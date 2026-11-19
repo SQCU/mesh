@@ -116,10 +116,11 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
 enum { HELLO=1, FAREWELL, RECORD, LINK, ORDER };
-/* design/node-addressed-transfers.md: an ORDER, a bridge's proposal of its order toward the peer's next epoch, sent
-   only as the cables between the two nodes change: the epochs its order has, the cables it holds up toward the peer
-   (`wire`, sorted: each cable's identity, alike at both ends), and the pieces it posted each way before it froze */
-struct order_message { uint32_t epochs,cables; uint64_t frontier[2]; uint64_t wire[MESH_PORTS]; };
+/* design/declared-programs.md: an ORDER, a bridge's proposal of its order toward the peer's next epoch, sent only as
+   the cables between the two nodes change: the epochs its order has, the cables it holds up toward the peer (`wire`,
+   sorted: each cable's identity, alike at both ends), and each way the piece from which the epoch may begin
+   (`boundary`: past every piece it posted, and the bound it posts below until the epoch is agreed) */
+struct order_message { uint32_t epochs,cables; uint64_t boundary[2]; uint64_t wire[MESH_PORTS]; };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
@@ -163,11 +164,13 @@ struct link {
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at;
   uint64_t wire[MESH_LINK_STREAMS];
-  /* the child's: the order it serves (its node slot, MESH_ABSENT none), each lane's walker each way (mesh-order.h),
-     and each lane's slots of the pieces it posted, by unit, for their completions */
+  /* the child's: the order it serves (its node slot, MESH_ABSENT none) and the generation it connected in, each
+     lane's segment to look from each way (mesh-order.h order_locate's hint), and, on the generation's first cable, the
+     done words' raising each way (its segment hint, and the done counts it last read: order_pass) */
   uint32_t order;
-  struct order_walker walker[2][MESH_LINK_LANES];
-  uint64_t *slots[2][MESH_LINK_LANES];
+  uint64_t generation;
+  uint64_t hint[2][MESH_LINK_LANES];
+  uint64_t raise_hint[2],raise_seen[2];
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
@@ -187,9 +190,9 @@ struct link {
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES` (its first three words the same
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
-   its bytes (the operator, 2026-10-21).  3: a child serves its link's part of the node's order (mesh-order.h), and
-   tells its freeze in its lane records */
-#define MESH_CHILD_VERSION 3u
+   its bytes (the operator, 2026-10-21).  4: a child posts the pieces the node's declared programs place on its link's
+   queue pairs (mesh-order.h), and the generation's first cable's child raises their done words */
+#define MESH_CHILD_VERSION 4u
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
    outstanding (mesh-link.c stream_end): the ends of its clients' holdings, not a failure of its lanes (EIO) or its
    hardware (design/rubrics.md M10: a fact named as what it is), told the parent in CHILD_BROKEN's `result` (version

@@ -1,6 +1,6 @@
 #include "mesh-bridge.h"
 
-/* design/node-addressed-transfers.md: the transfers outstanding toward every node, told in the region (`busy`), and
+/* design/declared-programs.md: the units the lanes hold outstanding, told in the region (`busy`), and
    the wall clock at which none last came to be (`idle_since`, 0 while any is) */
 static void busy_tell(void){
   uint64_t busy=0;
@@ -188,8 +188,8 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
 /* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first
    seen (its exit, the event loop's EVFILT_PROC, retires every slot it holds: a holder's death is that event, not a
    poll), one already gone retired at once; the rows of a retired client released but those a request outstanding on a
-   lane names or a transfer not retired is of (mesh-dataflow.c mesh_retired_release, mesh_pinned: a gone client's
-   transfers are carried without their gates, mesh-order.h order_walk), and the transfers outstanding told (busy_tell) */
+   lane names or a program not wholly done names (mesh-dataflow.c mesh_retired_release, mesh_pinned), and the units
+   outstanding told (busy_tell) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0;

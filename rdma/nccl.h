@@ -23,7 +23,7 @@
    the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
    config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its first gather carries each rank's
    node and the nodes its bridge holds a live order toward (mesh-call.h mesh_nodes_reached); each rank then opens the
-   order toward each member's node it is joined to (mesh_order_open: design/node-addressed-transfers.md), which takes
+   order toward each member's node it is joined to (mesh_order_open: design/declared-programs.md), which takes
    nothing, so any number of communicators of any processes share a node pair; the second gather carries each rank's
    status.  Each phase of the bootstrap (the connect or accepts, each gather) has a deadline, mesh.h MESH_PLATFORM_NS
    from its start, past which the program ends (design/data-model.md section 6).  The data program names nodes and its own pages; the compiled fabric has one link a node pair.
@@ -76,8 +76,8 @@
    program's typed cuts and declared WRITE endpoints), lowered to range records on its communicator's
    channels: one channel a peer node, each transfer one entry of its send list or landing list of
    immutable exact byte spans. Each direction has one matching DMA-unit sequence at both ends, in
-   compiled dependency order, appended to the bridge's order toward the node as the group is issued
-   (mesh-call.h mesh_order_append; the bridge alone places it on cables).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
+   compiled dependency order, declared once as the process's program (ncclMeshDeclareBegin, below) and issued by
+   raising the program's count of steps issued (mesh-call.h mesh_issue; the bridge alone places it on cables).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
    waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
    which the program ends: design/data-model.md section 6), and the order's restart loses what was outstanding
    (design/node-addressed-transfers.md).  A publication
@@ -109,8 +109,7 @@
    once, with every group before it; a host-path group fails while its own communicator's groups are issued and not
    complete, and waits only for its own communicator's GPU work, until its command buffer completes (an error status,
    which the platform's watchdog gives a command buffer that overruns, fails the group, and one not yet committed fails
-   it at once, ncclInvalidUsage), a revoke or a holding's end.  A group waits for room in its bridge's lists until the
-   bridge takes its entries, a revoke or its holding's end.  A host-path group spins on
+   it at once, ncclInvalidUsage), a revoke or a holding's end.  A host-path group spins on
    its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
    count's ~0, its holding's end or a revoke.  Each of these waits has a deadline, MESH_PLATFORM_NS from its start,
    past which the program ends (design/data-model.md section 6).  A group whose entries lie on one channel completes as
@@ -1094,6 +1093,26 @@ typedef struct {
    group then compiled at its call.  A form set after it (ncclMeshCommForms) changes no planned group.  A declared call
    that would fail at its call fails the plan as a value (ncclInvalidArgument, ncclInvalidUsage), comm's plan kept. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count, const ncclMeshPlan** plan);
+/* The process's transfer program declared (design/declared-programs.md).  Between ncclMeshDeclareBegin and
+   ncclMeshDeclareEnd, every group the process issues that crosses a link (an ncclGroupStart/End's calls of one
+   communicator, or a call outside a group; a group on several communicators is one step a communicator, in the order it
+   first names them) is the next step of the process's program: compiled, its operands placed in leases the program
+   holds, and its entries made the program's transfers; nothing moves and nothing is encoded, so the calls of a
+   declaration return at once and their buffers are not read (a Metal-path call names its buffers and stream kind; its
+   command buffer is not used).  Calls of one process on several communicators (micro-batches, tensor-parallel groups)
+   are one program, its steps in the order the code issues them.  ncclMeshDeclareEnd declares the program to this
+   node's bridge toward each node its steps cross (its period the steps; mesh-call.h mesh_declare), ending the process's
+   program before it there, which must be after a whole number of its executions.  From then on the k-th crossing group
+   the process issues runs step k mod period with the step's buffers: a group that is not its step (another
+   communicator, collective, root, count, type, operator, buffer or stream kind) fails as a value (ncclInvalidUsage),
+   and nothing about any group is told the bridge but each node's count of steps issued.  Every member's process
+   declares its own calls of the same steps at the same point of its code; nothing is exchanged.  A crossing group with
+   no program declared fails as a value.  ncclCommDestroy of a communicator a step names ends the program
+   (ncclInvalidUsage where its steps issued are not a whole number of its executions).  A declaration's groups are
+   refused while groups are issued and not complete (ncclMeshComplete), and a Metal-path step's next execution completes
+   its previous one first in the stream's order (its landings reuse the step's leases). */
+ncclResult_t ncclMeshDeclareBegin(void);
+ncclResult_t ncclMeshDeclareEnd(void);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;

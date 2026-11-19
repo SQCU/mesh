@@ -101,15 +101,17 @@ static void link_failed(struct port *,int64_t,uint32_t);
 /* design/node-addressed-transfers.md: the order the port's link serves (the link's peer node's), NULL before its
    connect found it */
 static inline struct mesh_node *link_order(const struct link *l){ return l->order<MESH_NODES?mesh_node_at(M,l->order):NULL; }
-/* A piece placed on lane j of the link (mesh-order.h order_post): its actual byte interval told in the lane's pins,
-   then posted, a SEND (`way` 0) through the lane's frame gate, a receive (1) within the lane's frame share; the slot
-   of the order it belongs to kept for its completion.  A span the region does not hold (`dud`) moves the bridge's own
-   block of the link instead, so the order of the lane stays the peer's (its transfer lost: mesh-order.h order_walk).
-   1 posted; 0 no room in the lane (the walk resumes there) */
-static int lane_post(void *context,int way,uint32_t j,struct mesh_dma_span bytes,int dud,uint64_t slot){
-  struct port *port=context;struct link *l=&port->link;
+/* Piece n of direction `way`, placed on lane j of the link (mesh-order.h): its actual byte interval told in the lane's
+   pins and its unit counted in the lane's posts, then, once the order's posting bound (`limit`, read after that count:
+   order_turn's proposal reads the counts after storing it) is past it, posted: a SEND (`way` 0) through the lane's frame
+   gate, a receive (1) within the lane's frame share.  A span the region does not hold (`dud`) moves the bridge's own
+   block of the link instead, so the lane stays the peer's (its transfer lost: order_pass).  1 posted; 0 not (no room in
+   the lane, or the bound: the pass resumes at this piece) */
+static int lane_post(struct port *port,int way,uint32_t j,struct mesh_dma_span bytes,int dud,uint64_t n){
+  struct link *l=&port->link;
   const uint32_t lane=MESH_LANE_FIRST+j;struct lane_state *state=l->lane+lane;
   struct mesh_lanes *x=lanes_of(port,j/2);
+  struct mesh_node *order=link_order(l);
   if(dud)bytes.offset=M->data_off+(uint64_t)l->page*M->pgsz;
   const struct frames each=frames_of(bytes.bytes);
   const struct mesh_queue *queue=l->provider.queues+lane;
@@ -124,7 +126,10 @@ static int lane_post(void *context,int way,uint32_t j,struct mesh_dma_span bytes
   }
   mesh_pin_store(mesh_unit_pin(M,x->rows,way,(int)(j&1),u),u,bytes);
   atomic_store_explicit(&x->posts[way].posted[j&1],u+1,memory_order_seq_cst);
-  l->slots[way][j][u%MESH_LANE_UNITS]=slot;
+  if(n>=atomic_load_explicit(&order->limit[way],memory_order_seq_cst)){
+    atomic_store_explicit(&x->posts[way].posted[j&1],u,memory_order_seq_cst);
+    return 0;
+  }
   struct ibv_sge span=dma_span(port,bytes);
   int error;
   if(way){
@@ -141,17 +146,11 @@ static int lane_post(void *context,int way,uint32_t j,struct mesh_dma_span bytes
   if(error){atomic_store_explicit(&x->posts[way].posted[j&1],u,memory_order_release);lane_lost(port,lane,error<0?-error:error);return 0;}
   return 1;
 }
-/* a lane's units completed one way through `through`: each one's piece counted in its transfer (mesh-order.h
-   order_completed), then the count told in the lane's posts */
+/* a lane's units completed one way through `through`, told in the lane's posts (the generation's first cable's child
+   raises the done words they complete: order_pass) */
 static void lane_completed(struct port *port,uint32_t lane,unsigned way,uint64_t through){
-  struct link *l=&port->link;
   const uint32_t j=lane-MESH_LANE_FIRST;
-  struct mesh_lanes *x=lanes_of(port,j/2);
-  _Atomic uint64_t *prefix=&x->posts[way].done[j&1];
-  struct mesh_node *order=link_order(l);
-  for(uint64_t u=atomic_load_explicit(prefix,memory_order_relaxed);order && u<through;u++)
-    order_completed(M,order,(int)way,l->slots[way][j][u%MESH_LANE_UNITS]);
-  atomic_store_explicit(prefix,through,memory_order_release);
+  atomic_store_explicit(&lanes_of(port,j/2)->posts[way].done[j&1],through,memory_order_release);
 }
 /* Completion retires the actual frame prefix and one DMA unit, separately. */
 static void lane_landed(struct port *port,uint32_t k,uint64_t id){
@@ -211,33 +210,41 @@ static void link_receive(struct port *port,uint32_t served){
   }
   for(uint32_t k=MESH_LANE_FIRST;landed>>k;k++)if(landed>>k&1)lane_completed(port,k,1,l->lane[k].got);
 }
-/* design/node-addressed-transfers.md: the link's part of its order, one pass: while the parent freezes the order
-   (to agree the next epoch with the peer), its posting stopped and the pieces it had posted each way told (`ack`,
-   `frontier`, the parent woken); else each lane's walker of each way posting the pieces the order places on it, then
-   the order's done transfers retired (mesh-order.h order_retire: the ring's room, without waiting for the parent) */
+/* design/declared-programs.md: the link's part of its order, one pass.  Each lane's next unit each way is a piece
+   (mesh-order.h order_unit_piece), which is a span of a transfer of an execution of a declared program
+   (order_locate); it is posted while its step is issued and its gate holds (order_ready) and the lane has room, and
+   the lane's next unit is then the next piece placed on it.  Nothing is searched for and nothing skipped: a lane waits
+   at its own next piece.  On the generation's first cable (its first epoch's first, which the generation keeps), the
+   pieces of every lane of the order that are done told through to their done words, in the pieces' order
+   (order_done_through, order_raise_through), and the piece below which every done word is raised published (`raised`) */
 static void order_pass(struct port *port){
   struct link *l=&port->link;
   struct mesh_node *x=link_order(l);
-  if(!x)return;
-  const uint64_t freeze=atomic_load_explicit(&x->freeze,memory_order_acquire);
-  struct mesh_lanes *own=lanes_of(port,0);
+  if(!x || atomic_load_explicit(&x->generation,memory_order_acquire)!=l->generation)return;
+  const uint32_t epochs=atomic_load_explicit(&x->epochs,memory_order_acquire);
+  if(!epochs)return;
+  const uint64_t segments=atomic_load_explicit(&x->segments,memory_order_acquire);
   const uint32_t lanes=2*plan_streams(l->plan);
-  if(freeze&1){
-    if(atomic_load_explicit(&own->ack,memory_order_acquire)==freeze)return;
-    const uint64_t generation=atomic_load_explicit(&x->generation,memory_order_acquire);
-    for(int way=0;way<2;way++){
-      uint64_t frontier=0;
-      for(uint32_t j=0;j<lanes;j++)
-        if(l->walker[way][j].started && l->walker[way][j].generation==generation && l->walker[way][j].posted>frontier)frontier=l->walker[way][j].posted;
-      atomic_store_explicit(&own->frontier[way],frontier,memory_order_release);
-    }
-    atomic_store_explicit(&own->ack,freeze,memory_order_release);
-    mesh_notify(&M->control);
-    return;
-  }
+  const uint64_t piece=page_bytes();
+  for(int way=0;way<2 && segments;way++)
+    for(uint32_t j=0;j<lanes;j++)
+      for(;;){
+        const struct lane_state *state=l->lane+MESH_LANE_FIRST+j;
+        uint64_t n;struct order_at at;
+        if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,&l->hint[way][j],&n,&at))break;
+        const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)M+at.t->spans))[at.span];
+        const int dud=!mesh_dma_span_valid(M,bytes) || bytes.bytes>piece;
+        if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,n))break;
+        if(dud)order_raise(M,at.t->done,UINT64_MAX);
+      }
+  if(x->epoch[0].cable[0].port!=port->index)return;
+  const struct mesh_epoch *last=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
   for(int way=0;way<2;way++){
-    for(uint32_t j=0;j<lanes;j++)order_walk(M,x,way,port->index,j,&l->walker[way][j],lane_post,port);
-    order_retire(M,x,way);
+    uint64_t done[MESH_PORTS*MESH_LINK_LANES];uint32_t k=0;
+    for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
+      for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof done/sizeof *done;lane++,k++)
+        done[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1],memory_order_acquire);
+    order_raise_pass(M,x,epochs,segments,way,done,&l->raise_hint[way],&l->raise_seen[way]);
   }
 }
 
@@ -491,13 +498,13 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
    child before any lane is served: each lane's units posted and completed each way 0 (its queue pairs are new), this
    child their poster (`child`, `child_start`: its exit ends every unit it posted, mesh-dataflow.c mesh_interval_pinned),
    the peer node, the link's bandwidth and identity told; then the order toward the peer found (its node slot, which
-   the parent made as the port paired: order_slot) and every walker new, so it starts at the order's anchor */
+   the parent made as the port paired: order_slot) and the generation it serves */
 static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
     struct mesh_lanes *x=lanes_of(port,s);
     _Atomic uint64_t *words[]={&x->posts[0].posted[0],&x->posts[0].posted[1],&x->posts[0].done[0],&x->posts[0].done[1],
-                               &x->posts[1].posted[0],&x->posts[1].posted[1],&x->posts[1].done[0],&x->posts[1].done[1],&x->ack};
+                               &x->posts[1].posted[0],&x->posts[1].posted[1],&x->posts[1].done[0],&x->posts[1].done[1]};
     for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
     x->child_start=mesh_started(getpid());
     atomic_store_explicit(&x->child,(uint32_t)getpid(),memory_order_release);
@@ -508,8 +515,9 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
   l->order=MESH_ABSENT;
-  for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(M,n)->node)==node && mesh_node_at(M,n)->ring)l->order=n;
-  memset(l->walker,0,sizeof l->walker);
+  for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(M,n)->node)==node)l->order=n;
+  l->generation=l->order<MESH_NODES?atomic_load(&mesh_node_at(M,l->order)->generation):0;
+  memset(l->hint,0,sizeof l->hint);memset(l->raise_hint,0,sizeof l->raise_hint);
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
@@ -574,14 +582,6 @@ static int stream_lists(struct port *port){
   uint64_t at=M->data_off+(uint64_t)page*M->pgsz;
   for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){lanes_of(port,s)->rows=at;at+=rows_bytes();}
   l->lists=page;
-  return 0;
-}
-/* design/transport.md section 14, "A process a port": the child's slots of the pieces each lane posts, made at its
-   first connect; 0, or ENOMEM */
-static int lanes_room(struct port *port){
-  struct link *l=&port->link;
-  for(int way=0;way<2;way++)for(uint32_t k=0;k<MESH_LINK_LANES;k++)
-    if(!l->slots[way][k] && !(l->slots[way][k]=calloc(MESH_LANE_UNITS,sizeof(uint64_t))))return ENOMEM;
   return 0;
 }
 /* the lane records of a port (`port` NULL: of every port) live no more, as its link is lost or the bridge stops (the
@@ -709,33 +709,29 @@ static void link_heard(struct port *port,const struct message *heard){
 }
 
 
-/* ---- design/node-addressed-transfers.md: the order toward each node, the parent's part ----------------------------
+/* ---- design/declared-programs.md: the order toward each node, the parent's part ---------------------------------
    The parent keeps, for each node it reaches, the order's epochs: the cables both ends hold up, sorted by identity.
-   When the cables it holds up toward a node are not the order's latest epoch's (a cable came up), it freezes the
-   order (no piece posted), waits for each port child of the epoch to tell the pieces it posted each way, and sends
-   the peer an ORDER; once both ends' ORDERs name the same cables, each end appends the same epoch, from the later of
-   the two ends' frontiers each way (mesh-order.h order_boundary), and thaws.  A cable of the epoch lost restarts the
-   order (order_restart, every transfer not done lost) and loses every cable toward the node, so both ends restart.
-   Nothing is sent about any transfer */
-/* each order's agreement: frozen, this end's ORDER sent (`mine`), the peer's heard for the current epochs (`theirs`)
-   and for the next (`ahead`: a peer that agreed first and proposes again before this end has agreed) */
-static struct order_state { int frozen,sent,heard,early; struct order_message mine,theirs,ahead; } orders[MESH_NODES];
-/* the node slot of the order toward `node`, made (its rings leased from the arena, made new, its generation 1) as a
-   port first pairs with it; MESH_ABSENT where the region holds no room */
+   When the cables it holds up toward a node are not the order's latest epoch's (a cable came up), it bounds each
+   direction's posting a little past every piece it has posted (`limit`, ORDER_SLACK pieces on: posting goes on
+   meanwhile), and sends the peer an ORDER naming the cables and that bound; once both ends' ORDERs name the same
+   cables, each end appends the same epoch, from the later of the two ends' bounds each way, and lifts the bound.  A
+   cable of the epoch lost restarts the order (order_restart, every program lost) and loses every cable toward the node,
+   so both ends restart; so does a restart a client's declaration asked (`restart`).  Nothing is sent about any
+   transfer */
+#define ORDER_SLACK UINT64_C(4096)
+/* each order's agreement: proposing (its bound stored), this end's ORDER sent (`mine`), the peer's heard for the
+   current epochs (`theirs`) and for the next (`ahead`: a peer that agreed first and proposes again before this end has
+   agreed) */
+static struct order_state { int proposing,sent,heard,early; struct order_message mine,theirs,ahead; } orders[MESH_NODES];
+/* the node slot of the order toward `node`, made (its generation 1, no epoch, no declaration, its bounds open) as a
+   port first pairs with it; MESH_ABSENT where every slot holds another node */
 static uint32_t order_slot(uint32_t node){
   uint32_t n=0,vacant=MESH_ABSENT;
   for(;n<MESH_NODES && atomic_load(&mesh_node_at(M,n)->node)!=node;n++)if(vacant==MESH_ABSENT && !atomic_load(&mesh_node_at(M,n)->node))vacant=n;
   if(n==MESH_NODES && (n=vacant)==MESH_ABSENT){say("bridge: no order slot for node %u (mesh.h MESH_NODES)\n",node);return MESH_ABSENT;}
   struct mesh_node *x=mesh_node_at(M,n);
-  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
-  if(!x->ring){
-    const uint64_t bytes=page_round(2*(uint64_t)MESH_RING*sizeof(struct mesh_slot));
-    const uint32_t pages=(uint32_t)(bytes/M->pgsz);
-    if(own->rings[n]==MESH_ABSENT)own->rings[n]=mesh_arena_alloc(&bridge,pages,M->block);
-    if(own->rings[n]==MESH_ABSENT){say("bridge: no room in the region for the order toward node %u\n",node);return MESH_ABSENT;}
-    held_pages+=pages;record_changed();
-    x->ring=M->data_off+(uint64_t)own->rings[n]*M->pgsz;
-    order_rings_new(M,x);
+  if(!atomic_load(&x->node)){
+    order_restart(M,x);
     if(!atomic_load(&x->generation))atomic_store(&x->generation,1);
   }
   atomic_store_explicit(&x->node,node,memory_order_release);
@@ -771,64 +767,69 @@ static void order_heard(struct port *port,const unsigned char *payload,uint32_t 
 static void order_lose(uint32_t node){
   for(uint32_t p=0;p<port_count;p++)if(ports[p].peer==node && (ports[p].greeted || ports[p].link.state!=LINK_DOWN))port_lost(ports+p,ECONNABORTED);
 }
-/* a slot a client took and never filled, its client gone: a transfer of no generation, which no order holds */
-static void orders_unfilled(struct mesh_node *x){
-  for(int way=0;way<2;way++){
-    const uint64_t tail=atomic_load(&x->tail[way]);
-    for(uint64_t i=atomic_load(&x->retired[way]);i<=tail;i++){
-      struct mesh_slot *s=mesh_ring(M,x,way,i);
-      const uint64_t owner=atomic_load(&s->owner);
-      if(atomic_load(&s->sequence)!=2*i || !owner || owned(owner))continue;
-      s->t=(struct mesh_crossing){0};
-      atomic_store_explicit(&s->sequence,2*i+1,memory_order_release);
-      uint64_t at=i;atomic_compare_exchange_strong(&x->tail[way],&at,i+1);
-    }
+/* the units the bridge's lanes hold posted and not done each way (struct hdr `busy`) */
+void orders_busy(uint64_t *busy){
+  for(uint32_t s=0;s<MESH_STREAMS;s++){
+    const struct mesh_lanes *x=mesh_lanes_at(M,s);
+    if(!atomic_load(&x->live))continue;
+    for(int way=0;way<2;way++)for(int lane=0;lane<2;lane++)
+      *busy+=atomic_load(&x->posts[way].posted[lane])-atomic_load(&x->posts[way].done[lane]);
   }
 }
-/* the transfers outstanding toward every node (struct hdr `busy`) */
-void orders_busy(uint64_t *busy){
-  for(uint32_t n=0;n<MESH_NODES;n++){
-    struct mesh_node *x=mesh_node_at(M,n);
-    if(x->ring)for(int way=0;way<2;way++)*busy+=atomic_load(&x->tail[way])-atomic_load(&x->retired[way]);
-  }
+/* the piece past every piece of direction `way` this end has posted (mesh-order.h order_posted_through, on the lanes'
+   counts as the region holds them, each read sequentially consistent: lane_post) */
+static uint64_t order_frontier(const struct mesh_node *x,int way){
+  const uint32_t epochs=atomic_load(&x->epochs);
+  if(!epochs)return 0;
+  const struct mesh_epoch *last=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
+  uint64_t posted[MESH_PORTS*MESH_LINK_LANES];uint32_t k=0;
+  for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
+    for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof posted/sizeof *posted;lane++,k++)
+      posted[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].posted[lane&1],memory_order_seq_cst);
+  return order_posted_through(x,epochs,way,posted);
 }
 static void order_turn(void){
   for(uint32_t n=0;n<MESH_NODES;n++){
     struct mesh_node *x=mesh_node_at(M,n);
     struct order_state *o=orders+n;
     const uint32_t node=atomic_load(&x->node);
-    if(!node || !x->ring)continue;
-    orders_unfilled(x);
-    for(int way=0;way<2;way++)order_retire(M,x,way);
+    if(!node)continue;
+    if(atomic_load(&x->restart)){
+      say("order toward node %u: a declaration met a program of a client gone with pieces outstanding: the order restarts\n",node);
+      order_restart(M,x);*o=(struct order_state){0};record_changed();order_lose(node);continue;
+    }
     uint64_t wire[MESH_PORTS];uint32_t port[MESH_PORTS];
     const uint32_t cables=order_cables(node,wire,port);
     const uint32_t epochs=atomic_load(&x->epochs);
-    const struct mesh_epoch *last=epochs?x->epoch+(epochs-1)%MESH_EPOCHS:NULL;
+    const struct mesh_epoch *last=epochs?x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1:NULL;
     /* a cable of the epoch lost: the order restarted, and every cable toward the node lost with it */
-    for(uint32_t c=0;last && c<last->cables;c++){
+    int lost=0;
+    for(uint32_t c=0;last && c<last->cables && !lost;c++){
       uint32_t k=0;
       while(k<cables && wire[k]!=last->cable[c].wire)k++;
       if(k<cables)continue;
-      say("order toward node %u: cable %#llx of its epoch lost: the order restarts (every transfer not done lost)\n",node,
+      say("order toward node %u: cable %#llx of its epoch lost: the order restarts (every program lost)\n",node,
           (unsigned long long)last->cable[c].wire);
-      order_restart(M,x);*o=(struct order_state){0};record_changed();
-      order_lose(node);
-      goto next;
+      lost=1;
     }
+    if(lost){order_restart(M,x);*o=(struct order_state){0};record_changed();order_lose(node);continue;}
     int same=last && last->cables==cables;
     for(uint32_t c=0;same && c<cables;c++)same=last->cable[c].wire==wire[c];
-    if(!o->frozen && !(o->heard || (!same && cables)))continue;
-    if(!o->frozen){atomic_fetch_add(&x->freeze,1);o->frozen=1;o->sent=0;}
-    const uint64_t freeze=atomic_load(&x->freeze);
-    uint64_t frontier[2]={last?last->first[0]:0,last?last->first[1]:0};
-    int acked=1;
-    for(uint32_t c=0;last && c<last->cables;c++){
-      const struct mesh_lanes *own=mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS);
-      if(atomic_load(&own->ack)!=freeze){acked=0;break;}
-      for(int way=0;way<2;way++)frontier[way]=MAX(frontier[way],atomic_load(&own->frontier[way]));
+    if(!o->proposing && !(o->heard || (!same && cables)))continue;
+    if(!cables)continue;
+    if(!o->proposing){
+      /* the bound: a little past every piece posted, stored before the counts are read again (each lane counts a unit
+         before it reads the bound: lane_post), so nothing is posted at or past the proposal before the epoch begins */
+      for(int way=0;way<2;way++){
+        /* the first epoch begins at piece 0: before it no piece has an epoch to be placed by */
+        const uint64_t bound=epochs?order_frontier(x,way)+ORDER_SLACK:0;
+        atomic_store_explicit(&x->limit[way],bound,memory_order_seq_cst);
+        const uint64_t again=order_frontier(x,way);
+        o->mine.boundary[way]=again>bound?again:bound;
+      }
+      o->proposing=1;o->sent=0;
     }
-    if(!acked || !cables)continue;
-    struct order_message mine={.epochs=epochs,.cables=cables,.frontier={frontier[0],frontier[1]}};
+    struct order_message mine={.epochs=epochs,.cables=cables,.boundary={o->mine.boundary[0],o->mine.boundary[1]}};
     memcpy(mine.wire,wire,cables*sizeof *wire);
     if(!o->sent || memcmp(&mine,&o->mine,sizeof mine)){
       struct port *via=NULL;
@@ -838,21 +839,20 @@ static void order_turn(void){
       port_say(via,(struct message){.kind=ORDER},&mine,sizeof mine);
     }
     if(!o->heard || o->theirs.epochs!=epochs || o->theirs.cables!=cables || memcmp(o->theirs.wire,wire,cables*sizeof *wire))continue;
-    const uint64_t first[2]={order_boundary(mine.frontier[0],o->theirs.frontier[1]),order_boundary(mine.frontier[1],o->theirs.frontier[0])};
+    const uint64_t first[2]={MAX(mine.boundary[0],o->theirs.boundary[1]),MAX(mine.boundary[1],o->theirs.boundary[0])};
     uint32_t lanes[MESH_PORTS];uint64_t bandwidth=0;
     for(uint32_t c=0;c<cables;c++){lanes[c]=2*plan_streams(ports[port[c]].link.plan);bandwidth+=ports[port[c]].bandwidth;}
     if(order_extend(x,first,cables,port,lanes,wire)){
       say("order toward node %u: its generation's epochs are all used: the order restarts\n",node);
-      order_restart(M,x);*o=(struct order_state){0};record_changed();order_lose(node);goto next;
+      order_restart(M,x);*o=(struct order_state){0};record_changed();order_lose(node);continue;
     }
     atomic_store(&x->bandwidth,bandwidth);
-    atomic_fetch_add(&x->freeze,1);
+    for(int way=0;way<2;way++)atomic_store_explicit(&x->limit[way],UINT64_MAX,memory_order_release);
     const struct order_state was=*o;
     *o=(struct order_state){.heard=was.early,.theirs=was.ahead};
     say("order toward node %u: epoch %u over %u cable%s from pieces %llu sent, %llu received\n",node,epochs+1,cables,cables==1?"":"s",
         (unsigned long long)first[0],(unsigned long long)first[1]);
     record_changed();
-  next:;
   }
 }
 
@@ -1669,7 +1669,6 @@ static void child_command(struct port *port,const struct child_message *heard){
   if(!refused && job==LINK_JOB_CONNECT){
     memcpy(l->peer,heard->peer,sizeof l->peer);port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
     port->peer=heard->node;child_bandwidth=heard->bandwidth;
-    refused=lanes_room(port);
   }
   if(refused){
     child_tell((struct child_message){.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=heard->pairing,.result=refused});
@@ -1814,7 +1813,6 @@ static int region_open(const struct hdr *geometry,int *out){
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);
   for(uint32_t p=0;p<MESH_PORTS;p++)own->link[p]=own->lists[p]=MESH_ABSENT;
-  for(uint32_t n=0;n<MESH_NODES;n++)own->rings[n]=MESH_ABSENT;
   own->ones=own->map=MESH_ABSENT;own->map_pages=0;
   *out=fd;
   return 0;
@@ -1831,8 +1829,8 @@ static void region_adopt(void){
     struct mesh_lanes *x=mesh_lanes_at(M,s);
     atomic_store(&x->live,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
   }
-  /* every order restarted: its cables were the bridge before's, so each transfer not done is lost; its rings kept */
-  for(uint32_t n=0;n<MESH_NODES;n++)if(mesh_node_at(M,n)->ring)order_restart(M,mesh_node_at(M,n));
+  /* every order restarted: its cables were the bridge before's, so every program of it is lost */
+  for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(M,n)->node))order_restart(M,mesh_node_at(M,n));
   struct mesh_link_info *links=mesh_links(M);
   for(uint32_t p=0;p<MESH_PORTS;p++){
     atomic_store(&links[p].peer,0);atomic_store(&links[p].phase,MESH_UNKNOWN);atomic_store(&links[p].code,0);atomic_store(&links[p].bandwidth,0);

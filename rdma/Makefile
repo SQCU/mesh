@@ -140,7 +140,7 @@ clean:
 # that matches each SEND to the receive posted first on its queue pair); builds nothing it installs
 check: all
 	mkdir -p .build/tests
-	cc -O2 $(WARN) -o .build/tests/order tests/order.c && .build/tests/order
+	cc -O2 $(WARN) -o .build/tests/order tests/order.c -L.build -lmesh -Wl,-rpath,$(CURDIR)/.build && .build/tests/order
 	tests/sim-two-nodes.sh
 .PHONY: check
 
@@ -152,6 +152,6 @@ mesh-c: mesh_c_build.py mesh-plan.h nccl.h
 	$(PYTHON) mesh_c_build.py
 .PHONY: mesh-c
 # the orders' and lanes' state, read-only (design/node-addressed-transfers.md): where a transfer stands
-.build/mesh-order-state: mesh-order-state.c mesh.h Makefile
+.build/mesh-order-state: mesh-order-state.c mesh-order.h mesh.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-order-state.c

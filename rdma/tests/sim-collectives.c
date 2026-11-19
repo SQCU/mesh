@@ -1,8 +1,9 @@
-/* design/node-addressed-transfers.md "Testing": one rank of a real libnccl-mesh communicator of two ranks over the
-   two-node simulator (tests/sim-wire.c): init, then AllReduce (sum), AllGather and Broadcast of fp32 at 6 KB, 98 KB and
-   1.5 MB with every value checked, `rounds` times each, then destroy.  Each rank attaches its own node's region
-   (MESH_REGION); the two meet at NCCL_COMM_ID.  Communicators made `comms` at once share the node's order, each
-   running every collective in turn.
+/* design/declared-programs.md "Testing": one rank of a real libnccl-mesh communicator of two ranks over the two-node
+   simulator (tests/sim-wire.c): init, then, at each size (fp32 at 6 KB, 98 KB and 1.5 MB), the program of two rounds
+   declared (each round on each communicator an AllReduce (sum), an AllGather and a Broadcast from root round mod 2:
+   ncclMeshDeclareBegin, the calls, ncclMeshDeclareEnd) and run `rounds` rounds, every value checked; then destroy.
+   Each rank attaches its own node's region (MESH_REGION); the two meet at NCCL_COMM_ID.  Communicators made `comms` at
+   once are steps of the one program, each running every collective in turn.
 
    usage: sim-collectives RANK [COMMS [ROUNDS]]   (environment: MESH_REGION, NCCL_COMM_ID) */
 #include "../nccl.h"
@@ -24,7 +25,7 @@ static int reusable(const void *buffer){
 static float value(int rank,size_t i,int round){ return (float)((rank+1)*1000+(int)(i%997)+round); }
 int main(int argc,char **argv){
   if(argc<2)return 2;
-  const int rank=atoi(argv[1]),comms=argc>2?atoi(argv[2]):1,rounds=argc>3?atoi(argv[3]):2;
+  const int rank=atoi(argv[1]),comms=argc>2?atoi(argv[2]):1,rounds=argc>3?2*((atoi(argv[3])+1)/2):2;
   const char *id=getenv("NCCL_COMM_ID");
   if(!id || comms<1 || comms>4){fprintf(stderr,"sim-collectives: NCCL_COMM_ID unset\n");return 2;}
   ncclComm_t comm[4];
@@ -42,6 +43,13 @@ int main(int argc,char **argv){
     const size_t n=sizes[s]/sizeof(float);
     float *send,*recv;
     if(check(ncclMemAlloc((void **)&send,n*sizeof *send),"ncclMemAlloc") || check(ncclMemAlloc((void **)&recv,2*n*sizeof *recv),"ncclMemAlloc"))return 1;
+    /* the program: two rounds of every communicator's three collectives, captured (nothing moves) */
+    if(check(ncclMeshDeclareBegin(),"ncclMeshDeclareBegin"))return 1;
+    for(int round=0;round<2;round++)for(int c=0;c<comms;c++)
+      if(check(ncclAllReduce(send,recv,n,ncclFloat,ncclSum,comm[c],NULL),"ncclAllReduce (declared)") ||
+         check(ncclAllGather(send,recv,n,ncclFloat,comm[c],NULL),"ncclAllGather (declared)") ||
+         check(ncclBroadcast(send,recv,n,ncclFloat,round%2,comm[c],NULL),"ncclBroadcast (declared)"))return 1;
+    if(check(ncclMeshDeclareEnd(),"ncclMeshDeclareEnd"))return 1;
     for(int round=0;round<rounds;round++)for(int c=0;c<comms;c++){
       struct timespec t0,t1;
       /* AllReduce */

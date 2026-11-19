@@ -1,5 +1,6 @@
 #include "mesh-dataflow.h"
 #include "mesh-call.h"
+#include "mesh-order.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -494,23 +495,35 @@ int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
   }
   return 0;
 }
-/* design/node-addressed-transfers.md: whether client `owner` has a transfer in some order not yet retired (the bridge
-   reads its table, gates and words, and posts its bytes, until it retires) */
-int mesh_owner_outstanding(struct hdr *m,uint64_t owner){
+/* design/declared-programs.md: whether a program of client `owner` that is not wholly done (open, or closed with
+   pieces whose done words are not yet raised) names bytes of `allocation`: its tables, its span tables or its spans (the
+   bridge reads and posts them until it is done) */
+int mesh_owner_names(struct hdr *m,uint64_t owner,struct mesh_dma_span allocation){
   for(uint32_t n=0;owner && n<MESH_NODES;n++){
-    struct mesh_node *x=mesh_node_at(m,n);
-    if(!atomic_load(&x->node) || !x->ring)continue;
-    for(int way=0;way<2;way++){
-      const uint64_t tail=atomic_load(&x->tail[way])+1;
-      for(uint64_t i=atomic_load(&x->retired[way]);i<tail && i-atomic_load(&x->retired[way])<MESH_RING;i++)
-        if(atomic_load(&mesh_ring(m,x,way,i)->owner)==owner)return 1;
+    const struct mesh_node *x=mesh_node_at(m,n);
+    if(!atomic_load(&x->node))continue;
+    for(uint32_t p=0;p<MESH_PROGRAMS;p++){
+      const struct mesh_declared *d=x->program+p;
+      if(atomic_load(&d->owner)!=owner)continue;
+      if(atomic_load(&d->closed)!=UINT64_MAX && atomic_load(&x->raised[0])>=atomic_load(&d->end[0]) &&
+         atomic_load(&x->raised[1])>=atomic_load(&d->end[1]))continue;
+      for(int way=0;way<2;way++){
+        const struct mesh_crossing *t=order_table(m,d,way);
+        if(!t)continue;
+        if(mesh_span_overlaps(allocation,(struct mesh_dma_span){d->program.table[way],d->program.transfers[way]*sizeof *t}))return 1;
+        for(uint64_t i=0;i<d->program.transfers[way];i++){
+          if(!mesh_region_holds(m,t[i].spans,t[i].units*sizeof(struct mesh_dma_span),8))continue;
+          if(mesh_span_overlaps(allocation,(struct mesh_dma_span){t[i].spans,t[i].units*sizeof(struct mesh_dma_span)}))return 1;
+          const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+t[i].spans);
+          for(uint64_t k=0;k<t[i].units;k++)if(mesh_span_overlaps(allocation,spans[k]))return 1;
+        }
+      }
     }
   }
   return 0;
 }
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
   uint64_t owner=atomic_load(&mesh_buffers(m)[first].owner);
-  if(mesh_owner_outstanding(m,owner))return 1;
   /* Lease backing, not a table's logical row IDs, is what reclaim frees.
      Coalescing physical runs scans each allocation row once in the usual
      contiguous case; scatter allocations retain each intersected run. */
@@ -521,7 +534,7 @@ static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
     while(run<count-i &&
           (uint32_t)atomic_load_explicit(&mesh_page(m)[first+i+run].mapping,memory_order_acquire)==(uint64_t)page+(uint64_t)run*m->block)run++;
     const struct mesh_dma_span allocation={m->data_off+(uint64_t)page*m->pgsz,(uint64_t)run*m->block*m->pgsz};
-    if(mesh_interval_pinned(m,allocation))return 1;
+    if(mesh_interval_pinned(m,allocation) || mesh_owner_names(m,owner,allocation))return 1;
     i+=run;
   }
   return 0;

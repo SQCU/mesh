@@ -14,7 +14,7 @@ struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atom
 _Static_assert(sizeof(struct mesh_link_info)==32 && MESH_PORTS*sizeof(struct mesh_link_info)<=MESH_BRIDGE_BYTES,"mesh_link_info");
 static inline struct mesh_link_info *mesh_links(struct hdr *m){ return (struct mesh_link_info *)((char *)m+m->bridge_off); }
 /* design/transport.md section 2: the bridge's own pages of the region, recorded beside the links so the next bridge
-   adopts them with the region instead of leasing them again: each port's link pages and its lanes' pins, each order's rings, the duds' block and the
+   adopts them with the region instead of leasing them again: each port's link pages and its lanes' pins and the
    map's pages (MESH_ABSENT where none); and the processes of the bridge that hold the region, each by its pid and start
    (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which registers the region
    and holds it until its exit, in an entry no live child holds (twice the ports: an earlier launch's child that has not
@@ -22,7 +22,7 @@ static inline struct mesh_link_info *mesh_links(struct hdr *m){ return (struct m
    ever appended */
 struct mesh_holder { uint32_t pid,padding; uint64_t start; };
 struct mesh_bridge_pages { uint32_t link[MESH_PORTS],lists[MESH_PORTS],ones,map,map_pages,padding; uint64_t bridge_start;
-  struct mesh_holder child[2*MESH_PORTS]; uint32_t rings[MESH_NODES]; };
+  struct mesh_holder child[2*MESH_PORTS]; };
 _Static_assert(MESH_PORTS*sizeof(struct mesh_link_info)+sizeof(struct mesh_bridge_pages)<=MESH_BRIDGE_BYTES,"mesh_bridge_pages");
 static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){
   return (struct mesh_bridge_pages *)((char *)m+m->bridge_off+MESH_PORTS*sizeof(struct mesh_link_info));

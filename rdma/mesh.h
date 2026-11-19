@@ -20,15 +20,15 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 #define MESH_MODE 0666
 /* The wire's contract between bridges (the versions before it, this file's history; the operator, 2026-10-21: "commits
    which do not change an interface 'contract' in any way are not interface-version changes regardless of their
-   hashes").  136 (design/node-addressed-transfers.md): no client names a cable, a stream or a lane; every client's
-   transfers toward a node are one shared order per direction, each piece of it on the cable and queue pair a pure
-   function of that order gives (mesh-order.h), and the bridges exchange ORDER only as the cables between them change.
-   A bridge of another version is not paired with (port_heard) */
-#define MESH_VERSION 136u
+   hashes").  137 (design/declared-programs.md): every piece's cable and queue pair is a pure function of the programs
+   both nodes' clients declared and of the cable epochs (mesh-order.h); the bridges exchange ORDER only as the cables
+   between them change, each end proposing the piece from which a new epoch begins.  A bridge of another version is
+   not paired with (port_heard) */
+#define MESH_VERSION 137u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
-   155 replaces the clients' streams with node orders (struct mesh_node) */
-#define MESH_LAYOUT 155u
+   156 replaces the node orders' rings with declared programs and segments (struct mesh_node) */
+#define MESH_LAYOUT 156u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes it
    holds an order toward (struct mesh_node) and its client slots; and the bytes of the bridge's own pages, which it
@@ -111,74 +111,98 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
   return a.bytes && b.bytes && (a.offset<=b.offset?b.offset-a.offset<a.bytes:a.offset-b.offset<b.bytes);
 }
 
-/* ---- Node-addressed transfers (design/node-addressed-transfers.md) ----------------------------------------------
-   A client names a node and bytes.  It appends a transfer to the region's order toward that node, one ring a
-   direction (0: what this node sends, 1: what it receives), shared by every client.  The order of each ring is the
-   order its transfers were appended in; the transfers of the other node's ring of the other direction are, by the
-   clients' shared program, the same transfers in the same order with spans of the same lengths.  The bridge cuts
-   every span into pieces (mesh-order.h), and places piece n of a direction's order, of the k-th transfer, on the cable
-   and queue pair the order's epoch maps (n, k) to; both ends compute it alike, so no transfer is ever announced,
-   granted or claimed.
+/* ---- Declared programs (design/declared-programs.md) ------------------------------------------------------------
+   A client names a node and bytes, and declares its transfer program toward that node once: an immutable table each
+   direction (0: what this node sends, 1: what it receives) of transfers, the step of its period each belongs to, its
+   gates and done words, and the period (steps an execution) after which it repeats.  At run time the client raises one
+   monotone counter, the steps it has issued (struct mesh_declared `issued`); nothing else is published.  Transfer t of
+   a direction is entry t mod n of its table in execution t / n.  The peer's client declares the same program, its
+   directions swapped, at the same point of its own code, so both ends hold equal tables and nothing about any transfer
+   is ever sent.  Every piece's cable and queue pair is a pure function of the node's declarations and cable epochs
+   (mesh-order.h): there is no queue of calls, no slot, no retirement.
 
-   A transfer: `units` spans at region offset `spans` (mesh_dma_span, each in the region's arena, none crossing a 1 GiB
-   extent).  Its gate: a SEND of span s goes once the word at `gate` reaches base+s+1, a receive is posted once it
-   reaches `base` (gate 0: at once); `gates` > 0 names instead `gates` mesh_gate {word, threshold} at `gate`, each of
-   which must hold for any of it.  Once every byte of it has crossed, the word at `done` (0: none) is raised to `value`;
-   transfers naming the same done word raise it in their order, so a count kept over several stays a prefix.  A lost
-   transfer (a cable toward the node lost, the order restarted) raises it to UINT64_MAX.  `generation` is the order's
-   (struct mesh_node) the client opened it in: a transfer of another is not in the order, and is lost at once */
-struct mesh_gate { uint64_t word,threshold; };
+   A transfer: `units` spans at region offset `spans`, each in the region's arena, none crossing a 1 GiB extent and none
+   longer than one piece (mesh-order.h order_piece_bytes: one allocation block), so span s is its piece s; `first` the
+   pieces of the table before it in one execution.  In execution e, a SEND of span s is posted once the step is issued
+   and the word at `gate` reaches gate_base + s + 1 + e gate_step (`flags` MESH_GATE_WHOLE: gate_base + e gate_step for
+   every span); a receive once the step is issued and the word reaches gate_base + e gate_step (gate 0: the step's
+   issue alone).  Once every byte of execution e has crossed, the
+   word at `done` (0: none) is raised to done_value + e done_step; done words rise in the order of the node's pieces, so
+   a count kept over several transfers is a prefix.  A lost transfer (a cable of the node lost, the order restarted)
+   raises every done word of its program to UINT64_MAX */
+#define MESH_GATE_WHOLE 1u
 struct mesh_crossing {
-  uint64_t spans,units,gate,base,done,value;
-  uint32_t gates,generation;
-  uint64_t reserved;
+  uint64_t spans,units,first;
+  uint32_t step,flags;
+  uint64_t gate,gate_base,gate_step;
+  uint64_t done,done_value,done_step;
+  uint64_t reserved[2];
 };
-_Static_assert(sizeof(struct mesh_crossing)==64,"mesh_crossing ABI");
-/* A ring slot: `sequence` 2i while it is free for the order's transfer i, 2i+1 once that transfer is in it; `owner` the
-   client that took it (by compare-and-swap from 0); the bridge's `pieces` (its piece count + 1, 0 until counted),
-   `completed` (pieces done) and `state` (0 until its done word was raised).  A slot is free again once the bridge
-   retires its transfer (struct mesh_node `retired`) */
-#define MESH_RING 4096u
-_Static_assert(!(MESH_RING&(MESH_RING-1)),"a ring a power of two");
-struct mesh_slot {
-  _Alignas(64) _Atomic uint64_t sequence;
-  _Atomic uint64_t owner,pieces,completed,state;
+_Static_assert(sizeof(struct mesh_crossing)==96,"mesh_crossing ABI");
+/* A program as its client declares it: its `key` (equal at both ends: the order of programs sharing a node's rounds),
+   its period (steps an execution) and `count` (executions a round, mesh-order.h order_round), and each direction's
+   table (`table`, a region offset of `transfers` mesh_crossing) with its pieces an execution (`pieces`) */
+struct mesh_declaration {
+  uint64_t key;
+  uint32_t period,count;
+  uint64_t table[2],transfers[2],pieces[2];
+};
+_Static_assert(sizeof(struct mesh_declaration)==64,"mesh_declaration ABI");
+/* A node's declared program (MESH_PROGRAMS a node): its client (`owner`, 0 vacant), the steps it has issued (`issued`,
+   the client's one counter, monotone), its declaration (copied once, immutable), and the executions after which it
+   ends (`closed`, UINT64_MAX while it runs; set once, by its client's next declaration toward the node) with the piece
+   each direction where its last segment ends (`end`, UINT64_MAX until then) */
+#define MESH_PROGRAMS 32u
+struct mesh_declared {
+  _Alignas(64) _Atomic uint64_t owner;
+  _Atomic uint64_t issued;
+  _Atomic uint64_t closed,end[2];
   uint64_t padding[3];
-  struct mesh_crossing t;
+  struct mesh_declaration program;
 };
-_Static_assert(sizeof(struct mesh_slot)==128,"mesh_slot ABI");
-/* An epoch of a direction's order: from piece first[way] on, piece n of the k-th transfer is on cable
-   (n - first) mod cables, queue pair k mod lanes of that cable's (mesh-order.h order_place).  Cables are named by the
-   bridge's port and sorted by their identity, alike at both ends */
+_Static_assert(sizeof(struct mesh_declared)==128,"mesh_declared ABI");
+/* A segment of a node's composition: from piece start[d] each direction on, rounds of the `programs` program slots it
+   names (`slot`, in key order), each round count_p executions of each in that order; program k's executions in it
+   begin at `base[k]`; `round` the pieces a round each direction; `rounds` its rounds (UINT64_MAX while it is the
+   node's last, open one; set once as the next segment is declared, which begins where it ends) */
+#define MESH_SEGMENTS 64u
+#define MESH_SEGMENT_PROGRAMS 4u
+struct mesh_segment {
+  uint64_t start[2],round[2];
+  _Atomic uint64_t rounds;
+  uint32_t programs,padding;
+  uint32_t slot[MESH_SEGMENT_PROGRAMS];
+  uint64_t base[MESH_SEGMENT_PROGRAMS];
+};
+_Static_assert(sizeof(struct mesh_segment)==96,"mesh_segment ABI");
+/* An epoch of a node's cables: from piece first[d] each direction on, the queue pairs of its `cables` cables (named by
+   the bridge's port, sorted by their identity `wire`, alike at both ends), taken in turn (mesh-order.h order_qp) */
 struct mesh_epoch { uint64_t first[2]; uint32_t cables,padding; struct { uint32_t port,lanes; uint64_t wire; } cable[MESH_PORTS]; };
 #define MESH_EPOCHS 16u
-/* The order toward node `node` (0: the slot unused): `live` while it has an epoch (clients open it only then),
-   `generation` (a restart of the order: every transfer of an earlier one lost), the bandwidth of its cables, its
-   rings (`ring`: a region offset, MESH_RING slots each way), each way's slots taken (`tail`, the clients') and retired
-   (`retired`, the parent's, with the anchor: the transfers and pieces of the order before `retired`, under
-   `anchored` odd while written, by whichever of the bridge's processes holds `retiring`), the parent's `freeze` (odd while it agrees the next epoch with the peer: no piece
-   is posted meanwhile) and the epochs of the generation */
+/* The order toward node `node` (0: the slot unused): `live` while it has an epoch, `generation` (a restart: every
+   program of an earlier one lost), the bandwidth of its cables, its epochs, its segments declared (`segments`, the
+   count, monotone within a generation; segment s in slot s mod MESH_SEGMENTS) and the client declaring one
+   (`declaring`, 0 none: declarations toward a node are made one at a time), a restart a declaration asked of the
+   bridge (`restart`: it met a program of a client gone with pieces outstanding), each direction's posting bound (`limit`,
+   UINT64_MAX but while the bridges agree a cable's epoch) and its pieces below which every done word was raised
+   (`raised`, by the port of the generation's first cable: mesh-order.h order_raise_through), and its programs */
 struct mesh_node {
   _Alignas(64) _Atomic uint32_t node;
   _Atomic uint32_t live;
   _Atomic uint64_t generation,bandwidth;
-  uint64_t ring;
-  _Atomic uint64_t freeze;
-  _Atomic uint32_t epochs,retiring;
-  _Alignas(64) _Atomic uint64_t tail[2];
-  _Alignas(64) _Atomic uint64_t retired[2];
-  _Atomic uint64_t anchored,anchor[2][2];
+  _Atomic uint32_t epochs,padding;
+  _Atomic uint64_t segments,declaring,restart;
+  _Alignas(64) _Atomic uint64_t limit[2];
+  _Alignas(64) _Atomic uint64_t raised[2];
   struct mesh_epoch epoch[MESH_EPOCHS];
+  struct mesh_segment segment[MESH_SEGMENTS];
+  struct mesh_declared program[MESH_PROGRAMS];
 };
-static inline struct mesh_slot *mesh_ring(void *m,const struct mesh_node *x,int way,uint64_t i){
-  return (struct mesh_slot *)((char *)m+x->ring)+(uint64_t)way*MESH_RING+i%MESH_RING;
-}
 
 /* The bridge's lanes (never a client's): a port's lane pair s, its peer and identity while live, each lane's units
    posted and completed each way and their interval pins (`rows`, a region offset), and the port child that posts them
    (`child`, `child_start`): a unit's buffer is the hardware's until it completes or that process is gone
-   (mesh-dataflow.c mesh_interval_pinned).  On a port's first record, `ack` the order's freeze its child has stopped
-   for and `frontier` the pieces it had posted each way */
+   (mesh-dataflow.c mesh_interval_pinned) */
 struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2],failed_span[2]; };
 _Static_assert(sizeof(struct mesh_posts)==64 && offsetof(struct mesh_posts,done)==16,"mesh_posts ABI");
 #define MESH_LANE_UNITS 4096u
@@ -205,7 +229,7 @@ struct mesh_lanes {
   _Atomic uint32_t live;
   uint64_t rows;
   _Atomic uint64_t bandwidth,wire;
-  _Atomic uint64_t ack,frontier[2];
+  uint64_t reserved[3];
   _Atomic uint32_t child,padding;
   uint64_t child_start;
   struct mesh_posts posts[2];
@@ -213,7 +237,7 @@ struct mesh_lanes {
 _Static_assert(sizeof(struct mesh_lanes)==256,"mesh_lanes");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
-   bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
+   bridge holds itself: the map, the lanes' pages and pins), the node's memory in bytes and hardware
    model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), and the `reached` nodes its bridge reaches (mesh-plan.h
    struct mesh_reach).  No host name: a name a person reads is a label the readers take from the name table by node
    number (etc/mesh-nodes.json, rdma/peers.py label; AGENTS.md "A node is its hardware; names are virtual") */
@@ -227,7 +251,7 @@ struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   uint64_t start,padding[6];
 };
-/* design/transport.md; `busy`: the transfers outstanding toward any node (0 between calls) and since when none has
+/* design/transport.md; `busy`: the units the bridge's lanes hold posted and not done (0 between calls) and since when none has
    been (`idle_since`, the wall clock in ns; 0 while any is); `node_off`, the orders toward nodes (struct mesh_node) */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,streams,clients;
@@ -286,16 +310,6 @@ static inline int mesh_dma_span_valid(const struct hdr *m,struct mesh_dma_span s
 static inline int mesh_region_holds(const struct hdr *m,uint64_t at,uint64_t bytes,uint64_t align){
   return at && !(at%align) && at<=m->length && bytes<=m->length-at;
 }
-/* whether a transfer's words and table lie in the region, and each of its spans is valid */
-static inline int mesh_crossing_valid(const struct hdr *m,const struct mesh_crossing *t){
-  if(!t->units || t->units>(m->length-m->data_off)/sizeof(struct mesh_dma_span) ||
-     !mesh_region_holds(m,t->spans,t->units*sizeof(struct mesh_dma_span),_Alignof(struct mesh_dma_span)) || t->spans<m->data_off ||
-     (t->gate && !mesh_region_holds(m,t->gate,t->gates?(uint64_t)t->gates*sizeof(struct mesh_gate):8,8)) ||
-     (t->done && !mesh_region_holds(m,t->done,8,8)))return 0;
-  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+t->spans);
-  for(uint64_t i=0;i<t->units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
-  return 1;
-}
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
@@ -318,7 +332,7 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
 /* design/transport.md; design/transport.md: the node's region: `pages` arena pages of `block`
    pages a block (the bridge's registered memory, its node's configured share of its memory), a page-table row a block (its page
    entry and buffer, and a bit in each plane), the bridge's own pages, its lane records, the orders toward nodes and
-   the client slots; the map's records, the lanes' pins and the orders' rings are leases the bridge takes from the arena (mesh_records, mesh_lanes_at, mesh_node_at), which the
+   the client slots; the map's records and the lanes' pins are leases the bridge takes from the arena (mesh_records, mesh_lanes_at), which the
    bridge registers whole once */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   uint32_t arena=pages/block*block,rows=arena/block;
