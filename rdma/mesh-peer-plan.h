@@ -34,10 +34,10 @@ struct peer_piece { struct mesh_dma_span span;uint64_t prefix;uint32_t channel; 
 struct peer_row {
   struct mesh_peer_transfer logical;
   size_t first,end,next;
-  size_t retired;uint32_t remote_open,announced,issued,done,published,prev,succ;
+  size_t retired;uint32_t remote_open,local_open,primed,done,published,prev,succ;
 };
 struct peer_plan {
-  struct mesh_cable cable[MESH_STREAMS]; uint32_t links,dynamic[2];
+  struct mesh_cable cable[MESH_STREAMS]; uint32_t links;
   struct peer_row *row;uint32_t rows;
   struct peer_piece *piece;size_t count,room;
 };
@@ -73,7 +73,6 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
   p->rows=a.head.records;p->row=calloc(p->rows,sizeof *p->row);
   if(!p->row)return ENOMEM;
   long double load[2][MESH_STREAMS]={0};
-  struct peer_record prior[2][2][MESH_STREAMS]={0};
   for(uint32_t k=0;k<p->rows;k++){
     struct peer_record u=a.row[k],v=b.row[k];
     if(peer_record_order(&u,&v) || (k && !peer_record_order(a.row+k-1,&u)) ||
@@ -101,13 +100,6 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
       uint32_t e=stripes[i].cable;uint64_t left=stripes[i].step.piece.elements;
       if(stripes[i].step.first!=logical || !p->cable[e].bandwidth)return EPROTO;
       load[way][e]+=left;
-      struct peer_record gates[]={u,v};
-      for(uint32_t side=0;side<2;side++){
-        struct peer_record *last=&prior[side][way][e],gate=gates[side];
-        if(last->units && last->gate &&
-          (gate.gate!=last->gate || gate.threshold<last->threshold))p->dynamic[way]=1;
-        *last=gate;
-      }
       while(left){
         if(ai>=u.units || bi>=v.units)return EPROTO;
         struct mesh_dma_span as=a.spans[u.first+ai],bs=b.spans[v.first+bi];
@@ -122,7 +114,7 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
       }
     }
     if(logical!=u.bytes || ai!=u.units || bi!=v.units)return EPROTO;
-    r->remote_open=!v.gate;r->end=p->count;
+    r->remote_open=!v.gate;r->local_open=!u.gate;r->primed=r->remote_open && r->local_open;r->end=p->count;
   }
   return 0;
 }
