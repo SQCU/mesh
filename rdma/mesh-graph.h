@@ -394,11 +394,19 @@ struct mesh_graph_buffer_result {
   uint64_t *bound;
   void (*release)(void *);
   void *owner;
+  const double *latency;
+  const unsigned char *arrival;
 };
 /* compiler-emit/docs/source-analysis.md: query[j] names the original forward edge; bound[j] is its reverse-edge Bff.
    Input arrays remain the caller's; actors/host/work/edge retain the specialized constructor's original operands. */
 int mesh_graph_buffer_queries(uint32_t vertices,const double *time,size_t edges,const uint32_t *from,
                               const uint32_t *to,const uint64_t *delay,size_t queries,const size_t *query,
+                              struct mesh_graph_buffer_result **out);
+/* AOT A3 and A10, BSL §4.3. An original edge e consumes time[from[e]] plus latency[from[e]]
+   when arrival[e] is set. The synthetic reverse reuse edge consumes only the downstream service. */
+int mesh_graph_buffer_arrivals(uint32_t vertices,const double *time,size_t edges,const uint32_t *from,
+                              const uint32_t *to,const uint64_t *delay,size_t queries,const size_t *query,
+                              const double *latency,const unsigned char *arrival,
                               struct mesh_graph_buffer_result **out);
 int mesh_graph_buffer_bounds(uint32_t actors, const double *host, const double *work, size_t edges,
                               const struct mesh_graph_dependence *edge, struct mesh_graph_buffer_result **out);

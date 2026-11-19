@@ -4109,7 +4109,7 @@ done:
 struct plan_saved_local { uint64_t magic,bytes,arena,offsets,orders,horizon,values,relation,words,uses;
                           uint32_t functions,roots,ncalls,norders,chained,closed,used,padding; uint64_t quantum; };
 struct plan_saved_local_function { uint64_t outstanding; uint32_t values,tasks,scheduled,padding; };
-#define PLAN_SAVED_LOCAL UINT64_C(0x454c434f4c48534d)
+#define PLAN_SAVED_LOCAL UINT64_C(0x464c434f4c48534d)
 /* the local sections at the archive's next 8-byte offset (mesh_local_save's whole archive, mesh_plan_compilation_save's first
    sections), their header's `bytes` the sections' length */
 struct plan_saved_arrays { uint32_t count,dependences,tasks,befores,resources,padding; uint64_t pairs; };
@@ -4312,17 +4312,20 @@ static void plan_bounds_put(struct plan_archive *out,const struct mesh_graph_buf
   plan_archive_put(out,b,sizeof *b);
 #define PUT(field,count) plan_archive_put(out,b->field,(size_t)(count)*sizeof *b->field);
   PLAN_BOUND_ARRAYS(PUT)
+  if(b->latency){PUT(latency,b->vertices) PUT(arrival,b->edges)}
 #undef PUT
 }
 static int plan_bounds_get(struct plan_archive *in,struct plan_bytes *owner,struct mesh_graph_buffer_result **out){
   const struct mesh_graph_buffer_result *saved=plan_archive_view(in,1,sizeof *saved);
   if(!saved)return in->status;
+  if(!!saved->latency!=!!saved->arrival)return EINVAL;
   struct mesh_graph_buffer_result *b=malloc(sizeof *b);
   if(!b)return ENOMEM;
   *out=b;*b=*saved;b->references=1;b->release=plan_bytes_release;b->owner=owner;
   __atomic_fetch_add(&owner->references,1,__ATOMIC_RELAXED);
 #define GET(field,count) b->field=(void *)(uintptr_t)plan_archive_view(in,(count),sizeof *b->field);
   PLAN_BOUND_ARRAYS(GET)
+  if(saved->latency){GET(latency,b->vertices) GET(arrival,b->edges)}
 #undef GET
   return in->status;
 }
@@ -5321,7 +5324,7 @@ static int plan_storage_get(struct plan_archive *in,struct mesh_planned *planned
   return in->status;
 }
 struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range rows,arena[2]; uint64_t used[2],signature,completion; };
-#define PLAN_SAVED_COMPILATION UINT64_C(0x414d4f435048534d)
+#define PLAN_SAVED_COMPILATION UINT64_C(0x424d4f435048534d)
 #define PLAN_STEP_ARRAYS(X) \
   X(item,p->flow->givens) X(sync,(uint64_t)p->waits+p->tells) X(wait_row,(uint64_t)p->flow->calls+1)
 #define PLAN_COMPILATION_ARRAYS(X) \

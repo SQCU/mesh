@@ -640,7 +640,8 @@ class BufferResult(C.Structure):
                 ('edges', C.c_size_t), ('part_edges', C.c_size_t), ('queries', C.c_size_t), ('from', _U), ('to', _U),
                 ('delay', C.POINTER(C.c_uint64)), ('edge', C.POINTER(Dependence)), ('query', _Z),
                 ('lambda', C.c_double), ('bound', C.POINTER(C.c_uint64)),
-                ('release', C.c_void_p), ('owner', C.c_void_p)]
+                ('release', C.c_void_p), ('owner', C.c_void_p),
+                ('latency', C.POINTER(C.c_double)), ('arrival', C.POINTER(C.c_ubyte))]
 
 
 class ChainResult(C.Structure):
@@ -695,6 +696,9 @@ for name, result, arguments in (
         ('mesh_graph_buffer_queries', C.c_int, [C.c_uint32, C.POINTER(C.c_double), C.c_size_t, _U, _U,
                                                C.POINTER(C.c_uint64), C.c_size_t, _Z,
                                                C.POINTER(C.POINTER(BufferResult))]),
+        ('mesh_graph_buffer_arrivals', C.c_int, [C.c_uint32, C.POINTER(C.c_double), C.c_size_t, _U, _U,
+                                               C.POINTER(C.c_uint64), C.c_size_t, _Z,
+                                               C.POINTER(C.c_double), C.POINTER(C.c_ubyte), C.POINTER(C.POINTER(BufferResult))]),
         ('mesh_graph_buffer_result_retain', None, [C.POINTER(BufferResult)]),
         ('mesh_graph_buffer_result_free', None, [C.POINTER(BufferResult)]),
         ('mesh_graph_chain_pairs', C.c_int, [C.c_uint32, _U, C.POINTER(C.POINTER(ChainResult))]),
@@ -844,10 +848,10 @@ def actor_time(machine, actor):
     return time.value, status == 0
 
 
-def buffer_queries(source, *operands):
+def buffer_queries(source, *operands, latency=None, arrival=None):
     made = C.POINTER(BufferResult)()
-    _check(LIB.mesh_graph_buffer_queries(*operands, C.byref(made)))
-    return Owned(made, LIB.mesh_graph_buffer_result_free, source, operands)
+    _check(LIB.mesh_graph_buffer_arrivals(*operands, latency, arrival, C.byref(made)))
+    return Owned(made, LIB.mesh_graph_buffer_result_free, source, (*operands, latency, arrival))
 
 
 def chain_pairs(graph, chains):
@@ -925,6 +929,7 @@ def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submi
         dependences(pairs.made))
     times.extend([0.] * (vertices - len(times)))
     edges.extend(admission)
+    resource_start = len(edges)
     query_function = dict(outer_queries)
     if completion is not None:
         edges.extend(completion.resource_cycle)
@@ -952,11 +957,28 @@ def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submi
                 queries.append(len(edges))
                 functions.append(query_function[i])
             edges.append((ports + 2 * edge.source + 1, ports + 2 * edge.sink, edge.delay))
+    latency = arrival = None
+    if any(body.made.contents.latency for body in bodies):
+        latency = (C.c_double * len(times))()
+        arrival = (C.c_ubyte * len(edges))()
+        C.memset(arrival, 1, len(edges))
+        edge = 0
+        for i, f in enumerate(calls):
+            body = bodies[f].made.contents
+            size = body.edges if completion is None else bodies[f].resource_start
+            if body.latency:
+                C.memmove(C.byref(latency, base[i] * C.sizeof(C.c_double)), body.latency,
+                          body.vertices * C.sizeof(C.c_double))
+                C.memmove(C.byref(arrival, edge), body.arrival, size)
+            edge += size
+        if completion is not None:
+            C.memset(C.byref(arrival, resource_start), 0, len(completion.resource_cycle))
     source, sink, delay = zip(*edges) if edges else ((), (), ())
     result = buffer_queries((calls, graph, pairs, bodies, completion), len(times),
         (C.c_double * len(times))(*times), len(edges), (C.c_uint32 * len(edges))(*source),
         (C.c_uint32 * len(edges))(*sink), (C.c_uint64 * len(edges))(*delay), len(queries),
-        (C.c_size_t * len(queries))(*queries))
+        (C.c_size_t * len(queries))(*queries),
+        latency=latency, arrival=arrival)
     return result, (C.c_uint32 * len(functions))(*functions)
 
 

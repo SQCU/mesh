@@ -3064,13 +3064,16 @@ static int zero_delay_cycle(const struct graph_scratch *s, uint32_t vertices, si
 static double cycle_tolerance(uint32_t vertices, const double *time) { return 1e-9 * time_sum(vertices, time); }
 /* R. Bellman, Quart. Appl. Math. 16, 1958; L. R. Ford, RAND P-923, 1956 */
 static int positive_cycle(double *distance, uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
-                          const uint32_t *to, const uint64_t *delay, double lambda, double tolerance) {
+                          const uint32_t *to, const uint64_t *delay, double lambda, double tolerance,
+                          const struct mesh_graph_buffer_result *cost) {
   for (uint32_t v = 0; v < vertices; v++) distance[v] = 0;
   for (uint32_t round = 0; round < vertices; round++) {
     int moved = 0;
     for (size_t e = 0; e < edges; e++) {
       if (delay[e] == UINT64_MAX) continue;
-      const double through = distance[from[e]] + (time[from[e]] - lambda * (double)delay[e]);
+      const uint32_t u = from[e];
+      const double transit = cost && e < cost->edges && cost->arrival[e] ? cost->latency[u] : 0;
+      const double through = distance[u] + (time[u] + transit - lambda * (double)delay[e]);
       if (distance[to[e]] + tolerance < through) { distance[to[e]] = through; moved = 1; }
     }
     if (!moved) return 0;
@@ -3079,9 +3082,10 @@ static int positive_cycle(double *distance, uint32_t vertices, const double *tim
 }
 /* BSL Fig. 8 */
 static int delays_pass(const struct graph_scratch *s, uint32_t vertices, const double *time, size_t edges,
-                       const uint32_t *from, const uint32_t *to, const uint64_t *delay, double lambda, double tolerance) {
+                       const uint32_t *from, const uint32_t *to, const uint64_t *delay, double lambda, double tolerance,
+                       const struct mesh_graph_buffer_result *cost) {
   return !zero_delay_cycle(s, vertices, edges, from, to, delay) &&
-         !positive_cycle(s->distance, vertices, time, edges, from, to, delay, lambda, tolerance);
+         !positive_cycle(s->distance, vertices, time, edges, from, to, delay, lambda, tolerance, cost);
 }
 /* BSL §3 */
 int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
@@ -3098,21 +3102,21 @@ int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from,
   return result;
 }
 /* BSL §9, BellmanFord; E. L. Lawler, Combinatorial Optimization: Networks and Matroids, 1976, pp. 94-97 */
-int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
-                          const uint64_t *delay, double *mean) {
+static int cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                          const uint64_t *delay, double total,const struct mesh_graph_buffer_result *cost,double *mean) {
   int result = graph_check(vertices, time, edges, from, to);
   if (result) return result;
   struct graph_scratch s;
   result = scratch_alloc(&s, vertices, edges);
   if (!result) {
-    const double tolerance = cycle_tolerance(vertices, time);
-    double lo = 0, hi = time_sum(vertices, time), found = 0;
+    const double tolerance = fmax(cycle_tolerance(vertices,time), DBL_EPSILON * total);
+    double lo = 0, hi = total, found = 0;
     if (zero_delay_cycle(&s, vertices, edges, from, to, delay)) found = INFINITY;
-    else if (positive_cycle(s.distance, vertices, time, edges, from, to, delay, 0, tolerance)) {
+    else if (positive_cycle(s.distance, vertices, time, edges, from, to, delay, 0, tolerance, cost)) {
       for (int step = 0; step < 200; step++) {
         const double mid = lo + (hi - lo) / 2;
         if (mid <= lo || mid >= hi) break;
-        if (positive_cycle(s.distance, vertices, time, edges, from, to, delay, mid, tolerance)) lo = mid; else hi = mid;
+        if (positive_cycle(s.distance, vertices, time, edges, from, to, delay, mid, tolerance, cost)) lo = mid; else hi = mid;
       }
       found = hi + vertices * tolerance;
     }
@@ -3121,9 +3125,13 @@ int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, c
   scratch_free(&s);
   return result;
 }
+int mesh_graph_cycle_mean(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                          const uint64_t *delay, double *mean) {
+  return cycle_mean(vertices,time,edges,from,to,delay,time_sum(vertices,time),NULL,mean);
+}
 /* BSL §9, Fig. 8, MinDelay */
-int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
-                         const uint64_t *delay, size_t e, double lambda, uint64_t bound, uint64_t *least) {
+static int min_delay(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                         const uint64_t *delay, size_t e, double lambda, uint64_t bound, double total,const struct mesh_graph_buffer_result *cost,uint64_t *least) {
   int result = graph_check(vertices, time, edges, from, to);
   if (!result && (e >= edges || !(lambda >= 0 && lambda <= DBL_MAX))) result = EINVAL;
   if (result) return result;
@@ -3132,20 +3140,24 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
   uint64_t *changed = result ? NULL : malloc((edges + 1) * sizeof *changed);
   if (!result && !changed) result = ENOMEM;
   if (!result) {
-    const double tolerance = cycle_tolerance(vertices, time);
+    const double tolerance = fmax(cycle_tolerance(vertices,time), DBL_EPSILON * total);
     for (size_t k = 0; k < edges; k++) changed[k] = delay[k];
     changed[e] = bound;
-    if (!delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance)) result = ERANGE;
+    if (!delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance, cost)) result = ERANGE;
     uint64_t lo = 0, hi = bound;
     while (!result && lo < hi) {
       const uint64_t mid = lo + (hi - lo) / 2;
       changed[e] = mid;
-      if (delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance)) hi = mid; else lo = mid + 1;
+      if (delays_pass(&s, vertices, time, edges, from, to, changed, lambda, tolerance, cost)) hi = mid; else lo = mid + 1;
     }
     if (!result) *least = hi;
   }
   scratch_free(&s); free(changed);
   return result;
+}
+int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
+                         const uint64_t *delay, size_t e, double lambda, uint64_t bound, uint64_t *least) {
+  return min_delay(vertices,time,edges,from,to,delay,e,lambda,bound,time_sum(vertices,time),NULL,least);
 }
 static void buffer_result_release(void *owner) {
   struct mesh_graph_buffer_result *r = owner;
@@ -3159,19 +3171,33 @@ static void buffer_result_release(void *owner) {
 int mesh_graph_buffer_queries(uint32_t vertices,const double *time,size_t edges,const uint32_t *from,
                               const uint32_t *to,const uint64_t *delay,size_t queries,const size_t *query,
                               struct mesh_graph_buffer_result **out) {
+  return mesh_graph_buffer_arrivals(vertices,time,edges,from,to,delay,queries,query,NULL,NULL,out);
+}
+int mesh_graph_buffer_arrivals(uint32_t vertices,const double *time,size_t edges,const uint32_t *from,
+                              const uint32_t *to,const uint64_t *delay,size_t queries,const size_t *query,
+                              const double *latency,const unsigned char *arrival,
+                              struct mesh_graph_buffer_result **out) {
   *out = NULL;
+  if ((vertices && !time) || (edges && (!from || !to || !delay)) || (queries && !query) || !!latency != !!arrival)
+    return EINVAL;
+  if (vertices == UINT32_MAX || edges >= SIZE_MAX / sizeof(uint64_t) - 1 || queries >= SIZE_MAX / sizeof(uint64_t))
+    return ENOMEM;
   struct mesh_graph_buffer_result *r = calloc(1, sizeof *r);
   if (!r) return ENOMEM;
   r->references = 1; r->release = buffer_result_release; r->owner = r; r->vertices = vertices; r->time = time; r->edges = edges;
   r->from = from; r->to = to; r->delay = delay; r->queries = queries; r->query = query;
+  r->latency = latency; r->arrival = arrival;
   r->bound = malloc((queries + 1) * sizeof *r->bound);
   uint32_t *source = malloc((edges + 1) * sizeof *source), *target = malloc((edges + 1) * sizeof *target);
   uint64_t *lag = malloc((edges + 1) * sizeof *lag);
   int status = r->bound && source && target && lag ? 0 : ENOMEM;
-  if (!status) status = mesh_graph_cycle_mean(vertices, time, edges, from, to, delay, &r->lambda);
+  double sum = time_sum(vertices,time);
+  for (uint32_t v = 0; !status && latency && v < vertices; v++) {
+    if (!(latency[v] >= 0 && latency[v] <= DBL_MAX-sum)) status = EINVAL;
+    else sum += latency[v];
+  }
+  if (!status) status = cycle_mean(vertices,time,edges,from,to,delay,sum,latency?r:NULL,&r->lambda);
   if (!status && r->lambda == INFINITY) status = EINVAL;
-  double sum = 0;
-  for (uint32_t v = 0; !status && v < vertices; v++) sum += time[v];
   for (size_t e = 0; !status && e < edges; e++) { source[e] = from[e]; target[e] = to[e]; lag[e] = delay[e]; }
   for (size_t j = 0; !status && j < queries; j++) {
     const size_t e = query[j];
@@ -3180,8 +3206,8 @@ int mesh_graph_buffer_queries(uint32_t vertices,const double *time,size_t edges,
     const double most = ceil(sum / r->lambda);
     source[edges] = to[e]; target[edges] = from[e]; lag[edges] = 0;
     uint64_t least = 0;
-    status = mesh_graph_min_delay(vertices, time, edges + 1, source, target, lag, edges, r->lambda,
-                                  most >= 1 ? (uint64_t)most : 1, &least);
+    const uint64_t room = most >= 0x1p64 ? UINT64_MAX : most >= 1 ? (uint64_t)most : 1;
+    status = min_delay(vertices,time,edges+1,source,target,lag,edges,r->lambda,room,sum,latency?r:NULL,&least);
     r->bound[j] = least ? least : 1;
   }
   free(source); free(target); free(lag);
@@ -5198,10 +5224,10 @@ int mesh_graph_resynchronized(struct mesh_graph_signature *s, const double *time
   const double tolerance = cycle_tolerance(T, time);
   for (uint32_t i = 0; !result && i < added; i++) {
     all_delay[edges + i] = added_delay[i];
-    ok[i] &= delays_pass(&g, T, time, total, all_from, all_to, all_delay, lambda, tolerance);
+    ok[i] &= delays_pass(&g, T, time, total, all_from, all_to, all_delay, lambda, tolerance, NULL);
     if (ok[i] && added_delay[i]) {
       all_delay[edges + i] = added_delay[i] - 1;
-      ok[i] &= !delays_pass(&g, T, time, total, all_from, all_to, all_delay, lambda, tolerance);
+      ok[i] &= !delays_pass(&g, T, time, total, all_from, all_to, all_delay, lambda, tolerance, NULL);
       all_delay[edges + i] = added_delay[i];
     }
   }
