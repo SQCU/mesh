@@ -975,6 +975,17 @@ def call_successors(families, bounds):
     return result
 
 
+def dependence_image(edges, target_members):
+    """Map each dependence endpoint through the source-to-target incidence."""
+    targets = collections.defaultdict(list)
+    for target, members in enumerate(target_members):
+        for source in members:
+            targets[source].append(target)
+    pairs = {(a, b, edge.delay) for edge in edges
+             for a in targets[edge.source] for b in targets[edge.sink] if a != b or edge.delay}
+    return (Dependence * len(pairs))(*(Dependence(*edge) for edge in sorted(pairs)))
+
+
 def call_submissions(successors, first, piece, physical_count):
     made = C.POINTER(ChainResult)()
     _check(LIB.mesh_graph_call_submissions(successors.group, successors.later, successors.lag,
