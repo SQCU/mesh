@@ -19,9 +19,9 @@ void mesh_retire(struct hdr *m,const struct mesh_plan_binding *planned){
   uint64_t open=planned->generation;
   if(open)atomic_compare_exchange_strong_explicit(&mesh_page(m)[planned->rows.first+planned->rows.count-1].publication,
                                                  &open,open|1,memory_order_seq_cst,memory_order_relaxed);
-  mesh_notify(&m->plans);
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
+  mesh_notify(&m->plans);
 }
 /* a private copy of the region's metadata (compiler/mesh_compiler/bridge.py planning) holds none of its publications:
    no record of it is copied */

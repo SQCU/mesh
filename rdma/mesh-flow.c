@@ -332,7 +332,7 @@ struct port_publication { uint64_t generation; const uint32_t *adjacent; struct 
                           uint32_t row,listed,places,holding; };
 /* a port's publications and every flow it holds of them (`flow`, the walk's, which the lanes read) */
 static struct port_plans { struct port_publication *published; uint32_t publications,room;
-  struct flow **flow; uint32_t flows,flow_room; uint64_t plans,walked; int walk,ended;
+  struct flow **flow; uint32_t flows,flow_room; uint64_t plans,walked,generation; int walk,ended;
   struct flow *current[2][MESH_LINK_LANES]; } port_plans[MESH_PORTS];
 
 /* tag pre-return-20261103 rdma/mesh-link.c:56-65 port_halt (3f72cbde, 306b22be), verbatim but not static */
@@ -1808,7 +1808,10 @@ static void plans_walk(struct port *port,uint32_t served){
     else free(p.loaded);
   }
   at->publications=kept;
-  for(uint32_t r=0;!at->ended && r<M->rows;r++){
+  const uint64_t generation=atomic_load_explicit(&M->generation,memory_order_acquire);
+  const int discover=generation!=at->generation;
+  const int committed=discover && mesh_publications_committed(M);
+  for(uint32_t r=0;discover && !at->ended && r<M->rows;r++){
     const uint64_t slot=mesh_slot(M,r);
     if(!mesh_slot_open(slot))continue;
     uint32_t e=0;
@@ -1828,6 +1831,7 @@ static void plans_walk(struct port *port,uint32_t served){
     *p=(struct port_publication){.generation=slot,.row=r};
     plans_load(port,p,algo);
   }
+  if(committed && !at->walk && !at->ended)at->generation=generation;
   for(uint32_t e=0;e<at->publications;e++)flows+=at->published[e].holding;
   if(flows>at->flow_room){
     struct flow **grown=realloc(at->flow,(size_t)flows*sizeof *grown);

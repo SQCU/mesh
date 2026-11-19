@@ -42,6 +42,13 @@ static inline int mesh_holder_swap(struct mesh_identity *at,struct mesh_identity
 static inline void mesh_holder_store(struct mesh_identity *at,struct mesh_identity value){
   __atomic_store((unsigned __int128 *)(void *)at,(unsigned __int128 *)(void *)&value,__ATOMIC_RELEASE);
 }
+/* An installation reserves its generation before publishing its root and releases preparing afterwards.
+   Sample the generation before this RMW. An idle preparer orders the following scan after the previous
+   installer's release. A later installer changes the sampled generation. */
+static inline int mesh_publications_committed(struct hdr *m){
+  struct mesh_identity idle={0};
+  return mesh_holder_swap(&m->preparing,&idle,(struct mesh_identity){0}) || !mesh_holder_live(idle);
+}
 /* A diagnostic's copy of row `row`'s open publication's holder, from a mapping of `length` bytes that may be read-only
    (mesh-stat.c, mesh-heartbeat.c), with no hazard, lock or registration: the root row's slot G read (acquire); its
    mapping (the record's page) and the record's two holder scalars each read once (relaxed atomic loads), at addresses

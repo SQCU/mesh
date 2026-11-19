@@ -867,21 +867,23 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    it A10's order constraints between the program's calls"; "A plan's destinations exist before its first message".
    What must stay: `submitted` the executions sent, never more; nothing sent twice that was sent once */
 static int unsent;
-/* the publications (mesh-bridge.h struct seen_publication), found again when `plans` changed: every root row's slot
+/* the publications (mesh-bridge.h struct seen_publication), found on installation or retirement: every root row's slot
    scanned, each open one's record read (this thread being the releaser), sorted by group; where the table could not
    grow, those found, and found again at the next call.  plan_here: the plan named (group, epoch) is its publication's,
    found by group and still open (its slot its generation), at place epoch - 1, standing and of the installed view;
    no bound test of a fact the plan fixes (K2) */
 static struct seen_publication *seen;
 static uint32_t seen_count,seen_room;
-static uint64_t seen_plans=UINT64_MAX;
+static uint64_t seen_generation=UINT64_MAX,seen_control;
 static int seen_group(const void *a,const void *b){
   const uint64_t x=((const struct seen_publication *)a)->group,y=((const struct seen_publication *)b)->group;
   return (x>y)-(x<y);
 }
 const struct seen_publication *publications_seen(uint32_t *count){
-  const uint64_t plans=atomic_load_explicit(&M->plans,memory_order_acquire);
-  if(plans!=seen_plans){
+  const uint64_t generation=atomic_load_explicit(&M->generation,memory_order_acquire);
+  const uint64_t control=atomic_load_explicit(&M->control,memory_order_acquire);
+  if(generation!=seen_generation || control!=seen_control){
+    const int committed=generation==seen_generation || mesh_publications_committed(M);
     uint32_t found=0;
     int whole=1;
     for(uint32_t r=0;whole && r<M->rows;r++){
@@ -898,7 +900,7 @@ const struct seen_publication *publications_seen(uint32_t *count){
     }
     qsort(seen,found,sizeof *seen,seen_group);
     seen_count=found;
-    if(whole)seen_plans=plans;
+    if(whole && committed){seen_generation=generation;seen_control=control;}
   }
   *count=seen_count;
   return seen;
@@ -1475,7 +1477,7 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    deliveries; then the release, last, where `plans` moved or a liveness turn runs, `unreleased` kept while a closed
    publication is still held.  What must stay: the release last, after this turn's cancellations and deliveries, on
    this thread */
-static uint64_t plans_seen;
+static uint64_t retirements_seen;
 void clients_turn(int liveness){
   uint64_t busy=0;
   /* each open publication's holder watched while it lives; one gone has its publication closed by this turn's release
@@ -1483,7 +1485,11 @@ void clients_turn(int liveness){
   uint32_t count;
   const struct seen_publication *all=publications_seen(&count);
   for(uint32_t e=0;e<count;e++){
-    if(mesh_slot(M,all[e].row)!=all[e].generation)continue;
+    const uint64_t slot=mesh_slot(M,all[e].row);
+    if(slot!=all[e].generation){
+      if(slot==(all[e].generation|1))unreleased=1;
+      continue;
+    }
     if(mesh_holder_live(all[e].holder)){
       struct kevent64_s watch;
       EV_SET64(&watch,(uint32_t)all[e].holder.client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
@@ -1497,8 +1503,8 @@ void clients_turn(int liveness){
   arrivals_apply();
   orders_submit();
   orders_deliver(UINT64_MAX);
-  const uint64_t plans=atomic_load_explicit(&M->plans,memory_order_acquire);
-  unreleased|=plans!=plans_seen;plans_seen=plans;
+  const uint64_t control=atomic_load_explicit(&M->control,memory_order_acquire);
+  unreleased|=control!=retirements_seen;retirements_seen=control;
   /* the tag's line again (the coordinator, at integration, once mesh-dataflow.c's mesh_retired_release returns the rows
      it kept, c01fa79d): a retired client's rows a port's plan may still name are kept, and looked at again next turn */
   /* 2026-11-04, sub-assignment 7, for mesh-flow.c plan_cancel (design/disjoint-pages-change-request.md, C3.6;
