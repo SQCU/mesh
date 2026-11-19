@@ -444,11 +444,21 @@ uint64_t owners[MESH_CLIENTS];
 /* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
 /* design/node-addressed-transfers.md: this node's reach as its record tells it (mesh-records.c record_changed): an
-   entry a node its order toward is live, with the bandwidth of the order's cables, at most `room`; their count.  A
-   record names nodes, never cables: the order is the bridge's alone */
+   entry a cable of each live order's newest epoch (mesh.h struct mesh_epoch: the cables both ends agreed), the peer
+   node and that cable's port bandwidth, at most `room`; their count.  mesh-dataflow.c mesh_join counts a pair's
+   entries as its parallel cables (the fewer of the two ends'), so a pair of three cables is three links of the map,
+   never one link at their summed bandwidth.  The entries name nodes and bandwidths, never ports: which cable carries a
+   piece is the order's (mesh-order.h order_qp) */
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room){
-  uint32_t count=mesh_nodes_reached(M,reach,room);
-  for(uint32_t k=0;k<count;k++)reach[k].padding=1;
+  uint32_t count=0;
+  for(uint32_t n=0;n<MESH_NODES && count<room;n++){
+    const struct mesh_node *x=mesh_node_at(M,n);
+    const uint32_t node=atomic_load_explicit(&x->node,memory_order_relaxed),epochs=atomic_load(&x->epochs);
+    if(!node || !atomic_load_explicit(&x->live,memory_order_acquire) || !epochs)continue;
+    const struct mesh_epoch *made=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
+    for(uint32_t c=0;c<made->cables && c<MESH_PORTS && count<room;c++)
+      reach[count++]=(struct mesh_reach){.node=node,.padding=1,.bandwidth=ports[made->cable[c].port].bandwidth};
+  }
   return count;
 }
 /* a port's link as the port table tells it; a change is a new record */

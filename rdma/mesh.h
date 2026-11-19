@@ -24,8 +24,10 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    both nodes' clients declared and of the cable epochs (mesh-order.h); the bridges exchange ORDER only as the cables
    between them change, each end proposing the piece from which a new epoch begins.  A bridge of another version is
    not paired with (port_heard).  140: the bridges also exchange SEGMENT, each segment's digest as its clients declared
-   it, a segment's pieces posted only once both ends' digests of it agree (mesh-order.h order_segments_turn) */
-#define MESH_VERSION 140u
+   it, a segment's pieces posted only once both ends' digests of it agree (mesh-order.h order_segments_turn).  141: a
+   record's reach is an entry a cable (mesh-link.c record_reach), no longer an entry a node at its cables' summed
+   bandwidth, so a pair's parallel cables are parallel links of every map made from the records (mesh_map) */
+#define MESH_VERSION 141u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node); 158 adds the segments

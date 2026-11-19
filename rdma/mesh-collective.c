@@ -315,7 +315,45 @@ static double mesh_log(double x){
 
 /* -- trees --------------------------------------------------------------------------------------------- */
 
+/* The map's ranks: its links between two of its nodes, each as listed (parallel links kept), its relays and table
+   left out.  A relay holds no rank: a hop that crosses one has no one to carry it (a bridge forwards only what its
+   clients' declared programs place, design/declared-programs.md), so the trees, the collectives' routes, cross none.
+   view->link and view->bandwidth are the caller's storage, map->links entries each. */
+int mesh_link_map_ranks(const struct mesh_link_map *map,struct mesh_link_map *view){
+  if(!map || !view || (map->links && (!map->link || !view->link)))return EINVAL;
+  const uint32_t n=map->nodes;
+  uint32_t (*link)[2]=view->link;uint64_t *bandwidth=view->bandwidth;
+  uint32_t links=0;
+  for(uint32_t l=0;l<map->links;l++){
+    if(map->link[l][0]>=n || map->link[l][1]>=n)continue;
+    link[links][0]=map->link[l][0];link[links][1]=map->link[l][1];
+    if(bandwidth)bandwidth[links]=map->bandwidth?map->bandwidth[l]:0;
+    links++;
+  }
+  *view=(struct mesh_link_map){.kind=map->relays?MESH_LINKS_GRAPH:map->kind,.nodes=n,.links=links,.link=link,
+    .bandwidth=map->bandwidth && bandwidth?bandwidth:NULL,.relays=0,.next=NULL,.mark=map->mark};
+  return 0;
+}
+/* a map with relays as its ranks' view (mesh_link_map_ranks) in storage of its own (*bandwidth, the view's links
+   with it), freed by mesh_ranks_free */
+static int mesh_ranks_of(const struct mesh_link_map *map,struct mesh_link_map *view,uint64_t **bandwidth){
+  *view=(struct mesh_link_map){.link=malloc(((size_t)map->links+1)*sizeof *view->link),.bandwidth=malloc(((size_t)map->links+1)*sizeof *view->bandwidth)};
+  *bandwidth=view->bandwidth;
+  uint32_t (*link)[2]=view->link;
+  const int error=link && *bandwidth?mesh_link_map_ranks(map,view):ENOMEM;
+  if(error){free(link);free(*bandwidth);}
+  return error;
+}
+static void mesh_ranks_free(struct mesh_link_map *view,uint64_t *bandwidth){free(view->link);free(bandwidth);}
+
 int mesh_trees_check(const struct mesh_link_map *map,const struct mesh_trees *trees){
+  if(map->relays){
+    struct mesh_link_map view;uint64_t *bandwidth;
+    if(mesh_ranks_of(map,&view,&bandwidth))return ENOMEM;
+    const int checked=mesh_trees_check(&view,trees);
+    mesh_ranks_free(&view,bandwidth);
+    return checked;
+  }
   const uint32_t n=trees->nodes;
   if(!n || n!=map->nodes || (trees->count && (!trees->root || !trees->parent || !trees->log_weight)))return EINVAL;
   for(uint32_t r=0;n>1 && r<n;r++){
@@ -805,6 +843,13 @@ static int mesh_packed_heavier(const void *a,const void *b){
 }
 
 uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint32_t *parent,double *log_weight){
+  if(map && map->relays){
+    struct mesh_link_map view;uint64_t *bandwidth;
+    if(mesh_ranks_of(map,&view,&bandwidth))return 0;
+    const uint32_t made=mesh_trees_shortest(&view,root,parent,log_weight);
+    mesh_ranks_free(&view,bandwidth);
+    return made;
+  }
   if(!map || mesh_link_map_check(map) || map->relays || mesh_link_map_joined(map,NULL))return 0;
   const uint32_t n=map->nodes;
   /* a pair's capacity: its parallel links' bandwidths summed, or their count where none is given */
@@ -851,6 +896,13 @@ done:
 
 uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
                          double *log_weight){
+  if(map->relays){
+    struct mesh_link_map view;uint64_t *bandwidth;
+    if(mesh_ranks_of(map,&view,&bandwidth))return 0;
+    const uint32_t made=mesh_trees_pack(&view,roots,eps,most,root,parent,log_weight);
+    mesh_ranks_free(&view,bandwidth);
+    return made;
+  }
   const uint32_t n=map->nodes,N=mesh_all(map);
   uint32_t rooted=0;
   for(uint32_t r=0;r<n;r++)rooted+=mesh_member(roots,r);

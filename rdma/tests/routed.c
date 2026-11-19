@@ -54,8 +54,9 @@ static int ready(const struct mesh_routed_rank *r,const unsigned char *done,uint
    REDUCE payloads land in distinct staging, as in the production executor. */
 static uint32_t waited_for_dma;
 static void simulate_cables(const struct mesh_routed_program *p,int64_t ***buffers,uint32_t expected_cables){
-  unsigned char *done[N],*published[N],*arrived[N],*deferred[N];int64_t **staged[N];uint32_t pending=0;
-  for(uint32_t r=0;r<N;r++){
+  const uint32_t R=p->nodes;assert(R<=8);
+  unsigned char *done[8],*published[8],*arrived[8],*deferred[8];int64_t **staged[8];uint32_t pending=0;
+  for(uint32_t r=0;r<R;r++){
     const size_t n=p->rank[r].count+1;
     done[r]=calloc(n,1);published[r]=calloc(n,1);arrived[r]=calloc(n,1);deferred[r]=calloc(n,1);staged[r]=calloc(n,sizeof *staged[r]);
     for(uint32_t k=0;k<p->rank[r].count;k++)pending+=p->rank[r].transfer[k].step.op!=MESH_STEP_SEND;
@@ -63,7 +64,7 @@ static void simulate_cables(const struct mesh_routed_program *p,int64_t ***buffe
   uint32_t iteration=0,used=0;
   while(pending){
     int advanced=0;
-    for(uint32_t r=0;r<N;r++)for(uint32_t k=0;k<p->rank[r].count;k++){
+    for(uint32_t r=0;r<R;r++)for(uint32_t k=0;k<p->rank[r].count;k++){
       const struct mesh_transfer *t=p->rank[r].transfer+k;const struct mesh_step *s=&t->step;
       if(s->op!=MESH_STEP_SEND || published[r][k] || !ready(p->rank+r,done[r],k))continue;
       int head=1;
@@ -72,8 +73,8 @@ static void simulate_cables(const struct mesh_routed_program *p,int64_t ***buffe
            p->rank[r].transfer[j].step.round<s->round && !published[r][j])head=0;
       if(head){published[r][k]=1;advanced=1;}
     }
-    for(uint32_t rr=0;rr<N;rr++){
-      const uint32_t r=(rr+iteration)%N;const struct mesh_routed_rank *rank=p->rank+r;
+    for(uint32_t rr=0;rr<R;rr++){
+      const uint32_t r=(rr+iteration)%R;const struct mesh_routed_rank *rank=p->rank+r;
       for(uint32_t kk=rank->count;kk>0;){
         const uint32_t k=--kk;const struct mesh_transfer *t=rank->transfer+k;const struct mesh_step *s=&t->step;
         if(s->op!=MESH_STEP_SEND || !published[r][k] || arrived[r][k])continue;
@@ -102,7 +103,7 @@ static void simulate_cables(const struct mesh_routed_program *p,int64_t ***buffe
         arrived[r][k]=arrived[s->peer][match]=1;advanced=1;used|=1u<<t->cable;
       }
     }
-    for(uint32_t r=0;r<N;r++)for(uint32_t k=0;k<p->rank[r].count;k++){
+    for(uint32_t r=0;r<R;r++)for(uint32_t k=0;k<p->rank[r].count;k++){
       const struct mesh_routed_rank *rank=p->rank+r;const struct mesh_transfer *t=rank->transfer+k;const struct mesh_step *s=&t->step;
       if(s->op==MESH_STEP_SEND || done[r][k] || !arrived[r][k] || !ready(rank,done[r],k))continue;
       int head=1;
@@ -124,7 +125,7 @@ static void simulate_cables(const struct mesh_routed_program *p,int64_t ***buffe
     assert(advanced);iteration++;
   }
   assert(used==expected_cables);
-  for(uint32_t r=0;r<N;r++){
+  for(uint32_t r=0;r<R;r++){
     for(uint32_t k=0;k<p->rank[r].count;k++)free(staged[r][k]);
     free(staged[r]);free(done[r]);free(published[r]);free(arrived[r]);free(deferred[r]);
   }
@@ -354,6 +355,109 @@ static void shortest_ring(void){
   free(segment);free(first);free(shares);free(move);free(logical);
 }
 
+
+/* The Studios' ring with the Mac mini (ranks 0 A, 1 B, 2 D, 3 C, 4 M; A-B 3 cables, B-D 2, D-C 4, C-A 1, M-A 1, M-B 1,
+   M-C 1), M a relay-only rank (contributors and recipients ranks 0-3: nccl.h ncclMeshCommMembers).  Its map a link a
+   cable (mesh-link.c record_reach, mesh_map); the communicator's fabric a channel a pair the map links, at the pair's
+   summed bandwidth (nccl-mesh.c fabric_discover), each pair's write routes its own channel (meshmlx's).  Along the packed
+   trees some compute root's tree crosses M, and the all-gather (M's segment 0) lowers to SEND/COPY alone, M's every
+   SEND a relay of what landed there, every rank's storage its operand alone (no relay storage anywhere: M's relayed
+   spans land in its own buffer at their segments' places); along the shortest trees no compute tree crosses M and M
+   has no transfer.  Over the whole map with M no member, M is a relay of the members' map: the trees cross none. */
+static void ring_with_relay(void){
+  enum { R=5, C=14, S=96 };
+  static const uint32_t ends[C][2]={{0,1},{0,1},{0,1},{1,2},{1,2},{2,3},{2,3},{2,3},{2,3},{3,0},{4,0},{4,1},{4,3},{1,0}};
+  uint32_t link[C][2];uint64_t bandwidth[C];
+  /* the 14th entry a fourth A-B cable is not on this cabling: the map lists 13 */
+  const uint32_t L=13;
+  for(uint32_t e=0;e<L;e++){memcpy(link[e],ends[e],sizeof link[e]);bandwidth[e]=80000000000ull;}
+  const struct mesh_link_map map={.kind=MESH_LINKS_GRAPH,.nodes=R,.links=L,.link=link,.bandwidth=bandwidth};
+  assert(!mesh_link_map_check(&map) && !mesh_link_map_joined(&map,NULL));
+  /* the fabric: a channel a pair the map links, its bandwidth the pair's parallel links' sum */
+  struct mesh_cable pair[R*R];uint32_t pairs=0;
+  for(uint32_t a=0;a<R;a++)for(uint32_t b=a+1;b<R;b++){
+    uint64_t sum=0;
+    for(uint32_t e=0;e<L;e++)if((link[e][0]==a && link[e][1]==b) || (link[e][0]==b && link[e][1]==a))sum+=bandwidth[e];
+    if(sum){pair[pairs]=(struct mesh_cable){100+pairs,sum,{a,b}};pairs++;}
+  }
+  assert(pairs==7);
+  const struct mesh_fabric f={R,pairs,pair};
+  struct mesh_paths direct[R*R]={0};uint32_t one[R*R][2],edge[R*R];double zero[1]={0};
+  for(uint32_t a=0;a<R;a++)for(uint32_t b=0;b<R;b++)for(uint32_t e=0;e<pairs;e++)
+    if((pair[e].node[0]==a && pair[e].node[1]==b) || (pair[e].node[0]==b && pair[e].node[1]==a)){
+      one[a*R+b][0]=0;one[a*R+b][1]=1;edge[a*R+b]=e;
+      direct[a*R+b]=(struct mesh_paths){1,one[a*R+b],edge+a*R+b,zero};assert(!mesh_paths_check(&f,a,b,direct+a*R+b));
+    }
+  const uint64_t compute=0xF;
+  uint32_t root[R*R],parent[R*R*R];double weight[R*R];
+  for(int packed=1;packed>=0;packed--){
+    const uint32_t trees=packed?mesh_trees_pack(&map,NULL,0,R,root,parent,weight):mesh_trees_shortest(&map,root,parent,weight);
+    assert(trees);
+    const struct mesh_trees t={R,trees,root,parent,weight};
+    assert(!mesh_trees_check(&map,&t));
+    /* whether a compute root's tree crosses M (M some node's parent there) */
+    uint32_t through=0;
+    for(uint32_t k=0;k<trees;k++)if(root[k]<4)for(uint32_t v=0;v<R;v++)through+=v!=root[k] && parent[(size_t)k*R+v]==4;
+    assert(packed?through>0:through==0);
+    uint32_t parts,moves;mesh_compile_room(&t,&parts,&moves);
+    uint32_t *segment=calloc(parts,sizeof *segment),*first=calloc(R+1,sizeof *first);
+    double *shares=calloc(parts,sizeof *shares);
+    struct mesh_move *move=calloc(moves,sizeof *move);struct mesh_program program;
+    assert(!mesh_compile_members(&t,MESH_ALLGATHER,0,0,&compute,&compute,&program,segment,shares,first,move));
+    struct mesh_step *logical=calloc(moves+1,sizeof *logical);uint32_t offsets[R+1]={0},initialized[R];
+    const uint64_t counts[R]={S,S,S,S,0};
+    assert(!mesh_program_check_members(&program,(struct mesh_operand){7,8,4*S},counts,16,&compute,&compute));
+    for(uint32_t r=0;r<R;r++){
+      initialized[r]=1+program.scratch;
+      offsets[r+1]=offsets[r]+mesh_program_steps_cut(&program,r,(struct mesh_operand){7,8,4*S},counts,16,logical+offsets[r]);
+    }
+    for(uint32_t k=0;k<offsets[R];k++)assert(logical[k].op==MESH_STEP_SEND || logical[k].op==MESH_STEP_COPY);
+    /* M: its moves relays alone (nothing of its own to send), none along the shortest trees */
+    assert(packed?offsets[R]>offsets[R-1]:offsets[R]==offsets[R-1]);
+    struct mesh_routed_program physical;
+    assert(!mesh_routed_compile(&f,direct,offsets,logical,initialized,16,&physical));
+    for(uint32_t r=0;r<R;r++)assert(physical.rank[r].buffers==initialized[r] && initialized[r]==1);
+    int64_t **buffers[R];
+    for(uint32_t r=0;r<R;r++){
+      const struct mesh_routed_rank *rank=physical.rank+r;
+      buffers[r]=calloc(rank->buffers,sizeof *buffers[r]);
+      for(uint32_t b=0;b<rank->buffers;b++){
+        buffers[r][b]=malloc((4*S+rank->extent[b]/8+1)*sizeof **buffers);
+        /* a contributor's own segment its operand; every other byte unwritten (M's whole buffer) */
+        for(uint64_t x=0;x<4*S+rank->extent[b]/8+1;x++)buffers[r][b][x]=r<4 && x/S==r?100*(int64_t)r+(int64_t)x:-123456789;
+      }
+    }
+    uint32_t cables_used=0;
+    for(uint32_t r=0;r<R;r++)for(uint32_t k=0;k<physical.rank[r].count;k++)cables_used|=1u<<physical.rank[r].transfer[k].cable;
+    simulate_cables(&physical,buffers,cables_used);
+    for(uint32_t r=0;r<4;r++)for(uint64_t x=0;x<4*S;x++)assert(buffers[r][0][x]==100*(int64_t)(x/S)+(int64_t)x);
+    uint64_t wanted=0,observed=0;
+    for(uint32_t k=0;k<offsets[R];k++)if(logical[k].op==MESH_STEP_SEND)wanted+=logical[k].piece.elements*8;
+    for(uint32_t k=0;k<R*R;k++)observed+=physical.demand[k];
+    assert(wanted==observed);
+    for(uint32_t r=0;r<R;r++){for(uint32_t b=0;b<physical.rank[r].buffers;b++)free(buffers[r][b]);free(buffers[r]);}
+    mesh_routed_free(&physical);free(segment);free(first);free(shares);free(move);free(logical);
+  }
+  /* M no member: a relay of the members' map (mesh_map_members), its links left out of the ranks' view, the trees
+     crossing none and the parallel A-B cables three links */
+  const uint32_t members[4]={0,1,2,3};
+  uint32_t mlink[64][2],next[R*R],mark[R];uint64_t mbw[64];
+  struct mesh_link_map m4={.nodes=R,.links=64,.link=mlink,.bandwidth=mbw,.next=next,.mark=mark};
+  assert(mesh_map_members(&map,members,4,NULL,&m4)==4 && m4.relays==1);
+  uint32_t ab=0;for(uint32_t e=0;e<m4.links;e++)ab+=(m4.link[e][0]==0 && m4.link[e][1]==1) || (m4.link[e][0]==1 && m4.link[e][1]==0);
+  assert(ab==3);
+  uint32_t vlink[64][2];uint64_t vbw[64];
+  struct mesh_link_map view={.link=vlink,.bandwidth=vbw};
+  assert(!mesh_link_map_ranks(&m4,&view) && view.nodes==4 && !view.relays && view.links==10);
+  assert(mesh_trees_shortest(&m4,root,parent,weight)==4);
+  for(uint32_t k=0;k<4;k++)for(uint32_t v=0;v<4;v++)assert(parent[k*4+v]<4);
+  const uint32_t packed=mesh_trees_pack(&m4,NULL,0,4,root,parent,weight);
+  assert(packed);
+  for(uint32_t k=0;k<packed;k++)for(uint32_t v=0;v<4;v++)assert(parent[k*4+v]<4);
+  const struct mesh_trees t4={4,packed,root,parent,weight};
+  assert(!mesh_trees_check(&m4,&t4));
+}
+
 int main(void){
   for(uint32_t s=0;s<N;s++)for(uint32_t d=0;d<N;d++)if(s!=d){
     paths[s*N+d]=(struct mesh_paths){0,path_first[s*N+d],path_edges[s*N+d],weights[s*N+d]};
@@ -365,6 +469,7 @@ int main(void){
   relayed_predecessor();
   publication_before_combine();
   shortest_ring();
-  puts("routed collectives: the shortest ring trees' all-gather with no relay storage over direct routes, 20 arithmetic/gather cases, counted exchange with a relay-only rank, ragged zero shares, parallel cables, alternate relays, compact leases, exact demands and mismatched declarations passed");
+  ring_with_relay();
+  puts("routed collectives: the shortest ring trees' all-gather with no relay storage over direct routes, 20 arithmetic/gather cases, counted exchange with a relay-only rank, the ring with the Mac mini relay-only (the packed trees through it, its relayed all-gather SEND/COPY with no relay storage; the shortest trees past it; a non-member a relay no tree crosses), ragged zero shares, parallel cables, alternate relays, compact leases, exact demands and mismatched declarations passed");
   return 0;
 }

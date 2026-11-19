@@ -146,7 +146,14 @@ and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-
 collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
 value naming two members no path between members joins (`ncclInvalidUsage`).
 
-Every member makes the map from the same gathered reports, so the members' maps are one, and every rank passes the same
+A communicator's map is the bridges' whole map (`mesh_map`, from the flooded records: a link a cable, so a pair's
+parallel cables are parallel links) over its members: its nodes the ranks, every other node a relay. Each rank reports
+the whole map its bridge holds at the init's gather, rank 0's is the communicator's, and a rank whose bridge holds
+another fails the init alike at every rank. Its fabric is the map's: a channel each pair of ranks a link joins, at
+the pair's summed bandwidth. A relay node holds no rank, so no tree crosses it (`mesh_link_map_ranks`: the trees take a
+map with relays as its ranks); a node that is to forward runs a client as a rank. The roles of a communicator's every
+collective are its configuration operand, `ncclMeshCommMembers(comm, contributors, recipients)` (Routes between unlinked
+ranks, below). Every member makes the map from the same gathered report, so the members' maps are one, and every rank passes the same
 paths, programs and forms; nothing is compared at run time.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
@@ -557,6 +564,14 @@ first partial and REDUCE only after that interval is defined. Raw caller
 programs are checked against the declared initialized intervals at
 configuration, not silently replaced with another topology. An unreachable
 required endpoint is a configuration error.
+
+`ncclMeshCommMembers` sets those roles for every collective issued or declared on the communicator, so a declared
+program (`ncclMeshDeclareBegin`, its groups, `ncclMeshDeclareEnd`) captures masked calls as issued: an all-gather's
+segment is a contributor's count and 0 at any other rank (its send buffer in place at the contributors' segments
+before it). A relay-only rank (in neither mask) issues every group as its peers do, with nothing of its own: a fused
+crossing lands its relayed spans in the caller's lease at their segments' places, its SENDs supplied by those landed
+prefixes, and since it runs no consumer that would return its landing leases, its execution k's gate opens in the
+stream's order once its execution k - 1's SENDs are done (a window of one execution, a wait the library encodes).
 
 ## Rules a program keeps
 

@@ -966,6 +966,16 @@ typedef struct {
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
+/* The communicator's operand roles, its configuration operand as its forms are (ncclMeshCall.contributors and
+   .recipients for every call): full-fabric rank bitmaps, ceil(nranks/64) words each, NULL every rank (both NULL:
+   every rank both, as before any call).  From comm's next group on, every collective issued or declared on it
+   (ncclAllReduce, ncclAllGather, ncclBroadcast, ncclReduce, ncclReduceScatter and their V forms; a declared call
+   naming its own masks keeps them) takes these roles: an all-gather's segment is a contributor's count and 0 at a rank
+   outside them (sendcount the contributors' count; its own segment sendbuff, in place at the contributors' segments
+   before it), a reduction combines the contributors' operands and leaves its result at the recipients alone.  A rank
+   in neither is relay-only: it supplies and receives nothing, and the trees may route through it, its moves COPY and
+   SEND alone where a fused crossing lowers.  Every rank passes the same roles at the same point between its groups. */
+ncclResult_t ncclMeshCommMembers(ncclComm_t comm, const uint64_t* contributors, const uint64_t* recipients);
 /* design/whole-function.md#interface */
 struct mesh_fabric;
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);

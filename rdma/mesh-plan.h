@@ -111,6 +111,12 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 /* Whether the map links its nodes a and b, either way (a mesh every pair; with a table, their route crossing relays
    alone). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
+/* The map's ranks: its links between two of its nodes, as listed (a pair's parallel links each one), its relays and
+   table left out, its kind a graph's where it had relays.  A relay holds no rank, and a hop that crosses one has no
+   client to carry it (a bridge places only what its clients' declared programs place), so the trees (mesh_trees_check,
+   mesh_trees_pack, mesh_trees_shortest take a map with relays as this view) and a communicator's routes cross none.
+   view->link and view->bandwidth (NULL: none) are the caller's storage of map->links entries; 0, or EINVAL. */
+int mesh_link_map_ranks(const struct mesh_link_map *map,struct mesh_link_map *view);
 
 /* Spanning trees over a map's nodes: the routes every collective and every message take (Blink's tree packing
    [Wang et al., MLSys 2020]; ForestColl [Zhao et al. 2024]).  Tree t is rooted at root[t]; node v's parent in it is
@@ -143,7 +149,8 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,doub
    links' bandwidths summed, or their count where the map gives the pair none), the lowest-numbered of equals; log
    weight 0.  The latency-first trees: a part crosses the fewest hops (the packed trees, which balance every link's load,
    may route a part the long way round a ring).  Writes root, parent (nodes a tree) and log_weight for map->nodes trees,
-   tree r rooted at node r; returns their count, 0 where the map does not join its nodes or has relays. */
+   tree r rooted at node r; returns their count, 0 where the map's links between its nodes do not join them.  A map
+   with relays is taken as its ranks (mesh_link_map_ranks): no tree crosses a relay. */
 uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */

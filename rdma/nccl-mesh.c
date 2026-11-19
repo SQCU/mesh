@@ -265,6 +265,9 @@ struct channel {
   size_t ready, landed, sent;
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
+  /* a relay-only rank's fused execution's SENDs end here (launch_metal): its next execution's gate opens once `sent`
+     reaches it */
+  mesh_pages relayed;
   struct mesh_byte_account payload[2]; /* immutable SEND/LAND unit-to-byte prefixes */
   unsigned trace_readers; /* group_lock; prohibit reclaiming lockless observers' chunks */
 };
@@ -297,6 +300,8 @@ struct attach;
 struct plan;
 struct ncclComm {
   struct mesh_link_map map;
+  /* the operand roles every collective on it takes (ncclMeshCommMembers; NULL every rank) */
+  uint64_t *contributors, *recipients;
   struct mesh_fabric fabric;
   uint32_t *endpoint;
   struct mesh_paths *writes;
@@ -430,7 +435,7 @@ static void comm_free(struct ncclComm *comm) {
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
   pthread_mutex_destroy(&comm->prepare);
-  free(comm->members); free(comm->forms);
+  free(comm->members); free(comm->forms); free(comm->contributors); free(comm->recipients);
   free(comm);
 }
 
@@ -553,13 +558,14 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
    takes part as a rank, and in this table, compiled with no contributors (compile_entry), it combines its own operand
    into what it sends on; the identity at a rank with no work (design/data-model.md section 9) is only a caller's
    programs' (mesh-plan.h mesh_compile's contributors) */
+static int ranks_joined(const struct mesh_link_map *map, uint32_t *apart);
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   if (n < 2) return ncclSuccess;
   const struct mesh_trees *along = &comm->paths, *rooted = &comm->paths;
   if (!comm->listed || comm->form_count) {
     uint32_t apart[2] = {0, 0};
-    const int joined = mesh_link_map_joined(&comm->map, apart);
+    const int joined = ranks_joined(&comm->map, apart);
     if (joined == ENOTCONN)
       return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: a "
                   "route crosses ranks alone, so a node it is to cross takes part as a rank", apart[0], comm->members[apart[0]],
@@ -663,6 +669,34 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int c
   free(comm->forms);
   comm->forms = made; comm->form_count = (uint32_t)count;
   routes_free(comm, 0);
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
+
+/* nccl.h ncclMeshCommMembers: the roles checked (a reduction or a gather keeps a contributor; a reduction a
+   recipient) and copied, every collective issued or declared on comm from its next group on taking them (enqueue,
+   declared: declared_members) */
+ncclResult_t ncclMeshCommMembers(ncclComm_t comm, const uint64_t *contributors, const uint64_t *recipients) {
+  if (!comm) return fail(ncclInvalidArgument, "ncclMeshCommMembers: comm is NULL");
+  const size_t words = ((size_t)comm->nranks + 63) / 64;
+  uint32_t in = 0, out = 0;
+  for (int r = 0; r < comm->nranks; r++) {
+    in += !contributors || (contributors[r / 64] >> (r % 64) & 1);
+    out += !recipients || (recipients[r / 64] >> (r % 64) & 1);
+  }
+  for (size_t k = 0; k < words; k++) {
+    const uint64_t past = comm->nranks % 64 && k + 1 == words ? ~0ull << (comm->nranks % 64) : 0;
+    if ((contributors && contributors[k] & past) || (recipients && recipients[k] & past))
+      return fail(ncclInvalidArgument, "ncclMeshCommMembers: a role names a rank past the communicator's %d", comm->nranks);
+  }
+  if (!in || !out) return fail(ncclInvalidArgument, "ncclMeshCommMembers: the roles leave no %s", in ? "recipient" : "contributor");
+  uint64_t *c = contributors ? malloc(words * sizeof *c) : NULL, *r = recipients ? malloc(words * sizeof *r) : NULL;
+  if ((contributors && !c) || (recipients && !r)) { free(c); free(r); return fail(ncclSystemError, "out of memory"); }
+  if (c) memcpy(c, contributors, words * sizeof *c);
+  if (r) memcpy(r, recipients, words * sizeof *r);
+  pthread_mutex_lock(&group_lock);
+  free(comm->contributors); free(comm->recipients);
+  comm->contributors = c; comm->recipients = r;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
 }
@@ -934,12 +968,15 @@ static void comm_leave(struct ncclComm *comm) {
 }
 
 /* a rank's report at a communicator's init (NCCL's bootstrap, below): its status (0, else why it cannot go on, so every
-   rank fails alike), its bridge's node and the nodes that bridge holds a live order toward, with each one's bandwidth
-   (reach_read, mesh-call.h mesh_nodes_reached) */
+   rank fails alike), its bridge's node and the whole map its bridge's records hold (`whole`, mesh-plan.h mesh_map over
+   no members: every node with a bridge, a link a cable, at most REPORT_LINKS; `whole_status` 0 or why it could not be
+   read: reach_read) */
+enum { REPORT_LINKS = MESH_NODES * MESH_PORTS / 2 };
+struct report_map { uint32_t nodes, links; uint32_t node[MESH_NODES]; uint32_t link[REPORT_LINKS][2]; uint64_t bandwidth[REPORT_LINKS]; };
 struct report {
   int32_t rank, status;
-  uint32_t node, count;
-  struct mesh_reach reach[MESH_NODES];
+  uint32_t node, whole_status;
+  struct report_map whole;
 };
 
 /* design/whole-function.md#fabric */
@@ -949,39 +986,74 @@ static int cable_order(const void *left, const void *right) {
   return (a->wire > b->wire) - (a->wire < b->wire);
 }
 
+/* whether the map's links between its ranks join them (mesh-plan.h mesh_link_map_ranks, mesh_link_map_joined: a
+   relay holds no rank, so no route crosses one), apart (NULL: none) the first two they leave apart */
+static int ranks_joined(const struct mesh_link_map *map, uint32_t *apart) {
+  struct mesh_link_map view = {.link = calloc((size_t)map->links + 1, sizeof *view.link), .bandwidth = calloc((size_t)map->links + 1, sizeof *view.bandwidth)};
+  uint32_t (*link)[2] = view.link;
+  uint64_t *bandwidth = view.bandwidth;
+  int joined = link && bandwidth ? mesh_link_map_ranks(map, &view) : ENOMEM;
+  if (!joined) joined = mesh_link_map_joined(&view, apart);
+  free(link); free(bandwidth);
+  return joined;
+}
+
+/* design/whole-function.md#fabric: the communicator's map, one source: the bridges' whole map (mesh_map's, as its
+   rank 0 read it in its report: every rank's is compared with it, and a rank whose bridge holds another map fails the
+   init alike at every rank, EXDEV) over its members (mesh_map_members, the rule mesh_map reads the records by): its
+   nodes the ranks, the whole map's other nodes its relays, a link a cable (parallel cables parallel links), each at the
+   bandwidth the records give, and the whole map's table.  The fabric is the map's: a channel each pair of ranks a link
+   of the map joins (the bridges' order between their nodes, whose cables beneath it are the bridge's own: its bandwidth
+   the sum of the pair's parallel links'), its identity the pair of nodes, alike at every member.  A relay holds no
+   rank, and no tree or route crosses one (mesh-plan.h mesh_link_map_ranks) */
 static int fabric_discover(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
+  const struct report_map *w = &reports[0].whole;
+  for (uint32_t r = 0; r < n; r++) if (reports[r].whole_status) return reports[r].whole_status;
+  for (uint32_t r = 1; r < n; r++) {
+    const struct report_map *x = &reports[r].whole;
+    if (x->nodes != w->nodes || x->links != w->links || memcmp(x->node, w->node, w->nodes * sizeof *w->node) ||
+        memcmp(x->link, w->link, w->links * sizeof *w->link) || memcmp(x->bandwidth, w->bandwidth, w->links * sizeof *w->bandwidth))
+      return EXDEV;
+  }
+  uint32_t wl[REPORT_LINKS][2], wn[MESH_NODES];
+  uint64_t wb[REPORT_LINKS];
+  memcpy(wl, w->link, sizeof wl); memcpy(wb, w->bandwidth, sizeof wb); memcpy(wn, w->node, sizeof wn);
+  const struct mesh_link_map whole = {.kind = MESH_LINKS_GRAPH, .nodes = w->nodes, .links = w->links, .link = wl, .bandwidth = wb, .mark = wn};
+  uint32_t *index = calloc((size_t)n + 1, sizeof *index);
+  if (!index) return ENOMEM;
+  for (uint32_t r = 0; r < n; r++) {
+    index[r] = w->nodes;
+    for (uint32_t k = 0; k < w->nodes; k++) if (w->node[k] == reports[r].node) index[r] = k;
+  }
+  const uint32_t T = n + w->nodes, L = w->links + (uint32_t)((size_t)T * T);
+  struct mesh_link_map *map = &comm->map;
+  *map = (struct mesh_link_map){.nodes = T, .links = L, .link = calloc((size_t)L + 1, sizeof *map->link),
+    .bandwidth = calloc((size_t)L + 1, sizeof *map->bandwidth), .next = calloc((size_t)T * T + 1, sizeof *map->next),
+    .mark = calloc((size_t)T + 1, sizeof *map->mark)};
+  if (!map->link || !map->bandwidth || !map->next || !map->mark) { free(index); return ENOMEM; }
+  const int made = mesh_map_members(&whole, index, n, NULL, map);
+  free(index);
+  if (made < 0) return -made;
+  if (!map->relays) { free(map->next); map->next = NULL; }
   struct mesh_cable *cables = calloc((size_t)n * n + 1, sizeof *cables);
   if (!cables) return ENOMEM;
   comm->fabric = (struct mesh_fabric){n, 0, cables};
-  /* design/node-addressed-transfers.md: one link of the communicator's fabric a pair of members whose bridges each hold
-     a live order toward the other's node, its bandwidth the lesser of the two orders' (the bridge's cables beneath
-     are its own); its identity the pair of nodes, alike at every member */
   for (uint32_t a = 0; a < n; a++) for (uint32_t b = a + 1; b < n; b++) {
-    const struct report *x = reports + a, *y = reports + b;
-    uint64_t there = 0, back = 0;
-    for (uint32_t k = 0; k < x->count; k++) if (x->reach[k].node == y->node) there = x->reach[k].bandwidth ? x->reach[k].bandwidth : 1;
-    for (uint32_t k = 0; k < y->count; k++) if (y->reach[k].node == x->node) back = y->reach[k].bandwidth ? y->reach[k].bandwidth : 1;
-    if (!there || !back) continue;
-    const uint32_t lo = x->node < y->node ? x->node : y->node, hi = x->node < y->node ? y->node : x->node;
-    cables[comm->fabric.cables++] = (struct mesh_cable){((uint64_t)lo << 32) | hi, there < back ? there : back, {a, b}};
+    uint64_t bandwidth = 0;
+    uint32_t parallel = 0;
+    for (uint32_t l = 0; l < map->links; l++)
+      if ((map->link[l][0] == a && map->link[l][1] == b) || (map->link[l][0] == b && map->link[l][1] == a)) { bandwidth += map->bandwidth[l]; parallel++; }
+    if (!parallel) continue;
+    const uint32_t x = reports[a].node, y = reports[b].node, lo = x < y ? x : y, hi = x < y ? y : x;
+    cables[comm->fabric.cables++] = (struct mesh_cable){((uint64_t)lo << 32) | hi, bandwidth ? bandwidth : parallel, {a, b}};
   }
   qsort(cables, comm->fabric.cables, sizeof *cables, cable_order);
-  const uint32_t links = comm->fabric.cables;
-  struct mesh_link_map *map = &comm->map;
-  *map = (struct mesh_link_map){.kind = MESH_LINKS_GRAPH, .nodes = n, .links = links,
-    .link = calloc(links + 1, sizeof *map->link), .bandwidth = calloc(links + 1, sizeof *map->bandwidth),
-    .mark = calloc(n + 1, sizeof *map->mark)};
-  comm->endpoint = malloc((links + 1) * sizeof *comm->endpoint);
-  if (!map->link || !map->bandwidth || !map->mark || !comm->endpoint) return ENOMEM;
-  for (uint32_t e = 0; e < links; e++) {
-    memcpy(map->link[e], cables[e].node, sizeof cables[e].node);
-    map->bandwidth[e] = cables[e].bandwidth;
-    comm->endpoint[e] = UINT32_MAX;
-  }
-  for (uint32_t r = 0; r < n; r++) map->mark[r] = reports[r].node;
+  comm->endpoint = malloc(((size_t)comm->fabric.cables + 1) * sizeof *comm->endpoint);
+  if (!comm->endpoint) return ENOMEM;
+  for (uint32_t e = 0; e < comm->fabric.cables; e++) comm->endpoint[e] = UINT32_MAX;
   int checked = mesh_fabric_check(&comm->fabric);
-  if (!checked) checked = mesh_link_map_joined(map, NULL);
+  if (!checked) checked = ranks_joined(map, NULL);
   if (!checked) checked = mesh_write_routes_default(&comm->fabric, &comm->writes);
   return checked;
 }
@@ -1253,9 +1325,17 @@ static void orders_await(struct attach *a) {
 }
 static void reach_read(struct attach *a, struct report *report) {
   report->node = a->context.M->node;
-  report->count = mesh_nodes_reached(a->context.M, report->reach, MESH_NODES);
+  /* the bridges' whole map as this node's records hold it (mesh-plan.h mesh_map over no members) */
+  uint32_t link[REPORT_LINKS][2];
+  uint64_t bandwidth[REPORT_LINKS];
+  struct mesh_link_map whole = {.kind = MESH_LINKS_GRAPH, .nodes = MESH_NODES, .links = REPORT_LINKS, .link = link, .bandwidth = bandwidth};
+  const int count = mesh_map(NULL, 0, report->whole.node, &whole);
+  report->whole_status = count < 0 ? (uint32_t)-count : 0;
+  if (count < 0) return;
+  report->whole.nodes = (uint32_t)count; report->whole.links = whole.links;
+  memcpy(report->whole.link, link, whole.links * sizeof *link);
+  memcpy(report->whole.bandwidth, bandwidth, whole.links * sizeof *bandwidth);
 }
-
 /* design/whole-function.md#fabric */
 static int comm_apart(const struct report *reports, uint32_t n) {
   for (uint32_t a = 0; a < n; a++)
@@ -1267,6 +1347,10 @@ static ncclResult_t apart_fail(const char *name) {
   return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings are kept a node)", name);
 }
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
+  if (status == EXDEV)
+    return fail(ncclSystemError, "communicator %s: rank %d's bridge holds another map than rank 0's (the bridges' records, mesh_map: "
+                "their floods not settled, or a cable changed during the init); a communicator made next reads the records as they "
+                "then stand", name, rank);
   return fail(ncclSystemError, "communicator %s: rank %d could not open its bridge's order toward a member's node (%s: ENOLINK, its "
               "bridge holds no live order there); a communicator made next reads the orders as they then stand", name, rank, strerror(status));
 }
@@ -3621,7 +3705,9 @@ static ncclResult_t launch_prepare(struct call *list, size_t n, struct prepared 
       if (s) s->buffer[0] = comm->rank == c->root ? c->send_at : c->recv_at;
     } else if (counted(c)) { if (s) { s->buffer[0] = c->send_at; s->buffer[1] = c->recv_at; } }
     else {
-      const int in_place = call_receives(c) && c->what != MESH_REDUCE_SCATTER;
+      /* a fused crossing lands in the caller's lease at every rank (the compiled span layout is the caller's buffer's),
+       a relay-only rank's relayed spans among them */
+    const int in_place = (call_receives(c) || c->fused) && c->what != MESH_REDUCE_SCATTER;
       struct where own = c->recv_at;
       if (!in_place && s && !named(own = spare_where(NULL, comm, bytes, taken))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
       if (!in_place && !s) {
@@ -4510,7 +4596,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (st) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; }
       result = relay_buffers(program, c, taken); continue;
     }
-    const int in_place = call_receives(c) && c->what != MESH_REDUCE_SCATTER;
+    /* a fused crossing lands in the caller's lease at every rank (the compiled span layout is the caller's buffer's),
+       a relay-only rank's relayed spans among them */
+    const int in_place = (call_receives(c) || c->fused) && c->what != MESH_REDUCE_SCATTER;
     struct where own = c->recv_at;
     if (!in_place && st && !named(own = spare_where(program, comm, bytes, taken))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
     if (!in_place && !st && capture) own = (struct where){NULL, 0};
@@ -4550,6 +4638,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   struct inflight *g = NULL, *before = NULL;
   int gate = 0, published = 0, scheduled = 0;
   uint64_t ticket = 0;
+  int relay_only = fused != NULL;
+  for (size_t i = 0; i < n; i++) relay_only &= !crosses(list + i) || (!call_contributes(list + i) && !call_receives(list + i));
+  mesh_pages *relayed = relay_only ? calloc(comm->count + 1, sizeof *relayed) : NULL;
+  if (relay_only && !relayed) result = fail(ncclSystemError, "out of memory");
   if (!result && remote) {
     if (!(g = calloc(1, sizeof *g)) || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) result = fail(ncclSystemError, "out of memory");
     else {
@@ -4559,7 +4651,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       /* Indexed writes carry immutable source/landing generations. Their
          destinations need no local publication handshake, whether the GPU
          producer is fused or was encoded before this call. */
+      for (uint32_t h = 0; relay_only && h < comm->count; h++) { relayed[h] = comm->channels[h].relayed; comm->channels[h].relayed = (mesh_pages){0}; }
       if (!(result = schedule(program, comm, plans, holder, &gate, fused_kind != 0 || all_writes(list, n)))) {
+        for (uint32_t h = 0; relay_only && h < comm->count; h++) if (plans[h].outs) comm->channels[h].relayed = comm->channels[h].out;
         g->plans = plans; plans = NULL; g->part = part;
         step_issue();
       }
@@ -4606,6 +4700,17 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   }
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++)
     for (size_t k = 0; k < g->plans[h].ins; k++) metal_uses(program, &g->plans[h].in[k].data.buffer, 1, 1);
+  /* a relay-only rank (no call contributes or receives: it supplies nothing and consumes nothing, its fused execution's
+     every SEND a relay of what lands) runs no kernel of the caller's that would return its landing leases: its
+     execution k's landings open after its execution k - 1's SENDs are done, the window of one execution, waited in the
+     stream's order before the gate (the step's leases are reused every execution: design/declared-programs.md) */
+  for (uint32_t h = 0; !result && relay_only && relayed && h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    if (!relayed[h].n) continue;
+    const struct metal_wait wait = {ch->buffer, comm->violation, ch->buffer, ch->sent, ch->sent, relayed[h], ch->sends, h, {0}};
+    result = gpu(metal_spin(program, &wait), "a relay-only rank's previous execution's SENDs");
+  }
+  free(relayed);
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
@@ -4874,8 +4979,14 @@ static ncclResult_t admit(struct call *made) {
 /* a call on the Metal path keeps its command buffer and its buffers' MTLBuffers and offsets, so neither the
    stream nor the ncclMeshBuffers need outlive the call (a lowering's are its own, gone before an enclosing
    group ends); what the call owns (an uneven call's counts) is freed with it, or here where it is refused */
+static ncclResult_t declared_members(struct call *c, const ncclMeshCall *d);
 static ncclResult_t enqueue(struct call c) {
-  const ncclResult_t refused = admit(&c);
+  ncclResult_t refused = admit(&c);
+  /* the communicator's operand roles (ncclMeshCommMembers), the call's as a declared call's masks are its own */
+  if (!refused && !c.target && !counted(&c) && (c.comm->contributors || c.comm->recipients)) {
+    const ncclMeshCall roles = {.contributors = c.comm->contributors, .recipients = c.comm->recipients};
+    refused = declared_members(&c, &roles);
+  }
   if (refused) { call_parts_free(&c); return refused; }
   ncclGroupStart();
   if (call_count == call_capacity) {
@@ -5016,7 +5127,9 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   if (d->what == WHAT_COUNTED) c->count = c->total - c->segments[me] - c->segments[n + me];
   const ncclResult_t refused = admit(c);
   if (refused) return refused;
-  const ncclResult_t members = declared_members(c, d);
+  /* a declared call without masks of its own takes the communicator's roles (ncclMeshCommMembers), as an issued one does */
+  const ncclMeshCall roles = {.contributors = comm->contributors, .recipients = comm->recipients};
+  const ncclResult_t members = declared_members(c, d->contributors || d->recipients || c->target || counted(c) ? d : &roles);
   if (members) return members;
   if (counted(c)) return prepare_counted(c, d->matrix);
   return reducing(c->what) ? reduction(c) : ncclSuccess;

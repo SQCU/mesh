@@ -196,6 +196,23 @@ static void node_make(uint32_t n,uint32_t node,uint32_t peer,uint64_t mib){
   atomic_store(&x->bandwidth,UINT64_C(80000000000)*w.cables);
   w.node[n].m=m;w.node[n].x=x;
 }
+/* the map each region holds, as the bridges' floods leave it (mesh-records.c map_put, mesh-link.c record_reach): both
+   nodes' records, each one's reach an entry a cable toward the other at the cable's 80 Gbit/s, in arena pages leased
+   for them as the bridge leases its map's; the communicator's map is made from them (mesh_map) */
+static void records_make(uint32_t n,uint32_t cables){
+  struct hdr *m=w.node[n].m;
+  struct mesh_ctx c={.M=m};
+  const uint32_t pages=(uint32_t)((2*sizeof(struct mesh_record)+m->pgsz-1)/m->pgsz),page=mesh_arena_alloc(&c,pages,1);
+  if(page==MESH_ABSENT){fprintf(stderr,"sim-wire: no pages for the map\n");exit(1);}
+  struct mesh_record *r=(struct mesh_record *)mesh_at(m,page);
+  for(uint32_t k=0;k<2;k++){
+    r[k]=(struct mesh_record){.node=w.node[k].m->node,.reached=cables,.boot=1,.sequence=1};
+    for(uint32_t e=0;e<cables;e++)r[k].reach[e]=(struct mesh_reach){.node=w.node[1-k].m->node,.padding=1,.bandwidth=UINT64_C(80000000000)};
+  }
+  atomic_store(&m->map_off,(uint64_t)((unsigned char *)r-(unsigned char *)m));
+  atomic_store(&m->map_nodes,2);
+  atomic_store(&m->map,2);
+}
 int main(int argc,char **argv){
   if(argc!=6){fprintf(stderr,"usage: sim-wire NODE_A NODE_B CABLES LANES MIB\n");return 2;}
   const uint32_t a=(uint32_t)strtoul(argv[1],NULL,0),b=(uint32_t)strtoul(argv[2],NULL,0);
@@ -208,6 +225,7 @@ int main(int argc,char **argv){
   /* BURST: every queue pair's matches a turn drained up to it (the wire's jitter then in which queue pairs are served) */
   w.burst=getenv("BURST")?strtoull(getenv("BURST"),NULL,0):0;
   node_make(0,a,b,strtoull(argv[5],NULL,0));node_make(1,b,a,strtoull(argv[5],NULL,0));
+  for(uint32_t n=0;n<2;n++)records_make(n,cables);
   /* the one epoch both ends agree: every cable from piece 0, cables named by port c, identity c + 1 at both ends; with
      FRESH (an order just restarted, as the bridges re-form it: its first cable up alone, then every one), an epoch over
      cable 0 from piece 0 and then one over every cable from ORDER_SLACK on, before any client */
