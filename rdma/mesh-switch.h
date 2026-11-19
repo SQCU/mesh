@@ -249,77 +249,99 @@ static inline int mesh_switch_trees(const struct mesh_switch_fabric *f,const uin
   return 0;
 }
 
-/* A learned hop-level policy over the whole state a node has when it sends a piece on. For each destination still to
-   be served through this node, each candidate first lane l (to a node the piece hasn't visited, on a path to the
-   destination) has features:
-   0 its arrival under the lines' predicted waits, past the best lane's, over the best lane's time to go;
-   1 the same unloaded (latency and send time only);
-   2 the same under waits drawn from the lines (the Thompson draw);
-   3 this node's posted backlog on l, in the piece's send times on it (as log(1 + that));
-   4 the multicast optimum's preference: the log share of the piece's commodity's optimum trees that send the
-     destination through l from this node (`prefer`, NULL as none), as 1 + log(share + 1e-3) / log(1e3), so a softmax
-     on it alone samples in proportion to the optimum;
-   5 whether this piece already takes l for an earlier destination (one SEND carries both);
-   6 .. 11 each of 0 .. 5 times the transaction's size, log(1 + bytes / page) / 8.
-   The policy's logits are w . phi, a softmax over the candidates, and the choice is the candidate whose interval holds
-   a swizzled quantile of the piece's name, the node and the destination. Where `score` is given, the gradient of the
-   choice's log-probability (phi of the chosen less the policy's mean phi) is added to it, for a learner. */
-#define MESH_SWITCH_FEATURES 12
-struct mesh_switch_policy { double w[MESH_SWITCH_FEATURES]; };
+/* A tree's arrivals for a piece of `bytes` leaving its source `src` at `now`: each node at its parent's arrival, plus,
+   on the source's own lanes, their posted backlog (`ahead`), and on later lanes the wait their lines predict there
+   then, plus the send time and latency. Returns the latest arrival among the destinations `to`; `idle`, if given,
+   gets the same with no backlog and no wait, and `sends` the number of SENDs the tree makes. */
+static inline double mesh_switch_tree_completion(const struct mesh_switch_fabric *f,const struct mesh_switch_tree *t,uint32_t src,uint64_t to,
+                                                 double now,double bytes,const double *ahead,const struct mesh_switch_line *view,
+                                                 double unit,double *idle,uint32_t *sends){
+  double at[MESH_SWITCH_TREE_NODES],free_at[MESH_SWITCH_TREE_NODES];uint64_t done=UINT64_C(1)<<src;uint32_t n=0;
+  for(uint32_t v=0;v<f->nodes;v++){at[v]=free_at[v]=INFINITY;if(t->parent[v]!=UINT32_MAX)n++;}
+  at[src]=now;free_at[src]=now;
+  for(uint32_t round=0;round<f->nodes;round++)for(uint32_t v=0;v<f->nodes;v++){
+    const uint32_t p=t->parent[v];
+    if(p==UINT32_MAX || done>>v&1 || !(done>>p&1))continue;
+    const struct mesh_switch_link *x=f->link+t->lane[v];
+    const double send=bytes/x->rate+x->latency;
+    const double wait=p==src?ahead[t->lane[v]]:mesh_switch_wait(view?view+t->lane[v]:NULL,unit,at[p],0);
+    at[v]=at[p]+wait+send;free_at[v]=free_at[p]+send;done|=UINT64_C(1)<<v;
+  }
+  double last=now,quiet=now;
+  for(uint32_t d=0;d<f->nodes;d++)if(to>>d&1 && d!=src){if(at[d]>last)last=at[d];if(free_at[d]>quiet)quiet=free_at[d];}
+  if(idle)*idle=quiet;
+  if(sends)*sends=n;
+  return last;
+}
 
-static inline uint32_t mesh_switch_route_policy(const struct mesh_switch_fabric *f,uint32_t self,double now,uint64_t to,uint64_t visited,
-                                                double bytes,double total,uint64_t key,const double *ahead,
-                                                const struct mesh_switch_line *view,double unit,const float *prefer,
-                                                const struct mesh_switch_policy *policy,double *score,uint32_t *lane,uint64_t *subset){
-  static const double zero[256]={0};
-  double z[256],mean[256][MESH_SWITCH_NODES],idle[256][MESH_SWITCH_NODES],drawn[256][MESH_SWITCH_NODES],when[MESH_SWITCH_NODES];
-  (void)when;
-  for(uint32_t l=0;l<f->links && l<256;l++)z[l]=mesh_switch_draw(mesh_switch_mix(key^((uint64_t)self<<40)^((uint64_t)l<<52)));
-  visited|=UINT64_C(1)<<self;
+/* the shortest-path tree from `src` reaching `to` under the lanes' delays: each destination by its least-delay path,
+   their union pruned to the nodes that lead to a destination. 0, or EINVAL if one can't be reached */
+static inline int mesh_switch_spt(const struct mesh_switch_fabric *f,uint32_t src,uint64_t to,const double *delay,struct mesh_switch_tree *t){
+  double at[MESH_SWITCH_TREE_NODES];uint32_t by[MESH_SWITCH_TREE_NODES];uint64_t done=0,keep=0;
+  if(f->nodes>MESH_SWITCH_TREE_NODES)return EINVAL;
+  for(uint32_t v=0;v<f->nodes;v++){at[v]=INFINITY;by[v]=UINT32_MAX;}
+  at[src]=0;
+  for(;;){
+    uint32_t u=MESH_SWITCH_NODES;
+    for(uint32_t v=0;v<f->nodes;v++)if(!(done>>v&1) && isfinite(at[v]) && (u==MESH_SWITCH_NODES || at[v]<at[u]))u=v;
+    if(u==MESH_SWITCH_NODES)break;
+    done|=UINT64_C(1)<<u;
+    for(uint32_t l=0;l<f->links;l++)if(f->link[l].from==u && at[u]+delay[l]<at[f->link[l].to]){at[f->link[l].to]=at[u]+delay[l];by[f->link[l].to]=l;}
+  }
+  for(uint32_t d=0;d<f->nodes;d++)if(to>>d&1 && d!=src){
+    if(!isfinite(at[d]))return EINVAL;
+    for(uint32_t v=d;v!=src;v=f->link[by[v]].from)keep|=UINT64_C(1)<<v;
+  }
+  for(uint32_t v=0;v<f->nodes;v++){
+    const int in=keep>>v&1;
+    t->lane[v]=in?by[v]:UINT32_MAX;t->parent[v]=in?f->link[by[v]].from:UINT32_MAX;
+  }
+  t->share=0;
+  return 0;
+}
+
+/* A learned policy over trees: a piece chooses, at its source, one of n candidate trees, and every hop forwards it on
+   to its children in that tree. The choice is a sample, never an argmax: the logits are the multicast optimum's log
+   share for each of its trees, plus w . phi, and the choice is the candidate whose softmax interval holds the
+   swizzled quantile of the piece's name. With w = 0 it samples the optimum exactly. No feature ranks a candidate
+   against the best one, so no weight can make the policy greedy. Each candidate's features:
+   0 1 for a candidate outside the optimum (a shortest-path tree), so its weight is that kind's log weight;
+   1 its unloaded depth (latency and send time to its deepest destination) over the shallowest candidate's, less 1;
+   2 its SENDs over the fewest any candidate makes, less 1;
+   3 .. 5 each of 0 .. 2 times the transaction's size, log(1 + bytes / page) / 8. */
+#define MESH_SWITCH_TREE_FEATURES 6
+struct mesh_switch_tree_policy { double w[MESH_SWITCH_TREE_FEATURES]; };
+
+static inline uint32_t mesh_switch_choose_tree(const struct mesh_switch_fabric *f,uint32_t src,double now,uint64_t to,double bytes,
+                                               double total,uint64_t key,const double *ahead,const struct mesh_switch_line *view,
+                                               double unit,const struct mesh_switch_tree *cand,uint32_t n,
+                                               const struct mesh_switch_tree_policy *policy){
+  (void)view;(void)unit;
+  double idle[64],shallow=INFINITY,logit[64],most=-INFINITY;uint32_t sends[64],fewest=UINT32_MAX;
+  static const double none[256]={0};
+  (void)ahead;
+  if(n>64)n=64;
+  for(uint32_t c=0;c<n;c++){
+    mesh_switch_tree_completion(f,cand+c,src,to,now,bytes,none,NULL,1,idle+c,sends+c);
+    if(idle[c]<shallow)shallow=idle[c];
+    if(sends[c]<fewest)fewest=sends[c];
+  }
   const double size=log1p(total/f->page)/8;
-  for(uint32_t l=0;l<f->links;l++){
-    const struct mesh_switch_link *x=f->link+l;
-    for(uint32_t v=0;v<f->nodes;v++)mean[l][v]=idle[l][v]=drawn[l][v]=INFINITY;
-    if(x->from!=self || visited>>x->to&1)continue;
-    const double send=bytes/x->rate,t0=now+ahead[l]+send+x->latency,u0=now+send+x->latency;
-    mesh_switch_search(f,x->to,t0,visited,bytes,view,unit,zero,mean[l]);
-    mesh_switch_search(f,x->to,u0,visited,bytes,NULL,unit,zero,idle[l]);
-    mesh_switch_search(f,x->to,t0,visited,bytes,view,unit,z,drawn[l]);
+  for(uint32_t c=0;c<n;c++){
+    double phi[MESH_SWITCH_TREE_FEATURES];
+    phi[0]=cand[c].share>0?0:1;
+    phi[1]=shallow>now?(idle[c]-now)/(shallow-now)-1:0;
+    phi[2]=fewest?(double)sends[c]/fewest-1:0;
+    for(uint32_t i=0;i<3;i++)phi[3+i]=phi[i]*size;
+    logit[c]=cand[c].share>0?log(cand[c].share):0;
+    for(uint32_t i=0;i<MESH_SWITCH_TREE_FEATURES;i++)logit[c]+=policy->w[i]*phi[i];
+    if(logit[c]>most)most=logit[c];
   }
-  uint32_t used=0;
-  for(uint32_t d=0;d<f->nodes;d++){
-    if(!(to>>d&1) || visited>>d&1)continue;
-    double bm=INFINITY,bi=INFINITY,bd=INFINITY;
-    for(uint32_t l=0;l<f->links;l++){if(mean[l][d]<bm)bm=mean[l][d];if(idle[l][d]<bi)bi=idle[l][d];if(drawn[l][d]<bd)bd=drawn[l][d];}
-    if(!isfinite(bm))return UINT32_MAX;
-    uint32_t cand[256],n=0;double phi[256][MESH_SWITCH_FEATURES],logit[256],most=-INFINITY;
-    for(uint32_t l=0;l<f->links;l++){
-      if(!isfinite(mean[l][d]))continue;
-      double *p=phi[n];
-      p[0]=(mean[l][d]-bm)/(bm-now+1000);p[1]=(idle[l][d]-bi)/(bi-now+1000);p[2]=(drawn[l][d]-bd)/(bd-now+1000);
-      p[3]=log1p(ahead[l]/(bytes/f->link[l].rate));p[4]=prefer?1+log(prefer[(size_t)d*f->links+l]+1e-3)/log(1e3):0;
-      p[5]=0;for(uint32_t k=0;k<used;k++)if(lane[k]==l)p[5]=1;
-      for(uint32_t i=0;i<6;i++)p[6+i]=p[i]*size;
-      logit[n]=0;for(uint32_t i=0;i<MESH_SWITCH_FEATURES;i++)logit[n]+=policy->w[i]*p[i];
-      if(logit[n]>most)most=logit[n];
-      cand[n++]=l;
-    }
-    double pi[256],sum=0;
-    for(uint32_t c=0;c<n;c++){pi[c]=exp(logit[c]-most);sum+=pi[c];}
-    const uint64_t r=mesh_switch_mix(key^((uint64_t)self<<40)^((uint64_t)d<<48)^0x5bd1e995ULL);
-    const double u=((r>>11)+0.5)/9007199254740992.0;
-    uint32_t pick=n-1;double c=0;
-    for(uint32_t k=0;k<n;k++){pi[k]/=sum;c+=pi[k];if(u<c){pick=k;break;}}
-    if(score)for(uint32_t i=0;i<MESH_SWITCH_FEATURES;i++){
-      double e=0;for(uint32_t k=0;k<n;k++)e+=pi[k]*phi[k][i];
-      score[i]+=phi[pick][i]-e;
-    }
-    const uint32_t l=cand[pick];
-    uint32_t k=0;while(k<used && lane[k]!=l)k++;
-    if(k==used){lane[used]=l;subset[used]=0;used++;}
-    subset[k]|=UINT64_C(1)<<d;
-  }
-  return used;
+  double sum=0;for(uint32_t c=0;c<n;c++){logit[c]=exp(logit[c]-most);sum+=logit[c];}
+  const double u=((mesh_switch_mix(key^0x7f4a7c15ULL)>>11)+0.5)/9007199254740992.0;
+  double c=0;
+  for(uint32_t k=0;k<n;k++){c+=logit[k]/sum;if(u<c)return k;}
+  return n-1;
 }
 
 /* One lane's predictor at its sender: a GRU over each execution's observed waits (as log(1 + wait / 1 us) a bin),

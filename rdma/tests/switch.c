@@ -16,10 +16,11 @@
    - sampled: each node's own lanes at their posted backlog, later hops at waits drawn from their lines (Thompson
      sampling, the lines from each lane's sender's GRU, carried in names);
    - trees: each piece's tree sampled from the multicast fluid optimum (mesh_switch_trees) with its swizzled quantile;
-   - descent (with --descent): each piece's tree sampled from a softmax over candidate trees (the optimum's, and each
-     commodity's shortest-path tree), its logits moved by online Jacobian descent over two subgoals, the mean and the
-     spread of the completion. Each iteration estimates both subgoals' gradients by the score function over 8
-     executions and steps along the min-norm point of their convex hull (MGDA), a direction that worsens neither.
+   - policy (with --descent): each piece chooses, at its source, one whole tree among candidates (the optimum's
+     trees, the unloaded shortest-path tree, and the shortest-path tree under the lines' predicted delays at that
+     moment) by sampling a softmax of the optimum's log shares plus learned adjustments (mesh_switch_choose_tree),
+     never an argmax; every hop forwards to its children in it. Its weights move by online Jacobian descent over the triplet's two latency goals, the mean and the spread of
+     T / floor, averaged over every transaction and size.
 
    The sampled, trees and descent rows are the mean and spread of the completion over 20 executions after any
    learning. The floor is the larger of two bounds: the all-gather's cut bound (the most bytes a compute node needs
@@ -76,7 +77,7 @@ static void load(const char *path){
 }
 static uint64_t all_compute(void){uint64_t a=0;for(uint32_t c=0;c<ncompute;c++)a|=UINT64_C(1)<<compute[c];return a;}
 
-struct piece { uint32_t source,page,tree,commodity; double bytes; uint64_t need,got; int phase; };
+struct piece { uint32_t source,page; double bytes; uint64_t need,got; int phase; struct mesh_switch_tree route; };
 struct event { double t; uint32_t node,piece,hops; uint64_t to,visited; uint8_t carried,lane[ENTRIES];uint32_t execution[ENTRIES];
                struct mesh_switch_line line[ENTRIES]; };
 static struct event *heap;static size_t events,room;
@@ -103,11 +104,7 @@ static struct event pop(void){
 static struct mesh_switch_fabric fabric;
 static const double unit=64;   /* ns, the lines' time unit */
 enum { FIXED, SAMPLED, TREES, POLICY };
-static struct mesh_switch_policy policy;static double last_utilisation;static double score[MESH_SWITCH_FEATURES],current_S;
-#define PREFER_COMMODITIES 24
-#define PREFER_NODES 8
-#define PREFER_LANES 32
-static float prefer[PREFER_COMMODITIES][PREFER_NODES][PREFER_NODES*PREFER_LANES];
+static struct mesh_switch_tree_policy policy;static double current_S;
 static int mode;
 static uint32_t execution;
 static double free_at[256][CABLES],busy[256];
@@ -127,27 +124,33 @@ static uint32_t earliest_cable(uint32_t l){
 
 static void send(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,uint32_t hops){
   double ahead[256];uint32_t lane[256];uint64_t subset[256];
-  for(uint32_t l=0;l<links;l++){const double f=free_at[l][earliest_cable(l)];ahead[l]=(mode==SAMPLED || mode==POLICY) && f>t?f-t:0;}
+  for(uint32_t l=0;l<links;l++){const double f=free_at[l][earliest_cable(l)];ahead[l]=mode!=FIXED && f>t?f-t:0;}
   const uint64_t key=mesh_switch_mix(((uint64_t)execution<<32)^k);
   uint32_t used=0;
-  if(mode==TREES){   /* the piece's tree, sampled at its source; every hop sends on to its children in the tree */
+  if(mode==TREES || mode==POLICY){   /* the piece's tree, chosen at its source; every hop sends on to its children in it */
     if(!hops){
       uint32_t j=0;while(j<ncommodities && !(csrc[j]==from && cto[j]==pieces[k].need))j++;
       assert(j<ncommodities);
-      double c=0;const double u=((key>>11)+0.5)/9007199254740992.0;uint32_t pick=tree_first[j+1]-1;
-      for(uint32_t q=tree_first[j];q<tree_first[j+1];q++){c+=trees[q].share;if(u<c){pick=q;break;}}
-      pieces[k].tree=pick;
+      if(mode==TREES){   /* sampled from the multicast optimum's shares */
+        double c=0;const double u=((key>>11)+0.5)/9007199254740992.0;uint32_t pick=tree_first[j+1]-1;
+        for(uint32_t q=tree_first[j];q<tree_first[j+1];q++){c+=trees[q].share;if(u<c){pick=q;break;}}
+        pieces[k].route=trees[pick];
+      }else{   /* chosen by the policy among the optimum's trees, the unloaded shortest-path tree, and the
+                  shortest-path tree under the lines' predicted delays now */
+        struct mesh_switch_tree cand[64];uint32_t n=0;
+        for(uint32_t q=tree_first[j];q<tree_first[j+1] && n<63;q++)cand[n++]=trees[q];
+        double delay[256];
+        for(uint32_t l=0;l<links;l++)delay[l]=(link[l].from==from?ahead[l]:mesh_switch_wait(view[from]+l,unit,t,0))+pieces[k].bytes/link[l].rate+link[l].latency;
+        if(!mesh_switch_spt(&fabric,from,pieces[k].need,delay,cand+n))n++;
+        pieces[k].route=cand[mesh_switch_choose_tree(&fabric,from,t,pieces[k].need,pieces[k].bytes,current_S,key,ahead,view[from],unit,cand,n,&policy)];
+      }
     }
-    const struct mesh_switch_tree *tr=trees+pieces[k].tree;
+    const struct mesh_switch_tree *tr=&pieces[k].route;
     for(uint32_t v=0;v<nodes;v++)if(tr->parent[v]==from){
       uint64_t below=0;   /* the destinations in v's subtree */
       for(uint32_t d=0;d<nodes;d++)if(to>>d&1){uint32_t at=d;while(at!=v && tr->parent[at]!=UINT32_MAX)at=tr->parent[at];if(at==v)below|=UINT64_C(1)<<d;}
       if(below){lane[used]=tr->lane[v];subset[used]=below;used++;}
     }
-  }else if(mode==POLICY){
-    if(!hops){uint32_t j=0;while(j<ncommodities && !(csrc[j]==from && cto[j]==pieces[k].need))j++;assert(j<ncommodities);pieces[k].commodity=j;}
-    used=mesh_switch_route_policy(&fabric,from,t,to,visited,pieces[k].bytes,current_S,key,ahead,view[from],unit,
-                                  prefer[pieces[k].commodity][from],&policy,score,lane,subset);
   }else used=mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,key,ahead,mode==SAMPLED?view[from]:NULL,unit,mode==SAMPLED,lane,subset);
   assert(used!=UINT32_MAX && used>0);
   uint64_t covered=0;
@@ -191,13 +194,13 @@ static double execute(int kind,double S,double page){
   for(uint32_t c=0;c<ncompute;c++)for(uint32_t p=0;p<P;p++){
     const double b=p+1<P?page:S-page*(P-1);
     const uint32_t src=compute[c],owner=compute[p%ncompute];
-    if(kind==0)pieces[npieces++]=(struct piece){src,p,0,0,b,all&~(UINT64_C(1)<<src),0,0};
-    else if(src!=owner){pieces[npieces++]=(struct piece){src,p,0,0,b,UINT64_C(1)<<owner,0,1};left[p]++;}
+    if(kind==0)pieces[npieces++]=(struct piece){src,p,b,all&~(UINT64_C(1)<<src),0,0,{{0},{0},0}};
+    else if(src!=owner){pieces[npieces++]=(struct piece){src,p,b,UINT64_C(1)<<owner,0,1,{{0},{0},0}};left[p]++;}
   }
   const uint32_t first=npieces;
   if(kind==1)for(uint32_t p=0;p<P;p++){   /* the reduced pages, sent once their partials have landed */
     const uint32_t owner=compute[p%ncompute];
-    pieces[npieces++]=(struct piece){owner,p,0,0,p+1<P?page:S-page*(P-1),all&~(UINT64_C(1)<<owner),0,2};
+    pieces[npieces++]=(struct piece){owner,p,p+1<P?page:S-page*(P-1),all&~(UINT64_C(1)<<owner),0,2,{{0},{0},0}};
   }
   for(uint32_t k=0;k<first;k++)send(0,pieces[k].source,k,pieces[k].need,0,0);
   if(kind==1)for(uint32_t p=0;p<P;p++)if(!left[p])send(0,pieces[first+p].source,first+p,pieces[first+p].need,0,0);
@@ -226,8 +229,6 @@ static double execute(int kind,double S,double page){
     view[link[l].from][l]=own[l];seen[link[l].from][l]=execution+1;
   }
   own_execution=++execution;
-  double b=0;for(uint32_t l=0;l<links;l++)b+=busy[l];
-  last_utilisation=T>0?b/(links*T):0;
   return T;
 }
 
@@ -265,36 +266,12 @@ static void optimum(int kind,double S,double page){
   for(uint32_t j=0;j<ncommodities;j++){
     tree_first[j]=n;
     for(uint32_t q=packed_first[j];q<packed_first[j+1];q++)trees[n++]=packed[q];
-    /* the shortest-path tree: each destination by its least-delay path from the source, the paths' union pruned to
-       the nodes that lead to a destination */
-    struct mesh_switch_tree fast;double at[MESH_SWITCH_NODES];uint32_t by[MESH_SWITCH_NODES];uint64_t done=0,keep=0;
-    for(uint32_t v=0;v<nodes;v++){at[v]=INFINITY;by[v]=UINT32_MAX;}
-    at[csrc[j]]=0;
-    for(;;){
-      uint32_t u=MESH_SWITCH_NODES;
-      for(uint32_t v=0;v<nodes;v++)if(!(done>>v&1) && isfinite(at[v]) && (u==MESH_SWITCH_NODES || at[v]<at[u]))u=v;
-      if(u==MESH_SWITCH_NODES)break;
-      done|=UINT64_C(1)<<u;
-      for(uint32_t l=0;l<links;l++)if(link[l].from==u && at[u]+delay[l]<at[link[l].to]){at[link[l].to]=at[u]+delay[l];by[link[l].to]=l;}
-    }
-    for(uint32_t dd=0;dd<nodes;dd++)if(cto[j]>>dd&1)for(uint32_t v=dd;v!=csrc[j];v=link[by[v]].from)keep|=UINT64_C(1)<<v;
-    for(uint32_t v=0;v<nodes;v++){
-      const int in=keep>>v&1;
-      fast.lane[v]=in?by[v]:UINT32_MAX;fast.parent[v]=in?link[by[v]].from:UINT32_MAX;
-    }
+    struct mesh_switch_tree fast;   /* the unloaded shortest-path tree */
+    assert(!mesh_switch_spt(&fabric,csrc[j],cto[j],delay,&fast));
     uint32_t q=tree_first[j];while(q<n && memcmp(trees[q].lane,fast.lane,nodes*sizeof *fast.lane))q++;
     if(q==n){fast.share=0;trees[n++]=fast;}
   }
   tree_first[ncommodities]=n;
-  assert(ncommodities<=PREFER_COMMODITIES);
-  /* each commodity's optimum preference: the share of its optimum trees that send destination d through lane l from
-     node u */
-  for(uint32_t j=0;j<ncommodities;j++){
-    for(uint32_t u=0;u<nodes;u++)for(size_t i=0;i<(size_t)nodes*links;i++)prefer[j][u][i]=0;
-    for(uint32_t q=packed_first[j];q<packed_first[j+1];q++)for(uint32_t d=0;d<nodes;d++)if(cto[j]>>d&1)
-      for(uint32_t v=d;packed[q].parent[v]!=UINT32_MAX;v=packed[q].parent[v])
-        prefer[j][packed[q].parent[v]][(size_t)d*links+packed[q].lane[v]]+=(float)packed[q].share;
-  }
 }
 
 /* the floor: the larger of the cut bound and the slowest source-destination pair's shortest delay for one piece. The
@@ -329,64 +306,63 @@ static double floor_of(int kind,double S,double page){
 struct world {
   struct mesh_switch_line own[256],view[MESH_SWITCH_NODES][256];uint32_t own_execution,execution,seen[MESH_SWITCH_NODES][256],cursor[MESH_SWITCH_NODES];
   struct mesh_switch_gru gru[256];struct mesh_switch_tree trees[4096];uint32_t tree_first[65],ncommodities,csrc[64];uint64_t cto[64];
-  double tdemand[64],tree_fluid;float prefer[PREFER_COMMODITIES][PREFER_NODES][PREFER_NODES*PREFER_LANES];
+  double tdemand[64],tree_fluid;
 };
 #define SAVE(w) do{memcpy((w)->own,own,sizeof own);memcpy((w)->view,view,sizeof view);(w)->own_execution=own_execution;(w)->execution=execution;\
   memcpy((w)->seen,seen,sizeof seen);memcpy((w)->cursor,cursor,sizeof cursor);memcpy((w)->gru,gru,sizeof gru);memcpy((w)->trees,trees,sizeof trees);\
   memcpy((w)->tree_first,tree_first,sizeof tree_first);(w)->ncommodities=ncommodities;memcpy((w)->csrc,csrc,sizeof csrc);memcpy((w)->cto,cto,sizeof cto);\
-  memcpy((w)->tdemand,tdemand,sizeof tdemand);(w)->tree_fluid=tree_fluid;memcpy((w)->prefer,prefer,sizeof prefer);}while(0)
+  memcpy((w)->tdemand,tdemand,sizeof tdemand);(w)->tree_fluid=tree_fluid;}while(0)
 #define LOAD(w) do{memcpy(own,(w)->own,sizeof own);memcpy(view,(w)->view,sizeof view);own_execution=(w)->own_execution;execution=(w)->execution;\
   memcpy(seen,(w)->seen,sizeof seen);memcpy(cursor,(w)->cursor,sizeof cursor);memcpy(gru,(w)->gru,sizeof gru);memcpy(trees,(w)->trees,sizeof trees);\
   memcpy(tree_first,(w)->tree_first,sizeof tree_first);ncommodities=(w)->ncommodities;memcpy(csrc,(w)->csrc,sizeof csrc);memcpy(cto,(w)->cto,sizeof cto);\
-  memcpy(tdemand,(w)->tdemand,sizeof tdemand);tree_fluid=(w)->tree_fluid;memcpy(prefer,(w)->prefer,sizeof prefer);}while(0)
+  memcpy(tdemand,(w)->tdemand,sizeof tdemand);tree_fluid=(w)->tree_fluid;}while(0)
 
-/* The policy, trained by online Jacobian descent over the two goals, each averaged over every (transaction, size) and
-   every sampled execution: latency, E[T / floor] (completion against its roofline), and utilisation, E[busy lane time
-   / (lanes x T)], to be raised. Each relative to its value at the start. Their gradients in the policy's weights come
-   from simultaneous perturbation (SPSA: the weights at +c and -c along a random sign vector, each side on the same
-   draws, averaged over M independent sign vectors), which doesn't grow noisier with the number of decisions an
-   execution makes. The step is a (Spall's
-   schedule) times the min-norm point of the two gradients' hull (MGDA for two, closed form). After each step, every
-   (transaction, size) runs once more at the new weights, so its lines follow the policy. */
-struct goals { double latency,utilisation; };
+/* The policy, trained by online Jacobian descent over the two latency goals of the triplet, each averaged over every
+   (transaction, size): the mean of T / floor (completion against its roofline) and its spread, over K sampled
+   executions each. Each relative to its value at the start. Their gradients in the policy's weights come from
+   simultaneous perturbation (SPSA: the weights at +c and -c along a random sign vector, each side on the same draws,
+   averaged over M independent sign vectors, since with one every goal's estimate is a multiple of the same vector).
+   The step is a (Spall's schedule) times the min-norm point of the two gradients' hull (MGDA for two, closed form).
+   After each step every (transaction, size) runs once more at the new weights, so its lines follow the policy. */
+struct goals { double mean,spread; };
 static struct goals evaluate(const double *rows,int sizes,double page,int K,struct world **slot,const double *floor,int keep){
   struct goals g={0,0};
   for(int q=0;q<2*sizes;q++){
     const int kind=q/sizes;const double S=rows[q%sizes]*1536*2;
     LOAD(slot[q]);mode=POLICY;
-    for(int e=0;e<K;e++){const double T=execute(kind,S,page);g.latency+=T/floor[q]/(2*sizes*K);g.utilisation+=last_utilisation/(2*sizes*K);}
+    const struct stats st=measure(kind,S,page,K);
+    g.mean+=st.mean/floor[q]/(2*sizes);g.spread+=st.sd/floor[q]/(2*sizes);
     if(keep)SAVE(slot[q]);
   }
   return g;
 }
 static void train(const double *rows,int sizes,double page,int iterations,struct world **slot,const double *floor){
-  enum { K=2, M=8 };   /* executions a side, and independent perturbations an iteration (one is rank one: every
-                          subgoal's estimate would be a multiple of the same sign vector) */
+  enum { K=3, M=8, F=MESH_SWITCH_TREE_FEATURES };
   const struct goals start=evaluate(rows,sizes,page,K,slot,floor,1);
   for(int k=0;k<iterations;k++){
     const double a=10.0/pow(k+1,0.602),c=1.0/pow(k+1,0.101);
-    const struct mesh_switch_policy base=policy;
-    double g1[MESH_SWITCH_FEATURES]={0},g2[MESH_SWITCH_FEATURES]={0},g11=0,g22=0,g12=0;
+    const struct mesh_switch_tree_policy base=policy;
+    double g1[F]={0},g2[F]={0},g11=0,g22=0,g12=0;
     for(int m=0;m<M;m++){
-      double delta[MESH_SWITCH_FEATURES];
+      double delta[F];
       uint64_t r=mesh_switch_mix(0x51a5ULL+(uint64_t)k*M+(uint64_t)m);
-      for(int f=0;f<MESH_SWITCH_FEATURES;f++){r=mesh_switch_mix(r);delta[f]=r&1?1:-1;}
-      for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]=base.w[f]+c*delta[f];
+      for(int f=0;f<F;f++){r=mesh_switch_mix(r);delta[f]=r&1?1:-1;}
+      for(int f=0;f<F;f++)policy.w[f]=base.w[f]+c*delta[f];
       const struct goals plus=evaluate(rows,sizes,page,K,slot,floor,0);
-      for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]=base.w[f]-c*delta[f];
+      for(int f=0;f<F;f++)policy.w[f]=base.w[f]-c*delta[f];
       const struct goals minus=evaluate(rows,sizes,page,K,slot,floor,0);
-      for(int f=0;f<MESH_SWITCH_FEATURES;f++){
-        g1[f]+=(plus.latency-minus.latency)/start.latency/(2*c)*delta[f]/M;
-        g2[f]-=(plus.utilisation-minus.utilisation)/start.utilisation/(2*c)*delta[f]/M;   /* raised: its negative falls */
+      for(int f=0;f<F;f++){
+        g1[f]+=(plus.mean-minus.mean)/start.mean/(2*c)*delta[f]/M;
+        g2[f]+=(plus.spread-minus.spread)/fmax(start.spread,1e-9)/(2*c)*delta[f]/M;
       }
     }
     policy=base;
-    for(int f=0;f<MESH_SWITCH_FEATURES;f++){g11+=g1[f]*g1[f];g22+=g2[f]*g2[f];g12+=g1[f]*g2[f];}
+    for(int f=0;f<F;f++){g11+=g1[f]*g1[f];g22+=g2[f]*g2[f];g12+=g1[f]*g2[f];}
     const double den=g11-2*g12+g22;
     double lambda=den>0?(g22-g12)/den:0.5;
     if(lambda<0)lambda=0;
     if(lambda>1)lambda=1;
-    for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]-=a*(lambda*g1[f]+(1-lambda)*g2[f]);
+    for(int f=0;f<F;f++)policy.w[f]-=a*(lambda*g1[f]+(1-lambda)*g2[f]);
     evaluate(rows,sizes,page,1,slot,floor,1);   /* the lines follow the policy */
   }
 }
@@ -397,14 +373,13 @@ int main(int argc,char **argv){
   load(argc>1?argv[1]:"tests/fabric-20261119.txt");
   const double page=argc>2?atof(argv[2]):16384;
   assert(!mesh_switch_fabric_make(&fabric,nodes,link,links,page));
-  assert(nodes<=PREFER_NODES && links<=PREFER_LANES);
   mesh_switch_gru_weights_make(&weights,20261119);
   static const double rows[]={2,8,32,128,1024,4096};
   enum { SIZES=6 };
   struct stats policy_row[2*SIZES]={{0,0}};
   if(descent){   /* the policy: each (transaction, size) warmed up, then trained on the two goals over all of them */
     struct world *slot[2*SIZES];double floor[2*SIZES];
-    memset(&policy,0,sizeof policy);policy.w[2]=-8;   /* it starts as the sampled router: the drawn arrival */
+    memset(&policy,0,sizeof policy);policy.w[0]=-10;   /* it starts as the optimum: the other candidates at e^-10 */
     for(int c=0;c<2*SIZES;c++){
       const int kind=c/SIZES;const double S=rows[c%SIZES]*1536*2;
       slot[c]=calloc(1,sizeof *slot[c]);assert(slot[c]);
@@ -414,7 +389,7 @@ int main(int argc,char **argv){
     }
     train(rows,SIZES,page,iterations,slot,floor);
     for(int c=0;c<2*SIZES;c++){LOAD(slot[c]);mode=POLICY;policy_row[c]=measure(c/SIZES,rows[c%SIZES]*1536*2,page,MEASURE);free(slot[c]);}
-    printf("policy weights:");for(int f=0;f<MESH_SWITCH_FEATURES;f++)printf(" %.2f",policy.w[f]);printf("\n");
+    printf("policy weights:");for(int f=0;f<MESH_SWITCH_TREE_FEATURES;f++)printf(" %.2f",policy.w[f]);printf("\n");
   }
   printf("%-10s %9s %9s %18s %18s %20s %9s %9s\n","","S bytes","fixed","sampled","trees","policy","fluid","floor");
   for(int kind=0;kind<2;kind++)for(size_t i=0;i<sizeof rows/sizeof *rows;i++){
