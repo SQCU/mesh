@@ -2090,6 +2090,7 @@ static uint64_t span_units(const struct mesh_span_plan *p, uint64_t offset, uint
 
 struct scatter_schedule {
   _Atomic uint32_t references;
+  struct steps *rank;
   struct mesh_scatter_link *link;
   struct mesh_scatter_group *group;
   struct mesh_scatter_send *send;
@@ -2097,11 +2098,6 @@ struct scatter_schedule {
   uint32_t links, groups, count;
   uint64_t piece;
 };
-
-static void scatter_release(struct scatter_schedule *schedule) {
-  if (!schedule || atomic_fetch_sub(&schedule->references, 1) != 1) return;
-  free(schedule->forwarded); free(schedule->link); free(schedule->group); free(schedule->send); free(schedule);
-}
 
 struct steps {
   struct scatter_schedule *scatter;
@@ -2265,17 +2261,51 @@ static ncclResult_t operands_check(const struct call *list, size_t n) {
   return ncclSuccess;
 }
 
-static void steps_free(struct steps *s) {
-  if (!s) return;
-  scatter_release(s->scatter);
-  free(s->buffer); free(s->steps); free(s->done); free(s->channel); free(s->entry); free(s->cable); free(s->prior_first); free(s->prior); free(s->read); free(s->fresh);
-  free(s->needed); free(s->extent); free(s->demand); free(s->consume_order); free(s->consumption); free(s->retired_first); free(s->retired);
-  free(s);
+static void steps_drop(struct steps *s, int owns_layout) {
+  if (owns_layout) {
+    free(s->steps); free(s->cable); free(s->prior_first); free(s->prior); free(s->extent);
+    free(s->demand); free(s->consume_order); free(s->retired_first); free(s->retired);
+  }
+  free(s->buffer); free(s->done); free(s->channel); free(s->entry); free(s->consumption);
+  free(s->read); free(s->fresh); free(s->needed); free(s);
 }
 
-/* a compiled call's steps for one issue of it (group_bound): its steps, their range dependencies and its receives of no
-   bytes done, copied; its buffers, channels and entries the issue's own (place_group, schedule_laid) */
+static void scatter_release(struct scatter_schedule *schedule) {
+  if (!schedule || atomic_fetch_sub(&schedule->references, 1) != 1) return;
+  if (schedule->rank) steps_drop(schedule->rank, 1);
+  free(schedule->forwarded); free(schedule->link); free(schedule->group); free(schedule->send); free(schedule);
+}
+
+static void steps_free(struct steps *s) {
+  if (!s) return;
+  struct scatter_schedule *schedule = s->scatter;
+  if (!schedule || s != schedule->rank) steps_drop(s, !schedule);
+  scatter_release(schedule);
+}
+
+/* A scheduled issue reads the producer's whole rank layout, with its own buffer bindings,
+   cursors and mutable completion state. The source plan may be released before this issue. */
+static struct steps *scatter_view(const struct steps *from) {
+  const size_t room = (size_t)from->count + 1;
+  const struct steps *rank = from->scatter->rank;
+  struct steps *s = calloc(1, sizeof *s);
+  if (!s) return NULL;
+  *s = (struct steps){.scatter=from->scatter, .steps=rank->steps, .count=rank->count, .buffers=rank->buffers,
+    .initialized=rank->initialized, .cable=rank->cable, .demand=rank->demand, .prior_first=rank->prior_first,
+    .prior=rank->prior, .priors=rank->priors};
+  atomic_fetch_add(&s->scatter->references, 1);
+  if (!(s->buffer = calloc(s->buffers, sizeof *s->buffer)) || !(s->done = malloc(room)) ||
+      !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
+      !(s->consumption = calloc(room, sizeof *s->consumption))) {
+    steps_free(s); return NULL;
+  }
+  memcpy(s->done, from->done, s->count);
+  return s;
+}
+
+/* a compiled call's steps for one issue of it (group_bound): its buffers, channels and entries the issue's own */
 static struct steps *steps_copy(const struct steps *from) {
+  if (from->scatter) return scatter_view(from);
   const size_t most = from->count + 1;
   struct steps *s = calloc(1, sizeof *s);
   if (s) *s = (struct steps){.count = from->count, .buffers = from->buffers, .initialized = from->initialized, .priors = from->priors};
@@ -2291,7 +2321,6 @@ static struct steps *steps_copy(const struct steps *from) {
     steps_free(s);
     return NULL;
   }
-  if ((s->scatter = from->scatter)) atomic_fetch_add(&s->scatter->references, 1);
   memcpy(s->steps, from->steps, from->count * sizeof *s->steps); memcpy(s->done, from->done, from->count);
   memcpy(s->cable, from->cable, from->count * sizeof *s->cable);
   memcpy(s->prior_first, from->prior_first, (from->count + 1) * sizeof *s->prior_first);
@@ -2491,7 +2520,7 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
                                                send->first / operand.element_bytes, view};
   }
   free(extent);
-  s->scatter = schedule;
+  s->scatter = schedule; schedule->rank = s;
   atomic_fetch_add(&schedule->references, 1);
   c->bound = s;
   return ncclSuccess;
