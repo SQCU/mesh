@@ -3259,6 +3259,10 @@ static int plan_sections(struct mesh_plan_compilation *compiled,size_t count,str
   planned->rows=(struct mesh_range){0,(uint32_t)rows+1};
   return status;
 }
+uint32_t mesh_plan_state_page(const struct mesh_plan_compilation *compiled,uint32_t function){
+  const struct mesh_plan_geometry *geometry=compiled->result.planned.analysis->geometry;
+  return plan_page(compiled->placement,geometry->block,compiled->step[function].state,0);
+}
 int mesh_plan_call_slot(const struct mesh_plan_compilation *compiled,uint32_t call,uint32_t value,uint64_t iteration,
                         struct mesh_plan_slot *out){
   const struct mesh_plan_analysis *a=compiled->result.planned.analysis;
@@ -3911,7 +3915,7 @@ int mesh_plan_program_install(struct mesh_ctx *context,uint64_t group,const stru
   if(status)goto done;
   for(uint32_t r=0;r<planned->rows.count;r++)binding->page[r]=plan_page_relocate(geometry,binding->arena,arenas,compiled->page[r],&status);
   for(uint32_t f=0;!status && f<count;f++){
-    const uint32_t original=plan_page(compiled->placement,geometry->block,compiled->step[f].state,0),
+    const uint32_t original=mesh_plan_state_page(compiled,f),
                    page=plan_page_relocate(geometry,binding->arena,arenas,original,&status);
     const uint64_t base=m->data_off+(uint64_t)page*m->pgsz;
     binding->plan[f]=base;

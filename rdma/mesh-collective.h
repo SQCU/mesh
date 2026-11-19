@@ -548,6 +548,7 @@ struct mesh_plan_compilation {
   struct mesh_plan_workspace *workspace;
 };
 int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
+uint32_t mesh_plan_state_page(const struct mesh_plan_compilation *,uint32_t function);
 int mesh_plan_call_slot(const struct mesh_plan_compilation *,uint32_t call,uint32_t value,uint64_t iteration,struct mesh_plan_slot *);
 /* Target storage lives in the same physical assignment as function values, roots and transport.
    Each workspace names its owning function, the value's complete lifetime in the storage proof,

@@ -456,39 +456,50 @@ class Target:
         return wires.state, word.value
 
     # metal_recording.h MetalRecorderPrepare, MetalRecorderReplay; metal_ir.h metal_ir_finalize, metal_ir_loaded
-    def placed(self, owned, libs, gpu, owner, programs, finalize, *, numerical_bodies=(), project_accesses=True):
+    def placed(self, owned, libs, gpu, owner, programs, finalize, *, numerical_bodies=(), selected=False):
         M, compiler, (lib, _), transport = libs
         error, planned = C.create_string_buffer(ROOM), owner.planned
         recorder = made(lib.MetalRecorderOpen(gpu, error, ROOM), error, "recorder", errno.ENODEV)
         owned(lambda: M.PUT(recorder, M.SELECTOR[b"release"]))
         buffer, captured = owner.bound(owned, M), []
+        if selected:
+            owned.offsets = owner.call_placements
         for r, (row, program) in enumerate(zip(self.rows, programs, strict=True)):
             if program is None:
                 captured.append((row, None, None))
                 continue
-            state, status = self.transport_state(owned, libs, gpu, owner, row, program)
             if numerical_bodies:
                 body = numerical_bodies[row.function].machine
                 if body is not None and (body.upstream or body.neural):
                     from .lower_metal import emitted
                     emitted(program, body, row.offset)
+            if not selected:
+                state, status = self.transport_state(owned, libs, gpu, owner, row, program)
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
-            for value, offsets, count, shares in self.placements(owner, r, program, libs):
-                compiler.metal_ir_value_placed(program, value, buffer, offsets, count, 0, shares)
-            step = self.stepped(owner, r)
-            if step is not None:
-                compiler.metal_ir_step_placed(program, buffer, *step)
-            # metal_ir.h metal_ir_value_placed with no buffer: each callable operand's root one logical copy, shared
-            # by every execution (a state or mutated input is the caller's one storage), its address the invocation's
+            if selected:
+                bindings = lib.MetalRecorderBindings(ready)
+                state, status = self.bind_transport(owned, libs, gpu, owner, row, program, ready, restore=not finalize)
+                values, step = owner.call_placements[r]
+            else:
+                bindings = compiler.metal_ir_program_buffers(program)
+                values, step = self.placements(owner, r, program, libs), self.stepped(owner, r)
+            for value, offsets, count, shares in values:
+                checked(compiler.metal_ir_bind_value(bindings, program, value, buffer, offsets, count, 0,
+                                                     shares, error, ROOM), error, "value binding")
             for root in self.external_roots(r):
-                compiler.metal_ir_value_placed(program, root, None, None, 1, 0, 0)
+                checked(compiler.metal_ir_bind_value(bindings, program, root, None, None, 1, 0, 0,
+                                                     error, ROOM), error, "external binding")
+            if step is not None:
+                compiler.metal_ir_bind_step(bindings, buffer, *step)
             # metal_recording.h MetalRecorderState: the transport's state buffer and this program's status word offset
             if state is not None:
                 checked(lib.MetalRecorderState(recorder, ready, state, status, error, ROOM), error,
                         "the transport state")
-            emitted = compiler.metal_ir_finalize if finalize else compiler.metal_ir_loaded
-            checked(emitted(program, error, ROOM), error, "emission" if finalize else "relocation")
+            if not finalize:
+                checked(compiler.metal_ir_loaded(program, error, ROOM), error, "relocation")
+            elif not selected:
+                checked(compiler.metal_ir_finalize(program, error, ROOM), error, "emission")
             captured.append((row, ready, program))
         calls = []
         for row, ready, program in captured:
@@ -498,7 +509,7 @@ class Target:
             replay = M.Replay()
             checked(lib.MetalRecorderReplay(recorder, ready, C.byref(replay), error, ROOM), error, "replay")
             owned(lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay)))
-            if project_accesses:
+            if not selected:
                 checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
             calls.append(M.Call(C.pointer(replay), row.planned + 1, None, 0))
         return recorder, (M.Call * len(calls))(*calls)
@@ -506,17 +517,17 @@ class Target:
     def external_roots(self, row):
         return (root for operand in self.operands for at, root in operand.occurrences if at == row)
 
-    def record(self, owned, libs, gpu, owner, programs, *, archive=None, numerical_bodies=(), schedule=None):
+    def record(self, owned, libs, gpu, owner, programs, *, archive=None, numerical_bodies=(), schedule=None, functions=None):
         M, _, (lib, _), _ = libs
         error = C.create_string_buffer(ROOM)
         recorder, calls = self.placed(owned, libs, gpu, owner, programs, archive is None,
-                                      numerical_bodies=numerical_bodies, project_accesses=schedule is None)
+                                      numerical_bodies=numerical_bodies, selected=schedule is not None)
         args = (recorder, calls, len(calls), C.byref(owner.planned),
                 C.byref(owner.binding) if owner.binding is not None else None)
         if archive is not None:
             handle = lib.MetalProgramLoad(*args, archive, error, ROOM)
         elif schedule is not None:
-            handle = lib.MetalRecorderProgramScheduled(*args, schedule, error, ROOM)
+            handle = lib.MetalRecorderProgramWithFunctions(*args, schedule, functions, error, ROOM)
         else:
             handle = lib.MetalRecorderProgram(*args, error, ROOM)
         native = made(handle, error, "the program's calls")

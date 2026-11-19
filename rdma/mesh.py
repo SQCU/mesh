@@ -592,6 +592,7 @@ for name, result, arguments in (
                                        C.POINTER(C.POINTER(Q)), C.POINTER(C.POINTER(PlanStorage))]),
         ('mesh_plan_storage_retain', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_storage_free', None, [C.POINTER(PlanStorage)]),
+        ('mesh_plan_state_page', U, [C.POINTER(PlanCompilation), U]),
         ('mesh_plan_call_slot', C.c_int, [C.POINTER(PlanCompilation), U, U, Q, C.POINTER(PlanSlot)]),
         ('mesh_plan_program_compile_workspaces', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
             C.POINTER(PlanStorage), C.POINTER(C.POINTER(PlanActors)), Z, C.POINTER(PlanWorkspace), C.POINTER(C.POINTER(PlanCompilation))]),

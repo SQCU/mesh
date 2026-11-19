@@ -188,10 +188,11 @@ ALL_FUSIONS = INLINE_MAPS | FUSE_EPILOGUE | FUSE_ROWS
 
 
 class CallIR:
-    def __init__(self, template):
+    def __init__(self, template, create=None):
         compiler = _compiler()
+        create = compiler.metal_ir_specialize if create is None else create
         error = C.create_string_buffer(4096)
-        self.program = compiler.metal_ir_specialize(template, error, len(error))
+        self.program = create(template, error, len(error))
         if not self.program:
             raise ValueError(error.value.decode())
         self.close = weakref.finalize(self, compiler.metal_ir_program_free, self.program)
@@ -262,6 +263,9 @@ class Transport(C.Structure):
 class Remote(C.Structure):
     _fields_ = [('phases', mesh.Q), ('group', mesh.Q), ('count', mesh.Q), ('pages', mesh.U), ('copies', mesh.U),
                 ('time', C.c_double)]
+
+
+METAL_IR_COUNTER_ABSOLUTE, METAL_IR_COUNTER_OFFSET, METAL_IR_COUNTER_OPERAND = range(3)
 
 
 class MetalSent(C.Structure):
@@ -678,12 +682,16 @@ def _recorder():
                 ('MetalRecorderOpen', P, [P, text, room]),
                 ('MetalBufferBorrow', P, [P, P, Q, RELEASE, P]),
                 ('MetalRecorderPrepare', P, [P, P, text, room]),
+                ('MetalRecorderBindings', P, [P]),
                 ('MetalRecorderReplay', C.c_int, [P, P, C.POINTER(Replay), text, room]),
+                ('MetalCaptureCounters', C.POINTER(Q), [P, C.c_size_t]),
                 ('MetalRecorderState', C.c_int, [P, P, P, Q, text, room]),
                 ('MetalReplayDestroy', None, [C.POINTER(Replay)]),
                 ('MetalRecorderActors', C.c_int, [P, machine, machine, C.POINTER(_Actors)]),
                 ('MetalRecorderActorsFree', None, [C.POINTER(_Actors)]),
                 ('MetalRecorderProgram', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), text, room]),
+                ('MetalProgramFunctions', P, []),
+                ('MetalRecorderProgramWithFunctions', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), P, P, text, room]),
                 ('MetalRecorderProgramScheduled', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), P, text, room]),
                 ('MetalProgramSave', C.c_int, [P, C.POINTER(Span), U, C.POINTER(P), C.POINTER(C.c_size_t), text,
                                                room]),
@@ -791,6 +799,8 @@ def _compiler():
                 ('metal_ir_graph_context', P, [P]),
                 ('metal_ir_graph_context_set', C.c_int, [P, P]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_free', None, [P]),
+                ('metal_ir_status_word', Q, [P]),
+                ('metal_ir_transport_addressing', None, [P, U]), ('metal_ir_transport_resolved', U, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
                 ('metal_ir_value_layout', U, [P, U, C.POINTER(Term), U, C.POINTER(C.c_int64)]),
@@ -860,6 +870,11 @@ def _compiler():
                 ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_specialize', P, [P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_select_occurrence', P, [P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_emit_selected', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_program_buffers', P, [P]),
+                ('metal_ir_bind_value', C.c_int, [P, P, U, P, C.POINTER(Q), Q, Q, U, C.c_char_p, C.c_size_t]),
+                ('metal_ir_bind_step', None, [P, P, C.POINTER(Q), Q, U]),
                 ('metal_ir_clone', P, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_machine', None, [P, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine)])):
             function = getattr(lib, name)
