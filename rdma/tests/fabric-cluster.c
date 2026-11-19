@@ -50,10 +50,24 @@ static void writes(ncclComm_t comm,const struct mesh_fabric *f,int rank,size_t c
     for(int t=0;t<iterations;t++)checked(ncclMemAlloc((void **)&landing[t][at],count*sizeof *input));at++;
   }
   checked(ncclMeshCommPlan(comm,calls,pairs,NULL));
+  /* each iteration's writes prepared once (their bindings: configuration), then declared as the program's steps, one
+     group an iteration on its own buffers (design/declared-programs.md), and run as declared */
+  ncclMeshWritePlan_t plan[iterations][pairs];
+  for(int t=0;t<iterations;t++)for(int k=0;k<pairs;k++){
+    plan[t][k]=NULL;
+    checked(ncclMeshWritePrepare(sources[t],landing[t][k],count,ncclInt32,calls[k].peer,calls[k].destination,comm,0,1,0,0,&plan[t][k]));
+  }
+  checked(ncclMeshDeclareBegin());
+  for(int t=0;t<iterations;t++){
+    checked(ncclGroupStart());
+    for(int k=0;k<pairs;k++)checked(ncclMeshWriteExecute(plan[t][k],NULL));
+    checked(ncclGroupEnd());
+  }
+  checked(ncclMeshDeclareEnd());
   for(int t=0;t<iterations;t++){
     for(size_t i=0;i<count;i++)sources[t][i]=(int)(i%997)+rank*1000+t*10000;
     checked(ncclGroupStart());
-    for(int k=0;k<pairs;k++)checked(ncclMeshWrite(sources[t],landing[t][k],count,ncclInt32,calls[k].peer,calls[k].destination,comm,NULL));
+    for(int k=0;k<pairs;k++)checked(ncclMeshWriteExecute(plan[t][k],NULL));
     checked(ncclGroupEnd());
     for(int k=0;k<pairs;k++)if(calls[k].destination==rank)for(size_t i=0;i<count;i++){
       const int expected=(int)(i%997)+calls[k].peer*1000+t*10000;
@@ -70,8 +84,10 @@ static void writes(ncclComm_t comm,const struct mesh_fabric *f,int rank,size_t c
   *done=1;
   const ncclMeshCall end={.what=MESH_ALLREDUCE,.count=1,.type=ncclInt32,.op=ncclSum,.repeat=1};
   checked(ncclMeshCommPlan(comm,&end,1,NULL));
+  checked(ncclMeshDeclareBegin());checked(ncclAllReduce(done,joined,1,ncclInt32,ncclSum,comm,NULL));checked(ncclMeshDeclareEnd());
   checked(ncclAllReduce(done,joined,1,ncclInt32,ncclSum,comm,NULL));
   assert(*joined==(int)f->nodes);
+  for(int t=0;t<iterations;t++)for(int k=0;k<pairs;k++)checked(ncclMeshWritePlanDestroy(plan[t][k]));
   for(int t=0;t<iterations;t++){
     checked(ncclMemFree(sources[t]));
     for(int k=0;k<pairs;k++)checked(ncclMemFree(landing[t][k]));
@@ -98,6 +114,7 @@ int main(int argc,char **argv){
   checked(ncclMemAlloc((void **)&output,count*sizeof *output));
   const ncclMeshCall calls[]={{.what=MESH_ALLREDUCE,.count=count,.type=ncclInt32,.op=ncclSum,.group=0,.repeat=1}};
   checked(ncclMeshCommPlan(comm,calls,1,NULL));
+  checked(ncclMeshDeclareBegin());checked(ncclAllReduce(input,output,count,ncclInt32,ncclSum,comm,NULL));checked(ncclMeshDeclareEnd());
   const int iterations=4;
   struct timespec start,end;
   clock_gettime(CLOCK_MONOTONIC,&start);

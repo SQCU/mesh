@@ -2,7 +2,9 @@
 
 All payloads use ordinary library operations. Role masks, ragged counts and
 the count matrix are configuration operands; no transport is implemented here.
-Fresh source leases make reuse independent of a remote acknowledgment.
+Fresh source leases make reuse independent of a remote acknowledgment: each
+case's iterations are the steps of one declared program (design/declared-
+programs.md), each on leases of its own, declared where the case begins.
 """
 import json
 import time
@@ -10,7 +12,7 @@ import time
 import numpy as np
 
 from mesh import ffi, lib, check
-from mesh_mpi import Comm, empty
+from mesh_mpi import Comm, declare, empty
 from routing import QueueSample
 
 
@@ -49,19 +51,14 @@ def main():
         check(lib.ncclMeshCommPlan(comm.comm, declaration, 1, ffi.NULL))
         demand = ffi.new('uint64_t[]', n*n)
         check(lib.ncclMeshCommPlanDemands(comm.comm, demand, n*n))
-        for iteration in range(3):
-            send_count = counts[rank] if what == lib.MESH_ALLGATHER else total
-            recv_count = counts[rank] if what == lib.MESH_REDUCE_SCATTER else total
-            receives = rank == root if what == lib.MESH_REDUCE else rank in outputs
-            source = empty(send_count, np.int32) if rank in inputs else None
-            target = empty(recv_count, np.int32) if receives else None
-            if source is not None:
-                source[:] = np.arange(send_count, dtype=np.int32) + 100*rank + iteration
-            if target is not None:
-                target.fill(-99999)
-            retained.extend(x for x in (source, target) if x is not None)
-            args = pointer(source), pointer(target)
-            start = time.perf_counter()
+        send_count = counts[rank] if what == lib.MESH_ALLGATHER else total
+        recv_count = counts[rank] if what == lib.MESH_REDUCE_SCATTER else total
+        receives = rank == root if what == lib.MESH_REDUCE else rank in outputs
+        leases = [(empty(send_count, np.int32) if rank in inputs else None, empty(recv_count, np.int32) if receives else None)
+                  for _ in range(3)]
+        retained.extend(x for pair in leases for x in pair if x is not None)
+
+        def issue(args):
             if what == lib.MESH_ALLREDUCE:
                 check(lib.ncclAllReduce(*args, total, lib.ncclInt32, op, comm.comm, ffi.NULL))
             elif what == lib.MESH_REDUCE:
@@ -72,6 +69,17 @@ def main():
                 check(lib.ncclMeshAllGatherV(*args, sizes, lib.ncclInt32, comm.comm, ffi.NULL))
             else:
                 check(lib.ncclMeshReduceScatterV(*args, sizes, lib.ncclInt32, op, comm.comm, ffi.NULL))
+
+        with declare():   # the case's program: its three iterations, each a step on its own leases
+            for source, target in leases:
+                issue((pointer(source), pointer(target)))
+        for iteration, (source, target) in enumerate(leases):
+            if source is not None:
+                source[:] = np.arange(send_count, dtype=np.int32) + 100*rank + iteration
+            if target is not None:
+                target.fill(-99999)
+            start = time.perf_counter()
+            issue((pointer(source), pointer(target)))
             elapsed = time.perf_counter() - start
             if receives:
                 if what == lib.MESH_ALLGATHER:
@@ -117,6 +125,8 @@ def main():
             source[:] = np.arange(amount, dtype=np.uint32) % 251 + rank
             target.fill(255)
         retained.extend(x for x in (source, target) if x is not None)
+        with declare():
+            check(lib.ncclMeshAlltoAllV(pointer(source), sizes, pointer(target), sizes+n, lib.ncclUint8, comm.comm, ffi.NULL))
         check(lib.ncclMeshAlltoAllV(pointer(source), sizes, pointer(target), sizes+n, lib.ncclUint8, comm.comm, ffi.NULL))
         if target is not None:
             np.testing.assert_array_equal(target, (np.arange(amount, dtype=np.uint32) % 251 + 1-rank).astype(np.uint8))
@@ -134,10 +144,15 @@ def main():
              'type': lib.ncclUint8, 'op': lib.ncclSum},
             {'group': 0, 'what': lib.MESH_ALLREDUCE, 'count': 1003, 'type': lib.ncclInt32, 'op': lib.ncclSum}])
         check(lib.ncclMeshCommPlan(comm.comm, declaration, 2, ffi.NULL))
-        check(lib.ncclGroupStart())
-        check(lib.ncclMeshAlltoAllV(pointer(next_source), sizes, pointer(next_target), sizes+n, lib.ncclUint8, comm.comm, ffi.NULL))
-        check(lib.ncclAllReduce(pointer(summed_source), pointer(summed_target), 1003, lib.ncclInt32, lib.ncclSum, comm.comm, ffi.NULL))
-        check(lib.ncclGroupEnd())
+
+        def grouped():
+            check(lib.ncclGroupStart())
+            check(lib.ncclMeshAlltoAllV(pointer(next_source), sizes, pointer(next_target), sizes+n, lib.ncclUint8, comm.comm, ffi.NULL))
+            check(lib.ncclAllReduce(pointer(summed_source), pointer(summed_target), 1003, lib.ncclInt32, lib.ncclSum, comm.comm, ffi.NULL))
+            check(lib.ncclGroupEnd())
+        with declare():
+            grouped()
+        grouped()
         if next_target is not None:
             np.testing.assert_array_equal(next_target, ((np.arange(amount, dtype=np.uint32)*7 + 1-rank) % 251).astype(np.uint8))
         np.testing.assert_array_equal(summed_target, n*np.arange(1003, dtype=np.int32) + 5*n*(n-1))
