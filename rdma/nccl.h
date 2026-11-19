@@ -22,28 +22,25 @@
    MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node (mesh_observe) meets there,
    the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
    config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its first gather carries each rank's
-   node and every live physical endpoint, including availability (mesh-call.h mesh_endpoints);
-   each rank then holds, on every physical cable joining it to a member, the stream of the least identity free at both
-   ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (a holding's
-   lists and counts are its holder's alone; a link has several, so communicators sharing a node pair hold their own;
-   EBUSY where a physical cable has none free at both ends); the second gather carries each rank's holding's
+   node and the nodes its bridge holds a live order toward (mesh-call.h mesh_nodes_reached); each rank then opens the
+   order toward each member's node it is joined to (mesh_order_open: design/node-addressed-transfers.md), which takes
+   nothing, so any number of communicators of any processes share a node pair; the second gather carries each rank's
    status.  Each phase of the bootstrap (the connect or accepts, each gather) has a deadline, mesh.h MESH_PLATFORM_NS
-   from its start, past which the program ends (design/data-model.md section 6).  The data program names nodes and its own pages; the compiled fabric retains every physical cable.
-   The bridge owns ports, lanes, frames, queue pairs and SEND sizing.  An init fails as a value where two ranks are on one node (its
-   holdings are kept a node), a stream is held by another process,
-   or its bridge is still ending its last holding, or gone; what it held is then let go and the next init reads the streams as they stand.  A
+   from its start, past which the program ends (design/data-model.md section 6).  The data program names nodes and its own pages; the compiled fabric has one link a node pair.
+   The bridge owns cables, ports, lanes, frames, queue pairs, SEND sizing and the order of every piece.  An init fails as a
+   value where two ranks are on one node, or a member's node has no live order; the next init reads the orders as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
    every member from the same reciprocal reports and kept for its life: its nodes are its members,
-   every physical cable is a separate channel, including all parallel cables (ncclMeshCommFabric),
+   each pair of members whose bridges reach each other's nodes is one link and one channel (ncclMeshCommFabric),
    and a route crosses members alone, so a node a route is to cross takes part as a member.  The communicator's own
    table makes every member a contributor, so a member on a route combines its own operand into what it sends on; only
    a program passed to ncclMeshCommInitRank with mesh_compile's contributors, or an explicit ncclMeshWrite path,
    has a member that sends on what lands alone (the identity, data-model.md section 9's relay).  Two members no path between members
    joins fail a collective, and a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
-   Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
-   two ranks or more holds none: it is made with no channel, and its first call that crosses a link fails as a value
+   Split opens its children's orders over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
+   two ranks or more opens none: it is made with no channel, and its first call that crosses a link fails as a value
    (a rank among those excluded gets NULL, as NCCL_SPLIT_NOCOLOR's).  Inside a group, Split and Grow run their own
    collectives at once, the group's calls set aside, and Shrink makes none.  ncclCommGrow meets at the bootstrap of the
    id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke is NCCL's: comm's
@@ -76,15 +73,14 @@
    ncclCollConfig_t.algSelection is not read.  Every member compiles the same programs from the same map and the same
    operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps_cut: the
-   program's typed cuts and declared WRITE endpoints), lowered to explicit physical cable/range
-   records on its communicator's channels: one holding per cable, each transfer one entry of its send
-   list or landing list of immutable exact byte spans. Each direction has one
-   matching DMA-unit sequence at both ends, in compiled dependency order,
-   presented to the bridge as the group is issued (mesh-call.h
-   mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
+   program's typed cuts and declared WRITE endpoints), lowered to range records on its communicator's
+   channels: one channel a peer node, each transfer one entry of its send list or landing list of
+   immutable exact byte spans. Each direction has one matching DMA-unit sequence at both ends, in
+   compiled dependency order, appended to the bridge's order toward the node as the group is issued
+   (mesh-call.h mesh_order_append; the bridge alone places it on cables).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
    waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
-   which the program ends: design/data-model.md section 6), and its holding's end with units outstanding takes its stream out of its link's pairing
-   (design/transport.md section 14).  A publication
+   which the program ends: design/data-model.md section 6), and the order's restart loses what was outstanding
+   (design/node-addressed-transfers.md).  A publication
    raises the holding's `ready` past the entry; a landing is awaited on its `landed`.
    The data program owns source/relay lifetimes; there are no `sent` waits (design/data-model.md section 6).  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
    payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's

@@ -466,7 +466,7 @@ static void mesh_reclaim(struct hdr *m){
    A row is held for nothing else: a holder that gave or died has no future write targeting any other of its rows (the
    bridge posts a unit only while its holding is its holder's, and tells it first: mesh-link.c unit_told), so they are
    released at once, and a row in W(t) once its unit completes or the port child that posted it is gone (its pid and
-   start, struct mesh_stream `child`, no longer a live process: its queue pairs, and the requests on them, went with
+   start, struct mesh_lanes `child`, no longer a live process: its queue pairs, and the requests on them, went with
    it), whichever launch of the bridge spawned it.  Each lane's units completed are read before those posted, every
    read sequentially consistent after the caller's give or retirement */
 /* Actual registered-memory overlap, independent of the row/alias that named

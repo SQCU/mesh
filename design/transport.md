@@ -388,6 +388,10 @@ programs that use them by rubric D.
 
 ## 14. The data path, decided by rubric M and C
 
+Wire 136 / layout 155 replaced the streams below with node-addressed transfers: no client names a cable, stream or
+lane, and every client's transfers toward a node are one shared order (design/node-addressed-transfers.md). What
+follows is the history of the per-cable streams it replaced.
+
 The forms the rewrite chose between, ranked by design/rubrics.md, and the form the code takes.
 
 The algorithm analysis these rows rest on is metal-microbench `output_data/bridge-20261019/FLOWS.md` section 7.

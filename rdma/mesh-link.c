@@ -717,7 +717,9 @@ static void link_heard(struct port *port,const struct message *heard){
    the two ends' frontiers each way (mesh-order.h order_boundary), and thaws.  A cable of the epoch lost restarts the
    order (order_restart, every transfer not done lost) and loses every cable toward the node, so both ends restart.
    Nothing is sent about any transfer */
-static struct order_state { int frozen,sent,heard; struct order_message mine,theirs; } orders[MESH_NODES];
+/* each order's agreement: frozen, this end's ORDER sent (`mine`), the peer's heard for the current epochs (`theirs`)
+   and for the next (`ahead`: a peer that agreed first and proposes again before this end has agreed) */
+static struct order_state { int frozen,sent,heard,early; struct order_message mine,theirs,ahead; } orders[MESH_NODES];
 /* the node slot of the order toward `node`, made (its rings leased from the arena, made new, its generation 1) as a
    port first pairs with it; MESH_ABSENT where the region holds no room */
 static uint32_t order_slot(uint32_t node){
@@ -758,8 +760,10 @@ static void order_heard(struct port *port,const unsigned char *payload,uint32_t 
   for(uint32_t n=0;n<MESH_NODES;n++){
     struct mesh_node *x=mesh_node_at(M,n);
     if(atomic_load(&x->node)!=port->peer)continue;
-    if(heard.epochs<atomic_load(&x->epochs) || heard.cables>MESH_PORTS)return;
-    orders[n].theirs=heard;orders[n].heard=1;
+    const uint32_t epochs=atomic_load(&x->epochs);
+    if(heard.cables>MESH_PORTS || (heard.epochs!=epochs && heard.epochs!=epochs+1))return;
+    if(heard.epochs==epochs){orders[n].theirs=heard;orders[n].heard=1;}
+    else{orders[n].ahead=heard;orders[n].early=1;}
     wake();
   }
 }
@@ -807,7 +811,7 @@ static void order_turn(void){
       if(k<cables)continue;
       say("order toward node %u: cable %#llx of its epoch lost: the order restarts (every transfer not done lost)\n",node,
           (unsigned long long)last->cable[c].wire);
-      order_restart(M,x);*o=(struct order_state){0};
+      order_restart(M,x);*o=(struct order_state){0};record_changed();
       order_lose(node);
       goto next;
     }
@@ -839,11 +843,12 @@ static void order_turn(void){
     for(uint32_t c=0;c<cables;c++){lanes[c]=2*plan_streams(ports[port[c]].link.plan);bandwidth+=ports[port[c]].bandwidth;}
     if(order_extend(x,first,cables,port,lanes,wire)){
       say("order toward node %u: its generation's epochs are all used: the order restarts\n",node);
-      order_restart(M,x);*o=(struct order_state){0};order_lose(node);goto next;
+      order_restart(M,x);*o=(struct order_state){0};record_changed();order_lose(node);goto next;
     }
     atomic_store(&x->bandwidth,bandwidth);
     atomic_fetch_add(&x->freeze,1);
-    *o=(struct order_state){0};
+    const struct order_state was=*o;
+    *o=(struct order_state){.heard=was.early,.theirs=was.ahead};
     say("order toward node %u: epoch %u over %u cable%s from pieces %llu sent, %llu received\n",node,epochs+1,cables,cables==1?"":"s",
         (unsigned long long)first[0],(unsigned long long)first[1]);
     record_changed();

@@ -60,6 +60,10 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
 
 ## Communicators
 
+Since wire 136 a communicator holds one channel per peer node, its entries appended to the bridge's order toward that
+node (design/node-addressed-transfers.md); the bridge alone places them on cables. Text below that speaks of a
+channel per cable, streams or holdings describes the contract before it.
+
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens, on the node's fabric address where it holds one), where
   each rank's node meets the others'. The root listens on that host alone where it is an IPv6 address.

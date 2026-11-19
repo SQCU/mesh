@@ -149,8 +149,7 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    `qpn` UINT32_MAX, no queue pair's number).  Each
    lane's SEND gate (`gate`: the frames posted and retired; its capacity, set as the lane connects), each data lane's
    progress (`lane`, struct lane_state), the arena page of the streams' lists and rings of rows (`lists`, leased as
-   the port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the progress thread: the
-   owner it serves (`held`), its state (`hold`) and its send and landing walks (`sending`, `landing`) */
+   the port first pairs, MESH_ABSENT none: mesh.h struct mesh_lanes `rows`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
@@ -188,8 +187,9 @@ struct link {
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES` (its first three words the same
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
-   its bytes (the operator, 2026-10-21) */
-#define MESH_CHILD_VERSION 2u
+   its bytes (the operator, 2026-10-21).  3: a child serves its link's part of the node's order (mesh-order.h), and
+   tells its freeze in its lane records */
+#define MESH_CHILD_VERSION 3u
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
    outstanding (mesh-link.c stream_end): the ends of its clients' holdings, not a failure of its lanes (EIO) or its
    hardware (design/rubrics.md M10: a fact named as what it is), told the parent in CHILD_BROKEN's `result` (version

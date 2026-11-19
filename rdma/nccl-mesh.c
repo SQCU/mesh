@@ -750,8 +750,8 @@ static const struct entry *program_of(ncclComm_t comm, int what, int root, uint6
 /* -- the process's client of its node's bridge (design/transport.md):
    one attach of the node's region (mesh_attach), made at the process's first lease or first communicator, whichever
    comes first.  Its slot owns every lease the process takes (ncclMemAlloc: a section of the region, mesh-call.h
-   mesh_section_create, whose rows' owner is the slot), and it holds a stream on each physical cable its communicators use
-   (`holds`, mesh-call.h mesh_stream_take), each for one communicator at a time.  The leases'
+   mesh_section_create, whose rows' owner is the slot), and a hold of the order toward each node its communicators'
+   channels reach (`holds`, mesh-call.h mesh_order_open), one a channel, taking nothing of the bridge's.  The leases'
    bookkeeping is the region's, where the bridge sees it: the bridge retires the slot of a process gone and returns its
    leases' pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A
    lease is an operand of the node's region, which outlives its bridge (design/transport.md section 2: a bridge that
@@ -1796,7 +1796,7 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
    lost, or a wait's bound reached after a revoke: nccl-mesh-metal.h METAL_*; a wait past its bound, its deadline, ends
    the program here, where the host first reads it: design/data-model.md section 6); else a stream it holds
    no longer its own (a bridge's restart, or a pairing lost and made again, opens every stream new: mesh-call.h
-   mesh_stream_held), kept now (comm_fail), so ncclCommGetAsyncError reads it before any group runs on it; ncclSuccess
+   hold_live), kept now (comm_fail), so ncclCommGetAsyncError reads it before any group runs on it; ncclSuccess
    where none.  Under group_lock */
 static ncclResult_t comm_failure(struct ncclComm *comm) {
   if (comm->failed) return comm_told(comm);
@@ -2792,7 +2792,7 @@ static void touch(struct ncclComm *comm) {
   touching = comm;
 }
 /* whether channel ch's list (0 send, 1 landing) has room for `need` entries more: its entries presented and not taken
-   by the bridge, with them, at most MESH_STREAM_ENTRIES */
+   by the bridge, with them, at most MESH_RING */
 static int room_for(const struct ncclComm *comm, const struct channel *ch, int list, uint64_t need) {
   return mesh_order_outstanding((struct mesh_ctx *)&comm->attach->context, &comm->attach->holds[ch->stream].order, list) + need <= MESH_RING;
 }
@@ -2843,7 +2843,7 @@ static int channel_present(struct ncclComm *comm, const struct channel *ch, int 
   return 0;
 }
 /* each channel's entries presented (channel_present), its send list's and then its landing list's, once
-   the bridge has room for all of them (each list's entries presented and not taken fewer than MESH_STREAM_ENTRIES with
+   the order has room for all of them (each direction's transfers appended and not retired fewer than MESH_RING with
    them: the bridge takes an entry as it reads it while fewer than that of the list are taken and not done), so a group
    is presented whole or not at all; a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated
    as gate_of says.  The wait for room (room_wait) holds no lock and ends by its deadline (design/rubrics.md M3, 10-18:
@@ -2979,7 +2979,7 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
    relay buffers remain owned by the data program until their consumers finish; publishing does not retire a SEND.
    No SEND-completion wait is added here (design/data-model.md section 6). Every landing wait ends at an event: its
    count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
-   longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
+   longer the communicator's own, hold_live: the order restarted, a cable toward the node lost or a bridge restarted), or a revoke,
    each read at every look; the landings and publications finish by their
    deadline, MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: "no wait may ever
    run longer than a deadline operand presented at the time the wait was constructed"; design/data-model.md section

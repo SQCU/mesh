@@ -1,11 +1,11 @@
 /* One-sided DMA and immutable-descriptor ownership.
-   mesh_stream.sent/landed are contiguous COMPLETED UNIT prefixes (mesh-link.c,
-   link_send/walk_count), including both lanes. It is not a byte prefix and a
+   A channel's sent/landed are COMPLETED UNIT prefixes (done words the bridge
+   raises in order, mesh-order.h order_publish), over every cable. It is not a byte prefix and a
    presented/taken/ready prefix is not a completion. Register every future SEND
    range before presenting any entry; otherwise not-yet-posted source reads
    would disappear from the ownership proof. No ACK, wait or payload copy.
 
-   `wire` identifies a QP pairing, not a holding. The caller assigns a unique,
+   `wire` identifies a node's order and its generation, not a holding. The caller assigns a unique,
    nonzero `holding` on each local acquisition, even if the same client takes
    the same stream and wire again. Query never substitutes a later holding's
    prefix for an old one's. Keep the generation identity until old dependencies

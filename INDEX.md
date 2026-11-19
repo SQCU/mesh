@@ -40,6 +40,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/quiet-link.md](design/quiet-link.md): an adjunct to data-model.md section 3: what a link's first SEND after
   a quiet stretch costs, where mesh runs meet it, and the transfer size above which the cost is under 1%, filed as an
   idiosyncrasy that moves no kernel on the (throughput, latency) frontier.
+- [design/node-addressed-transfers.md](design/node-addressed-transfers.md): wire 136's client contract: a client
+  names a node and bytes; every client's transfers toward a node are one shared order whose pieces the bridges place
+  on cables and queue pairs by a pure function, with ORDER exchanged only as cables change; the literature it rests on,
+  what it deleted, its precondition and its tests. It supersedes transport.md section 14's streams and
+  node-addressed-crossings.md.
 - [design/transport.md](design/transport.md): the transport as the code holds it: the registered region, the page
   table, links, posted receives, SENDs and readiness words, and who owns each. It explains why SEND and RECV do not
   fail and what happens on a hang, a lost cable or a stopped bridge, and gives the data path (section 14), the source's

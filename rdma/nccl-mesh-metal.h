@@ -1,6 +1,7 @@
 /* libnccl-mesh's Metal half (nccl-mesh-metal.m): a group's work on the GPU, encoded into the caller's command
-   buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A channel's holding (mesh-call.h mesh_stream_view: its
-   three page counts) is one buffer over the region's page that holds them, and the bytes it sends and lands are the
+   buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A channel's three page counts (nccl-mesh.c struct
+   channel_view, words of the process's own lease that its entries' gates and done words name) are one buffer over the
+   page that holds them, and the bytes it sends and lands are the
    client's own pages.  A wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-kernels.h
    mesh_step_wait) on the holding's `landed` until it covers the entry, and on no other count; it ends at the count, at the link's loss (the bridge's ~0) or at its program's bound (metal_begin's
    polls), and reads no other word.  A publication is one system fence and one store of the holding's `ready`. */
@@ -13,7 +14,7 @@
 /* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, Three kinds of source: the interface table) */
 #pragma GCC visibility push(hidden)
 
-/* A count of a holding's pages (mesh.h struct mesh_stream `ready`, `sent` and `landed`; an entry's end): a type of its
+/* A count of a holding's pages (a channel's `ready`, `sent` and `landed`; an entry's end): a type of its
    own, so a byte count, an entry or an element count is never added to it, taken from it or compared with it but
    through a named conversion.  pages_of: a piece's bytes as the pages it fills, rounded up, the one conversion from
    bytes.  pages_to_word and pages_from_word: the count as a region word or a kernel's argument record holds it, used
