@@ -8,6 +8,7 @@ inside a batch. GPU snapshots in the persistent-output cases are test-only.
 import argparse
 import json
 import math
+import time
 
 import torch
 import torch.distributed as dist
@@ -17,7 +18,7 @@ from torch.distributed.tensor import Shard
 from torch_mesh import partition
 
 import mesh
-from routing import Fabric, QueueSample
+from routing import QueueSample
 
 
 def values(source, iteration, shape, dtype):
@@ -36,6 +37,26 @@ def failure(group):
 def traffic(before, after):
     return [dict(cable=b['cable'], wire=b['wire'], sent_bytes=a['sent'] - b['sent'],
                  landed_bytes=a['landed'] - b['landed']) for b, a in zip(before, after)]
+
+
+def payload_traffic(group, sample, before, sent, landed):
+    """Exact two-rank accounting after execution; larger graphs report relay bytes.
+
+    A local SEND CQ can trail the consumer's GPU completion slightly. This
+    diagnostic poll is outside the function and does not gate payload progress.
+    """
+    deadline = time.monotonic() + 5
+    while True:
+        wires = traffic(before, sample.read())
+        if group.size() != 2:
+            return wires
+        measured = (sum(row['sent_bytes'] for row in wires), sum(row['landed_bytes'] for row in wires))
+        if measured == (sent, landed):
+            return wires
+        assert measured[0] <= sent and measured[1] <= landed, ('wire padding or duplicate traffic', measured, sent, landed)
+        if time.monotonic() >= deadline:
+            raise AssertionError(('exact payload accounting incomplete', measured, sent, landed))
+        time.sleep(0.001)
 
 
 def gathered(group, sample, name, sizes, dtype, strided, persistent, repeats, iterations, require_all):
@@ -64,12 +85,16 @@ def gathered(group, sample, name, sizes, dtype, strided, persistent, repeats, it
             errors = (actual != reference).nonzero()
             at = tuple(errors[0].tolist())
             raise AssertionError((name, rank, iteration, len(errors), at, actual[at].item(), reference[at].item()))
-    wires = traffic(before, sample.read())
+    useful_sent = source.numel() * source.element_size() * iterations
+    useful_landed = pre * (sum(sizes) - sizes[rank]) * post * source.element_size() * iterations
+    wires = payload_traffic(group, sample, before, useful_sent, useful_landed)
     if require_all:
         assert all(row['sent_bytes'] > 0 and row['landed_bytes'] > 0 for row in wires), (name, rank, wires)
     group.plan([])
     return dict(case=name, rank=rank, dtype=str(dtype), sizes=sizes, strided=strided, persistent_output=persistent,
-                repeats=repeats, calls=iterations, exact=True, channels=len(wires), traffic=wires)
+                repeats=repeats, calls=iterations, exact=True, channels=len(wires), traffic=wires,
+                payload_padding_bytes=0, common_write_plans=True,
+                two_rank_exact_payload_verified=group.size() == 2)
 
 
 def summed(group, sample, dtype, iterations):
@@ -85,9 +110,12 @@ def summed(group, sample, dtype, iterations):
         expected = sum(values(rank, iteration, source.shape, dtype).float() for rank in range(group.size())).to(dtype)
         if not torch.equal(actual.cpu(), expected):
             raise AssertionError(('sum', group.rank(), dtype, iteration))
-    wires = traffic(before, sample.read())
+    useful = source.numel() * source.element_size() * iterations
+    wires = payload_traffic(group, sample, before, useful, useful)
     group.plan([])
-    return dict(case='sum', rank=group.rank(), dtype=str(dtype), calls=iterations, exact=True, traffic=wires)
+    return dict(case='sum', rank=group.rank(), dtype=str(dtype), calls=iterations, exact=True, traffic=wires,
+                payload_padding_bytes=0, common_write_plans=True,
+                two_rank_exact_payload_verified=group.size() == 2)
 
 
 def migrated(group, iterations):
@@ -123,41 +151,41 @@ def migrated(group, iterations):
     return dict(case='asymmetric-migration', rank=rank, old_parts=old, new_parts=new,
                 calls=len(snapshots), axes=[0, 1], exact=True, receipt_collectives=0,
                 staging_collectives=0,
-                note='Aligned indexed original-to-final writes; distinct relay leases, native deferred retirement')
+                note='Affine original-to-final exact-byte writes; distinct relay leases, native deferred retirement')
 
 
-def masked_migrations(group, sample, iterations):
-    """Odd-byte affine runs, poisoned adjacent storage, and multiple frames."""
+def byte_migrations(group, sample, iterations):
+    """Exact-byte affine runs, poisoned neighbors, and more rows than descriptor entries."""
     from unittest.mock import patch
     from migration import compile_rows
 
-    topology = DeviceMesh.from_group(group, 'mps', mesh_dim_names=('masked',))
+    topology = DeviceMesh.from_group(group, 'mps', mesh_dim_names=('bytes',))
     old, new = ([4, 3, 1], [3, 3, 2]) if group.size() == 3 else ([3, 1], [2, 2])
     rank, snapshots, references, guards, sources, metadata = group.rank(), [], [], [], [], []
-    original_empty = partition._empty
-    fabric = Fabric.of(group.comm)
 
     def guarded_empty(shape, like, group=None, dtype=None):
-        if len(shape) == 1:  # physical ingress train: keep page alignment
-            return original_empty(shape, like, group, dtype)
         count = math.prod(shape)
-        backing = torch_mesh.empty(count + 34, dtype=dtype or like.dtype).fill_(173)
+        backing = torch_mesh.empty(count + 34, dtype=dtype or like.dtype)
+        # Exact receives can be preposted immediately. Initialize guards only;
+        # no outstanding GPU store may overwrite an incoming payload interval.
+        backing[:17].fill_(173)
+        backing[count + 17:].fill_(173)
         guards.append((backing, count, 173))
         return backing.narrow(0, 17, count).view(shape)
 
     before = sample.read()
-    for dim, shape in ((0, (sum(old), 3)), (1, (7, sum(old), 32771))):
+    for dim, shape in ((0, (sum(old), 3)), (1, (7, sum(old), 32771)), (1, (5003, sum(old), 3))):
         plan = compile_rows(shape, dim, old, new, 1)
         trains = []
         for run in plan.runs:
             if run.source == run.destination:
                 continue
-            frame = min(group.page * len(fabric.paths[run.source, run.destination]), -(-run.bytes // group.page) * group.page)
-            trains.append(dict(source=run.source, destination=run.destination, frames=run.frames(frame),
-                               frame_bytes=frame, useful_bytes=run.bytes, padded_bytes=run.frames(frame) * frame))
+            trains.append(dict(source=run.source, destination=run.destination, logical_messages=1,
+                               row_bytes=run.row_bytes, rows=run.rows, source_stride=run.source_stride,
+                               destination_stride=run.destination_stride, useful_bytes=run.bytes, padding_bytes=0))
         metadata.append(dict(axis=dim, shape=shape, trains=trains))
         for iteration in range(iterations):
-            partition._attach(topology, 'masked', old)
+            partition._attach(topology, 'bytes', old)
             full = (torch.arange(math.prod(shape), dtype=torch.int64) + 53 * iteration).remainder_(256).to(torch.uint8).view(shape)
             expected_source = full.narrow(dim, sum(old[:rank]), old[rank]).contiguous()
             count = expected_source.numel()
@@ -168,8 +196,8 @@ def masked_migrations(group, sample, iterations):
             sources.append((source, expected_source))
             operand = partition.from_local(source, topology, [Shard(dim)], shape=shape,
                                            stride=torch.empty(shape, device='meta').stride())
-            partition._attach(topology, 'masked', new)
-            with patch.object(dist, 'all_to_all_single', side_effect=AssertionError('masked migration used whole-operand staging')), \
+            partition._attach(topology, 'bytes', new)
+            with patch.object(dist, 'all_to_all_single', side_effect=AssertionError('byte migration used whole-operand staging')), \
                     patch.object(partition, '_empty', side_effect=guarded_empty):
                 snapshots.append(partition.follow(operand)[0].to_local())
             references.append(full.narrow(dim, sum(new[:rank]), new[rank]).contiguous())
@@ -177,15 +205,81 @@ def masked_migrations(group, sample, iterations):
     failure(group)
     for i, (actual, expected) in enumerate(zip(snapshots, references)):
         if not torch.equal(actual.cpu(), expected):
-            raise AssertionError(('masked migration bytes', rank, i))
+            raise AssertionError(('exact migration bytes', rank, i))
     for source, expected in sources:
-        assert torch.equal(source.cpu(), expected), ('masked source overwritten', rank)
+        assert torch.equal(source.cpu(), expected), ('byte source overwritten', rank)
     for backing, count, poison in guards:
         actual = backing.cpu()
-        assert torch.all(actual[:17] == poison) and torch.all(actual[count + 17:] == poison), ('masked neighbor poison', rank)
-    return dict(case='masked-migration', rank=rank, calls=len(snapshots), exact=True, original_bits_preserved=True,
+        assert torch.all(actual[:17] == poison) and torch.all(actual[count + 17:] == poison), ('byte neighbor poison', rank)
+    return dict(case='byte-migration', rank=rank, calls=len(snapshots), exact=True, original_bits_preserved=True,
                 neighboring_poison_preserved=True, whole_operand_staging_collectives=0, receipt_collectives=0,
                 geometry=metadata, traffic=traffic(before, sample.read()))
+
+
+def indexed_span_writes(group, sample, iterations):
+    """Real Torch SpanWrites: original/final strided views and distinct fresh leases."""
+    from torch_mesh import _stream
+    from torch_mesh.backend import Call, WRITE
+
+    rank, size, shape = group.rank(), group.size(), (3, 5, 19)
+    count = math.prod(shape)
+    pairs = [(source, (source + 1) % size) for source in range(size)]
+    group.plan([[Call(WRITE, count, torch.uint8, root=source, destination=destination)
+                 for source, destination in pairs]])
+    prepared, originals, finals, relays = [], [], [], []
+    for iteration in range(iterations):
+        deliveries = []
+        for source, destination in pairs:
+            pattern = ((torch.arange(count, dtype=torch.int64) * 37 + source * 53 + iteration * 71)
+                       .remainder_(256).to(torch.uint8).view(shape))
+            if rank == source:
+                storage = torch_mesh.empty(3, 7, 64, dtype=torch.uint8).fill_(231)
+                view = storage[:, 1:6, 2:59:3]
+                view.copy_(pattern)
+                expected = torch.full(storage.shape, 231, dtype=torch.uint8)
+                expected[:, 1:6, 2:59:3].copy_(pattern)
+                originals.append((storage, expected))
+            elif rank == destination:
+                storage = torch_mesh.empty(5, 3, 49, dtype=torch.uint8)
+                view = storage[..., 3:41:2].permute(1, 0, 2)
+                # Only holes/borders are initialized. No outstanding producer
+                # store can overwrite an immediately preposted payload byte.
+                storage[..., :3].fill_(173)
+                storage[..., 4:40:2].fill_(173)
+                storage[..., 40:].fill_(173)
+                expected = torch.full(storage.shape, 173, dtype=torch.uint8)
+                expected[..., 3:41:2].permute(1, 0, 2).copy_(pattern)
+                finals.append((storage, expected))
+            else:
+                storage = torch_mesh.empty(count + 23, dtype=torch.uint8)
+                storage[:7].fill_(149)
+                storage[7 + count:].fill_(149)
+                view = storage.narrow(0, 7, count)
+                relays.append(storage)
+            deliveries.append((view, source, destination))
+        # This public binding always constructs _stream.SpanWrites; it cannot
+        # take affine_rows, padded gather, or a staging collective instead.
+        prepared.append(group.prepare_writes(deliveries))
+    _stream.publish_boundary()
+    before = sample.read()
+    for plan in prepared:
+        plan.execute()
+    torch.mps.synchronize()
+    failure(group)
+    for iteration, (storage, expected) in enumerate(finals):
+        assert torch.equal(storage.cpu(), expected), ('indexed final bytes/holes/borders', rank, iteration)
+    for iteration, (storage, expected) in enumerate(originals):
+        assert torch.equal(storage.cpu(), expected), ('indexed original bytes/holes/borders', rank, iteration)
+    for storage in relays:
+        actual = storage.cpu()
+        assert torch.all(actual[:7] == 149) and torch.all(actual[7 + count:] == 149), ('indexed relay guards', rank)
+    wires = payload_traffic(group, sample, before, count * iterations, count * iterations)
+    group.plan([])
+    return dict(case='indexed-span-writes', rank=rank, calls=iterations, logical_writes=size * iterations,
+                shape=shape, bytes_per_write=count, exact=True, original_bits_preserved=True,
+                neighboring_poison_preserved=True, payload_padding_bytes=0, torch_span_writes=True,
+                fresh_retained_generations=True, receipt_collectives=0, traffic=wires,
+                two_rank_exact_payload_verified=size == 2)
 
 
 def main():
@@ -198,8 +292,8 @@ def main():
     group = dist.group.WORLD
     if group.size() not in (2, 3):
         raise ValueError('this cluster check is for two or three ranks')
-    fabric = Fabric.of(group.comm)
-    fabric.install(group.comm, {f'route:{a}:{b}': [1] * len(paths) for (a, b), paths in fabric.paths.items()})
+    # Native communicator realization supplies every physical default route.
+    # No test-only route installation may conceal a missing production default.
     sample = QueueSample(group.comm, group.rank())
     cases = []
     for dtype in (torch.float16, torch.float32):
@@ -217,9 +311,12 @@ def main():
     moved = migrated(group, args.iterations // 3)
     cases.append(moved)
     print(json.dumps(moved), flush=True)
-    masked = masked_migrations(group, sample, args.iterations // 3)
-    cases.append(masked)
-    print(json.dumps(masked), flush=True)
+    exact = byte_migrations(group, sample, args.iterations // 3)
+    cases.append(exact)
+    print(json.dumps(exact), flush=True)
+    indexed = indexed_span_writes(group, sample, args.iterations // 3)
+    cases.append(indexed)
+    print(json.dumps(indexed), flush=True)
     print(json.dumps(dict(rank=group.rank(), cases=len(cases), calls=sum(case['calls'] for case in cases),
                           passed=True, scope='Correctness and physical-cable usage; diagnostic output snapshots, no bandwidth claim')), flush=True)
     # Control-only teardown, after every tested function and numerical check.

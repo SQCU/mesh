@@ -5,14 +5,15 @@ struct traced_entry {
   struct mesh_entry entry;
   struct ncclMeshWindow window;
   uint64_t previous_queue, previous_ns;
+  uint64_t *payload_prefix;
   uint32_t channel;
 };
 struct ncclMeshTrace {
   struct ncclComm *comm;
   pthread_t thread;
   _Atomic int stop;
-  int status, count, room;
-  uint64_t *cursor, *page, *queued, *peak;
+  int status, count, room, joined;
+  uint64_t *cursor, *units, *queued, *peak;
   uint64_t previous_ns, polls, max_gap_ns;
   struct traced_entry *entries;
 };
@@ -33,10 +34,20 @@ static void trace_read(struct ncclMeshTrace *trace) {
       record->entry = channel->view.list[direction][trace->cursor[slot] % MESH_STREAM_ENTRIES];
       record->channel = h;
       record->previous_ns = trace->previous_ns;
+      const uint64_t units = record->entry.units;
+      if (!units || units > SIZE_MAX / sizeof(uint64_t) - 1 || trace->units[slot] > UINT64_MAX - units) {
+        trace->status = EINVAL; break;
+      }
+      record->payload_prefix = malloc(((size_t)units + 1) * sizeof *record->payload_prefix);
+      if (!record->payload_prefix) { trace->status = ENOMEM; break; }
+      /* The compiler records lengths before presenting the entry. Its region
+         table may have retired before this observer's first sample. */
+      trace->status = mesh_byte_account_prefix(channel->payload + direction, trace->units[slot], units, record->payload_prefix);
+      if (trace->status) break;
       record->window = (struct ncclMeshWindow){.cable = channel->cable, .peer = (uint32_t)channel->peer, .direction = direction,
-        .wire = *channel->wire, .first = trace->page[slot], .last = trace->page[slot] + record->entry.pages,
-        .bytes = record->entry.pages * comm->page, .relay = !direction && record->entry.word != 0};
-      trace->page[slot] += record->entry.pages;
+        .wire = *channel->wire, .first = trace->units[slot], .last = trace->units[slot] + units,
+        .bytes = record->payload_prefix[units], .relay = !direction && record->entry.word != 0};
+      trace->units[slot] += units;
       trace->cursor[slot]++;
     }
     }
@@ -69,9 +80,9 @@ static void trace_read(struct ncclMeshTrace *trace) {
     const uint64_t sent = atomic_load_explicit(channel->view.sent, memory_order_acquire);
     if (ready == UINT64_MAX || sent == UINT64_MAX) { trace->status = ENOLINK; break; }
     const uint64_t eligible = ready > record->entry.base ? ready - record->entry.base : 0;
-    const uint64_t supplied = eligible < record->entry.pages ? eligible : record->entry.pages;
+    const uint64_t supplied = eligible < record->entry.units ? eligible : record->entry.units;
     const uint64_t done = sent > w->first ? sent - w->first : 0;
-    const uint64_t queued = supplied > done ? (supplied - done) * comm->page : 0;
+    const uint64_t queued = supplied > done ? record->payload_prefix[supplied] - record->payload_prefix[done] : 0;
     const uint64_t now = mesh_clock_ns();
     if (!w->start_hi_ns && (supplied || done)) {
       w->start_lo_ns = record->previous_ns;
@@ -116,42 +127,82 @@ ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out)
   atomic_init(&trace->stop, 0);
   trace->entries = calloc((size_t)room, sizeof *trace->entries);
   trace->cursor = calloc(2 * comm->count + 1, sizeof *trace->cursor);
-  trace->page = calloc(2 * comm->count + 1, sizeof *trace->page);
+  trace->units = calloc(2 * comm->count + 1, sizeof *trace->units);
   trace->queued = calloc(comm->count + 1, sizeof *trace->queued);
   trace->peak = calloc(comm->count + 1, sizeof *trace->peak);
-  if (!trace->entries || !trace->cursor || !trace->page || !trace->queued || !trace->peak) {
-    free(trace->entries); free(trace->cursor); free(trace->page); free(trace->queued); free(trace->peak); free(trace);
+  if (!trace->entries || !trace->cursor || !trace->units || !trace->queued || !trace->peak) {
+    free(trace->entries); free(trace->cursor); free(trace->units); free(trace->queued); free(trace->peak); free(trace);
     return fail(ncclSystemError, "out of memory");
   }
+  pthread_mutex_lock(&group_lock);
   for (uint32_t h = 0; h < comm->count; h++) {
+    comm->channels[h].trace_readers++;
     for (uint32_t direction = 0; direction < 2; direction++)
       trace->cursor[2 * h + direction] = atomic_load_explicit(comm->channels[h].view.presented[direction], memory_order_acquire);
-    trace->page[2 * h] = pages_to_word(comm->channels[h].out);
-    trace->page[2 * h + 1] = pages_to_word(comm->channels[h].in);
+    trace->units[2 * h] = comm->channels[h].out.n;
+    trace->units[2 * h + 1] = comm->channels[h].in.n;
   }
   trace->previous_ns = mesh_clock_ns();
   const int status = pthread_create(&trace->thread, NULL, trace_run, trace);
   if (status) {
-    free(trace->entries); free(trace->cursor); free(trace->page); free(trace->queued); free(trace->peak); free(trace);
+    for (uint32_t h = 0; h < comm->count; h++) comm->channels[h].trace_readers--;
+    pthread_mutex_unlock(&group_lock);
+    free(trace->entries); free(trace->cursor); free(trace->units); free(trace->queued); free(trace->peak); free(trace);
     return fail(ncclSystemError, "trace observer: %s", strerror(status));
   }
+  pthread_mutex_unlock(&group_lock);
   *out = trace;
+  return ncclSuccess;
+}
+
+static void trace_finish(ncclMeshTrace_t trace) {
+  if (trace->joined) return;
+  atomic_store_explicit(&trace->stop, 1, memory_order_release);
+  pthread_join(trace->thread, NULL);
+  trace->joined = 1;
+}
+
+ncclResult_t ncclMeshTraceSpanLengths(ncclMeshTrace_t trace, uint64_t *out, size_t room, size_t *count) {
+  if (!trace || !count) return fail(ncclInvalidArgument, "trace span storage");
+  trace_finish(trace);
+  size_t needed = 0;
+  for (int k = 0; k < trace->count; k++) {
+    if (trace->entries[k].entry.units > SIZE_MAX - needed) return fail(ncclSystemError, "trace span count overflow");
+    needed += trace->entries[k].entry.units;
+  }
+  *count = needed;
+  if (trace->status) return fail(ncclSystemError, "trace observer: %s", strerror(trace->status));
+  if (!out) return ncclSuccess;
+  if (room < needed) return fail(ncclInvalidArgument, "trace span storage has %zu values, requires %zu", room, needed);
+  size_t at = 0;
+  for (int k = 0; k < trace->count; k++) {
+    const struct traced_entry *record = trace->entries + k;
+    for (uint64_t u = 0; u < record->entry.units; u++)
+      out[at++] = record->payload_prefix[u + 1] - record->payload_prefix[u];
+  }
   return ncclSuccess;
 }
 
 ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out, int room, int *count,
                              struct ncclMeshTraceStats *stats) {
   if (!trace || !out || !count || !stats || room < trace->room) return fail(ncclInvalidArgument, "trace result storage");
-  atomic_store_explicit(&trace->stop, 1, memory_order_release);
-  pthread_join(trace->thread, NULL);
+  trace_finish(trace);
   *count = trace->count;
   *stats = (struct ncclMeshTraceStats){.polls = trace->polls, .max_gap_ns = trace->max_gap_ns};
   for (int k = 0; k < trace->count; k++) {
     out[k] = trace->entries[k].window;
     out[k].cable_peak_queue_bytes = trace->peak[trace->entries[k].channel];
     stats->incomplete += !out[k].end_hi_ns;
+    free(trace->entries[k].payload_prefix);
   }
   const int status = trace->status;
-  free(trace->entries); free(trace->cursor); free(trace->page); free(trace->queued); free(trace->peak); free(trace);
+  pthread_mutex_lock(&group_lock);
+  for (uint32_t h = 0; h < trace->comm->count; h++) {
+    struct channel *channel = trace->comm->channels + h;
+    channel->trace_readers--;
+    channel_account_prune(channel);
+  }
+  pthread_mutex_unlock(&group_lock);
+  free(trace->entries); free(trace->cursor); free(trace->units); free(trace->queued); free(trace->peak); free(trace);
   return status ? fail(ncclSystemError, "trace observer: %s", strerror(status)) : ncclSuccess;
 }

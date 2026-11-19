@@ -10,29 +10,23 @@ in tiles).  No one engine is fastest for every operation, the fastest set change
 at once slow each other (power, performance cores and memory shared), so an operation's final backend is resolved
 here, per operation and row count, as one joint decision: its units shared among the configured engines like a mesh
 dimension among ranks, each engine holding its shard of the weights resident, the shares running at once on unified
-memory, and rdma/allocate.py `Coupled` moving the allocation only to one whose calls measured faster (a search over
-allocations, each measured before any is chosen, the engines' slowing of each other in the calls they ran).  A share
-of nothing leaves that engine out: the resolution can be one engine.
+memory. All operation allocations are components of one WholeFunctionController
+vector, updated from measured completion of the entire enclosing graph. Primitive
+operation timings describe resource use; they are not separate objectives.
 
 An operation states how its shares combine, the mesh's crossing rule for its split axis (tools/mesh/programs.py
 points): `Linear` (y = x W^T + b) shares its output features, which concatenate; `FFN` (y = down(act(x Wg^T) *
 (x Wu^T)), Megatron's column-then-row split) shares its intermediate neurons, each engine giving a partial of the whole
 output, which sum.  Each engine lowers each kind its own way (the Neural Engine an FFN share as one fused graph).
 
-A call that prepares a share (copies a shard, compiles and loads a Neural Engine model) or first runs it at its row
-count (torch's MPS builds a graph a shape; Core ML's first predictions after a load are slow) is no evidence.  A call is
-measured by timing events on torch's stream (its span, and the GPU's share where others run beside it), each about 0.1
-ms of host time, so once a decision's allocation stands one call in `sample` (default 16) is measured, enough to see its
-time move.
+AOT realization prepares the next vector's shards between function executions.
+Timing events within operations are optional diagnostics. The controller receives
+the whole graph's elapsed time, including joins, projections and communication.
 
-Engines never time-share a physical unit.  Each states what it occupies (`Engine.occupies`: the GPU; the CPU's cores;
-the Neural Engine, and whatever units Core ML places a Neural Engine share's operations on, read from its compute
-plan through rdma/mesh-coreml.m mesh_coreml_placement), the engine's `occupies` option stating it in place of the
-engine's own (ane={'occupies': 'ane+gpu'}), and two engines occupying one unit never hold units of a decision together
-(allocate.Coupled.forbid), applied when the decision is made and when a share's load reads its placement, before any
-of its calls is measured: running both at once would time-share the unit (two APIs on the same arithmetic units,
-contending for registers and switching between them) rather than add capacity.  The rule is the hardware's, data of
-the engines, never a measurement's or a model's conclusion.
+Each engine states the resources it occupies (Engine.occupies). Overlapping
+resources are schedule metadata: the controller can retain a time-sharing
+allocation when it improves the complete function. Occupancy does not forbid
+otherwise legal allocations.
 
 Nothing is implicit.  An operation takes its engines as an operand (`Engines`, from the program: its engines' names
 and each one's options); without one it is torch's own operation on its input's device.  An engine the program names
@@ -51,7 +45,7 @@ in its time).
   pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128, 'block': 4096})
   ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
   y = ffn(x)                # x [..., H] on MPS: every configured engine its share of the neurons
-  engines.rebalance(pool)   # each (operation, rows)'s search on the calls since the last: its next allocation"""
+  engines.rebalance(pool, completed_function_observation)  # one objective for the entire graph"""
 import concurrent.futures
 import ctypes
 import hashlib
@@ -429,7 +423,7 @@ class Engines:
         self.names, self.window, self.sample = names, int(window), int(sample)
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
-        self.operations, self.decisions, self.evidence, self.solvers, self.last = [], {}, {}, {}, {}
+        self.operations, self.decisions, self.evidence, self.last = [], {}, {}, {}
         self.separated = {}
 
 
@@ -498,9 +492,8 @@ class Operation:
         first = {(engines[i].name, bounds[i], bounds[i + 1], rows) for i in held} - self.warm
         prepared = any(p for _, p in shards.values()) or bool(first)
         self.warm |= first
-        solver = self.engines.solvers.get(key)
         self.calls[key] = self.calls.get(key, 0) + 1
-        measured = not prepared and (solver is None or not solver.stands or self.calls[key] % self.engines.sample == 0)
+        measured = not prepared and self.calls[key] % self.engines.sample == 0
         alone = len(held) == 1 and not engines[held[0]].host_side
         if measured:
             span = (torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True))
@@ -547,15 +540,13 @@ class Operation:
         return y
 
     def _separate(self, key):
-        """No two engines occupying one physical unit (`Engine.occupies`, a Neural Engine share's from Core ML's
-        placement of its operations) hold units of this decision together: they would time-share it."""
+        """Record shared resources; time sharing is a measured feasible schedule."""
         engines = self.engines.engines
+        shared = self.engines.separated.setdefault(key, set())
         for i in range(len(engines)):
             for j in range(i + 1, len(engines)):
-                pair = (i, j)
-                if engines[i].occupies & engines[j].occupies and pair not in self.engines.separated.setdefault(key, set()):
-                    self.engines.separated[key].add(pair)
-                    self.engines.decisions[key]['parts'] = solver(self.engines, key).forbid(i, j)
+                if engines[i].occupies & engines[j].occupies:
+                    shared.add((i, j))
 
 
 class Linear(Operation):
@@ -588,39 +579,63 @@ class FFN(Operation):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
-def solver(engines, key):
-    """The search (allocate.Coupled) of decision `key` of `engines`, made at its first use."""
-    found = engines.solvers.get(key)
+def controller(engines, workload):
+    """All operation/shape decisions in one enclosing-function vector."""
+    from controller import WholeFunctionController
+    found = getattr(engines, 'controller', None)
+    decisions = {key: {k: d[k] for k in ('parts', 'grain', 'low', 'high')}
+                 for key, d in engines.decisions.items()}
     if found is None:
-        import allocate
-        d = engines.decisions[key]
-        found = engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'], window=engines.window)
+        found = engines.controller = WholeFunctionController(
+            decisions, workload=workload,
+            schedule={'shared_resources': {k: sorted(v) for k, v in engines.separated.items()}})
+    elif found.workload != workload or set(found.parts) != set(decisions):
+        raise ValueError('declare all engine operation shapes before timing one fixed whole function')
     return found
 
 
-def rebalance(engines):
-    """Each (operation, rows) decision's search (allocate.Coupled) on its calls since the last: each engine's share
-    times (the GPU's from its events) and the calls' spans on the GPU's timeline, the measure; the next allocation,
-    written into the operations.  {decision: parts}."""
-    torch.mps.synchronize()
-    out, engines.last = {}, {}
-    for key, d in engines.decisions.items():
+def prepare(engines):
+    """Realize every declared operation/shape's shards before the next function."""
+    for operation in engines.operations:
+        for key, decision in operation.decisions.items():
+            rows = int(key.rsplit('@', 1)[1])
+            start = 0
+            for engine, count in zip(engines.engines, decision['parts']):
+                if count:
+                    operation._shard(engine, start, start + count, rows)
+                start += count
+
+
+def rebalance(engines, observation):
+    """Move every engine decision from one actually completed whole function.
+
+    Caller supplies scope/function, complete, workload and seconds measured across
+    the entire graph (including projections, joins and communication). Primitive
+    events are diagnostics. No transport synchronization or per-operation policy
+    is inserted here.
+    """
+    if observation.get('scope') != 'function' or not observation.get('complete'):
+        raise ValueError('engine allocation requires completed whole-function evidence')
+    flow = controller(engines, observation['workload'])
+    engines.last = {}
+    for key in engines.decisions:
         calls = engines.evidence.pop(key, [])
-        search = solver(engines, key)
-        if not calls:
-            continue
         width = len(engines.engines)
         times, spans = [[] for _ in range(width)], []
         for marks, seconds, span in calls:
+            if not span[1].query():
+                continue
             whole = span[0].elapsed_time(span[1]) / 1e3
             for i, pair in marks.items():
                 times[i].append(whole if pair is span else pair[0].elapsed_time(pair[1]) / 1e3)
-            for i, s in seconds.items():
-                times[i].append(s)
+            for i, value in seconds.items():
+                times[i].append(value)
             spans.append(whole)
         engines.last[key] = {'ms': [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times],
-                             'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3)}
-        d['parts'] = search.observe(times, spans)
-        out[key] = list(d['parts'])
-    return out
-
+                             'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3) if spans else None}
+    next_ = flow.completed(observation['seconds'], proposal=observation.get('proposal'),
+                           engine_diagnostics=engines.last)
+    for key, parts in next_['parts'].items():
+        engines.decisions[key]['parts'] = list(parts)
+    prepare(engines)
+    return next_['parts']

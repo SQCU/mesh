@@ -25,11 +25,13 @@
    pages and nothing else (no keepalive, no spare, no dud of the bridge's own), page p of the stream's sequence over
    its pairing on its lane p mod 2, posted in that order (design/transport.md section 14).  134: a holding ends with
    nothing outstanding on its stream's lanes, or the stream is never live again in the pairing (a link none of whose
-   streams is live is lost and pairs again from 0); no communicator presents filler */
-#define MESH_VERSION 134u
+   streams is live is lost and pairs again from 0); no communicator presents filler. 135: each lane unit is an exact
+   compiler-declared byte extent; matching SEND/receive lengths and order are fixed by the shared plan. */
+#define MESH_VERSION 135u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 153u
+   before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
+   154 replaces row-range transport entries and row pins with immutable byte spans and interval pins. */
+#define MESH_LAYOUT 154u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -89,19 +91,34 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* design/pages-and-functions.md; design/transport.md section 14: an entry of a holding's send list or landing list: a
-   range of the holder's rows, `pages` of them from row `row` (each row a page: the range is the entry's block table,
-   each row's page wherever the holder's plan put it, fixed before its first call), and the count that governs them,
-   in pages: a send entry's page k is ready once the word at region offset `word` (0: the holding's `ready`) reads at
-   least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at least `base` (its
-   rows released by their reader: a page is written again only after release).  A page is a row's block (`block` arena
-   pages).  Every count of a holding is in pages and no page is named by a byte offset (`word` is a word's region
-   offset), so nothing in the transport can lie off a page */
-struct mesh_entry { uint64_t row,pages,word,base; };
-/* a count or index of pages (a holding's counts, an entry's `pages` and `base`, a page's place in a holding or an
-   entry) and a page-table row, each a type of its own so the compiler keeps them apart from each other, from bytes and
-   from a lane's units; one row is one page (mesh_row_after).  The region's words keep their storage: they are typed
-   where read and written (mesh_entry_row, mesh_pages_load) */
+/* Wire 135 / layout 154: an immutable table of resolved byte extents. Offsets
+   are relative to the region base; each span is one exact SEND/receive payload.
+   A span never crosses a registration extent. Full-page data uses this same
+   representation. The compiler jointly partitions both endpoints into equal
+   payload lengths in equal unit order; the bridge never pads or copies data. */
+#define MESH_DMA_EXTENT (UINT64_C(1)<<30)
+struct mesh_dma_span { uint64_t offset,bytes; };
+struct mesh_entry { uint64_t spans,units,word,base; };
+/* One progress-thread CPU read scope, independently of outstanding DMA. The
+   sequence never resets with a holding; odd or changed snapshots retain storage.
+   A zero byte count/word is quiescent. Fits previously unused stream padding. */
+struct mesh_cpu_pin { _Atomic uint64_t sequence,offset,bytes,word; };
+_Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");
+_Static_assert(sizeof(struct mesh_entry)==32,"mesh_entry ABI");
+/* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
+   A receive's optional word permits its first write at word >= base. The
+   immutable span table and its backing allocations outlive every future unit
+   and every posted DMA. `taken` does not release this table. */
+struct mesh_units { uint64_t n; };
+static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
+static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }
+static inline int mesh_units_lt(struct mesh_units a,struct mesh_units b){ return a.n<b.n; }
+static inline struct mesh_units mesh_units_load(const _Atomic uint64_t *word){ return (struct mesh_units){atomic_load_explicit(word,memory_order_acquire)}; }
+static inline void mesh_units_store(_Atomic uint64_t *word,struct mesh_units p){ atomic_store_explicit(word,p.n,memory_order_release); }
+#define MESH_UNITS_LOST ((struct mesh_units){UINT64_MAX})
+/* Allocation-page counts and page-table row IDs, separate from transport units.
+   Native arithmetic may still use page quantities; each realized transport
+   prefix counts exact span units, not allocation pages or byte lengths. */
 struct mesh_pages { uint64_t n; };
 struct mesh_row { uint64_t r; };
 static inline struct mesh_pages mesh_pages_add(struct mesh_pages a,struct mesh_pages b){ return (struct mesh_pages){a.n+b.n}; }
@@ -110,27 +127,39 @@ static inline struct mesh_pages mesh_pages_min(struct mesh_pages a,struct mesh_p
 static inline int mesh_pages_lt(struct mesh_pages a,struct mesh_pages b){ return a.n<b.n; }
 /* the row of page `i` of a range of rows from `row` */
 static inline struct mesh_row mesh_row_after(struct mesh_row row,struct mesh_pages i){ return (struct mesh_row){row.r+i.n}; }
-static inline struct mesh_row mesh_entry_row(const struct mesh_entry *e){ return (struct mesh_row){e->row}; }
-static inline struct mesh_pages mesh_entry_pages(const struct mesh_entry *e){ return (struct mesh_pages){e->pages}; }
-static inline struct mesh_pages mesh_entry_base(const struct mesh_entry *e){ return (struct mesh_pages){e->base}; }
 static inline struct mesh_pages mesh_pages_load(const _Atomic uint64_t *word){ return (struct mesh_pages){atomic_load_explicit(word,memory_order_acquire)}; }
 static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){ atomic_store_explicit(word,p.n,memory_order_release); }
 /* a holding's `sent` and `landed` once its link is lost */
 #define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
-/* design/transport.md section 14: a stream's two lanes one way over its pairing (0 its SENDs, 1 its receives), the
-   bridge's, on a line of its own: each lane's units posted, and completed (a SEND done, a receive landed); the stream's
-   pages posted that way are its two lanes' units posted together.  The row each unit names is slot u mod
-   MESH_LANE_UNITS of its lane's ring that way (struct mesh_stream `rows`, MESH_ABSENT where it names none), so the
-   units posted and not completed, the plan's window in flight (W(t), design/extents-and-liveness.md), name the rows a
-   lane still holds (mesh-dataflow.c mesh_pinned).  A unit's row and its lane's count are told before the unit is posted, and it is posted only while its
-   holding is still its holder's (its owner word not given, its client not retired: mesh-link.c holding_kept), so a
-   lease returned or retired after its holder gave or died is held by none but units posted before */
+/* Each posted unit retains its actual arena interval, independent of aliases
+   or allocation-row boundaries. A stable sequence identifies its ring slot;
+   a reader racing reuse conservatively retains the allocation. All pin fields
+   precede posted and the final holding check (mesh-link.c unit_told). */
 struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 #define MESH_LANE_UNITS 4096u
 _Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
-/* the slot of a stream's rings (`rows`, a region offset) holding the row of unit u of lane `lane` one way (`way`) */
-static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int lane,uint64_t u){
-  return (_Atomic uint32_t *)((char *)m+rows)+((uint64_t)(2*way+lane)*MESH_LANE_UNITS+u%MESH_LANE_UNITS);
+struct mesh_dma_pin { _Atomic uint64_t sequence,offset,bytes; };
+static inline struct mesh_dma_pin *mesh_unit_pin(void *m,uint64_t pins,int way,int lane,uint64_t u){
+  return (struct mesh_dma_pin *)((char *)m+pins)+((uint64_t)(2*way+lane)*MESH_LANE_UNITS+u%MESH_LANE_UNITS);
+}
+/* Sequential consistency also makes the multiword snapshot sound during ring
+   reuse: observing a new field places the final sequence read after its writer's
+   odd sequence. No allocator may accept a mixture from two slot generations. */
+static inline void mesh_pin_store(struct mesh_dma_pin *pin,uint64_t unit,struct mesh_dma_span span){
+  atomic_store_explicit(&pin->sequence,2*unit+1,memory_order_seq_cst);
+  atomic_store_explicit(&pin->offset,span.offset,memory_order_seq_cst);
+  atomic_store_explicit(&pin->bytes,span.bytes,memory_order_seq_cst);
+  atomic_store_explicit(&pin->sequence,2*unit+2,memory_order_seq_cst);
+}
+static inline int mesh_pin_load(const struct mesh_dma_pin *pin,uint64_t unit,struct mesh_dma_span *span){
+  if(unit>=(UINT64_MAX-1)/2)return 0;
+  const uint64_t sequence=atomic_load_explicit(&pin->sequence,memory_order_seq_cst);
+  if(sequence!=2*unit+2)return 0;
+  *span=(struct mesh_dma_span){atomic_load_explicit(&pin->offset,memory_order_seq_cst),atomic_load_explicit(&pin->bytes,memory_order_seq_cst)};
+  return atomic_load_explicit(&pin->sequence,memory_order_seq_cst)==sequence;
+}
+static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
+  return a.bytes && b.bytes && (a.offset<=b.offset?b.offset-a.offset<a.bytes:a.offset-b.offset<b.bytes);
 }
 /* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
    link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
@@ -139,11 +168,10 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    holding at once (nothing more of it posted), makes the holding's words new (every count 0) and stores 0 where nothing
    of it is outstanding (design/transport.md section 14, "A holding's end").  `posts`,
    the bridge's: each of the stream's two lanes' units over its pairing, each way, posted and completed, counted from 0
-   as the port's child makes the link's queue pairs, and `rows` (a region offset) their rings of the rows the units
-   name, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
+   as the port's child makes the link's queue pairs, and `rows` (a region offset, historical field name) their rings of physical byte intervals, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
    posts them, written as it opens the stream: a unit's buffer is the hardware's until it completes or the queue pair
    holding it is gone with that process (verbs), so the units outstanding count only while it lives
-   (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' entries' pages, and a holding ends with nothing of it
+   (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' declared byte spans, and a holding ends with nothing of it
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
    counts are equal whenever no holder holds it.  No communicator reads them; a client reads every stream's, and their
    rows and child, as it returns a lease (mesh-dataflow.c mesh_lease_return, mesh_pinned: a row a unit outstanding
@@ -153,7 +181,7 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    live for the rest of its pairing.  The holder presents its
    entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
    then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
-   bridge's, per list) is past it.  Three page counts over the holding, each in its list's order and all of it before:
+   bridge's, per list) is past it.  Three unit counts over the holding, each in its list's order and all of it before:
    `ready`, the holder's, of the send list produced; `sent`, the bridge's, of the send list whose SENDs have completed;
    `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  Its `wire` is
    one cable's stream's identity, made from its first lane's two queue pair numbers and the two ends' GIDs (mesh-link.c
@@ -165,6 +193,7 @@ struct mesh_stream {
   _Atomic uint64_t bandwidth,wire;
   _Alignas(64) _Atomic uint64_t owner;
   _Atomic uint64_t sends,lands;
+  struct mesh_cpu_pin metadata;
   _Alignas(64) _Atomic uint64_t ready;
   _Alignas(64) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];
@@ -173,6 +202,8 @@ struct mesh_stream {
   struct mesh_posts posts[2];
 };
 _Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");
+_Static_assert(offsetof(struct mesh_stream,metadata)==88 && offsetof(struct mesh_stream,ready)==128,
+               "CPU metadata pin consumes padding without moving stream ABI fields");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
@@ -234,6 +265,25 @@ static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_At
 /* design/transport.md */
 /* the arena occupancy bitmap is indexed by arena page and sized by arena pages: it is not a row plane */
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
+/* Config-time validation; no rounding, copying, or interpretation of row IDs.
+   An entry's immutable table itself must reside in the region's arena. */
+static inline int mesh_dma_span_valid(const struct hdr *m,struct mesh_dma_span span){
+  const uint64_t arena=(uint64_t)mesh_arena_pages(m)*m->pgsz;
+  if(!span.bytes || span.bytes>UINT32_MAX || span.offset<m->data_off)return 0;
+  const uint64_t at=span.offset-m->data_off;
+  return at<arena && span.bytes<=arena-at && span.bytes<=MESH_DMA_EXTENT-at%MESH_DMA_EXTENT;
+}
+static inline int mesh_entry_table_valid(const struct hdr *m,struct mesh_entry e){
+  return e.units && e.spans>=m->data_off && e.spans<=m->length && !(e.spans%_Alignof(struct mesh_dma_span)) &&
+    e.units<=(m->length-e.spans)/sizeof(struct mesh_dma_span) && e.base<UINT64_MAX-e.units &&
+    (!e.word || (!(e.word%_Alignof(_Atomic uint64_t)) && e.word<=m->length-sizeof(uint64_t)));
+}
+static inline int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
+  if(!mesh_entry_table_valid(m,e))return 0;
+  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+e.spans);
+  for(uint64_t i=0;i<e.units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
+  return 1;
+}
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }

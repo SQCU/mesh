@@ -1,10 +1,8 @@
 """The partial tensors' collectives (design/algorithm-sources.md#collective-movement, #collectivereduce_scatter): the
-verbs over a program's blocks, each block row one libnccl-mesh call over its members' communicator (rdma/NCCL.md), so
-a row crosses once its own blocks are ready (a program runs in row order).  A crossing's kind follows from how its
-consumer reads the blocks: read whole is MPI_Allgatherv (all_gather, broadcast: ncclMeshAllGatherV); moved to an owner
-is MPI_Alltoallv (all_to_all, scatter, gather); contracted is MPI_Reduce_scatter (reduce_scatter, reduce:
-ncclMeshReduceScatterV) or the all-reduce, by SUM, MAX or MIN; a softmax over a split is the log-sum-exp merge of its
-partials, PARTIALS (the reduction operator ncclMeshRedOpCreatePartials over rows of [m, l, O]).  Any other associative combine is a supplied
+verbs over a program's blocks, each block row one declared group on the full physical communicator. Movement
+binds original and final strided views to exact indexed native WRITEs. Reductions bind original contiguous
+fragments to native reductions, by SUM, MAX or MIN; a softmax over a split uses the native log-sum-exp merge of
+partials, PARTIALS (ncclMeshRedOpCreatePartials over complete rows of [m, l, O]). Any other associative combine is a supplied
 kernel declaring `combine` (Swift's `using combine:`): the terms moved to their owner by one all-to-all and combined
 there by a tree of its calls.  Every member records every verb (the program is SPMD); `peers` and `owners` are ranks
 of the program, `owners` each block's index to its owner."""
@@ -23,16 +21,6 @@ send = recv = Program.copy
 recv_like = Program.replicate
 
 
-# design/algorithm-sources.md#collectivereduce_scatter
-def _identity(op, dtype):
-    if op == SUM:
-        return 0
-    if dtype.is_floating_point:
-        return float('-inf') if op == MAX else float('inf')
-    info = torch.iinfo(dtype)
-    return info.min if op == MAX else info.max
-
-
 # design/algorithm-sources.md#collective-movement
 def _rows(indices):
     rows = {}
@@ -46,37 +34,72 @@ def _record(program, kind, members, roles, run, queue):
     members = tuple(sorted(set(members)))
     refs = [ref for role in roles.values() for refs in role for ref in refs]
     if len(members) > 1 and refs:
-        program._record(kind, members, min(ref.origin[0] for ref in refs), roles, run, queue=queue, crossing=True,
-                        members=members)
-
-
-# design/algorithm-sources.md#collective-movement
-def _numel(refs):
-    return sum(ref.rows * ref.columns for ref in refs)
+        physical = tuple(range(program.size))
+        program._record(kind, physical, min(ref.origin[0] for ref in refs), roles, run, queue=queue, crossing=True,
+                        members=physical, participants=members)
 
 
 # design/algorithm-sources.md#collective-movement
 def _buffer(program, dtype, numel):
-    return _native.allocate(numel, dtype, program.device, program.size > 1)
+    return _native.allocate(numel, dtype, program.device, program.size > 1)[:numel]
 
 
-# design/algorithm-sources.md#collective-movement
-def _pieces(buffer, refs):
-    sizes = [ref.rows * ref.columns for ref in refs]
-    return zip(refs, buffer[:sum(sizes)].split(sizes))
+def _alias_fragments(program, task, refs):
+    """AOT union cuts, each interval aliasing contiguous original operand bytes."""
+    runs, cursor = [], 0
+    for ref in refs:
+        # Ref layout is metadata; excluded ranks do not allocate these backings.
+        if ref.column_stride == 1 and ref.row_stride == ref.columns:
+            runs.append((cursor, cursor + ref.rows * ref.columns, ref, ref.offset))
+            cursor += ref.rows * ref.columns
+        else:
+            for row in range(ref.rows):
+                width = ref.columns if ref.column_stride == 1 else 1
+                for column in range(0, ref.columns, width):
+                    start = ref.offset + row * ref.row_stride + column * ref.column_stride
+                    runs.append((cursor, cursor + width, ref, start))
+                    cursor += width
+    cuts = program._world.union_cuts(task.index, [0, cursor, *(end for _, end, _, _ in runs)])
+    pieces, index = [], 0
+    for first, last in zip(cuts, cuts[1:]):
+        while runs[index][1] <= first:
+            index += 1
+        lo, hi, ref, offset = runs[index]
+        if last > hi:
+            raise ValueError('common fragment crosses a local contiguous alias')
+        pieces.append((ref, offset + first - lo, last - first))
+    return pieces
 
 
-# design/algorithm-sources.md#collective-movement
-def _pack(buffer, refs):
-    for ref, piece in _pieces(buffer, refs):
-        piece.view(ref.shape).copy_(ref.tensor)
-    return buffer
+def _alias(ref, offset, count):
+    return ref.backing.flat().narrow(0, offset, count)
 
 
-# design/algorithm-sources.md#collective-movement
-def _unpack(buffer, refs):
-    for ref, piece in _pieces(buffer, refs):
-        ref.tensor.copy_(piece.view(ref.shape))
+def _issue_fragments(program, task):
+    bindings, group = task.prepared
+    return (_native.fragments(bindings, group),)
+
+
+def _prepare_all_gather(program, task):
+    _, segments = task.run
+    moves = [(ref, source, ref, destination) for source, segment in enumerate(segments) for ref in segment
+             for destination in task.participants if destination != source]
+    return _prepare_moves(program, task, moves)
+
+
+def _prepare_moves(program, task, moves):
+    """Exact original/final views; distinct compact forwarding leases per write."""
+    deliveries, calls = [], []
+    for source, a, destination, b in moves:
+        count = source.rows * source.columns * source.dtype.itemsize
+        if count != destination.rows * destination.columns * destination.dtype.itemsize:
+            raise ValueError('Program movement requires equal logical byte extents')
+        view = source.tensor if program.rank == a else destination.tensor if program.rank == b else _buffer(program, torch.uint8, count)
+        deliveries.append((view, a, b))
+        calls.append(_native.call('WRITE', count, torch.uint8, root=a, destination=b))
+    group = program._world.of(task.queue, task.members)
+    prepared = _native.prepare_writes(deliveries, group)
+    return prepared, calls
 
 
 # design/algorithm-sources.md#collective-movement
@@ -88,24 +111,19 @@ def _segments(members, row, value, owners):
 def all_gather(program, value, *, peers, owners, queue=0):
     members = tuple(sorted(set(peers) | set(owners.values())))
     for row in _rows(owners):
-        segments = _segments(members, row, value, owners)
+        segments = _segments(range(program.size), row, value, owners)
         roles = {m: (mine, tuple(ref for other in segments if other is not mine for ref in other), ())
-                 for m, mine in zip(members, segments)}
+                 for m, mine in enumerate(segments) if m in members}
         _record(program, 'all_gather', members, roles, (_issue_all_gather, segments), queue)
     return value
 
 
 # design/algorithm-sources.md#collective-movement
 def _issue_all_gather(program, task):
-    _, segments = task.run
-    me = task.members.index(program.rank)
-    whole = _buffer(program, next(ref.dtype for refs in segments for ref in refs), sum(map(_numel, segments)))
-    blocks = list(whole.split([_numel(refs) for refs in segments]))
-    work = _native.all_gather(blocks, _pack(blocks[me], segments[me]), program._world.of(task.queue, task.members))
-    for at, (block, refs) in enumerate(zip(blocks, segments)):
-        if at != me:
-            _unpack(block, refs)
-    return (work,)
+    return (task.prepared[0].execute(async_op=True),)
+
+
+_issue_all_gather.prepare = _prepare_all_gather
 
 
 # design/algorithm-sources.md#collective-movement
@@ -115,8 +133,7 @@ def broadcast(program, value, *, root, peers, queue=0):
 
 # design/algorithm-sources.md#collective-movement
 def _exchange(program, rows, queue):
-    """Each row's moves (source, sender, destination, receiver) as one MPI_Alltoallv among their members: what a
-    member sends each other one, in the moves' order, received in the same order."""
+    """One ordered group of exact indexed WRITEs per row, with every rank available to forward."""
     for moves in rows:
         moves = tuple(move for move in moves if move[1] != move[3])
         for source, _, destination, _ in moves:
@@ -129,17 +146,15 @@ def _exchange(program, rows, queue):
 
 # design/algorithm-sources.md#collective-movement
 def _issue_exchange(program, task):
+    return (task.prepared[0].execute(async_op=True),)
+
+
+def _prepare_exchange(program, task):
     _, moves = task.run
-    me = program.rank
-    sends = [[s for s, a, _, b in moves if a == me and b == m] for m in task.members]
-    receives = [[d for _, a, d, b in moves if b == me and a == m] for m in task.members]
-    dtype = moves[0][0].dtype
-    sent = _pack(_buffer(program, dtype, sum(map(_numel, sends))), [ref for refs in sends for ref in refs])
-    received = _buffer(program, dtype, sum(map(_numel, receives)))
-    work = _native.all_to_all(received, sent, [_numel(refs) for refs in receives], [_numel(refs) for refs in sends],
-                              program._world.of(task.queue, task.members))
-    _unpack(received, [ref for refs in receives for ref in refs])
-    return (work,)
+    return _prepare_moves(program, task, moves)
+
+
+_issue_exchange.prepare = _prepare_exchange
 
 
 # design/algorithm-sources.md#collective-movement
@@ -165,12 +180,14 @@ def reduce_scatter(program, value, *, peers, owners, op=SUM, queue=0):
         return _combine(program, value, peers, owners, op, queue)
     members = tuple(sorted(peers | set(owners.values())))
     for row in _rows(owners):
-        segments = _segments(members, row, value, owners)
+        segments = _segments(range(program.size), row, value, owners)
         roles = {}
-        for m, mine in zip(members, segments):
+        for m, mine in enumerate(segments):
+            if m not in members:
+                continue
             others = tuple(ref for other in segments if other is not mine for ref in other)
             roles[m] = (others, (), mine) if m in peers else ((), mine, ())
-        run = (_issue_partials, tuple(value[i] for i in row), tuple(members.index(owners[i]) for i in row), peers) \
+        run = (_issue_partials, tuple(value[i] for i in row), tuple(owners[i] for i in row), peers) \
             if op == PARTIALS else (_issue_reduce_scatter, segments, op, peers)
         _record(program, 'reduce', members, roles, run, queue)
     return value
@@ -178,35 +195,63 @@ def reduce_scatter(program, value, *, peers, owners, op=SUM, queue=0):
 
 # design/algorithm-sources.md#collectivereduce_scatter
 def _issue_reduce_scatter(program, task):
+    return _issue_fragments(program, task)
+
+
+def _prepare_reduce_scatter(program, task):
     _, segments, op, peers = task.run
-    me = task.members.index(program.rank)
-    refs = [ref for row in segments for ref in row]
-    sizes = [_numel(row) for row in segments]
-    terms = _buffer(program, refs[0].dtype, sum(sizes))
-    if program.rank in peers:
-        _pack(terms, refs)
-    else:
-        terms.fill_(_identity(op, refs[0].dtype))
-    out = _buffer(program, refs[0].dtype, sizes[me])
-    work = _native.reduce_scatter(out, list(terms.split(sizes)), op, program._world.of(task.queue, task.members))
-    _unpack(out, segments[me])
-    return (work,)
+    refs = tuple(ref for segment in segments for ref in segment)
+    owners = {id(ref): rank for rank, segment in enumerate(segments) for ref in segment}
+    empty = _buffer(program, refs[0].dtype, 0)
+    bindings = []
+    for ref, offset, count in _alias_fragments(program, task, refs):
+        owner = owners[id(ref)]
+        alias = _alias(ref, offset, count) if program.rank in peers or program.rank == owner else empty
+        call = _native.call('REDUCE', count, ref.dtype, op=op, root=owner,
+                            contributors=tuple(peers), recipients=(owner,))
+        bindings.append((call, alias if program.rank in peers else empty,
+                         alias if program.rank == owner else empty))
+    return bindings, program._world.of(task.queue, task.members)
+
+
+_issue_reduce_scatter.prepare = _prepare_reduce_scatter
 
 
 # design/algorithm-sources.md#collectivereduce_scatter
 def _issue_partials(program, task):
+    return _issue_fragments(program, task)
+
+
+def _prepare_partials(program, task):
+    """Native PARTIALS records have contiguous float32 fields [m,l,O].
+
+    Records may be separated by arbitrary row gaps or backing allocations.
+    Configuration fragments only between complete records; it never packs a
+    transposed/strided field list or emulates the numerical merge in Python.
+    """
     _, refs, roots, peers = task.run
-    me, works = task.members.index(program.rank), []
-    for ref, root in zip(refs, roots):
-        whole = _buffer(program, ref.dtype, ref.rows * ref.columns)
-        if program.rank in peers:
-            _pack(whole, (ref,))
-        else:
-            whole.zero_()
-        works.append(_native.partials(whole.view(ref.shape), root, program._world.of(task.queue, task.members)))
-        if root in (None, me):
-            _unpack(whole, (ref,))
-    return tuple(works)
+    for ref in refs:
+        if (ref.dtype != torch.float32 or ref.columns < 3 or ref.column_stride != 1
+                or ref.rows > 1 and ref.row_stride < ref.columns):
+            raise ValueError('PARTIALS requires nonoverlapping records of contiguous float32 [m,l,O] fields')
+    owners = {id(ref): root for ref, root in zip(refs, roots)}
+    group = program._world.of(task.queue, task.members)
+    backend = group._get_backend(torch.device(program.device))
+    empty, bindings = _buffer(program, refs[0].dtype, 0), []
+    for ref, offset, count in _alias_fragments(program, task, refs):
+        if (offset - ref.offset) % max(ref.row_stride, ref.columns) % ref.columns or count % ref.columns:
+            raise ValueError('PARTIALS common fragment must contain complete typed records')
+        root = owners[id(ref)]
+        receives = program.rank in task.participants if root is None else program.rank == root
+        alias = _alias(ref, offset, count) if program.rank in peers or receives else empty
+        call = _native.call('ALLREDUCE' if root is None else 'REDUCE', count, ref.dtype,
+                            op=backend.partials_operator(ref.columns), root=0 if root is None else root,
+                            contributors=tuple(peers), recipients=task.participants if root is None else (root,))
+        bindings.append((call, alias if program.rank in peers else empty, alias if receives else empty))
+    return bindings, group
+
+
+_issue_partials.prepare = _prepare_partials
 
 
 # design/algorithm-sources.md#collectivereduce_scatter
@@ -254,11 +299,37 @@ def all_reduce(program, value, *, peers, owners=None, op=SUM, queue=0):
 
 # design/algorithm-sources.md#collectivereduce_scatter
 def _issue_all_reduce(program, task):
+    return _issue_fragments(program, task)
+
+
+def _prepare_all_reduce(program, task):
     _, refs, op = task.run
-    whole = _pack(_buffer(program, refs[0].dtype, _numel(refs)), refs)
-    work = _native.all_reduce(whole, op, program._world.of(task.queue, task.members))
-    _unpack(whole, refs)
-    return (work,)
+    empty = _buffer(program, refs[0].dtype, 0)
+    bindings = []
+    for ref, offset, count in _alias_fragments(program, task, refs):
+        alias = _alias(ref, offset, count) if program.rank in task.participants else empty
+        call = _native.call('ALLREDUCE', count, ref.dtype, op=op,
+                            contributors=task.participants, recipients=task.participants)
+        bindings.append((call, alias, alias))
+    return bindings, program._world.of(task.queue, task.members)
+
+
+_issue_all_reduce.prepare = _prepare_all_reduce
+
+
+def _declaration(task):
+    """The same bound counts/operators execution passes to the native library."""
+    issue = task.run[0]
+    if issue in (_issue_all_gather, _issue_exchange):
+        return [task.prepared[1]]
+    if issue in (_issue_reduce_scatter, _issue_all_reduce, _issue_partials):
+        bindings, _ = task.prepared
+        return [[call for call, _, _ in bindings]]
+    raise TypeError('unknown Program collective declaration')
+
+
+for _issue in (_issue_all_gather, _issue_exchange, _issue_reduce_scatter, _issue_all_reduce, _issue_partials):
+    _issue.declaration = _declaration
 
 
 sum_scatter = reduce_scatter

@@ -14,12 +14,15 @@ a step queued behind the GPU makes none.  The output and the gradients of query,
 import math
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 _FREE, _MASKS = {}, {}
 
 
 def _lease(shape, like, dtype=None):
-    free = _FREE.get((tuple(shape), dtype or like.dtype))
+    if isinstance(like, FakeTensor):
+        return like.new_empty(tuple(shape), dtype=dtype or like.dtype)
+    free = _FREE.get((tuple(shape), dtype or like.dtype, like.device))
     if free:
         return free.pop()
     from . import empty
@@ -28,7 +31,8 @@ def _lease(shape, like, dtype=None):
 
 def _returned(*leases):
     for lease in leases:
-        _FREE.setdefault((tuple(lease.shape), lease.dtype), []).append(lease)
+        if not isinstance(lease, FakeTensor):
+            _FREE.setdefault((tuple(lease.shape), lease.dtype, lease.device), []).append(lease)
 
 
 def _scores(query, key, value, is_causal, scale):
@@ -39,9 +43,14 @@ def _scores(query, key, value, is_causal, scale):
     torch.baddbmm(flat, query.reshape(-1, L, query.size(-1)), key.reshape(-1, S, key.size(-1)).transpose(1, 2), beta=0,
                   alpha=scale, out=flat)
     if is_causal:
-        if (L, S) not in _MASKS:
-            _MASKS[L, S] = _lease((L, S), query, torch.bool).fill_(True).triu_(1)
-        scores.masked_fill_(_MASKS[L, S], -math.inf)
+        if isinstance(query, FakeTensor):
+            mask = query.new_empty((L, S), dtype=torch.bool).fill_(True).triu_(1)
+        else:
+            key = L, S, query.device
+            if key not in _MASKS:
+                _MASKS[key] = _lease((L, S), query, torch.bool).fill_(True).triu_(1)
+            mask = _MASKS[key]
+        scores.masked_fill_(mask, -math.inf)
     torch.ops.aten._softmax.out(scores, -1, False, out=scores)
     return torch.matmul(scores, value), scores
 

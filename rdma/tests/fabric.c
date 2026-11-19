@@ -1,6 +1,7 @@
 #include "mesh-plan.h"
 #include <assert.h>
 #include <errno.h>
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -80,7 +81,7 @@ static void refinement(void){
   puts("relay refinement: latest COPY intervals, overlapping writes, ragged conservation, unchanged wire pages passed");
 }
 
-static void point_layout(void){
+static void group_layout(void){
   const struct mesh_step send[]={
     {MESH_STEP_SEND,1,0,0,0,{0,4,4096}},
     {MESH_STEP_SEND,1,0,0,4096,{0,4,8192}},
@@ -92,7 +93,7 @@ static void point_layout(void){
   const uint32_t counts[]={3,3},last_counts[]={1,1};
   const struct mesh_step *steps[]={send,recv},*last[]={send+3,recv+3};
   const struct mesh_group_call calls[]={
-    {MESH_GROUP_POINT,0,counts,steps},{MESH_GROUP_POINT,0,last_counts,last}
+    {counts,steps},{last_counts,last}
   };
   const struct mesh_group group={2,2,calls,16384};
   struct mesh_place scratch[4];
@@ -107,7 +108,7 @@ static void point_layout(void){
       assert(made[r][k].place.entry==9+k);
     }
   }
-  puts("point layout: every physical stripe retained in both directions and across calls passed");
+  puts("group layout: every physical stripe retained in declared call order passed");
 }
 
 static void writes(void){
@@ -193,17 +194,36 @@ int main(void){
       at+=a[i].step.piece.elements;
     }
     assert(at==4096+elements);
-    if(elements>8192)assert(n==3);
+    if(elements>=7*4096)assert(n==3);
   }
   struct mesh_transfer out[5];
   const struct mesh_step send={MESH_STEP_SEND,1,0,0,0,{0,4,4096*703}};
   assert(mesh_fabric_stripe(&f,0,&send,16384,NULL,out,5)==3);
-  assert(out[0].step.piece.elements==4096*101);
+  assert(out[0].step.piece.elements==4096*100);
   assert(out[1].step.piece.elements==4096*201);
-  assert(out[2].step.piece.elements==4096*401);
+  assert(out[2].step.piece.elements==4096*402);
   assert(mesh_fabric_stripe(&f,0,&send,16384,NULL,out,2)==-ENOSPC);
+  assert(mesh_fabric_stripe(&f,0,&send,16384,NULL,NULL,0)==3);
+  /* Configuration weights are total flow, including short transactions. A
+     compulsory page on a much slower cable would override that operand. */
+  const double short_weights[]={1000,1,1,1,1};
+  struct mesh_step short_send=send;short_send.piece.elements=3*4096;
+  assert(mesh_fabric_stripe(&f,0,&short_send,16384,short_weights,out,5)==1);
+  assert(out[0].cable==0 && out[0].step.piece.elements==3*4096);
+  /* The common log-weight compiler handles finite weights whose raw sum would
+     overflow, and preserves the receive's local reduction/placement typing. */
+  const double huge_weights[]={DBL_MAX,DBL_MAX,DBL_MAX,1,1};
+  const struct mesh_step reduce={MESH_STEP_REDUCE,0,19,7,31,{11,4,3*4096+17}};
+  assert(mesh_fabric_stripe(&f,1,&reduce,16384,huge_weights,out,5)==3);
+  uint64_t covered=0;
+  for(unsigned k=0;k<3;k++){
+    assert(out[k].step.op==MESH_STEP_REDUCE && out[k].step.peer==0 && out[k].step.round==19 && out[k].step.buffer==7);
+    assert(out[k].step.first==31+covered && out[k].step.piece.type==11);
+    covered+=out[k].step.piece.elements;
+  }
+  assert(covered==reduce.piece.elements);
   puts("physical fabric: reciprocal schedules, ragged conservation, all cables, unequal capacities passed");
   writes();
   refinement();
-  point_layout();
+  group_layout();
 }

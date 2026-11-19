@@ -30,7 +30,7 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
    stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 /* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
-   lists (0 the send list, 1 the landing list) and their counts presented and taken, and its three page counts; 0,
+   lists (0 the send list, 1 the landing list) and their counts presented and taken, and its three contiguous unit counts; 0,
    EINVAL, EPERM where the client does not hold it, or ENOLINK */
 struct mesh_stream_view {
   struct mesh_entry *list[2];
@@ -38,8 +38,7 @@ struct mesh_stream_view {
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
 /* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list
-   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL where its rows leave the
-   page table, EAGAIN where the list's slot is not yet taken
+   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL for an invalid immutable span table, byte extent or publication word, EAGAIN where the list's slot is not yet taken
    (MESH_STREAM_ENTRIES presented and not taken: present it again), EPERM, or ENOLINK */
 int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
 #endif

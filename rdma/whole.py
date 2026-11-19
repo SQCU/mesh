@@ -58,13 +58,12 @@ def delay_observations(cables, ranks, offsets):
     nodes = sorted(r['rank'] for r in ranks)
     labels = [f'node:{r}' for r in nodes] + [f'link:{e}' for e in range(2 * len(cables))] + ['function']
     matches = matched_transfers(ranks)
-    design, values, variances, clock, groups, page_sizes = [], [], [], [], [], set()
+    design, values, variances, clock, groups, page_sizes, first_spans = [], [], [], [], [], set(), []
+    explicit_spans = any('unit_bytes' in m['send'] or m['send'].get('unit_kind') == 'byte_extent' for m in matches)
     for match in matches:
         source, destination, sent = match['source'], match['destination'], match['send']
-        pages = sent['last'] - sent['first']
-        if sent['bytes'] % pages:
-            raise ValueError('delay inference requires an integral physical page size')
-        page_sizes.add(sent['bytes'] // pages)
+        lengths = match['unit_bytes']
+        page_sizes.update(lengths)
         cable = cables[sent['cable']]
         if source == destination or set(cable['nodes']) != {source, destination}:
             raise ValueError('delay observation endpoints disagree with the physical cable')
@@ -74,7 +73,8 @@ def delay_observations(cables, ranks, offsets):
         capacity = cable['bits_per_second'] / 8
         start = (sent['start_lo_ns'] + sent['start_hi_ns']) / 2 + sum(offsets[str(source)]) / 2
         arrival = sum(match['arrival_ns']) / 2 + sum(offsets[str(destination)]) / 2
-        values.append((arrival - start) * 1e-9 - sent['bytes'] / pages / capacity)
+        values.append((arrival - start) * 1e-9 - lengths[0] / capacity)
+        first_spans.append(lengths[0])
         variances.append(((sent['start_hi_ns'] - sent['start_lo_ns']) ** 2
                           + (match['arrival_ns'][1] - match['arrival_ns'][0]) ** 2) * 1e-18 / 12)
         row, clocks = [0.0] * len(labels), [0.0] * len(nodes)
@@ -82,17 +82,22 @@ def delay_observations(cables, ranks, offsets):
         row[len(nodes) + arc] = row[-1] = 1
         clocks[nodes.index(source)], clocks[nodes.index(destination)] = -1, 1
         design.append(row); clock.append(clocks); groups.append(f'link:{arc}')
-    if not design or len(page_sizes) != 1:
+    if not design or (not explicit_spans and len(page_sizes) != 1):
         raise ValueError('delay inference requires a complete set of observed transfers')
     receive_count = sum(w['direction'] == 1 for rank in ranks for w in rank['windows'])
-    return {'labels': labels, 'design': design, 'seconds': values, 'variance': variances,
+    result = {'labels': labels, 'design': design, 'seconds': values, 'variance': variances,
             'clock_design': clock, 'clock_variance': [(offsets[str(r)][1] - offsets[str(r)][0]) ** 2 * 1e-18 / 12 for r in nodes],
-            'groups': groups, 'page_bytes': page_sizes.pop(),
+            'groups': groups,
             'coverage': {'send_entries': len(matches), 'receive_entries': receive_count,
                          'wire_bytes': sum(match['send']['bytes'] for match in matches),
                          'observed_shared_first_boundaries': len(design),
                          'send_entries_without_destination_first_observation': len(matches) - len(design),
                          'receive_entries_without_source_first_observation': receive_count - len(design)}}
+    if explicit_spans:
+        result.update(unit_kind='byte_extent', first_span_bytes=first_spans)
+    else:
+        result['page_bytes'] = page_sizes.pop()
+    return result
 
 
 class DelayPosterior:
@@ -208,13 +213,25 @@ def pipeline_delay_prior(model, posterior, fractions):
     for e, (source, destination) in enumerate(model['directed_nodes']):
         delay.append(sum(mean[labels.index(label)] for label in
                          (f'node:{source}', f'node:{destination}', f'link:{e}', 'function')))
-    page = model.get('page_bytes', 0)
     for k, (name, p) in enumerate(columns):
         prefix = 0.0
-        for e in model['paths'][name]['arcs'][p]:
+        spec = model['paths'][name]
+        arcs = spec['arcs'][p]
+        if 'first_span_bytes' in spec or 'first_span_service_upper_bound_bytes' in spec:
+            # A declared service upper bound is a conservative model prior.
+            # Observed delay residuals always subtract actual trace lengths.
+            key = 'first_span_bytes' if 'first_span_bytes' in spec else 'first_span_service_upper_bound_bytes'
+            sizes = spec[key][p]
+            if len(sizes) != len(arcs) or any(not math.isfinite(n) or n <= 0 for n in sizes):
+                raise ValueError('routing first-span lengths must describe every path arc')
+        elif model.get('unit_kind') == 'byte_extent':
+            raise ValueError('byte-extent routing requires compiled first-span lengths')
+        else:
+            sizes = [model.get('page_bytes', 0)] * len(arcs)
+        for e, span_bytes in zip(arcs, sizes):
             load[e, k] = model['paths'][name]['bytes']
             arrival[e, k] = load[e, k] * (prefix + delay[e])
-            prefix += delay[e] + page / model['capacities'][e]
+            prefix += delay[e] + span_bytes / model['capacities'][e]
     bytes_on_edge, weighted_arrival = load @ fractions, arrival @ fractions
     offset = np.divide(weighted_arrival, bytes_on_edge, out=np.zeros(size), where=bytes_on_edge > 0)
     derivative = np.divide(arrival - offset[:, None] * load, bytes_on_edge[:, None],
@@ -297,6 +314,7 @@ class FunctionFlow:
         self.delay_model, self.delay_posterior = None, None
         self.serial, self.round, self.workload = 0, 0, None
         self.samples, self.history = [], []
+        self.calibration_parts = {name: list(spec['parts']) for name, spec in self.decisions.items()}
         for name, spec in self.decisions.items():
             parts = list(map(float, spec['parts']))
             total = sum(parts)
@@ -306,6 +324,16 @@ class FunctionFlow:
             if not all(lo <= v <= hi for v, lo, hi in zip(parts, spec['low'], spec['high'])):
                 raise ValueError('initial vector is outside its simplex')
             fraction = [(v - lo) / (hi - lo) if hi > lo else 0.5 for v, lo, hi in zip(parts, spec['low'], spec['high'])]
+            quantum = spec.get('quantum', spec['grain'])
+            quantum = [quantum] * len(parts) if isinstance(quantum, (float, int)) else quantum
+            if len(quantum) != len(parts) or any(not math.isfinite(q) or q < 0 for q in quantum):
+                raise ValueError('coordinate quantum must be finite, nonnegative and match its parts')
+            # A quantized boundary must remain observable from both perturbation
+            # signs. This seeds the latent coordinate at half a declared quantum;
+            # it reserves no work and imposes no minimum physical allocation.
+            fraction = [min(.25, q / (2 * (hi - lo))) if v == 0 and q and hi > lo else
+                        1 - min(.25, q / (2 * (hi - lo))) if v == 1 and q and hi > lo else v
+                        for v, q, lo, hi in zip(fraction, quantum, spec['low'], spec['high'])]
             self.vector[name] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fraction]
             self.momentum[name] = [0.0] * len(parts)
             self.energy[name] = [0.0] * len(parts)
@@ -368,6 +396,8 @@ class FunctionFlow:
                 release = [t + b * (new - old) / previous.get('stages', 1) for t, b, new, old in
                            zip(release, self.compute_model['slopes'], parts['compute'], previous['parts'])]
             release = [t - min(release) for t in release]
+        if not explore and self.serial == 0 and hasattr(self, 'calibration_parts'):
+            parts = copy.deepcopy(self.calibration_parts)
         return {'id': self.serial, 'parts': parts, 'continuous': continuous, 'phase': 'finite_difference' if explore else 'centre',
                 'producer_seconds': release,
                 'offset': sign * self.perturbation / (self.round + 1) ** 0.101, 'round': self.round}
@@ -377,7 +407,7 @@ class FunctionFlow:
         return self.ask()['parts']
 
     def observe(self, observation):
-        expected = self.ask()
+        expected = self.ask(explore=observation.get('phase') != 'centre')
         if observation.get('scope') != 'function' or not observation.get('complete'):
             raise ValueError('feedback requires a completed whole function')
         if observation.get('id') != expected['id'] or observation.get('parts') != expected['parts']:
@@ -405,6 +435,8 @@ class FunctionFlow:
             self.delay_model = posterior.state()
             if self.routing_model is not None and 'page_bytes' in batch:
                 self.routing_model['page_bytes'] = batch['page_bytes']
+            if self.routing_model is not None and batch.get('unit_kind') == 'byte_extent':
+                self.routing_model['unit_kind'] = 'byte_extent'
         if self.fit_compute:
             self._compute_observation(observation)
         if self.routing_model is not None:
@@ -412,6 +444,10 @@ class FunctionFlow:
             self.routing_observations.append({'parts': copy.deepcopy(observation['parts']),
                                               'stages': copy.deepcopy(observation['finishes']['stages'])})
             self.routing_observations = self.routing_observations[-64:]
+        if expected['phase'] == 'centre':
+            # A measured calibration/repeat is evidence, not a zero-offset FD sample.
+            self.serial += 1
+            return self.ask()
         self.samples.append({'id': self.serial, 'seconds': seconds, 'cost': metrics['cost'],
                              'performance': metrics, 'offset': expected['offset']})
         self.serial += 1

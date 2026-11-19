@@ -1,7 +1,11 @@
 """design/whole-function.md#ahead-of-time"""
 import pathlib
+import ast
+import math
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from routing import Fabric
@@ -44,6 +48,65 @@ class RoutingTests(unittest.TestCase):
             times = [result['directed_load_bytes'][2 * e + direction] /
                      (fabric.cables[e]['bits_per_second'] / 8) for e in range(4)]
             self.assertLess(max(times) - min(times), 1e-7)
+
+    def test_solver_override_keeps_all_parallel_and_relay_paths(self):
+        fabric = self.fabric()
+        installed = []
+        ffi = SimpleNamespace(new=lambda _type, value: value)
+        native = SimpleNamespace(ncclMeshCommWriteRoutes=lambda *args: installed.append(args))
+        # The default table belongs to the native communicator. An override of
+        # one commodity must not replace other pairs or consult pointer identity.
+        with patch.dict(sys.modules, mesh=SimpleNamespace(ffi=ffi, lib=native, check=lambda _: None)):
+            weights = list(range(1, len(fabric.paths[1, 0]) + 1))
+            fabric.install('comm', {'route:1:0': weights})
+        self.assertEqual(len(installed), 1)
+        comm, source, destination, routes = installed[0]
+        self.assertEqual((comm, source, destination), ('comm', 1, 0))
+        paths = [routes['cable'][a:b] for a, b in zip(routes['first'], routes['first'][1:])]
+        self.assertEqual(paths, fabric.paths[1, 0])
+        self.assertEqual(routes['log_weight'], [math.log(x) for x in weights])
+
+    def held(self, topology, destroyed, attached):
+        path = pathlib.Path(__file__).resolve().parents[1] / 'torch-mesh/torch_mesh/backend.py'
+        cls = next(node for node in ast.parse(path.read_text()).body
+                   if isinstance(node, ast.ClassDef) and node.name == 'ProcessGroupMesh')
+        held = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == '_held')
+        env = {'ffi': SimpleNamespace(cast=lambda _type, comm: comm),
+               'Fabric': SimpleNamespace(of=topology),
+               'LIB': SimpleNamespace(ncclCommDestroy=destroyed.append),
+               '_stream': SimpleNamespace(attach=lambda *args: attached.append(args))}
+        exec(compile(ast.Module(body=[held], type_ignores=[]), str(path), 'exec'), env)
+        return env['_held']
+
+    def test_recycled_communicator_address_gets_its_own_topology_snapshot(self):
+        first, second = self.fabric(), Fabric(2, [{'nodes': [0, 1], 'bits_per_second': 80}])
+        snapshots, reads, destroyed, attached = iter([first, second]), [], [], []
+
+        def topology(comm):
+            reads.append(comm)
+            return next(snapshots)
+
+        held = self.held(topology, destroyed, attached)
+        old, new = SimpleNamespace(), SimpleNamespace()
+        held(old, 0, 3, 17)
+        held(new, 0, 2, 17)  # allocator can reuse the native address after destroy
+        self.assertIs(old.fabric, first)
+        self.assertIs(new.fabric, second)
+        self.assertEqual(reads, [17, 17])
+        self.assertEqual(attached, [(old, 17), (new, 17)])
+        self.assertFalse(destroyed)
+
+    def test_unusable_topology_fails_realization_and_releases_communicator(self):
+        destroyed, attached = [], []
+
+        def topology(_):
+            return Fabric(2, [])
+
+        held = self.held(topology, destroyed, attached)
+        with self.assertRaisesRegex(ValueError, 'no path from 0 to 1'):
+            held(SimpleNamespace(), 0, 2, 17)
+        self.assertEqual(destroyed, [17])
+        self.assertFalse(attached)
 
 
 if __name__ == '__main__':

@@ -11,6 +11,9 @@ import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard
 from torch_mesh import partition
+from torch_mesh.backend import BROADCAST, Call
+from torch_mesh.declarations import Preparations
+from torch_mesh.invocation import Invocation
 
 import chain
 import lstm
@@ -45,6 +48,9 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=H)
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
+    invocation = Invocation(mesh, 'tp', {'function': 'lstm_sequence', 'layers': L, 'input_width': KIN,
+                                        'width': H, 'steps': steps, 'rows': rows},
+                            config.get('controller_state', config['output'] + '.controller.json'))
     shape = lambda l: (4, H, (KIN if l == 0 else H) + H)
     split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
     held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
@@ -67,9 +73,15 @@ def main():
     dist.barrier()
     ticks, half = steps + L - 1, steps // k // 2 * k
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+    group = mesh.get_group('tp')
+    groups, forms = recording.schedule(group, steps)
+    initial = [partition.gathered(tick.mine, 2, tick.sizes, group)] * (L - 1)
+    initial_forms = [(tick.mine, None, 2, tick.sizes, group.group_name, False, 1)] * (L - 1)
+    invocation.realize([[Call(BROADCAST, X.numel(), X.dtype, root=0)], *initial, *groups],
+                       Preparations([*initial_forms, *forms]))
+    invocation.begin()
     began = time.perf_counter()
     dist.broadcast(X, src=0)
-    torch_mesh.plan(mesh.get_group('tp'), [partition.gathered(tick.mine, 2, tick.sizes, mesh.get_group('tp'))])
     for s in range(L - 1):
         tick.starting(s, X[s])
     recording.issue(half)
@@ -79,6 +91,7 @@ def main():
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
+    feedback = invocation.completed(seconds, useful_work_bytes=steps * rows * H * torch.half.itemsize)
     torch_mesh.plan(mesh.get_group('tp'), [])
     steady = middle.elapsed_time(end) / 1e3 / (steps - half)
     if O is not None:
@@ -90,7 +103,8 @@ def main():
                    steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
                    tick_microseconds=seconds / ticks * 1e6, steady_tick_microseconds=steady * 1e6,
                    host_microseconds=hosted / ticks * 1e6, latency_ticks=L,
-                   sent_bytes_per_tick=(size - 1) * rows * L * blocks[rank] * torch.half.itemsize)
+                   sent_bytes_per_tick=(size - 1) * rows * L * blocks[rank] * torch.half.itemsize,
+                   function_feedback=feedback)
     print(json.dumps(summary), flush=True)
     dist.destroy_process_group()
 

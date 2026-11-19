@@ -1,4 +1,4 @@
-"""Actual GPU masked-frame checks, with null transport bindings (no NIC claim)."""
+"""Actual GPU exact-byte migration kernels; null transport bindings, no NIC claim."""
 import ast
 import itertools
 import json
@@ -37,49 +37,37 @@ def instance(name, *args):
 
 dummy = torch.zeros(1, dtype=torch.int32, device='mps')
 checks = []
-for channels, vector, inline in itertools.product((1, 3, 5, 6), (1, 2, 4, 8, 16), (0, 1)):
-    declarations = [instance('migration_publish', vector, channels, 256),
-                    instance('migration_land', vector, channels, inline, 256),
-                    instance('migration_ready', channels, 256), instance('migration_local', vector, channels, 256)]
+for channels, vector in itertools.product((1, 3, 5, 6), (1, 2, 4, 8, 16)):
+    rows_cases = ((1, 513), (257, 3), (65, 17), (3, 5003))
+    declarations = [instance('migration_ready', channels, 256),
+                    instance('migration_publish_existing', channels, 256)]
+    declarations += [instance('migration_local', vector, channels, row, 256) for row, _ in rows_cases]
     shader = torch.mps.compile_shader(prelude + source + '\n'.join(line for _, line in declarations))
-    publish, land, ready, retain = [getattr(shader, name) for name, _ in declarations]
-    for row, rows in ((1, 513), (257, 3), (65, 17)):
+    ready, publish = [getattr(shader, name) for name, _ in declarations[:2]]
+    for case, (row, rows) in enumerate(rows_cases):
+        retain = getattr(shader, declarations[case + 2][0])
         run = RowWrite(0, 1, 3 * vector, 5 * vector, row * vector, rows,
                        (row + 7) * vector, (row + 11) * vector)
-        frame_bytes = 256 * vector
-        count = run.frames(frame_bytes)
         source_bytes = run.source_byte(run.bytes - 1) + 1 + 32
         output_bytes = run.destination_byte(run.bytes - 1) + 1 + 32
         original = torch.arange(source_bytes, dtype=torch.int32).remainder(251).to(torch.uint8)
-        original[run.source_offset:run.source_offset + vector] = 255  # includes NaN payloads when viewed as float
+        original[run.source_offset:run.source_offset + vector] = 255
         expected = torch.full((output_bytes,), 173, dtype=torch.uint8)
-        expected_frames = torch.zeros(count * frame_bytes + 32, dtype=torch.uint8)
-        expected_frames[-32:] = 239
-        for i in range(run.bytes):
-            expected[run.destination_byte(i)] = original[run.source_byte(i)]
-            expected_frames[i] = original[run.source_byte(i)]
-        x = original.to('mps')
-        frames = torch.full((count * frame_bytes + 32,), 239, dtype=torch.uint8, device='mps')
-        out = torch.full((output_bytes,), 173, dtype=torch.uint8, device='mps')
-        local = out.clone()
-        arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
-        for j in range(count):
-            constants = torch.tensor(namespace['_migration_words'](run, frame_bytes, vector, j) + [0] * (24 * channels),
-                                     dtype=torch.int32, device='mps')
-            publish(x, frames, arrivals, *([dummy] * 12), constants, threads=2048, group_size=256)
-            if not inline:
-                ready(*([dummy] * 15), constants, threads=256, group_size=256)
-            land(frames, out, *([dummy] * 13), constants, threads=256 if inline else 2048, group_size=256)
+        for r in range(rows):
+            expected.narrow(0, run.destination_offset + r * run.destination_stride, run.row_bytes).copy_(
+                original.narrow(0, run.source_offset + r * run.source_stride, run.row_bytes))
+        x, local = original.to('mps'), torch.full((output_bytes,), 173, dtype=torch.uint8, device='mps')
+        constants = torch.tensor(namespace['_migration_words'](run, run.bytes, vector) + [0] * (24 * channels),
+                                 dtype=torch.int32, device='mps')
+        publish(*([dummy] * 15), constants, threads=256, group_size=256)
+        ready(*([dummy] * 15), constants, threads=256, group_size=256)
         retain(x, local, *([dummy] * 13), constants, threads=2048, group_size=256)
-        assert torch.equal(frames.cpu(), expected_frames), ('publication bits/padding/guard', channels, vector, row, rows)
-        assert torch.equal(out.cpu(), expected), ('masked output/neighbor poison', channels, vector, row, rows)
         assert torch.equal(local.cpu(), expected), ('local retention bits/neighbor poison', channels, vector, row, rows)
         assert torch.equal(x.cpu(), original), 'original input overwritten'
-        checks.append(dict(channels=channels, vector_bytes=vector, inline_wait=inline, row_bytes=run.row_bytes,
-                           rows=rows, frames=count, final_valid_bytes=run.bytes % frame_bytes or frame_bytes))
+        checks.append(dict(channels=channels, vector_bytes=vector, row_bytes=run.row_bytes, rows=rows))
 
 report = dict(cases=len(checks), checks=checks, torch=torch.__version__,
-              scope='Actual GPU bit preservation, masked padding, neighboring-byte guards, affine row/frame boundaries; null transport bindings')
+              scope='Actual GPU local-retention bit/guard checks and release-only/ready kernel compilation; null transport bindings')
 if len(sys.argv) > 1:
     Path(sys.argv[1]).write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps({k: v for k, v in report.items() if k != 'checks'}))

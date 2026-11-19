@@ -1,6 +1,6 @@
 // torch's MPS stream and the host as libnccl-mesh's streams (nccl.h): every collective of torch_mesh/backend.py and
 // torch's functional collectives on MPS is one call of `issue`, a group of calls each one kind (an all-reduce, reduce,
-// broadcast, the V all-gather, reduce-scatter and all-to-all, a send, a receive; a reduction by
+// broadcast, the V all-gather, reduce-scatter and all-to-all, a directed write; a reduction by
 // any of the library's operators, the partials merge among them).  On MPS tensors the group is encoded in torch's stream's command buffer and open compute encoder (its kernels
 // join torch's own) with a workspace allocator (MPS tensors from torch's caching allocator, held until the group is
 // complete, then reused in the stream's order), committed by the one commit rule (below) without waiting; on CPU
@@ -22,6 +22,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -349,7 +350,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
 // all-reduce's, reduce's or broadcast's sends alone where it is in place), its counts (a V call's segment a rank, an
 // all-to-all's elements to each rank then from each, in its tensors' elements), its operator (an ncclRedOp_t: a
 // built-in or one the library made, as the partials merge) and its root (a send's or receive's peer).
-enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, WRITE };
+enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, WRITE = 8 };
 using Tensors = std::vector<std::optional<at::Tensor>>;
 using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t, int64_t>;
 
@@ -449,8 +450,6 @@ static Issue prepare(const Call &call, Group &g) {
     for (auto c : counts) i.counts.push_back((size_t)c * per);
     break;
   }
-  case SEND: i.sends = {g.moving(tensor(sends, 0))}; break;
-  case RECV: i.receives = {g.moving(tensor(receives, 0))}; break;
   default: TORCH_CHECK(false, "no collective of kind ", what);
   }
   return i;
@@ -474,8 +473,6 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
     case ALLTOALL:
       result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, i.counts.data() + i.counts.size() / 2, a.at ? a.type : i.receives[0].type, comm, s);
       break;
-    case SEND: result = ncclSend(a.at, a.count, a.type, (int)i.root, comm, s); break;
-    case RECV: result = ncclRecv(b, i.receives[0].count, i.receives[0].type, (int)i.root, comm, s); break;
     }
   }
   const ncclResult_t ended = ncclGroupEnd();
@@ -487,17 +484,10 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
 // issued on torch's streams (ncclMeshComplete encodes every issued group's completion on the current one) and waiting
 // for each stream a group was issued on (the session's positions run in its order), the GIL released while it runs
 // where `unlock`.
-static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, bool unlock) {
-  Group g;
-  for (const Call &c : calls)
-    for (const Tensors *list : {&std::get<1>(c), &std::get<2>(c)})
-      for (const std::optional<at::Tensor> &t : *list) g.metal |= t && t->is_mps();
-  std::vector<Issue> issues;
-  for (const Call &c : calls) issues.push_back(prepare(c, g));
-  uint64_t ticket = 0;
-  if (g.metal) {
-    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm, {});
-  } else {
+static uint64_t submit(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool metal,
+                       bool split, int64_t comm, std::vector<at::Tensor> held, bool unlock) {
+  if (metal) return on_stream(call, split, comm, std::move(held));
+  {
     bool streamed = false;
     for (MeshStream *s : streams_made()) streamed |= s->streamed;
     if (streamed) {
@@ -512,9 +502,20 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
     }
     std::optional<pybind11::gil_scoped_release> unlocked;
     if (unlock) unlocked.emplace();
-    checked(encoded(issues, communicator(comm), nullptr));
+    checked(call(nullptr));
   }
-  return ticket;
+  return 0;
+}
+
+static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, bool unlock) {
+  Group g;
+  for (const Call &c : calls)
+    for (const Tensors *list : {&std::get<1>(c), &std::get<2>(c)})
+      for (const std::optional<at::Tensor> &t : *list) g.metal |= t && t->is_mps();
+  std::vector<Issue> issues;
+  for (const Call &c : calls) issues.push_back(prepare(c, g));
+  return submit([&](ncclMeshStream *stream) { return encoded(issues, communicator(comm), stream); },
+                g.metal, split, comm, {}, unlock);
 }
 
 // torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
@@ -1061,21 +1062,11 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
   return out;
 }
 
-// Fused crossings (torch_mesh/fused.py; nccl.h ncclMeshFused): the one-shot exchange, ncclSend
-// of a rank's part to every other rank and ncclRecv of each one's part into a landing tensor of its own, in one group,
-// whose steps the caller's kernels run on torch's stream: the kernel that makes the rank's part writes it into its send
-// tensor and publishes it to every peer (one store of each holding's `ready`), and the kernel after the call awaits
-// every landing and reads each peer's part from its landing tensor, adding them to its own (an all-reduce's sum, which
-// the caller makes); the call dispatches no step (a fused group's channels complete in the stream's order with no
-// dispatch: nccl-mesh.c complete, complete_track).  The send tensor and every landing tensor lie in region tensors
-// (torch_mesh.empty: a lease), each starting on a page, which the bridge sends from and lands in, zero copy.  The call
-// is the library's classic form on torch's command buffer and open encoder with a residency set: the library writes
-// each publication's and each landing's argument record into the lists this call gives it room in (n - 1 of each:
-// an all-reduce's one-shot counts) and returns their bindings, GPU addresses the caller's kernels reach by
-// address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
-// was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
-// it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a
-// value, the library's refusal; nothing falls back to a slower form.  The peers are every other rank, in rank order.
+// Fused crossings share immutable exact-byte WritePrepare/Execute plans.
+// GPU bindings name physical channels, including every parallel cable and
+// compiled relay path. Producers publish source ranges; consumers observe
+// only their data dependencies. Registration cuts are agreed at realization,
+// and no buffer must begin on a transport page. Unsupported inputs fail.
 static std::vector<void *> fused_queues_;
 
 static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
@@ -1101,40 +1092,40 @@ static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
 // steps; the text a kernel that runs them is compiled after.
 static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 
-// One collective lowered to physical channel fragments, including relay paths.
-// The source is this rank's segment of the immutable landing generation.
-static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_gather(
-    const at::Tensor &slot, const std::vector<int64_t> &counts, int64_t comm, int64_t polls, int64_t repeats, int64_t stride) {
-  const ncclComm_t c = communicator(comm);
-  int rank = 0, ranks = 0, channels = 0;
-  checked(ncclCommUserRank(c, &rank));
-  checked(ncclCommCount(c, &ranks));
-  checked(ncclMeshCommSample(c, nullptr, 0, &channels));
-  TORCH_CHECK(counts.size() == (size_t)ranks, "fused gather: one segment per rank");
-  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused gather: polls is a 32-bit count");
-  int64_t first = 0;
-  for (int q = 0; q < rank; q++) first += counts[q];
-  Group g{true};
-  const Operand out = g.moving(slot.narrow(0, first, counts[rank])), in = g.moving(slot);
-  const size_t per = kind(slot.scalar_type()) == ncclNumTypes ? slot.element_size() : 1;
-  std::vector<size_t> lengths;
-  for (int64_t count : counts) lengths.push_back(count * per);
+// Prepared handles retain the same exact-byte contract for generic gathers,
+// reductions and the public indexed/affine write API. No collective-specific
+// transport planner is selected by a generic data function.
+struct PreparedWrites {
+  std::vector<ncclMeshWritePlan_t> handles;
+  ~PreparedWrites() { for (auto plan : handles) ncclMeshWritePlanDestroy(plan); }
+};
+
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> execute_fused_writes(
+    const PreparedWrites &plans, int64_t comm, int64_t polls, int64_t repeats, int64_t stride) {
+  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused writes: polls is a 32-bit count");
+  int channels = 0;
+  checked(ncclMeshCommSample(communicator(comm), nullptr, 0, &channels));
   std::vector<std::array<uint64_t, 6>> publish(channels), land(channels);
   ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
                          (uint32_t)channels, (uint32_t)channels, (uint32_t)repeats, (size_t)stride};
   ncclMeshFused *const records = &steps;
-  const size_t *const segments = lengths.data();
+  const ncclMeshWritePlan_t *const handles = plans.handles.data();
+  const size_t count = plans.handles.size();
+  if (!count) return {{}, {}};
   __block ncclResult_t result = ncclSuccess;
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   id<MTLResidencySet> residency = fused_residency(stream);
   {
-    const Deadline deadline("fused_gather: bind physical channel fragments");
+    const Deadline deadline("fused writes: execute prepared physical bindings");
     dispatch_sync(stream->queue(), ^{
       @autoreleasepool {
         ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
                              nullptr, (__bridge void *)residency, (uint32_t)polls, records};
-        result = ncclMeshAllGatherV(out.at, (void *)in.at, segments, out.type, c, &on);
+        ncclResult_t made = ncclGroupStart();
+        for (size_t i = 0; i < count && !made; i++) made = ncclMeshWriteExecute(handles[i], &on);
+        const ncclResult_t ended = ncclGroupEnd();
+        result = made ? made : ended;
       }
     });
   }
@@ -1153,7 +1144,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
 // segment of each), taken in turn a batch; this batch's records as the kernels' binding words.  A call's output is a
 // lease of the held pool (region_empty, held: returned once its tensor is freed and the stream has passed it).  A call is
 // one dispatch_sync: both its kernels encoded (the publication's and the landing's) and the publication committed by
-// the stream's rule (MeshStream::published); the exchange (fused_gather) at its batch's first repeat.  Forms are kept
+// the stream's rule (MeshStream::published); the prepared writes at its batch's first repeat.  Forms are kept
 // by communicator (the group's, found by its name at every call: attach) and released with it (fused_release, from the
 // group's shutdown), under one lock (fused_lock_: a backward's crossings may run on autograd's thread); the map is never
 // destroyed at exit, where torch's MPS allocator may be gone before it.
@@ -1166,8 +1157,11 @@ struct FusedForm {
   struct Ring {
     std::vector<at::Tensor> slots[2];
     std::vector<std::vector<at::Tensor>> segments[2];
+    std::vector<at::Tensor> relays[2];
+    std::shared_ptr<PreparedWrites> plans[2];
   };
   std::map<int64_t, Ring> rings;
+  std::map<int64_t, std::deque<Ring>> prepared_fresh;
   Ring *ring = nullptr;
   int64_t turn = 0, j = 0, half = 0;
   std::vector<int64_t> pbind, lbind;
@@ -1234,30 +1228,97 @@ static void fused_release(int64_t comm) {
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
 
+// Route changes happen between complete functions. A partially issued repeat
+// train still owns its schedule; discarding its bindings would strand data.
+static void fused_reconfigure(int64_t comm) {
+  std::lock_guard<std::mutex> guard(*fused_lock_);
+  for (const auto &entry : *fused_forms_)
+    TORCH_CHECK(entry.second.comm != comm || entry.second.j == 0,
+                "route reconfiguration requires a complete fused repeat train");
+  for (auto f = fused_forms_->begin(); f != fused_forms_->end();)
+    f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
+}
+
 // a call's repeat j of `repeats` in form f (its calls since its last batch), and at j 0 the batch: its two leases' slots
 // (made once a repeats, both leases taken before either is laid out), the half taken in turn, the exchange of its
 // segments and the records' binding words.  The form's counters advance only once the leases are taken and the exchange
 // is made, so a refused lease leaves the form as it was and no peer exchanged with
+// Allocate and agree registration cuts without presenting a receive or
+// executing a producer. A fresh generation owns every source/landing/relay lease.
+static void fused_allocate_ring(FusedForm &f, FusedForm::Ring &ring, const at::Tensor &xc, int64_t repeats) {
+  TORCH_CHECK(repeats >= 1 && repeats <= (int64_t)UINT32_MAX && f.slot >= 0 &&
+              f.slot <= INT64_MAX / repeats / (int64_t)xc.element_size(),
+              "fused gather: repeated byte extent overflows address space");
+  if (ring.slots[0].empty()) {
+    const at::Tensor leases[2] = {region_empty({repeats * f.slot}, xc, true), region_empty({repeats * f.slot}, xc, true)};
+    for (int h = 0; h < 2; h++)
+      for (int64_t r = 0; r < repeats; r++) {
+        const at::Tensor slot = leases[h].narrow(0, r * f.slot, f.slot);
+        ring.slots[h].push_back(slot);
+        std::vector<at::Tensor> segments;
+        for (int64_t q = 0; q < f.ranks; q++) segments.push_back(slot.narrow(0, f.starts[q], f.counts[q]));
+        ring.segments[h].push_back(segments);
+      }
+  }
+  // Prepare each bound generation once. Metadata exchange agrees common
+  // registration cuts before any receive is presented. Relay allocations
+  // are disjoint per pair, so another destination cannot overwrite a live
+  // forwarding range or any local original contribution.
+  for (int h = 0; h < 2; h++) if (!ring.plans[h]) {
+    auto prepared = std::make_shared<PreparedWrites>();
+    Group g{true};
+    for (int64_t source = 0; source < f.ranks; source++) if (f.counts[source])
+      for (int64_t destination = 0; destination < f.ranks; destination++) if (source != destination) {
+        const at::Tensor source_view = ring.segments[h][0][source];
+        at::Tensor landing_view = source_view;
+        int64_t local_stride = f.slot * (int64_t)xc.element_size();
+        if (f.rank != source && f.rank != destination) {
+          ring.relays[h].push_back(region_empty({repeats * f.counts[source]}, xc, true));
+          landing_view = ring.relays[h].back().narrow(0, 0, f.counts[source]);
+          local_stride = f.counts[source] * (int64_t)xc.element_size();
+        }
+        const Operand out = g.moving(source_view), in = g.moving(landing_view);
+        prepared->handles.push_back(nullptr);
+        checked(ncclMeshWritePrepare(out.at, (void *)in.at, out.count, out.type, (int)source, (int)destination,
+                                    communicator(f.comm), 1, (uint32_t)repeats, (size_t)local_stride, 0,
+                                    &prepared->handles.back()));
+      }
+    ring.plans[h] = std::move(prepared);
+  }
+}
+
+static void fused_prepare(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim,
+                          const std::vector<int64_t> &sizes, const std::string &group, bool adds,
+                          int64_t repeats, int64_t batches) {
+  TORCH_CHECK(batches >= 1, "fused preparation requires a positive batch count");
+  std::unique_lock<std::mutex> held(*fused_lock_);
+  FusedForm &f = fused_form_of(x, w, dim, sizes, group, adds, held);
+  TORCH_CHECK(f.j == 0, "fused preparation requires a complete preceding repeat train");
+  const bool fresh = std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; });
+  if (fresh) {
+    auto &queue = f.prepared_fresh[repeats];
+    for (int64_t k = (int64_t)queue.size(); k < batches; k++) {
+      FusedForm::Ring ring;
+      fused_allocate_ring(f, ring, x, repeats);
+      queue.push_back(std::move(ring));
+    }
+  } else fused_allocate_ring(f, f.rings[repeats], x, repeats);
+}
+
 static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
   const int64_t j = f.j, channels = f.channels;
   if (j == 0) {
     FusedForm::Ring &ring = f.rings[repeats];
-    // Without every rank's natural return publication there is no two-slot
-    // recurrence proof. Fresh generations retire through local DMA ownership.
-    if (std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; })) ring = FusedForm::Ring{};
-    if (ring.slots[0].empty()) {
-      const at::Tensor leases[2] = {region_empty({repeats * f.slot}, xc, true), region_empty({repeats * f.slot}, xc, true)};
-      for (int h = 0; h < 2; h++)
-        for (int64_t r = 0; r < repeats; r++) {
-          const at::Tensor slot = leases[h].narrow(0, r * f.slot, f.slot);
-          ring.slots[h].push_back(slot);
-          std::vector<at::Tensor> segments;
-          for (int64_t q = 0; q < f.ranks; q++) segments.push_back(slot.narrow(0, f.starts[q], f.counts[q]));
-          ring.segments[h].push_back(segments);
-        }
+    if (std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; })) {
+      auto &queue = f.prepared_fresh[repeats];
+      if (!queue.empty()) {
+        ring = std::move(queue.front());
+        queue.pop_front();
+      } else ring = FusedForm::Ring{};
     }
+    fused_allocate_ring(f, ring, xc, repeats);
     const int64_t half = f.turn % 2;
-    const auto made = fused_gather(ring.slots[half][0], f.counts, f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
+    const auto made = execute_fused_writes(*ring.plans[half], f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
     f.pbind.clear(), f.lbind.clear();
     for (int64_t k = 0; k < channels; k++) binding_words(f.pbind, nullptr);
     for (int64_t k = 0; k < channels; k++) binding_words(f.pbind, k < (int64_t)made.first.size() ? &made.first[k] : nullptr);
@@ -1274,7 +1335,7 @@ static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
 // (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
 static at::Tensor fused_step_impl(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
                              std::string group, bool adds, int64_t repeats, const std::optional<at::Tensor> &destination) {
-  TORCH_CHECK(repeats >= 1, "torch_mesh::fused_step: repeats ", repeats, ", where a batch is one crossing or more");
+  TORCH_CHECK(repeats >= 1 && repeats <= (int64_t)UINT32_MAX, "torch_mesh::fused_step: repeats ", repeats, ", where a batch is one crossing or more");
   const at::Tensor xc = x;
   std::unique_lock<std::mutex> held(*fused_lock_);
   FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds, held);
@@ -1332,17 +1393,17 @@ static void fused_step_out(const at::Tensor &x, const std::optional<at::Tensor> 
 
 // A declared set of routed writes. Bindings name physical channels, including
 // parallel cables; relay readiness stays in the compiled stream entries.
-static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes(
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes_impl(
     const at::Tensor &send, const std::vector<at::Tensor> &landings,
-    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride) {
+    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride,
+    int64_t row_bytes, int64_t rows) {
   TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused writes: polls is a 32-bit count of loads");
   TORCH_CHECK(repeats > 0 && repeats <= (int64_t)UINT32_MAX && stride >= 0,
               "fused writes: positive 32-bit frame count and nonnegative byte stride required");
   const ncclComm_t c = communicator(comm);
-  size_t page = 0;
-  checked(ncclMeshCommPage(c, &page));
-  TORCH_CHECK(!stride || (size_t)stride % page == 0, "fused writes: frame stride must align to physical pages");
+  TORCH_CHECK(rows >= 0 && row_bytes >= 0 && (!rows || (row_bytes > 0 && stride >= row_bytes)),
+              "affine writes need positive row bytes and a local pitch at least that large");
   const auto framed = [repeats, stride](const at::Tensor &tensor) {
     const size_t bytes = tensor.nbytes(), offset = tensor.storage_offset() * tensor.element_size();
     TORCH_CHECK(!stride || (size_t)(repeats - 1) <= (SIZE_MAX - bytes) / (size_t)stride,
@@ -1351,51 +1412,82 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
     TORCH_CHECK(offset <= tensor.storage().nbytes() && extent <= tensor.storage().nbytes() - offset,
                 "fused writes: all frames must lie inside the tensor's backing storage");
   };
-  framed(send);
-  int channels = 0;
-  checked(ncclMeshCommSample(c, nullptr, 0, &channels));
+  if (!rows) framed(send);
   Group g{true};
   const Operand out = g.moving(send);
   std::vector<Operand> in;
   for (const at::Tensor &landing : landings) {
-    framed(landing);
+    if (!rows) framed(landing);
     in.push_back(g.moving(landing));
     TORCH_CHECK(in.back().count == out.count && in.back().type == out.type,
                 "fused writes: landing extent and dtype must match the source");
   }
-  std::vector<std::array<uint64_t, 6>> publish(channels), land(channels);
-  ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
-                         (uint32_t)channels, (uint32_t)channels, (uint32_t)repeats, (size_t)stride};
-  ncclMeshFused *const records = &steps;
-  const Operand *const ins = in.data();
-  const auto *const endpoints = pairs.data();
-  const size_t count = pairs.size();
-  __block ncclResult_t result = ncclSuccess;
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MeshStream *s = &stream_of(stream);
-  id<MTLResidencySet> residency = fused_residency(stream);
-  {
-    const Deadline deadline("fused_writes: a turn of torch's queue, a group encoded");
-    dispatch_sync(stream->queue(), ^{
-      @autoreleasepool {
-        ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
-                             nullptr, (__bridge void *)residency, (uint32_t)polls, records};
-        ncclResult_t made = ncclGroupStart();
-        for (size_t i = 0; i < count && !made; i++)
-          made = ncclMeshWrite(out.at, (void *)ins[i].at, out.count, out.type, endpoints[i][0], endpoints[i][1], c, &on);
-        const ncclResult_t ended = ncclGroupEnd();
-        result = made ? made : ended;
-      }
-    });
+  PreparedWrites plans;
+  plans.handles.resize(pairs.size(), nullptr);
+  for (size_t i = 0; i < pairs.size(); i++) {
+    if (rows) {
+      TORCH_CHECK(out.type == ncclUint8 && out.count == (size_t)row_bytes,
+                  "affine write bindings name the first row as a contiguous byte view");
+      checked(ncclMeshWriteRowsPrepare(out.at, (void *)in[i].at, (size_t)row_bytes, (size_t)rows, (size_t)stride,
+                                      pairs[i][0], pairs[i][1], c, 1, 0, &plans.handles[i]));
+    } else checked(ncclMeshWritePrepare(out.at, (void *)in[i].at, out.count, out.type, pairs[i][0], pairs[i][1], c, 1,
+                                      (uint32_t)repeats, (size_t)stride, 0, &plans.handles[i]));
   }
-  s->streamed = true;
-  s->retire(0, std::exchange(s->scratch, {}));
-  checked(result);
-  std::vector<std::vector<uint64_t>> published, landed;
-  for (uint32_t k = 0; k < steps.publishes; k++) published.emplace_back(publish[k].begin(), publish[k].end());
-  for (uint32_t k = 0; k < steps.lands; k++) landed.emplace_back(land[k].begin(), land[k].end());
-  return {published, landed};
+  return execute_fused_writes(plans, comm, polls, repeats, rows ? 0 : stride);
 }
+
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes(
+    const at::Tensor &send, const std::vector<at::Tensor> &landings,
+    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls, int64_t repeats, int64_t stride) {
+  return fused_writes_impl(send, landings, pairs, comm, polls, repeats, stride, 0, 0);
+}
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_write_rows(
+    const at::Tensor &send, const std::vector<at::Tensor> &landings,
+    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t row_bytes, int64_t rows, int64_t stride) {
+  TORCH_CHECK(rows > 0, "affine writes require positive rows");
+  return fused_writes_impl(send, landings, pairs, comm, 0, 1, stride, row_bytes, rows);
+}
+
+// Immutable exact-span bindings use the same preparation/execution contract
+// as affine and contiguous WRITEs. All source/destination address selection is
+// configuration metadata. Execution contains no packing or count exchange.
+using SpanBinding = std::tuple<at::Tensor, std::vector<std::array<uint64_t, 2>>, int, int>;
+struct SpanWrites {
+  int64_t comm;
+  bool metal;
+  PreparedWrites plans;
+  std::vector<at::Tensor> leases;
+  SpanWrites(const std::vector<SpanBinding> &bindings, int64_t handle) : comm(handle), metal(false) {
+    TORCH_CHECK(!bindings.empty(), "span writes require at least one declared delivery");
+    metal = std::get<0>(bindings.front()).is_mps();
+    Group g{metal};
+    for (const auto &[base, rows, source, destination] : bindings) {
+      TORCH_CHECK(base.is_mps() == metal, "span writes require one local device");
+      const size_t offset = base.storage_offset() * base.element_size();
+      const size_t storage = base.storage().nbytes();
+      std::vector<ncclMeshSpan> spans;
+      for (const auto &row : rows) {
+        TORCH_CHECK(offset <= storage && row[0] <= storage - offset && row[1] <= storage - offset - row[0],
+                    "span write lies outside its original tensor storage");
+        spans.push_back({row[0], row[1]});
+      }
+      const void *at = g.where(base);
+      plans.handles.push_back(nullptr);
+      checked(ncclMeshWriteSpansPrepare(at, (void *)at, spans.data(), spans.size(), source, destination,
+                                       communicator(comm), metal, 0, &plans.handles.back()));
+      leases.push_back(base);
+    }
+  }
+  c10::intrusive_ptr<c10d::Work> execute(bool split) {
+    const uint64_t ticket = submit([&](ncclMeshStream *stream) {
+      ncclResult_t result = ncclGroupStart();
+      for (auto plan : plans.handles) if (!result) result = ncclMeshWriteExecute(plan, stream);
+      const ncclResult_t ended = ncclGroupEnd();
+      return result ? result : ended;
+    }, metal, split, comm, leases, true);
+    return work_of(ticket, leases, comm);
+  }
+};
 
 // A fused crossing's publishing kernel just encoded on torch's stream (fused.encode): a publication under the stream's
 // one commit rule (MeshStream::published), as a group that published is.
@@ -1411,7 +1503,7 @@ static void fused_published() {
 
 
 // Optional whole-function microprofile. Markers commit without waiting; read
-// only after the caller's final synchronization. Use Metal's GPU timestamps,
+// after ready() reports completion, without a synchronization. Use Metal's GPU timestamps,
 // not the scheduling time of a CPU event callback. Each buffer is retained
 // until the profile is destroyed, and repeated reads do not consume a signal.
 struct GPUTimings {
@@ -1434,10 +1526,18 @@ struct GPUTimings {
       }
     });
   }
+  bool ready() const {
+    for (id<MTLCommandBuffer> buffer : buffers) {
+      TORCH_CHECK(buffer.status != MTLCommandBufferStatusError, "GPU timing command buffer failed: ",
+                  buffer.error ? buffer.error.localizedDescription.UTF8String : "unknown Metal error");
+      if (buffer.status != MTLCommandBufferStatusCompleted) return false;
+    }
+    return !buffers.empty();
+  }
   std::vector<double> read() const {
     std::vector<double> out;
     for (id<MTLCommandBuffer> buffer : buffers) {
-      TORCH_CHECK(buffer.status == MTLCommandBufferStatusCompleted, "GPU timings require the function's final synchronization");
+      TORCH_CHECK(buffer.status == MTLCommandBufferStatusCompleted, "GPU timings require completed function markers");
       const double end = buffer.GPUEndTime;
       TORCH_CHECK(end > 0 && (out.empty() || end >= out.back()), "GPU timing markers are not monotone");
       out.push_back(end);
@@ -1450,7 +1550,7 @@ struct GPUTimings {
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   pybind11::class_<GPUTimings>(module, "GPUTimings")
-    .def(pybind11::init<>()).def("mark", &GPUTimings::mark).def("read", &GPUTimings::read);
+    .def(pybind11::init<>()).def("mark", &GPUTimings::mark).def("ready", &GPUTimings::ready).def("read", &GPUTimings::read);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
   module.def("linear_split", &linear_split);
@@ -1482,8 +1582,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_maker", &fused_maker);
   module.def("fused_release", &fused_release);
+  pybind11::class_<SpanWrites, std::shared_ptr<SpanWrites>>(module, "SpanWrites")
+    .def(pybind11::init<const std::vector<SpanBinding> &, int64_t>())
+    .def("execute", &SpanWrites::execute, pybind11::arg("async_op") = false);
+  module.def("fused_reconfigure", &fused_reconfigure);
+  module.def("fused_prepare", &fused_prepare, pybind11::arg("x"), pybind11::arg("w"), pybind11::arg("dim"),
+             pybind11::arg("sizes"), pybind11::arg("group"), pybind11::arg("adds"),
+             pybind11::arg("repeats") = 1, pybind11::arg("batches") = 1);
   module.def("fused_writes", &fused_writes, pybind11::arg("send"), pybind11::arg("landings"), pybind11::arg("pairs"),
              pybind11::arg("comm"), pybind11::arg("polls"), pybind11::arg("repeats") = 1, pybind11::arg("stride") = 0);
+  module.def("fused_write_rows", &fused_write_rows, pybind11::arg("send"), pybind11::arg("landings"), pybind11::arg("pairs"),
+             pybind11::arg("comm"), pybind11::arg("row_bytes"), pybind11::arg("rows"), pybind11::arg("stride"));
   module.def("encode_many", &encode_many);
   module.def("fused_published", &fused_published);
 }

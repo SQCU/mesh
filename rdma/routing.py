@@ -132,6 +132,13 @@ class Fabric:
                            'demand_bytes': {f'{a}:{b}': demands[a, b] for a, b in pairs}}
 
     def install(self, comm, parts):
+        """Override selected default route weights at a configuration boundary.
+
+        Native communicator realization already installs every simple physical
+        path for every ordered pair. Unspecified pairs keep those defaults (or
+        their previous solver weights); no process-global address cache records
+        whether a communicator is usable.
+        """
         import mesh
         ffi, lib = mesh.ffi, mesh.lib
         for (source, destination), paths in self.paths.items():
@@ -147,22 +154,12 @@ class Fabric:
             arrays = ffi.new('uint32_t[]', first), ffi.new('uint32_t[]', cable), ffi.new('double[]', [math.log(x) for x in weights])
             routes = ffi.new('struct mesh_paths *', {'count': len(paths), 'first': arrays[0], 'cable': arrays[1], 'log_weight': arrays[2]})
             mesh.check(lib.ncclMeshCommWriteRoutes(comm, source, destination, routes))
-        ROUTED.add(int(ffi.cast('uintptr_t', comm)))
 
     def completion_model(self, demands):
         """Directed load Jacobian for one repeated stage, before measurement."""
         return {'capacities': [c['bits_per_second'] / 8 for c in self.cables for _ in range(2)],
                 'paths': {f'route:{a}:{b}': {'bytes': demands[a, b],
                           'arcs': [self.arcs(a, path) for path in self.paths[a, b]]} for a, b in sorted(demands)}}
-
-
-ROUTED = set()  # the communicators (their addresses) install() gave one-way write routes
-
-
-def routed(comm):
-    """Whether install() gave communicator `comm` its one-way write routes (a write compiles only along them)."""
-    import mesh
-    return int(mesh.ffi.cast('uintptr_t', comm)) in ROUTED
 
 
 class QueueSample:

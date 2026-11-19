@@ -977,13 +977,15 @@ for every collective or caller placement.
 
 The Python surface's `reduce_scatter(program, value, *, peers, owners, op=SUM, queue=0)` (also `sum_scatter`),
 `reduce(..., root, peers)` (`reduce_scatter` with every block owned by `root`) and `all_reduce(..., peers,
-owners=None)` (`all_sum`, `all_max`, `all_min`) reduce a block row in one libnccl-mesh call over its members where
-`op` is `SUM`, `MAX` or `MIN`: `reduce_scatter` MPI_Reduce_scatter (`ncclMeshReduceScatterV`, member m's segment the
-row's blocks m owns, every member's terms packed in member order; an owner off the peers contributes the operator's
-identity), `all_reduce` the row's all-reduce; an update of each block, its readers taking the reduced value. `PARTIALS`
-merges each block by its log-sum-exp (nccl.h `ncclMeshRedOpCreatePartials`'s operator, a reduce toward its owner or an
-all-reduce toward every peer, through torch_mesh's ProcessGroupMesh.merge_partials on either path; the block read as
-rows of [m, l, O], a member off the peers an empty partial). Any other associative combine is a supplied
+owners=None)` (`all_sum`, `all_max`, `all_min`) lower a block row to one group of native collectives over the full
+physical communicator. Configuration agrees the union of all ranks' contiguous alias boundaries. `all_reduce`
+uses native all-reduces on those original intervals; `reduce_scatter` uses rooted native reductions whose outputs
+alias the owning blocks. Disconnected allocations and row/column gaps require no packed payload. Contributor and
+recipient masks preserve the logical peer set while every physical node remains available to forward; an owner
+outside the contributors supplies no identity-filled input. `PARTIALS` uses the native log-sum-exp operator over
+complete float32 records `[m,l,O]`. Fields within each record must be contiguous; records may have row gaps or lie
+in separate allocations. Configuration rejects strided fields or overlapping records instead of packing them.
+No Python reduction arithmetic replaces the native operator. Any other associative combine is a supplied
 kernel declaring `combine`: each peer's term moved to the owner by one all-to-all a row
 and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh blocks; `all_reduce`
 of such a combine is that `reduce_scatter`, then `all_gather`.
@@ -997,13 +999,13 @@ The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-repor
 and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
 distinct communication relations, one for each verb.
 
-In the Python surface each verb is one libnccl-mesh call a block row over the communicator of its members (a row
-crosses once its own blocks are ready): `all_gather(program, value, *, peers, owners)` is MPI_Allgatherv
-(`ncclMeshAllGatherV`, member m's segment the row's blocks m owns, every member, the peers and the owners, receiving
-every block) and `broadcast(..., root, peers)` the same with every block `root`'s; `all_to_all(..., owners,
-destinations)` is MPI_Alltoallv (`torch.distributed.all_to_all_single` on the "mesh" backend), and `scatter` and
-`gather` the same with every block's sender or receiver `root`. Each defines the block on its receivers in place, its
-blocks packed into one region tensor and back.
+In the Python surface each verb declares one ordered group of exact indexed WRITEs per block row on the full
+physical communicator. `all_gather(program, value, *, peers, owners)` writes each owner's blocks to every logical
+participant; `broadcast(..., root, peers)` uses `root` as their source. `all_to_all(..., owners, destinations)`,
+`scatter`, `gather`, and `Program.copy` declare their directed source/destination relations through the same binding.
+Configuration maps each original source and final destination view to immutable native byte spans, preserving
+row and column gaps without packing. Each forwarding rank binds a distinct compact lease. Prepared execution
+contains no count exchange or payload pack/unpack pass, and all physical paths remain available.
 
 Swift's `broadcast`, `allGather`, `gather`, `scatter`, `allScatter` and `allToAll` were deleted with swift/ in
 a8952de9.

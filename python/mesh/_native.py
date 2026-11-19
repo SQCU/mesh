@@ -1,11 +1,12 @@
 """The partial-tensor library's binding to the mesh's own (design/algorithm-sources.md#program): operands are torch
 tensors, the region's where they cross (torch_mesh.empty: rdma/NCCL.md "Memory"); every
 crossing and collective is libnccl-mesh's, through torch.distributed's "mesh" backend (rdma/torch-mesh/README.md):
-point to point, MPI_Allgatherv and MPI_Reduce_scatter (ncclMeshAllGatherV, ncclMeshReduceScatterV), the all-reduce,
-the all-to-all and the split-KV partials merge (ncclMeshRedOpCreatePartials's operator).  Host-path calls
+exact indexed WRITE plans and native reductions, including the split-KV partials merge
+(ncclMeshRedOpCreatePartials's operator). Host-path calls
 complete where they return, MPS ones are encoded on torch's stream and waited where their consumer runs.  It computes
 nothing: a program's numerics are its supplied kernels'."""
 import os
+import json
 
 import numpy as np
 import torch
@@ -37,10 +38,14 @@ def numpy_dtype(value):
 class World:
     """This process's rank among the program's: `group` (a torch.distributed group of the mesh backend), else the
     world torch already holds, else the one torchrun's variables name (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT;
-    ncclCommInitRank through torch_mesh), else a lone rank with no communicator.  Each queue is a communicator of its
-    own and each set of members a collective spans another, made in one order on every member at realize."""
+    ncclCommInitRank through torch_mesh), else a lone rank with no communicator. Logical participant sets and queues
+    retain the same full physical communicator, so every machine remains available for forwarding."""
+
+    serial = 0
 
     def __init__(self, device, group):
+        World.serial += 1
+        self.serial = World.serial
         self.device, self.owned = device, False
         if group is None and dist.is_available() and dist.is_initialized():
             group = dist.group.WORLD
@@ -53,22 +58,39 @@ class World:
         self.size = dist.get_world_size(group) if group is not None else 1
         self.groups = {}
 
+    def union_cuts(self, task, cuts):
+        """Agree logical alias-fragment boundaries once during realization."""
+        cuts = sorted(set(cuts))
+        if self.group is None or self.size == 1:
+            return cuts
+        store = dist.distributed_c10d._get_default_store()
+        key = f'mesh/program/{self.group.group_name}/{self.serial}/cuts/{task}'
+        store.set(f'{key}/{self.rank}', json.dumps(cuts).encode())
+        rows = [json.loads(store.get(f'{key}/{rank}')) for rank in range(self.size)]
+        if any(row[0] != 0 or row[-1] != cuts[-1] for row in rows):
+            raise ValueError('Program collective operands have different logical extents across ranks')
+        return sorted(set(cut for row in rows for cut in row))
+
     # design/algorithm-sources.md#independent-native-queues
     def prepare(self, keys):
         for queue, members in sorted(set(keys)):
-            if (queue, members) in self.groups:
-                continue
-            if queue == 0 and len(members) == self.size:
-                self.groups[(queue, members)] = self.group
-            elif self.rank in members:
-                ranks = [dist.get_global_rank(self.group, r) for r in members]
-                self.groups[(queue, members)] = dist.new_group(ranks=ranks, use_local_synchronization=True)
-            else:
-                self.groups[(queue, members)] = None
+            self.groups[(queue, tuple(members))] = self.group
 
     # design/algorithm-sources.md#independent-native-queues
     def of(self, queue, members):
         return self.groups[(queue, tuple(sorted(members)))]
+
+    def declare(self, tasks):
+        """Realize the common physical communicator's complete ordered graph."""
+        calls = []
+        for task in tasks:
+            declaration = getattr(task.run[0], 'declaration', None) if task.crossing else None
+            if declaration is not None:
+                if self.rank in task.members:
+                    calls.extend(declaration(task))
+        if self.group is not None:
+            from torch_mesh import plan
+            plan(self.group, calls)
 
     # design/algorithm-sources.md#mesherror
     def revoke(self):
@@ -88,6 +110,21 @@ class World:
             self.owned = False
 
 
+
+def call(kind, count, scalar, *, counts=None, op='sum', root=0, contributors=None, matrix=None, recipients=None,
+         destination=0):
+    """One declaration in the common Torch/native collective metadata type."""
+    from torch_mesh import backend
+    return backend.Call(getattr(backend, kind), count, scalar, root=root,
+                        op=OPS[op] if isinstance(op, str) else op, counts=counts,
+                        contributors=contributors, matrix=matrix, recipients=recipients, destination=destination)
+
+
+def prepare_writes(deliveries, group):
+    """Use the production backend's one exact indexed WRITE preparation."""
+    return group._get_backend(deliveries[0][0].device).prepare_writes(deliveries)
+
+
 # design/algorithm-sources.md#programtensor
 def allocate(numel, scalar, device, in_region):
     if in_region:
@@ -96,39 +133,14 @@ def allocate(numel, scalar, device, in_region):
     return torch.empty(max(1, numel), dtype=scalar, device=device)
 
 
-# design/algorithm-sources.md#programcopy
-def send(tensor, peer, group):
-    return dist.isend(tensor, group=group, group_dst=peer)
-
-
-# design/algorithm-sources.md#programcopy
-def recv(tensor, peer, group):
-    return dist.irecv(tensor, group=group, group_src=peer)
-
-
-# design/algorithm-sources.md#collective-movement
-def all_gather(blocks, mine, group):
-    return dist.all_gather(blocks, mine, group=group, async_op=True)
-
-
-# design/algorithm-sources.md#collective-movement
-def all_to_all(received, sent, receives, sends, group):
-    return dist.all_to_all_single(received, sent, receives, sends, group=group, async_op=True)
-
-
-# design/algorithm-sources.md#collectivereduce_scatter
-def reduce_scatter(out, pieces, op, group):
-    return dist.reduce_scatter(out, pieces, op=OPS[op], group=group, async_op=True)
-
-
-# design/algorithm-sources.md#collectivereduce_scatter
-def all_reduce(tensor, op, group):
-    return dist.all_reduce(tensor, op=OPS[op], group=group, async_op=True)
-
-
-# design/algorithm-sources.md#collectivereduce_scatter
-def partials(tensor, root, group):
-    """nccl.h's log-sum-exp merge (ncclMeshRedOpCreatePartials) of a (rows, 2 + dim) float32 operand, each row [m, l, O],
-    in place, toward every member (root None) or `root` (the backend's ProcessGroupMesh.merge_partials, both paths)."""
-    return group._get_backend(tensor.device).merge_partials(tensor, tensor, root=-1 if root is None else root,
-                                                             async_op=True)
+def fragments(bindings, group):
+    """One group of canonical native collectives over retained alias slices."""
+    from torch_mesh import backend
+    calls, outputs = [], []
+    for declaration, source, destination in bindings:
+        code = declaration.op if isinstance(declaration.op, int) else backend.op(declaration.op)
+        calls.append((declaration.kind, [source], [destination], declaration.counts or [], code, declaration.root))
+        if destination is not None:
+            outputs.append(destination)
+    device = next(t.device for _, source, destination in bindings for t in (source, destination) if t is not None)
+    return group._get_backend(device)._issue(calls, outputs, True)

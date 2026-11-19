@@ -246,6 +246,18 @@ class WholeFunctionTests(unittest.TestCase):
                          'send_entries_without_destination_first_observation': 2,
                          'receive_entries_without_source_first_observation': 0})
 
+    def test_byte_extent_delay_subtracts_observed_first_span_not_page_or_mean(self):
+        cables, ranks, offsets = self.delay_trace()
+        lengths = [1, 7, 1000, 3, 4000, 20000]
+        for rank in ranks:
+            rank['windows'][0].update(unit_kind='byte_extent', unit_bytes=lengths, bytes=sum(lengths))
+        batch = delay_observations(cables, ranks, offsets)
+        self.assertAlmostEqual(batch['seconds'][0], 10e-6 - 1 / 10_000_000_000)
+        self.assertEqual(batch['first_span_bytes'], [1])
+        self.assertEqual(batch['unit_kind'], 'byte_extent')
+        self.assertNotIn('page_bytes', batch)
+        self.assertEqual(batch['coverage']['wire_bytes'], sum(lengths))
+
     def test_refined_copies_do_not_invent_interior_source_eligibility(self):
         batch = delay_observations(*self.delay_trace(receive_ranges=((0, 2), (2, 5), (5, 6))))
         self.assertEqual(batch['coverage']['observed_shared_first_boundaries'], 1)
@@ -355,6 +367,25 @@ class WholeFunctionTests(unittest.TestCase):
             centres.append(flow.centre['route'][0])
         self.assertGreater(centres[0], 64)
         self.assertLess(centres[1], 64)
+
+    def test_byte_extent_pipeline_prior_uses_compiled_per_hop_lengths(self):
+        import numpy as np
+        model = {'capacities': [10, 10, 10], 'paths': {'route': {'bytes': 100, 'arcs': [[0, 2], [1, 2]],
+                                                               'first_span_bytes': [[5, 7], [11, 7]]}},
+                 'directed_nodes': [[0, 1], [0, 1], [1, 2]], 'unit_kind': 'byte_extent', 'page_bytes': 9999}
+        labels = ['node:0', 'node:1', 'node:2', 'link:0', 'link:1', 'link:2', 'function']
+        posterior = DelayPosterior(labels).state()
+        posterior['mean'][3:6] = [1, 3, 2]
+        arrival, derivative = pipeline_delay_prior(model, posterior, np.array([0.25, 0.75]))
+        self.assertAlmostEqual(arrival[2], 5.45)
+        self.assertAlmostEqual((derivative @ np.array([1, -1]))[2], -2.6)
+        del model['paths']['route']['first_span_bytes']
+        with self.assertRaisesRegex(ValueError, 'compiled first-span lengths'):
+            pipeline_delay_prior(model, posterior, np.array([0.25, 0.75]))
+        model['paths']['route']['first_span_service_upper_bound_bytes'] = [[12, 12], [12, 12]]
+        bounded, _ = pipeline_delay_prior(model, posterior, np.array([0.25, 0.75]))
+        self.assertGreater(bounded[2], arrival[2])
+        self.assertNotIn('first_span_bytes', model['paths']['route'])
 
     def test_partial_or_wrong_configuration_cannot_train(self):
         search = self.search()

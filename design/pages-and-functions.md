@@ -1,6 +1,6 @@
 # Pages and functions
 
-On the actual Thunderbolt substrate, literal pages use SEND/RECV, as documented
+On the actual Thunderbolt substrate, payload intervals use SEND/RECV, as documented
 by Apple TN3205; software publication of a received page does not require
 hardware remote-write support.
 Statements below about instant execution and topology-independent utilization
@@ -22,7 +22,8 @@ returns, functions, release, reduce, accumulator page, index page, NFE, status
 word, metadata. The other words that have appeared in code ("stage", "chunk",
 "version", "gate", "token", "group", "consumer", "scheduler") each named a
 control-flow object standing in for something the page table already holds;
-the algorithm below uses none of them.
+the algorithm below does not require those objects as extra execution handshakes.
+Its logical page/range vocabulary is independent of the physical transfer quantum.
 
 ## One NFE on two peers
 
@@ -30,8 +31,9 @@ the algorithm below uses none of them.
 
 One page table holds every page the runtime will use. Each function output
 is a range of rows in that table. A row holds three things: which page, its
-stamp, and its use count. The use count is the use-checker. The page table is
-the only state.
+stamp, and its use count. The use count is the use-checker. This is the logical
+operand/ownership model, not the bridge ABI: compiled span descriptors, local
+ownership metadata and physical completion prefixes realize its dependencies.
 
 Every function has a known number of output pages. Every function input is
 the output pages of some function, on this node or on a peer. All of this is
@@ -143,8 +145,9 @@ Nothing a Mini does depends on how many Minis there are.
 
 A Mini holds its share of the program's weights. They never move. It holds
 one page table. The table has a row for every page the Mini will ever use. A
-row holds a page, a stamp, and a use count. That table is the Mini's whole
-state. Every function output is a range of rows in the table. Every function
+row holds a page, a stamp, and a use count. This describes the Mini's logical
+operand state, realized by the storage and transport metadata described above.
+Every function output is a range of rows in the table. Every function
 input is some function's output rows, on this Mini or on an adjacent Mini.
 
 ### One NFE, number k
@@ -289,18 +292,53 @@ unknown retirement evidence retains storage. See
 [whole-function.md](whole-function.md#typed-one-sided-lifetimes) and
 `rdma/tests/test_lifetimes.py` for the proof and counterexamples.
 
-The same types cover a sub-page masked frame train. Packing reads the original
-operand and an immutable affine descriptor; a transport lease covers the full
-padded frame. Its landing enables a masked read and writes only the declared
-final-output intervals. Every frame use retains the descriptor, and the output
-becomes available only after all stores required by that output are complete.
-The original operand can retire after its last pack read; the packed source
-remains owned until every DMA read ends. A landing remains owned until its
-masked consumer and any forwarding reads end. Serial receiver execution alone
-does not prevent an already preposted remote write from overwriting that frame.
-Without a natural return proof, successive landing frames have distinct storage.
-Mask geometry and disjoint final stores are separate compiler obligations;
-ownership reachability does not prove byte-address arithmetic.
+The byte-extent revision resolves a logical page or affine row into exact byte
+intervals. A local 16-byte `mesh_dma_span {offset, bytes}` names one payload;
+`mesh_entry {spans, units, word, base}` names an immutable array of those spans.
+The descriptor bytes are not payload headers. Allocation pages, 1 GiB registered
+extents, 4 KiB hardware credit frames, and actual SGE payload lengths are distinct.
+Short or unaligned spans transfer only their declared bytes. Exact intervals
+leave adjacent destination values untouched, without padded transport copies.
+
+[`ncclMeshWritePrepare`, `ncclMeshWriteRowsPrepare` and `ncclMeshWriteSpansPrepare`](../rdma/nccl.h) bind
+placements and common packet cuts at configuration time. The rows form maps
+logical byte k to `(k / row_bytes) * local_pitch + k % row_bytes`; all rows use
+one span table, with no per-row host execution call or entry. Registration cuts
+use the actual phase of each row. The indexed form concatenates each local
+span list in logical order; endpoints may have different counts, gaps, and
+physical ordering. Source intervals can repeat, while overlapping landing
+intervals fail configuration. The common cuts preserve every local boundary
+and actual registration phase. No numerical buffer is packed.
+`ncclMeshWriteExecute` reuses the binding with no new placement exchange or
+receipt. Indexed preparation has local sanitizer and protected-memory tests;
+it has not yet been included in the live cluster evidence below.
+
+This source revision is wire 135/layout 154. Its existing contiguous/affine
+[live validation](transport.md#exact-byte-validation-on-2026-10-24)
+passed three-rank writes from 3 bytes through 1 GiB + 19 bytes, including ragged
+rows, exact byte accounting and preserved neighbors; larger transfers used all
+six cables. Two-node and three-node fused runs each passed 14 cases and 94 calls
+per rank. A complete three-byte numerical function took median 31.290 µs with
+exact writes versus 35.569 µs with padded transfers across five trials of 128
+calls per mode. These are whole-function observations, not isolated NIC timing.
+The bridge deployment was temporary and the preceding bridge was restored.
+
+Each source extent remains immutable until every declared physical reader
+finishes, including reads not posted yet. Pins record physical byte intervals,
+so crossing an allocation row or using an alias cannot hide a backing reader.
+A destination's consumer and any forwarding read have separate lifetimes.
+Serial receiver execution alone does not order an already preposted remote
+write; one-way reuse still needs a natural causal proof or distinct storage.
+The earlier masked frame train obeyed the same proof, but its padding is not a
+requirement of the byte-span interface.
+
+The immutable span table is itself a closure operand. SEND and LAND prefixes
+retire its two directions independently, and taking its list entry does not
+finish the bridge's later CPU reads of the table. A local stream give prevents
+new posts; the bridge's subsequent owner transition proves its CPU reader ended.
+Keep descriptor storage until completion or that local quiescence proof. None
+of these ownership proofs introduces a network ACK. Affine address geometry and
+disjoint final stores remain separate obligations from ownership reachability.
 
 ## What this is called elsewhere
 

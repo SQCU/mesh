@@ -3,7 +3,7 @@ import pathlib
 import sys
 import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from roofline import causal_offsets, roofline, union_ns, finishes, matched_transfers
+from roofline import causal_offsets, roofline, union_ns, finishes, matched_transfers, unit_lengths
 
 
 def window(cable, start, end, count):
@@ -24,6 +24,60 @@ def landings(cables, ranks):
 
 
 class RooflineTests(unittest.TestCase):
+    def test_byte_extents_count_payload_separately_from_credit_frames(self):
+        cables = [{'nodes': [0, 1], 'bits_per_second': 80}]
+        sent = window(0, 1, 3, 8192)
+        sent.update(last=2, unit_kind='byte_extent', unit_bytes=[1, 8191])
+        ranks = landings(cables, [{'rank': 0, 'windows': [sent]}, {'rank': 1, 'windows': []}])
+        result = roofline(cables, ranks, 8192, {'0': [0, 0], '1': [0, 0]})
+        self.assertEqual(result['wire_bytes'], 8192)
+        self.assertEqual(result['wire_payload_bytes'], 8192)
+        self.assertEqual(result['credit_frames_4096'], 3)
+        self.assertEqual(result['wire_bandwidth_bytes_per_second_bounds'], [4096, 4096])
+        self.assertIsNone(result['physical_framing_overhead_bytes'])
+
+    def test_crossing_byte_extent_groups_preserve_exact_unit_lengths(self):
+        ranks = self.refined(sends=((0, 2, 1, 6), (2, 4, 5, 8)),
+                             receives=((0, 1, 2, 3), (1, 4, 4, 8)))
+        lengths = [3, 4097, 17, 1]
+        for rank in ranks:
+            for w in rank['windows']:
+                parts = lengths[w['first']:w['last']]
+                w.update(unit_kind='byte_extent', unit_bytes=parts, bytes=sum(parts))
+        matches = matched_transfers(ranks)
+        self.assertEqual([m['unit_bytes'] for m in matches], [(3, 4097), (17, 1)])
+        self.assertEqual(sum(m['send']['bytes'] for m in matches), sum(lengths))
+        self.assertFalse(matches[1]['arrival_exact'])
+
+    def test_equal_average_payload_does_not_match_different_extent_sequences(self):
+        ranks = self.refined(sends=((0, 2, 1, 6),), receives=((0, 2, 2, 6),))
+        for rank, lengths in zip(ranks, ([1, 8191], [4096, 4096])):
+            rank['windows'][0].update(unit_kind='byte_extent', unit_bytes=lengths, bytes=sum(lengths))
+        with self.assertRaisesRegex(ValueError, 'byte counts'):
+            matched_transfers(ranks)
+
+    def test_byte_extent_metadata_cannot_silently_become_uniform_pages(self):
+        w = window(0, 1, 2, 8192)
+        w.update(last=2, unit_kind='byte_extent')
+        with self.assertRaisesRegex(ValueError, 'exact unit lengths'):
+            unit_lengths(w)
+        for lengths in ([8192], [0, 8192], [4095, 4096], [4096.0, 4096.0]):
+            with self.subTest(lengths=lengths), self.assertRaises(ValueError):
+                unit_lengths({**w, 'unit_bytes': lengths})
+        del w['unit_kind']
+        self.assertEqual(unit_lengths(w), (4096, 4096))
+
+    def test_repeated_stages_require_same_extent_sequence_not_only_same_byte_sum(self):
+        cables = [{'nodes': [0, 1], 'bits_per_second': 80}]
+        ranks = [{'rank': r, 'windows': []} for r in (0, 1)]
+        for rank in ranks:
+            for stage, lengths in enumerate(([1, 7], [2, 6])):
+                w = window(0, 1 + 10 * stage, 3 + 10 * stage, 8)
+                w.update(first=2 * stage, last=2 * stage + 2, unit_kind='byte_extent', unit_bytes=lengths)
+                rank['windows'].append(w)
+        with self.assertRaisesRegex(ValueError, 'layout does not repeat'):
+            finishes(cables, landings(cables, ranks), 2, {'0': [0, 0], '1': [0, 0]})
+
     def refined(self, sends=((0, 10, 1, 3), (10, 20, 4, 8)), receives=((0, 20, 2, 8),)):
         ranks = [{'rank': 0, 'windows': []}, {'rank': 1, 'windows': []}]
         for first, last, start, end in sends:
