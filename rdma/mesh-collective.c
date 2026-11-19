@@ -1590,9 +1590,7 @@ static void plan_ordered(struct plan_room_edges *graph,const struct plan_step *p
 static int plan_here(const uint32_t *key,const uint32_t *node,uint32_t J,uint32_t n,uint32_t self,uint32_t x){
   return node[x]==self && ((x>=2*J && key[x]==n) || key[x]==self);
 }
-/* design/aot-compilation-change-request.md A10 and appendix item 2: `calls`, `row` and `order` the instance rows
-   (storage, copies, transport), `source_calls`, `source_row`, `source_order` and source_outstanding[] the original
-   source family's (the issue bound's successor and delay) */
+/* design/aot-compilation-change-request.md A7/A10; output_data/compiler-review-20261119/source-issue-and-rank-time.md */
 static int plan_graph(struct plan_step *plans,const struct mesh_plan_analysis *a,struct mesh_planned *planned){
   const struct mesh_function *functions=a->function;
   const uint32_t count=a->functions,*calls=a->calls,norders=a->norders,self=a->nodes->self;
@@ -1672,9 +1670,7 @@ static int plan_graph(struct plan_step *plans,const struct mesh_plan_analysis *a
      !entry || !first || !rows || !wait_first || !wait_order || !tell_first || !tell_order || !cause){
     status=ENOMEM;goto done;
   }
-  /* design/aot-compilation-change-request.md A10 and appendix item 2: each vertex's observer, the call whose
-     submissions count it, and the blocks later it does: a work vertex's its call's source-family successor, a
-     submission's itself */
+  /* design/aot-compilation-change-request.md A10: observer[x] names the submission which witnesses x's completion. */
   for(uint32_t j=0;j<J;j++){
     const struct plan_step *p=plans+calls[j];
     call[2*j]=call[2*j+1]=j;

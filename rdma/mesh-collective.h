@@ -94,7 +94,7 @@ enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_
        MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART, MESH_PLANNED_WINDOW };
 /* struct mesh_planned order[q]'s domain by cause[q].kind, in every result (mesh_plan, mesh_plan_local, loaded):
    MESH_PLANNED_PART call `pair`'s part vertices from 0 (its function's edges); MESH_ORDER_FLOW, MESH_ORDER_CONFLICT
-   and MESH_PLANNED_CHAIN call ordinals; MESH_PLANNED_PROGRAM, _SUBMIT, _OUTSTANDING _TRANSFER and _WINDOW the signature's
+   and MESH_PLANNED_CHAIN call ordinals; MESH_PLANNED_PROGRAM, _SUBMIT, _OUTSTANDING, _TRANSFER and _WINDOW the signature's
    tasks */
 struct mesh_planned_cause { uint32_t kind,pair; };
 struct mesh_planned_call { uint64_t lead; uint32_t function,ordinal,every,parts,waits,padding; };
@@ -223,8 +223,9 @@ int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_w
                         uint32_t nodes,uint32_t self,struct mesh_grouped *grouped);
 /* design/aot-compilation-change-request.md A2, A4 and A7 to A10, appendix items 2 and 6: one program's joint network
    plan, mesh_plan's over its instances functions[count] (calls[j] call j's), with mesh_plan_local's program operands
-   (order, ordered, closure, chains, roots, use_first, use) and the original source family (source_calls[j] call j's
-   source function of `sources`, source_outstanding[] each one's issue bound: its own rows, A10's successor and delay).
+   (order, ordered, closure, chains, roots, use_first, use). source_calls indexes original occurrences in their source
+   order. source_outstanding names the limit by family. mesh_source_occurrences.first/piece maps each original call
+   to its physical pieces; its nodes mask locates each physical function's numerical work.
    grouped[f] function f's declared rows' grouping on this node, required (mesh_declared_group's, retained by the
    caller and borrowed by the result, out->grouped; plan_function's demand_of its view; NULL: EINVAL; one of another
    map or node: ESTALE, of another row count: EINVAL). A function's
