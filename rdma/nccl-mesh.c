@@ -1,3 +1,4 @@
+#include "mesh-peer-cables.h"
 /* design/whole-function.md#fabric */
 #include "nccl.h"
 #include "mesh-call.h"
@@ -925,36 +926,9 @@ static int fabric_discover(struct ncclComm *comm, const struct report *reports) 
   comm->fabric = (struct mesh_fabric){n, 0, cables};
   for (uint32_t a = 0; a < n; a++) for (uint32_t b = a + 1; b < n; b++) {
     const struct report *x = reports + a, *y = reports + b;
-    for (uint32_t i = 0; i < x->count; i++) {
-      const struct mesh_endpoint *one = x->endpoint + i;
-      if (one->node != y->node) continue;
-      uint32_t earlier = 0;
-      for (uint32_t k = 0; k < i; k++) earlier |= x->endpoint[k].bundle == one->bundle;
-      if (earlier) continue;
-      uint64_t wire = 0, bandwidth = 0;
-      int reciprocal = 0;
-      for (uint32_t k = i; k < x->count; k++) {
-        const struct mesh_endpoint *u = x->endpoint + k;
-        if (u->bundle != one->bundle) continue;
-        for (uint32_t j = 0; j < y->count; j++) {
-          const struct mesh_endpoint *v = y->endpoint + j;
-          if (v->node != x->node || v->wire != u->wire) continue;
-          reciprocal = 1;
-          if (!u->available || !v->available || (wire && wire < u->wire)) continue;
-          wire = u->wire;
-          bandwidth = u->bandwidth < v->bandwidth ? u->bandwidth : v->bandwidth;
-        }
-      }
-      if (!wire) return reciprocal ? EBUSY : ENOLINK;
-      cables[comm->fabric.cables++] = (struct mesh_cable){wire, bandwidth, {a, b}};
-    }
-    for (uint32_t j = 0; j < y->count; j++) {
-      const struct mesh_endpoint *v = y->endpoint + j;
-      if (v->node != x->node) continue;
-      int reciprocal = 0;
-      for (uint32_t i = 0; i < x->count; i++) reciprocal |= x->endpoint[i].node == y->node && x->endpoint[i].wire == v->wire;
-      if (!reciprocal) return ENOLINK;
-    }
+    int error = mesh_peer_cables(a, x->node, x->endpoint, x->count, b, y->node, y->endpoint, y->count,
+                                 cables, &comm->fabric.cables);
+    if (error) return error;
   }
   qsort(cables, comm->fabric.cables, sizeof *cables, cable_order);
   const uint32_t links = comm->fabric.cables;

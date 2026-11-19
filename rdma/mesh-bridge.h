@@ -136,7 +136,13 @@ enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
    sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
-enum { HELLO=1, FAREWELL, RECORD, LINK };
+enum { HELLO=1, FAREWELL, RECORD, LINK, PEER_MESSAGE };
+enum { PEER_EXTENTS=1 };
+void peer_service_open(void);
+void peer_service_close(void);
+void peer_message(uint32_t,uint64_t,uint32_t,const void *,uint32_t);
+void peer_event(int);
+void peer_turn(void);
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }

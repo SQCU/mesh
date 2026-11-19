@@ -922,6 +922,8 @@ static void message_heard(struct port *port,const struct message *heard,const un
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
   else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
+  else if(heard->kind==PEER_MESSAGE && (port->heard.code&PEER_EXTENTS))
+    peer_message(port->peer,(uint64_t)heard->code,heard->count,payload,heard->bytes);
 }
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello
    names the peer (the node it states, whatever node's hello this end dialed), and pairs the link, its plan the fewer
@@ -992,7 +994,7 @@ static void port_greet(struct port *port){
     port_lost(port,errno?errno:EIO);return;
   }
   port_watch(port,EVFILT_READ);
-  port_say(port,(struct message){.kind=HELLO,.count=1+port->budget},NULL,0);
+  port_say(port,(struct message){.kind=HELLO,.count=1+port->budget,.code=PEER_EXTENTS},NULL,0);
 }
 /* design/transport.md: the port a link-local peer reached, by its interface; none for a scope of 0 (no
    interface: a LAN address, or the index of an interface that is gone) */
@@ -2014,6 +2016,7 @@ int main(int argc,char **argv){
   mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize();M->magic=MESH_MAGIC;
+  peer_service_open();atexit(peer_service_close);
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
@@ -2049,6 +2052,7 @@ int main(int argc,char **argv){
       liveness=now+MESH_PAUSE_NS;
       record_retell();
     }
+    peer_turn();
     clients_turn(alive);
     struct kevent64_s ready[16];
     const uint64_t due=turn_due(liveness),at=clock_ns(),rest=due>at?due-at:0;
@@ -2059,6 +2063,7 @@ int main(int argc,char **argv){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
       /* design/transport.md section 14, "A process a port": a port's child's message or exit */
+      else if(e->udata==UINT64_MAX-1)peer_event((int)e->ident);
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_CHILD)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
         if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child)child_reaped(port);

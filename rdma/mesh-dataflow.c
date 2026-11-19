@@ -308,7 +308,7 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
-    if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
+    if(atomic_load(&slot->peer_owner) || !atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->start=mesh_started(getpid());
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     /* design/transport.md section 2: the bridge woken (as mesh_retire wakes it), so it watches this process's exit
@@ -506,6 +506,8 @@ static int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
   return 0;
 }
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
+  uint64_t owner=atomic_load(&mesh_buffers(m)[first].owner);
+  if(owner && atomic_load(&mesh_client_at(m,owner)->peer_owner)==owner)return 1;
   /* Lease backing, not a table's logical row IDs, is what reclaim frees.
      Coalescing physical runs scans each allocation row once in the usual
      contiguous case; scatter allocations retain each intersected run. */
