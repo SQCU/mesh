@@ -30,12 +30,13 @@ struct where { void *buffer; size_t offset; };
 struct ncclMeshWritePlan { struct mesh_span_plan packets; size_t stride, row_bytes, rows, pitch;
   ncclMeshSpan *view; uint64_t *view_first; size_t views,view_extent; };
 struct steps {
+  struct scatter_schedule *scatter;
   struct mesh_step *steps; struct where *buffer,*read;
   uint32_t *channel,*prior_first,*prior,*consume_order,*retired_first,*retired; uint64_t *entry,*consumption; unsigned char *done,*fresh;
 };
 struct call { struct steps *bound; struct ncclMeshWritePlan *write_plan; ncclMeshFused *fused; int target,root; };
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages,end; uint64_t need; size_t offset,bytes;
-  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority; uint64_t *retire; };
+  struct where data; struct mesh_dma_span *spans; uint64_t table; double priority; uint64_t *retire; struct mesh_byte_shape *shape; };
 struct schedule { struct message *out,*in; size_t outs,ins; uint64_t first[2],word,base; mesh_pages each[2]; size_t *consume; };
 struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule *plans,*write_plans; };
 struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; int active; };
@@ -106,6 +107,7 @@ static void channel_log(struct ncclComm *comm,const struct channel *ch,int land,
 # Keep private schedule lowering in the same production helper used by indexed
 # preparation fixtures; there is no test-only permutation implementation.
 _native_source = (ROOT / 'nccl-mesh.c').read_text()
+MOCKS += _native_source[_native_source.index('struct scatter_slice {'):_native_source.index('struct steps {')]
 _begin = _native_source.index('struct consumption_order {')
 MOCKS += _native_source[_begin:_native_source.index('};', _begin)+2]
 MOCKS += '\n'.join(function(_native_source, name) for name in
@@ -220,7 +222,12 @@ static void relay_prefix(void){
   struct message out={.c=&call,.step=1,.offset=4096,.bytes=4099,.pages={span_units(&p.packets,4096,4099)}};
   in.end=in.pages;out.end=out.pages;
   struct schedule schedules[]={{.in=&in,.ins=1},{.out=&out,.outs=1}};
-  assert(!place_group(NULL,&comm,schedules,1));assert(!issue_entries(&comm,schedules));
+  assert(!place_group(NULL,&comm,schedules,1));
+  assert(!mesh_byte_shape_make(&in.shape,&in.spans[0].bytes,in.pages.n,sizeof *in.spans));
+  assert(!mesh_byte_shape_make(&out.shape,&out.spans[0].bytes,out.pages.n,sizeof *out.spans));
+  comm.channels[0].trace_readers=comm.channels[1].trace_readers=1;
+  assert(!issue_entries(&comm,schedules));
+  mesh_byte_shape_release(in.shape);mesh_byte_shape_release(out.shape);
   const struct mesh_entry e=observed[1][0][0];
   assert(e.word==(uint64_t)((char *)&region->control-(char *)region));
   assert(e.base==2 && e.units==2); /* MR tail 3 + 4093, not one 4096-byte page. */
@@ -258,8 +265,8 @@ class NativeBytePlans(unittest.TestCase):
     def test_native_exact_placement_binding_and_relay(self):
         source = (ROOT / 'nccl-mesh.c').read_text()
         names = ('named', 'shifted', 'address_of', 'write_displacement', 'span_after', 'span_units',
-                 'page_up', 'schedules_free', 'group_at', 'repeat_of', 'group_bound', 'place_group',
-                 'forwards', 'channel_account_prune', 'channel_account_append', 'group_entries', 'entry_logged',
+                 'page_up', 'schedules_free', 'group_at', 'repeat_of', 'group_bound', 'scatter_spans', 'place_group',
+                 'forwards', 'channel_account_prune', 'forwarding_gate', 'visit_crossings', 'group_entries', 'entry_logged',
                  'issue_entries')
         bodies = '\n\n'.join(function(source, name) for name in names)
         self.compile_and_run(MOCKS + bodies + CASES, 'native exact byte plans PASS')
