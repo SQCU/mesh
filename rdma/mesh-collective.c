@@ -952,21 +952,18 @@ static int plan_trees(struct mesh_plan_flow *p){
   const uint32_t n=p->n;
   p->adjacency=calloc((size_t)p->made+1,sizeof *p->adjacency);
   p->members=malloc(((size_t)p->made+1)*sizeof *p->members);
-  p->span=malloc(((size_t)p->made+1)*sizeof *p->span);
   p->counts=malloc(((size_t)p->demands+1)*sizeof *p->counts);
-  if(!p->adjacency || !p->members || !p->span || !p->counts)return ENOMEM;
+  if(!p->adjacency || !p->members || !p->counts)return ENOMEM;
   for(uint32_t i=0;i<p->demands;i++){
     const struct mesh_plan_demand *d=p->demand+i;
     p->counts[i]=p->run+d->tree;
-    uint64_t k=0;
     for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
       int status=mesh_graph_tree_create(n,d->source,p->parent+p->tree[j]*n,p->adjacency+j);
       if(status)return status;
       const size_t *first=p->adjacency[j]->children->first,*child=p->adjacency[j]->children->order;
       p->members[j]=0;
       for(size_t c=first[0];c<first[n];c++)p->members[j]|=UINT64_C(1)<<child[c];
-      p->span[j]=(struct mesh_graph_interval){j,p->cuts[i]->cut[k],p->cuts[i]->cut[k+p->run[j]]};
-      k+=p->run[j];
+      p->run[j]=p->cuts[i]->count[j-d->tree];
     }
   }
   return 0;
@@ -2000,7 +1997,7 @@ static int plan_instructions(struct mesh_plan_flow *p,const struct mesh_plan_geo
         endpoint[count++]=(struct mesh_plan_endpoint){t,role,view[role]};
       }
     }
-    status=mesh_plan_cut(m,p,i,count,endpoint,0,NULL,NULL,p->cuts+i);
+    status=mesh_plan_cut(m,p,i,count,endpoint,d->trees,p->span+d->tree,NULL,p->cuts+i);
   }
   return status;
 }
@@ -2251,7 +2248,6 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
     if(values[j].kind==MESH_EXECUTION && !p->value_lag[j] && values[j].begin>values[j].end){
       status=EINVAL;goto done;
     }
-  if((status=plan_instructions(p,m)) || (status=plan_landings(p)))goto done;
 
   if(p->demands){
     double share_capacity[sizeof p->capacity / sizeof *p->capacity];
@@ -2301,38 +2297,42 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
     p->made=made;
     p->tree=malloc(((size_t)made+1)*sizeof *p->tree);
     p->run=calloc((size_t)made+1,sizeof *p->run);
+    p->span=malloc(((size_t)made+1)*sizeof *p->span);
     rate=malloc(((size_t)made+1)*sizeof *rate);
     latency=calloc((size_t)made+1,sizeof *latency);
     trees=malloc(((size_t)p->demands+1)*sizeof *trees);
-    if(!p->tree || !p->run || !rate || !latency || !trees){status=ENOMEM;goto done;}
+    if(!p->tree || !p->run || !p->span || !rate || !latency || !trees){status=ENOMEM;goto done;}
     mesh_graph_rows(p->demands,made,plan_at,demand,trees,p->tree);
     for(uint32_t i=0;i<p->demands;i++){
       p->demand[i].tree=(uint32_t)trees[i];
       p->demand[i].trees=(uint32_t)(trees[i+1]-trees[i]);
     }
-    /* design/data-model.md §5, design/joint-compilation.md §3: load is bytes, capacity is bits/s.
-       Express relay startup in ns and the packed tree's rate in cut instructions/ns. */
-    for(uint32_t j=0;j<made;j++){
-      const uint32_t tree=(uint32_t)p->tree[j],i=demand[tree];
-      rate[j]=share[tree];
-      if(!finite || !p->cuts[i]->instructions)continue;
-      latency[j]=tree_ns[tree];
-      rate[j]*=(double)p->cuts[i]->instructions/8e9;
-    }
+    /* design/data-model.md §5: the longest-startup tree carries the earliest source bytes.
+       mesh_graph_flow_startup expresses rate as a fraction of the demand per bit/s; fill consumes bytes/ns. */
     for(uint32_t i=0;i<p->demands;i++){
-      struct mesh_plan_demand *d=p->demand+i;
-      if(finite && d->trees){
-        double first=latency[d->tree];
-        for(uint32_t j=d->tree+1;j<d->tree+d->trees;j++)first=fmin(first,latency[j]);
-        for(uint32_t j=d->tree;j<d->tree+d->trees;j++)latency[j]-=first;
+      const struct mesh_plan_demand *d=p->demand+i;
+      if(finite)qsort_b(p->tree+d->tree,d->trees,sizeof *p->tree,^(const void *left,const void *right){
+        const size_t a=*(const size_t *)left,b=*(const size_t *)right;
+        return tree_ns[a]==tree_ns[b]?(a>b)-(a<b):(tree_ns[a]<tree_ns[b])-(tree_ns[a]>tree_ns[b]);
+      });
+      const double first=finite && d->trees?tree_ns[p->tree[d->tree+d->trees-1]]:0;
+      for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
+        const size_t tree=p->tree[j];
+        latency[j]=finite?tree_ns[tree]-first:0;
+        rate[j]=finite?share[tree]*(double)d->bytes/8e9:share[tree];
       }
-      mesh_graph_fill(d->trees,latency+d->tree,rate+d->tree,p->cuts[i]->instructions,p->run+d->tree);
-      uint64_t cut=0;
-      for(uint32_t j=d->tree;j<d->tree+d->trees;j++)cut+=p->run[j];
-      if(cut!=p->cuts[i]->instructions){status=EHOSTUNREACH;goto done;}
+      mesh_graph_fill(d->trees,latency+d->tree,rate+d->tree,d->bytes,p->run+d->tree);
+      uint64_t start=0;
+      for(uint32_t j=d->tree;j<d->tree+d->trees;j++){
+        const uint64_t end=start+p->run[j];
+        p->span[j]=(struct mesh_graph_interval){j,start,end};
+        start=end;
+      }
+      if(start!=d->bytes){status=EHOSTUNREACH;goto done;}
     }
   }
-  if((status=plan_trees(p)) || (status=plan_template(p,dependence,dependences)) || (status=plan_acyclic(p)) ||
+  if((status=plan_instructions(p,m)) || (status=plan_landings(p)) || (status=plan_trees(p)) ||
+     (status=plan_template(p,dependence,dependences)) || (status=plan_acyclic(p)) ||
      (status=plan_unroll(p)) || (status=plan_sets(p,m)))goto done;
   p->start_lead=p->copies-1;
   if((status=mesh_plan_flow_geometry(p,(const struct mesh_plan_cuts *const *)p->cuts,p->counts,p->cut_local,
@@ -4391,7 +4391,7 @@ static int plan_flow_extra_get(struct plan_archive *in,struct mesh_plan_flow *p,
       struct plan_cut_loaded *loaded=calloc(1,sizeof *loaded);
       if(!r || !loaded){free(loaded);return ENOMEM;}
       *r=*view;r->geometry=p->geometry;r->source=p;r->endpoint=p->endpoint+offset;
-      r->span=NULL;r->previous=NULL;r->mapped=loaded;
+      r->span=view->spans?p->span+p->demand[i].tree:NULL;r->previous=NULL;r->mapped=loaded;
       if((status=plan_cut_arrays_get(in,r,view)))return status;
     }
   }
