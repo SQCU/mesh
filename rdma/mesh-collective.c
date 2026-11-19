@@ -1143,6 +1143,56 @@ static int mesh_scatter_order(const void *a,const void *b){
   if(x->link!=y->link)return x->link<y->link?-1:1;
   return (x->first>y->first)-(x->first<y->first);
 }
+struct scatter_piece { uint32_t index,nodes; const uint64_t *parents; };
+static int scatter_tree_order(const void *a,const void *b){
+  const struct scatter_piece *x=a,*y=b;
+  for(uint32_t r=0;r<x->nodes;r++)
+    if(x->parents[r]!=y->parents[r])return x->parents[r]<y->parents[r]?-1:1;
+  return (x->index>y->index)-(x->index<y->index);
+}
+/* Each group's source holds all its bytes at release. Equal-sized pieces can exchange logical
+   intervals across the entire schedule. Give pieces with the same directed peer adjacencies
+   consecutive intervals; every hop keeps its cable, byte count and service position. */
+static int scatter_intervals(uint32_t nodes,const struct mesh_scatter_link *link,const struct mesh_scatter_group *group,
+                             uint32_t groups,uint64_t piece,struct mesh_scatter_run *run){
+  uint32_t k=0;
+  while(k<run->count && link[run->send[k].link].from==group[run->send[k].group].source)k++;
+  if(k==run->count)return 0;
+  uint32_t *first=calloc((size_t)groups+1,sizeof *first);
+  if(!first)return ENOMEM;
+  for(k=0;k<run->count;k++){
+    const struct mesh_scatter_send *s=run->send+k;
+    if(s->bytes==piece)first[s->group+1]=(uint32_t)(group[s->group].bytes/piece);
+  }
+  for(uint32_t g=0;g<groups;g++)first[g+1]+=first[g];
+  const size_t count=first[groups];
+  if(!count){free(first);return 0;}
+  uint64_t *parents=calloc(count,nodes*sizeof *parents);
+  struct scatter_piece *parts=calloc(count,sizeof *parts);
+  uint32_t *ordinal=calloc(count,sizeof *ordinal);
+  if(!parents || !parts || !ordinal){free(ordinal);free(parts);free(parents);free(first);return ENOMEM;}
+  for(k=0;k<count;k++)parts[k]=(struct scatter_piece){k,nodes,parents+(size_t)k*nodes};
+  for(k=0;k<run->count;k++){
+    const struct mesh_scatter_send *s=run->send+k;
+    if(s->bytes!=piece)continue;
+    const size_t i=first[s->group]+(s->first-group[s->group].first)/piece;
+    const struct mesh_scatter_link *edge=link+s->link;
+    parents[i*nodes+edge->to]|=UINT64_C(1)<<edge->from;
+  }
+  for(uint32_t g=0;g<groups;g++){
+    qsort(parts+first[g],first[g+1]-first[g],sizeof *parts,scatter_tree_order);
+    for(uint32_t i=first[g];i<first[g+1];i++)ordinal[parts[i].index]=i-first[g];
+  }
+  for(k=0;k<run->count;k++){
+    struct mesh_scatter_send *s=run->send+k;
+    if(s->bytes==piece){
+      const uint64_t base=group[s->group].first;
+      s->first=base+piece*ordinal[first[s->group]+(s->first-base)/piece];
+    }
+  }
+  free(ordinal);free(parts);free(parents);free(first);
+  return 0;
+}
 int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
                           uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,uint32_t *count,uint64_t *piece_bytes,
                           double *makespan,double *bound){
@@ -1166,6 +1216,8 @@ int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,ui
     else free(run.send);
   }
   qsort(best.send,best.count,sizeof *best.send,mesh_scatter_order);
+  const int error=scatter_intervals(nodes,link,group,groups,chosen,&best);
+  if(error){free(best.send);return error;}
   /* the bound: every destination's bytes over its in-links' summed rate after its nearest in-link's latency; every
      source's over its out-links' */
   double lower=0;
