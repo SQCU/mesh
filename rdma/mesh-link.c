@@ -1,4 +1,5 @@
 #include "mesh-bridge.h"
+#include "mesh-peer-private.h"
 #include <spawn.h>
 #include <netinet/tcp.h>
 #include <sys/wait.h>
@@ -296,7 +297,8 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
       if(at[lane]>=atomic_load_explicit(&x->peer_presented[way][lane],memory_order_acquire))break;
       struct mesh_entry *cells=(void *)((char *)M+x->lists);
       struct mesh_entry record=cells[way*MESH_STREAM_ENTRIES+lane*(MESH_STREAM_ENTRIES/2)+at[lane]%(MESH_STREAM_ENTRIES/2)];
-      if(!mesh_entry_table_valid(M,(struct mesh_entry){record.spans,record.units,record.word,0}) || record.units!=1){link_failed(port,EINVAL,way?3:2);break;}
+      if(!mesh_entry_table_valid(M,(struct mesh_entry){record.spans,1,record.word,0}) ||
+         (record.units!=1 && !mesh_entry_table_valid(M,(struct mesh_entry){record.units,1,0,0}))){link_failed(port,EINVAL,way?3:2);break;}
       single.spans=(const void *)((const char *)M+record.spans);
       single.word=record.word?(const void *)((const char *)M+record.word):NULL;
       single.base.n=record.base;entry=&single;
@@ -313,6 +315,28 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
     if(!post_span(port,t,k+lane,way,entry->spans[unit]))break;
   }
   if(pinned)metadata_pin(x,NULL);
+}
+static void lane_completed(struct port *port,uint32_t t,unsigned way,unsigned lane,uint64_t through){
+  struct link *l=&port->link;
+  struct mesh_stream *x=stream_of(port,t);
+  _Atomic uint64_t *prefix=&x->posts[way].done[lane];
+  if(l->hold[t]==HOLD_SERVE && atomic_load_explicit(&x->peer_mode,memory_order_acquire)==l->held[t]){
+    const size_t capacity=MESH_STREAM_ENTRIES/2;
+    const struct mesh_entry *list=(const void *)((const char *)M+x->lists);
+    list+=way*MESH_STREAM_ENTRIES+lane*capacity;
+    for(uint64_t n=atomic_load_explicit(prefix,memory_order_relaxed);n<through;n++){
+      uint64_t footer=list[n%capacity].units;if(footer==1)continue;
+      struct taken pin={.spans=(const void *)((const char *)M+footer),.units={1}};
+      metadata_pin(x,&pin);if(!holding_kept(x,l->held[t])){metadata_pin(x,NULL);break;}
+      const struct mesh_peer_gate *result=(const void *)pin.spans;
+      uint64_t word=result->word,value=result->threshold;
+      pin.word=(const void *)((const char *)M+word);
+      metadata_pin(x,&pin);
+      if(holding_kept(x,l->held[t]))mesh_peer_complete(M,word,value);
+      metadata_pin(x,NULL);
+    }
+  }
+  atomic_store_explicit(prefix,through,memory_order_release);
 }
 /* Completion retires the actual frame prefix and one DMA unit, separately. */
 static void lane_landed(struct port *port,uint32_t k,uint64_t id){
@@ -360,7 +384,7 @@ static void link_send(struct port *port,uint32_t served){
     if(!(completed&(UINT32_C(3)<<k)))continue;
     struct mesh_stream *x=stream_of(port,t);
     const struct lane_state *s=l->lane+k;
-    for(uint32_t c=0;c<2;c++)if(completed>>(k+c)&1)atomic_store_explicit(&x->posts[0].done[c],s[c].done,memory_order_release);
+    for(uint32_t c=0;c<2;c++)if(completed>>(k+c)&1)lane_completed(port,t,0,c,s[c].done);
     if(l->hold[t]!=HOLD_SERVE)continue;
     if(atomic_load(&x->peer_mode)==l->held[t])continue;
     struct walk *w=l->sending+t;walk_count(w,(struct mesh_units){MIN(relative_lane(w,0,s[0].done),relative_lane(w,1,s[1].done))},&x->sent);
@@ -391,7 +415,7 @@ static void link_receive(struct port *port,uint32_t served){
     if(!(landed&(UINT32_C(3)<<k)))continue;
     struct mesh_stream *x=stream_of(port,t);
     const struct lane_state *s=l->lane+k;
-    for(uint32_t c=0;c<2;c++)if(landed>>(k+c)&1)atomic_store_explicit(&x->posts[1].done[c],s[c].got,memory_order_release);
+    for(uint32_t c=0;c<2;c++)if(landed>>(k+c)&1)lane_completed(port,t,1,c,s[c].got);
     if(l->hold[t]!=HOLD_SERVE)continue;
     if(atomic_load(&x->peer_mode)==l->held[t])continue;
     struct walk *w=l->landing+t;walk_count(w,(struct mesh_units){MIN(relative_lane(w,0,s[0].got),relative_lane(w,1,s[1].got))},&x->landed);
