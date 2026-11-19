@@ -590,6 +590,7 @@ struct mesh_program_completion {
   struct mesh_graph_dependence *cycle;
   uint32_t *call_order;
   struct mesh_graph_closure access_order;
+  uint32_t *numerical; /* per original instruction, rank/device ordinal or MESH_ABSENT */
 };
 struct mesh_plan_compilation {
   size_t references;

@@ -165,6 +165,9 @@ struct mesh_graph_grouping {
 };
 int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, size_t), const void *context,
                       struct mesh_graph_grouping **out);
+/* Ordinal in each retained row for item place[v], UINT32_MAX for the omitted key. */
+int mesh_graph_group_ordinals(const struct mesh_graph_grouping *,uint32_t omit,uint32_t vertices,
+                              const uint32_t *place,uint32_t *ordinal);
 void mesh_graph_group_free(struct mesh_graph_grouping *);
 int mesh_graph_call_successors(uint32_t families,uint32_t occurrences,const uint32_t *family,const uint64_t *bound,
                                struct mesh_graph_grouping **group,uint32_t *later,uint64_t *lag);

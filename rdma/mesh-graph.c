@@ -728,6 +728,16 @@ int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, 
   if (status) mesh_graph_group_free(g); else *out = g;
   return status;
 }
+int mesh_graph_group_ordinals(const struct mesh_graph_grouping *g,uint32_t omit,uint32_t vertices,
+                              const uint32_t *place,uint32_t *ordinal) {
+  if(g->items>UINT32_MAX)return EOVERFLOW;
+  for(uint32_t v=0;v<vertices;v++){
+    uint32_t i=place[v];
+    if(i>=g->items)return EINVAL;
+    ordinal[v]=g->key(g->context,i)==omit?UINT32_MAX:(uint32_t)g->ordinal[i];
+  }
+  return 0;
+}
 int mesh_graph_call_successors(uint32_t families,uint32_t occurrences,const uint32_t *family,const uint64_t *bound,
                                struct mesh_graph_grouping **group,uint32_t *later,uint64_t *lag) {
   int status=mesh_graph_group(families,occurrences,mesh_graph_row_head,family,group);

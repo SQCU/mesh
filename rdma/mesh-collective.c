@@ -5321,7 +5321,7 @@ static int plan_storage_get(struct plan_archive *in,struct mesh_planned *planned
   return in->status;
 }
 struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range rows,arena[2]; uint64_t used[2],signature,completion; };
-#define PLAN_SAVED_COMPILATION UINT64_C(0x434d4f435048534d)
+#define PLAN_SAVED_COMPILATION UINT64_C(0x444d4f435048534d)
 #define PLAN_STEP_ARRAYS(X) \
   X(item,p->flow->givens) X(sync,(uint64_t)p->waits+p->tells) X(wait_row,(uint64_t)p->flow->calls+1)
 #define PLAN_COMPILATION_ARRAYS(X) \
@@ -5343,6 +5343,7 @@ static void program_completion_put(struct plan_archive *out,const struct mesh_pr
   plan_archive_put(out,&s->cycles,sizeof s->cycles);
   plan_archive_put(out,s->cycle,s->cycles*sizeof *s->cycle);
   plan_archive_put(out,s->call_order,s->base[s->calls]*sizeof *s->call_order);
+  plan_archive_put(out,s->numerical,s->base[s->calls]*sizeof *s->numerical);
   plan_archive_put(out,s->access_order.reached,(size_t)s->vertices*s->access_order.words*sizeof(uint64_t));
 }
 static int program_completion_get(struct plan_archive *in,struct mesh_graph_context *graph,struct plan_bytes *owner,
@@ -5377,10 +5378,13 @@ static int program_completion_get(struct plan_archive *in,struct mesh_graph_cont
     if(in->status)return in->status;
     for(size_t i=0;i<*n;i++)if(s->cycle[i].from>=s->vertices || s->cycle[i].to>=s->vertices)return EINVAL;
     s->call_order=(void *)(uintptr_t)plan_archive_view(in,s->base[s->calls],sizeof *s->call_order);
+    s->numerical=(void *)(uintptr_t)plan_archive_view(in,s->base[s->calls],sizeof *s->numerical);
     size_t words=((size_t)s->vertices+63)/64;
     s->access_order=(struct mesh_graph_closure){s->vertices,words,
       (void *)(uintptr_t)plan_archive_view(in,(size_t)s->vertices*words,sizeof(uint64_t))};
     if(in->status)return in->status;
+    for(uint32_t v=0;v<s->base[s->calls];v++)
+      if(s->numerical[v]!=MESH_ABSENT && s->numerical[v]>=s->base[s->calls])return EINVAL;
   }
   return rc;
 }

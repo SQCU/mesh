@@ -628,6 +628,12 @@ def grouping(keys, labels):
     return Owned(made, LIB.mesh_graph_group_free, labels)
 
 
+def group_ordinals(group, omit, vertices, place):
+    ordinal = (C.c_uint32 * vertices)()
+    _check(LIB.mesh_graph_group_ordinals(group.made, omit, vertices, place, ordinal))
+    return ordinal
+
+
 class Tree(C.Structure):
     _fields_ = [('vertices', C.c_uint32), ('root', C.c_uint32), ('parent', _U),
                 ('children', C.POINTER(Grouping))]
@@ -692,6 +698,7 @@ for name, result, arguments in (
         ('mesh_graph_group', C.c_int, [C.c_uint32, C.c_size_t, C.c_void_p, C.c_void_p,
                                       C.POINTER(C.POINTER(Grouping))]),
         ('mesh_graph_group_free', None, [C.POINTER(Grouping)]),
+        ('mesh_graph_group_ordinals', C.c_int, [C.POINTER(Grouping), C.c_uint32, C.c_uint32, _U, _U]),
         ('mesh_graph_tree_create', C.c_int, [C.c_uint32, C.c_uint32, _U, C.POINTER(C.POINTER(Tree))]),
         ('mesh_graph_tree_free', None, [C.POINTER(Tree)]),
         ('mesh_graph_tree_parent', C.c_uint32, [C.c_void_p, C.c_size_t]),

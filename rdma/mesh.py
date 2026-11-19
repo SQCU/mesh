@@ -251,7 +251,11 @@ class ProgramCompletion(C.Structure):
         ('length', C.POINTER(D)), ('completion', C.POINTER(D)), ('key', C.POINTER(ScheduleResource)),
         ('name', C.POINTER(C.c_char)), ('cross_edge', C.POINTER(Z)),
         ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p), ('access_relation', C.c_void_p), ('cycles', Z),
-        ('cycle', C.POINTER(mesh_graph.Dependence)), ('call_order', C.POINTER(U)), ('access_order', mesh_graph.Closed)]
+        ('cycle', C.POINTER(mesh_graph.Dependence)), ('call_order', C.POINTER(U)), ('access_order', mesh_graph.Closed),
+        ('numerical', C.POINTER(U))]
+
+    def numerical_positions(self, call):
+        return mesh_graph.View(self, self.numerical, range(self.base[call], self.base[call + 1]), int)
 
     @property
     def cross(self):
