@@ -2,7 +2,7 @@
 #define MESH_PEER_CABLES_H
 #include "mesh-call.h"
 static inline int mesh_peer_cables(uint32_t a,uint32_t xnode,const struct mesh_endpoint *x,uint32_t xn,
-  uint32_t b,uint32_t ynode,const struct mesh_endpoint *y,uint32_t yn,struct mesh_cable *cables,uint32_t *count){
+  uint32_t b,uint32_t ynode,const struct mesh_endpoint *y,uint32_t yn,struct mesh_cable *cables,uint32_t *count,int require_all){
     for (uint32_t i = 0; i < xn; i++) {
       const struct mesh_endpoint *one = x + i;
       if (one->node != ynode) continue;
@@ -23,7 +23,7 @@ static inline int mesh_peer_cables(uint32_t a,uint32_t xnode,const struct mesh_e
           bandwidth = u->bandwidth < v->bandwidth ? u->bandwidth : v->bandwidth;
         }
       }
-      if (!wire) return reciprocal ? EBUSY : ENOLINK;
+      if (!wire) { if (require_all) return reciprocal ? EBUSY : ENOLINK; continue; }
       cables[(*count)++] = (struct mesh_cable){wire, bandwidth, {a, b}};
     }
     for (uint32_t j = 0; j < yn; j++) {
@@ -31,7 +31,7 @@ static inline int mesh_peer_cables(uint32_t a,uint32_t xnode,const struct mesh_e
       if (v->node != xnode) continue;
       int reciprocal = 0;
       for (uint32_t i = 0; i < xn; i++) reciprocal |= x[i].node == ynode && x[i].wire == v->wire;
-      if (!reciprocal) return ENOLINK;
+      if (!reciprocal && require_all) return ENOLINK;
     }
   return 0;
 }

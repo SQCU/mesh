@@ -30,10 +30,10 @@ static inline int peer_layout(void *data,size_t bytes,struct peer_layout *l){
   l->spans=(void *)(l->row+l->head.records);
   return 0;
 }
-struct peer_piece { struct mesh_dma_span span;uint64_t prefix;uint32_t channel; };
+struct peer_piece { struct mesh_dma_span span;uint64_t prefix;size_t next;uint32_t channel,row; };
 struct peer_row {
   struct mesh_peer_transfer logical;
-  size_t first,end,next;
+  size_t first,end;uint64_t bytes;
   size_t retired;uint32_t remote_open,local_open,primed,done,published,prev,succ;
 };
 struct peer_plan {
@@ -64,7 +64,7 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
   if(!packet || a.head.records!=b.head.records)return EPROTO;
   uint32_t rank=node>peer;
   struct peer_layout x=rank?b:a,y=rank?a:b;
-  int status=mesh_peer_cables(0,rank?peer:node,x.links,x.head.endpoints,1,rank?node:peer,y.links,y.head.endpoints,p->cable,&p->links);
+  int status=mesh_peer_cables(0,rank?peer:node,x.links,x.head.endpoints,1,rank?node:peer,y.links,y.head.endpoints,p->cable,&p->links,0);
   if(status || !p->links)return status?status:ENOLINK;
   qsort(p->cable,p->links,sizeof *p->cable,peer_wire_sort);
   qsort(a.row,a.head.records,sizeof *a.row,peer_record_order);
@@ -72,7 +72,6 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
   struct mesh_fabric fabric={2,p->links,p->cable};
   p->rows=a.head.records;p->row=calloc(p->rows,sizeof *p->row);
   if(!p->row)return ENOMEM;
-  long double load[2][MESH_STREAMS]={0};
   for(uint32_t k=0;k<p->rows;k++){
     struct peer_record u=a.row[k],v=b.row[k];
     if(peer_record_order(&u,&v) || (k && !peer_record_order(a.row+k-1,&u)) ||
@@ -80,15 +79,11 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
        u.first>a.head.units || u.units>a.head.units-u.first || v.first>b.head.units || v.units>b.head.units-v.first ||
        u.pad>=a.head.records)return EPROTO;
     struct peer_row *r=p->row+k;
-    r->logical=records[u.pad];r->first=r->next=p->count;
-    unsigned way=r->logical.land;
+    r->logical=records[u.pad];r->first=p->count;r->bytes=u.bytes;
     struct mesh_transfer stripes[MESH_STREAMS]={0};
     int n;
     if(u.bytes<=packet){
-      uint32_t best=0;
-      for(uint32_t e=1;e<p->links;e++)
-        if((load[way][e]+u.bytes)/p->cable[e].bandwidth < (load[way][best]+u.bytes)/p->cable[best].bandwidth)best=e;
-      stripes[0]=(struct mesh_transfer){.step.piece={1,1,u.bytes},.cable=best};n=1;
+      stripes[0]=(struct mesh_transfer){.step.piece={1,1,u.bytes}};n=1;
     }else{
       struct mesh_step step={.op=MESH_STEP_SEND,.peer=1,.piece={1,1,u.bytes}};
       n=mesh_fabric_stripe(&fabric,0,&step,1,NULL,stripes,p->links);
@@ -99,7 +94,6 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
     for(int i=0;i<n;i++){
       uint32_t e=stripes[i].cable;uint64_t left=stripes[i].step.piece.elements;
       if(stripes[i].step.first!=logical || !p->cable[e].bandwidth)return EPROTO;
-      load[way][e]+=left;
       while(left){
         if(ai>=u.units || bi>=v.units)return EPROTO;
         struct mesh_dma_span as=a.spans[u.first+ai],bs=b.spans[v.first+bi];

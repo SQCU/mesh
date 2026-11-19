@@ -927,7 +927,7 @@ static int fabric_discover(struct ncclComm *comm, const struct report *reports) 
   for (uint32_t a = 0; a < n; a++) for (uint32_t b = a + 1; b < n; b++) {
     const struct report *x = reports + a, *y = reports + b;
     int error = mesh_peer_cables(a, x->node, x->endpoint, x->count, b, y->node, y->endpoint, y->count,
-                                 cables, &comm->fabric.cables);
+                                 cables, &comm->fabric.cables, 1);
     if (error) return error;
   }
   qsort(cables, comm->fabric.cables, sizeof *cables, cable_order);
