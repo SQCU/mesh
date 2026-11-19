@@ -282,15 +282,6 @@ static void channel_account_prune(struct channel *channel) {
     mesh_byte_account_prune(channel->payload, sent);
   if (landed != UINT64_MAX) mesh_byte_account_prune(channel->payload + 1, landed);
 }
-/* Called in channel order, before presentation makes the entry observable.
-   The copied lengths also keep late trace readers independent of table leases. */
-static int channel_account_append(struct channel *channel, int direction, uint64_t first,
-                                  const struct mesh_dma_span *spans, uint64_t units) {
-  if (direction < 0 || direction > 1 || (units && !spans)) return EINVAL;
-  channel_account_prune(channel);
-  return mesh_byte_account_append(channel->payload + direction, first,
-                                  units ? &spans[0].bytes : NULL, units, sizeof *spans);
-}
 /* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, and the group holding it (its
    number + 1: comm->groups as it took it; 0 free) */
 struct spare { void *address; size_t bytes; uint64_t holder; };
@@ -2695,7 +2686,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    they lie in (`row`); a landing's `need` (the send entries a combine into bytes an earlier SEND of its call on its
    channel reads waits to be published: that entry + 1, 0 none) */
 struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
-                 struct where data; struct mesh_dma_span *spans; uint64_t table; double priority; uint64_t *retire; };
+                 struct where data; struct mesh_dma_span *spans; uint64_t table; double priority; uint64_t *retire; struct mesh_byte_shape *shape; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
    count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
@@ -3424,18 +3415,24 @@ static ncclResult_t issue_entries(struct ncclComm *comm, struct schedule *plans)
   }
   pthread_mutex_unlock(&attach_lock);
   if (retained) return comm_fail(comm, ncclSystemError, "registering DMA lifetimes: %s", strerror(retained));
-  for (uint32_t h = 0; h < comm->count; h++) for (int send = 1; send >= 0; send--) {
+  int observed = 0;
+  for (uint32_t h = 0; h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
-    const size_t count = send ? plans[h].outs : plans[h].ins;
-    const struct message *items = send ? plans[h].out : plans[h].in;
-    for (size_t k = 0; k < count; k++) {
-      const struct message *m = items + k;
-      if (!m->pages.n) continue;
-      const int status = channel_account_append(ch, !send, m->end.n - m->pages.n, m->spans, m->pages.n);
-      if (status) return comm_fail(comm, ncclSystemError, "recording exact DMA byte prefixes: %s", strerror(status));
+    if (!plans[h].ins && !plans[h].outs) continue;
+    observed |= ch->trace_readers != 0;
+    channel_account_prune(ch);
+    for (int send = 1; send >= 0; send--) {
+      const size_t count = send ? plans[h].outs : plans[h].ins;
+      const struct message *items = send ? plans[h].out : plans[h].in;
+      for (size_t k = 0; k < count; k++) {
+        const struct message *m = items + k;
+        if (!m->pages.n) continue;
+        const int status = mesh_byte_account_view(ch->payload + !send, m->end.n - m->pages.n, m->shape);
+        if (status) return comm_fail(comm, ncclSystemError, "recording exact DMA byte prefixes: %s", strerror(status));
+      }
     }
   }
-  group_entries(comm, plans, entry_logged, NULL);
+  if (observed) group_entries(comm, plans, entry_logged, NULL);
   return ncclSuccess;
 }
 
@@ -3605,6 +3602,16 @@ static ncclResult_t step_record(struct ncclComm *comm, struct step_part *part, s
   }
   if (result) { schedules_free(comm, kept); return result; }
   part->plans = kept;
+  for (uint32_t h = 0; h < comm->count; h++) for (int d = 0; d < 2; d++) {
+    const size_t count = d ? kept[h].ins : kept[h].outs;
+    struct message *items = d ? kept[h].in : kept[h].out;
+    for (size_t k = 0; k < count; k++) {
+      struct message *m = items + k;
+      if (!m->pages.n) continue;
+      const int status = mesh_byte_shape_make(&m->shape, &m->spans[0].bytes, m->pages.n, sizeof *m->spans);
+      if (status) return fail(ncclSystemError, "compiling the DMA byte prefixes: %s", strerror(status));
+    }
+  }
   int gate = 0;
   schedule_laid(comm, plans);
   result = bind_retirements(comm, plans);
@@ -3622,7 +3629,11 @@ static void declaration_free(struct declaration *d) {
   if (!d) return;
   for (uint32_t k = 0; k < d->count; k++) {
     struct step_part *p = d->parts + k;
-    if (p->plans) schedules_free(p->comm, p->plans);
+    for (uint32_t h = 0; p->plans && h < p->comm->count; h++) {
+      for (size_t j = 0; j < p->plans[h].outs; j++) mesh_byte_shape_release(p->plans[h].out[j].shape);
+      for (size_t j = 0; j < p->plans[h].ins; j++) mesh_byte_shape_release(p->plans[h].in[j].shape);
+    }
+    schedules_free(p->comm, p->plans);
     calls_free(p->calls, p->n);
     free(p->tape);
     spares_give(p->comm, p->holder);
