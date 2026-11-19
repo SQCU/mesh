@@ -170,17 +170,28 @@ programs_pair unseen 6; pair_end unseen either
 sleep 1; programs_pair seen 6; pair_end seen passed
 finish
 # a program left with a piece never sent (its last SEND's gate never opened, as a fused crossing's last frame whose
-# producer never ran: tests/sim-dangling.c), closed at the executions it issued and its clients gone: the queue pairs
-# its pieces are on wait at them, so the next declaration restarts the order and fails as values (before, the next
-# pair waited its deadline behind it, the hang of the M5 Ultra pair's logit_check, 2026-11-19), and the one after runs
+# producer never ran: tests/sim-dangling.c), closed at the executions it issued and its clients gone: that piece can
+# never be posted, so the next declaration restarts the order and fails as values (before, the next pair waited its
+# deadline behind it, the hang of the M5 Ultra pair's logit_check, 2026-11-19), and the one after runs.  Then a gone
+# pair's last pieces posted and still crossing as it ends ("inflight"): they complete through their own completions,
+# and the pair declared at once after it runs behind them, no restart
+dangling_pair() {   # dangling_pair NAME EXECUTIONS MODE: both ranks, ended before it returns
+  MESH_REGION=/mesh-sim-11 bounded "$here/.build/tests/sim-dangling" 12 "$2" "$3" > "$out/$1.0" 2>&1 &
+  r0=$!
+  MESH_REGION=/mesh-sim-12 bounded "$here/.build/tests/sim-dangling" 11 "$2" "$3" > "$out/$1.1" 2>&1
+  second=$?; wait $r0; first=$?
+  echo "restarts, $1: rank 0 $first rank 1 $second"; [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/$1.0" "$out/$1.1"; }
+}
 restarting 0
-MESH_REGION=/mesh-sim-11 bounded "$here/.build/tests/sim-dangling" 12 > "$out/dangling.0" 2>&1 &
-r0=$!
-MESH_REGION=/mesh-sim-12 bounded "$here/.build/tests/sim-dangling" 11 > "$out/dangling.1" 2>&1
-second=$?; wait $r0; first=$?
-echo "restarts, dangling: rank 0 $first rank 1 $second"; [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/dangling.0" "$out/dangling.1"; }
+dangling_pair dangling 16 dangling
 programs_pair behind 6; pair_end behind either
 programs_pair cleared 6; pair_end cleared passed
+restarts=$(grep -c "the order restarts" "$out/sim.err")
+dangling_pair inflight 200000 inflight
+# its pieces still crossing as the next pair declares: node 11's raised then, short of the gone program's 200,000
+echo "restarts, inflight: node 11 $(MESH_REGION=/mesh-sim-11 "$here/.build/mesh-order-state" 0 | grep -m1 'send: ' | sed 's/.*raised/raised/') as the next pair begins"
+programs_pair following 6; pair_end following passed
+[ "$(grep -c "the order restarts" "$out/sim.err")" = "$restarts" ] || { echo "restarts, following: the order restarted"; failed=1; }
 finish
 echo "two simulated nodes: $([ $failed = 0 ] && echo passed || echo FAILED)"
 exit $failed

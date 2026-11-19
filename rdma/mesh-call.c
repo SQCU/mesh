@@ -88,8 +88,6 @@ static int declaring_take(struct hdr *m,struct mesh_node *x,uint64_t client){
    gone holds pieces outstanding or ended mid-execution (its peer's count may differ: only a restart realigns the two
    ends), program slots of programs closed and wholly done made vacant, the declared one (`program`, NULL none) given a
    slot, and the next segment published (mesh-order.h order_compose, order_publish_segment) */
-/* how long a declaration gives a closed program of a client gone to complete its pieces in flight */
-#define ORDER_CLOSE_GRACE_NS (1000ull*1000000ull)
 static int declare_held(struct mesh_ctx *context,const struct mesh_order *order,struct mesh_node *x,const struct mesh_declaration *program,
                         uint32_t only,struct mesh_run *run){
   struct hdr *m=context->M;
@@ -106,29 +104,28 @@ static int declare_held(struct mesh_ctx *context,const struct mesh_order *order,
     for(uint32_t k=0;gone && k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
       uint64_t rounds;
       if(!(gone>>g->slot[k]&1))continue;
+      /* mid-execution (its peer's count may differ), or a piece of it that can never be posted (its gate shut, its
+         client gone: order_gate_shut); its pieces posted complete or fail through their own completions */
       int outstanding=order_round_of(x,g,k,&rounds)!=0;
       for(int d=0;!outstanding && d<2;d++)
-        outstanding=atomic_load_explicit(&x->raised[d],memory_order_acquire)<g->start[d]+rounds*g->round[d];
+        outstanding=order_gate_shut(m,x,segments,g->slot[k],d,atomic_load_explicit(&x->raised[d],memory_order_acquire),
+                                    g->start[d]+rounds*g->round[d]);
       if(outstanding){atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;}
     }
   }
-  /* a closed program of a client gone whose pieces are not all done (a SEND its client never published: its gate never
-     reached, e.g. a fused crossing's frame whose producer was never run) holds every queue pair its pieces are on, so
-     every program after it waits behind it for ever; its pieces still in flight are given ORDER_CLOSE_GRACE_NS to
-     complete, and if they do not, the order restarts (a restart asked, as for a gone program with pieces outstanding)
-     and this declaration fails as a value, not the next program's GPU wait at its deadline */
+  /* a closed program of a client gone with a piece that can never be posted (its gate shut: a SEND its client never
+     published, e.g. a fused crossing's frame whose producer was never run) holds the queue pair that piece is on, so
+     every program after it would wait behind it for ever: the order restarts (a restart asked, as for a gone program
+     mid-execution) and this declaration fails as a value.  Its pieces posted or postable complete or fail through their
+     own completions, and the programs after them follow them on their queue pairs: nothing is waited for here */
   for(uint32_t p=0;p<MESH_PROGRAMS;p++){
     const struct mesh_declared *d=x->program+p;
     const uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
     if(!owner || client_live(m,owner) || atomic_load_explicit(&d->closed,memory_order_acquire)==UINT64_MAX)continue;
-    int done=0;
-    for(const uint64_t until=mesh_clock_ns()+ORDER_CLOSE_GRACE_NS;!done;){
-      done=atomic_load_explicit(&x->raised[0],memory_order_acquire)>=atomic_load_explicit(&d->end[0],memory_order_acquire) &&
-           atomic_load_explicit(&x->raised[1],memory_order_acquire)>=atomic_load_explicit(&d->end[1],memory_order_acquire);
-      if(done || mesh_clock_ns()>=until)break;
-      usleep(1000);
-    }
-    if(!done){atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;}
+    for(int k=0;k<2;k++)
+      if(order_gate_shut(m,x,segments,p,k,atomic_load_explicit(&x->raised[k],memory_order_acquire),atomic_load_explicit(&d->end[k],memory_order_acquire))){
+        atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;
+      }
   }
   for(uint32_t p=0;p<MESH_PROGRAMS;p++){
     struct mesh_declared *d=x->program+p;

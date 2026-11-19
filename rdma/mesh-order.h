@@ -179,6 +179,23 @@ static inline uint64_t order_raise_through(struct hdr *m,const struct mesh_node 
   return n;
 }
 
+/* whether program `slot`'s pieces of direction d from `from` to `to` (its pieces not known done: above `raised`) hold
+   one whose gate is not open (a SEND span's word short of its threshold; a receive's): where its client is gone, that
+   piece is never posted (only its client opens its gates) and the queue pair it is on waits at it for ever.  Every
+   other piece of it is posted or postable, and completes or fails through its own completion (the hardware's), so it
+   holds nothing for ever.  Of the state alone: no clock */
+static inline int order_gate_shut(const struct hdr *m,const struct mesh_node *x,uint64_t segments,uint32_t slot,int d,uint64_t from,uint64_t to){
+  uint64_t hint=0;
+  for(uint64_t n=from;n<to;n++){
+    struct order_at at;
+    if(!order_locate(m,x,segments,d,n,&hint,&at) || at.slot!=slot)continue;
+    const struct mesh_crossing *t=at.t;
+    if(!t->gate || t->gate%8 || t->gate+8>m->length)continue;
+    const uint64_t threshold=t->gate_base+at.execution*t->gate_step+(d || t->flags&MESH_GATE_WHOLE?0:at.span+1);
+    if(atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire)<threshold)return 1;
+  }
+  return 0;
+}
 /* ---- The bridge's two steps (mesh-link.c order_pass; tests/sim-wire.c runs the same) -----------------------------
    A lane's next piece to post each way: the piece its unit u is (order_unit_piece), where it lies (order_locate) and
    whether it may go (order_ready, below the order's posting bound `limit`): 1 with *n and *at filled, else 0 (the lane

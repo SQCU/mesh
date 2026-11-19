@@ -118,9 +118,11 @@ execution k / period.
   published (its SEND gate never reached: a fused crossing's frame whose producer never ran; logit_check left its
   last step's arg-max frame so, its output never evaluated). That piece holds the queue pair it is on, so every program
   after it waits behind it (the M5 Ultra pair, 2026-11-19: three of six logit_check pairs waited their deadlines at
-  entry 0 on a settled order, `raised` one piece short of the closed decode's end). A declaration that finds a closed
-  program of a client gone whose pieces are not all done gives its pieces in flight 1 s, then asks a restart and fails
-  as a value (mesh-call.c declare_held); the run after it runs.
+  entry 0 on a settled order, `raised` one piece short of the closed decode's end). A declaration decides it from the state alone, no clock (mesh-order.h order_gate_shut): a piece of a
+  gone client's program, closed or going on, whose gate is not open can never be posted (only its client opens its
+  gates), so the declaration asks a restart and fails as a value at once (mesh-call.c declare_held), and the run after
+  it runs; every other piece of it is posted or postable and completes or fails through its own completion, and the
+  next program's pieces follow it on their queue pairs, so nothing is waited for.
 - **Recovery.** A communicator made while an order toward a member's node is being made again (a node slot held, not
   live: its cables coming up, its epochs agreed) waits for it, at most 30 s (`NCCL_MESH_ORDER_WAIT_NS`), and is made
   once it is live, not refused with ENOLINK. A restart then loses the run it happened in, not the ones after it.
@@ -207,7 +209,8 @@ Re-read for this document: none. Each entry below is recalled, and says where a 
     and runs, cables joining mid-run); a client gone at one node while its peer lives on, then a pair declared
     meanwhile (it fails as values at both ranks, no deadline met), then one more (it runs); a declaration at a node
     whose bridge sees the other's restart 300 ms late, then one more; a program left with a piece never sent
-    (tests/sim-dangling.c), then a pair (fails as values), then one more (runs). No pair may wait a deadline, and the
+    (tests/sim-dangling.c), then a pair (fails as values), then one more (runs); a gone pair's last pieces still
+    crossing (sim-dangling inflight, 200,000 executions), then a pair at once (runs behind them, no restart). No pair may wait a deadline, and the
     wire's check must stand.
 - **Python.** The native extraction tests (`test_native_byte_plans`, `test_indexed_write`, `test_diagnostics`) take
   the new production functions.
