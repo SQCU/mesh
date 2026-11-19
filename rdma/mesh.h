@@ -218,7 +218,7 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    at these offsets (design/transport.md section 2) */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
-  uint64_t start; _Atomic uint64_t peer_owner; uint64_t padding[5];
+  uint64_t start; _Atomic uint64_t peer_owner,peer_stream; uint64_t padding[4];
 };
 /* design/transport.md; `busy`: the streams held (0 between calls) and since when none has been (`idle_since`, the
    wall clock in ns; 0 while any is) */

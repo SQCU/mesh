@@ -264,7 +264,9 @@ static void stream_send(struct port *port,uint32_t t,uint32_t served){
     if(pinned!=e){metadata_pin(x,e);pinned=e;if(!holding_kept(x,l->held[t]))break;}
     if(!e->whole){link_failed(port,EINVAL,2);break;}
     const struct mesh_units i=mesh_units_sub(q,e->unit);
-    if(!mesh_units_lt(mesh_units_add(e->base,i),mesh_units_load(e->word)))break;
+    struct mesh_units ready=mesh_units_load(e->word);
+    if(!mesh_units_lt(mesh_units_add(e->base,i),ready) || (ready.n==UINT64_MAX &&
+       atomic_load(&mesh_client_at(M,l->held[t])->peer_stream)==l->held[t]))break;
     const struct mesh_dma_span bytes=e->spans[i.n];
     if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL,2);break;}
     const struct frames each=frames_of(bytes.bytes);
@@ -300,7 +302,10 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     if(!e)break;
     if(pinned!=e){metadata_pin(x,e);pinned=e;if(!holding_kept(x,l->held[t]))break;}
     if(!e->whole){link_failed(port,EINVAL,3);break;}
-    if(e->word && mesh_units_lt(mesh_units_load(e->word),e->base))break;
+    if(e->word){struct mesh_units ready=mesh_units_load(e->word);
+      if(mesh_units_lt(ready,e->base) || (ready.n==UINT64_MAX &&
+         atomic_load(&mesh_client_at(M,l->held[t])->peer_stream)==l->held[t]))break;
+    }
     const struct mesh_dma_span bytes=e->spans[mesh_units_sub(q,e->unit).n];
     if(!mesh_dma_span_valid(M,bytes)){link_failed(port,EINVAL,3);break;}
     const struct frames each=frames_of(bytes.bytes);

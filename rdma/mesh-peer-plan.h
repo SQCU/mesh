@@ -34,7 +34,7 @@ struct peer_piece { struct mesh_dma_span span;uint64_t prefix;uint32_t channel; 
 struct peer_row {
   struct mesh_peer_transfer logical;
   size_t first,end,next;
-  uint32_t remote_open,announced,issued,done;
+  size_t retired;uint32_t remote_open,announced,issued,done,published,prev,succ;
 };
 struct peer_plan {
   struct mesh_cable cable[MESH_STREAMS]; uint32_t links,dynamic[2];
@@ -95,6 +95,7 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
       n=mesh_fabric_stripe(&fabric,0,&step,1,NULL,stripes,p->links);
       if(n<=0)return n?-n:EPROTO;
     }
+    r->prev=r->succ=UINT32_MAX;
     uint32_t ai=0,bi=0;uint64_t ax=0,bx=0,logical=0;
     for(int i=0;i<n;i++){
       uint32_t e=stripes[i].cable;uint64_t left=stripes[i].step.piece.elements;

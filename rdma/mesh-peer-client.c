@@ -10,6 +10,7 @@ static int peer_request(struct mesh_ctx *ctx,struct mesh_peer_request request,in
   uint64_t pid=atomic_load(&ctx->M->bridge_pid);
   struct sockaddr_un address=mesh_peer_address(pid);
   int error=connect(fd,(struct sockaddr *)&address,sizeof address)?errno:0;
+  if(error==ENOENT || error==ECONNREFUSED)error=ENOTSUP;
   pid_t remote=0;socklen_t size=sizeof remote;
   if(!error && (getsockopt(fd,SOL_LOCAL,LOCAL_PEERPID,&remote,&size) || (uint64_t)remote!=pid))error=EPROTO;
   int one=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one);
@@ -33,7 +34,8 @@ int mesh_peer_install(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,uint64_t
 int mesh_peer_wait(struct mesh_ctx *ctx,uint64_t installation,uint64_t timeout_ns){
   if(!ctx || !ctx->M || !installation || installation>(uint64_t)INT_MAX+1)return EINVAL;
   int fd=(int)(installation-1),status=0;
-  uint64_t limit=mesh_clock_ns()+(timeout_ns?timeout_ns:MESH_PLATFORM_NS);
+  struct mesh_deadline bounded=mesh_deadline("peer installation",timeout_ns);
+  uint64_t limit=bounded.at;
   for(;;){
     ssize_t size=recv(fd,&status,sizeof status,MSG_PEEK|MSG_DONTWAIT);
     if(size==sizeof status)return status;
@@ -54,11 +56,15 @@ int mesh_peer_release(struct mesh_ctx *ctx,uint64_t installation){
   if(!ctx || !ctx->M || !installation || installation>(uint64_t)INT_MAX+1)return EINVAL;
   int fd=(int)(installation-1);
   shutdown(fd,SHUT_WR);
-  char tail[32];
+  int status=0,result=0;size_t have=0,replies=0;
   for(;;){
-    ssize_t n=recv(fd,tail,sizeof tail,0);
+    ssize_t n=recv(fd,(char *)&status+have,sizeof status-have,0);
     if(!n)break;
-    if(n<0 && errno!=EINTR){int error=errno;close(fd);return error;}
+    if(n<0){if(errno==EINTR)continue;result=errno;break;}
+    have+=(size_t)n;
+    if(have==sizeof status){replies++;if(status)result=status;status=0;have=0;}
   }
-  return close(fd)?errno:0;
+  if((have || replies<2) && !result)result=EPIPE;
+  if(close(fd) && !result)result=errno;
+  return result;
 }
