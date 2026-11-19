@@ -179,9 +179,7 @@ class Graph:
         vertices = list(dict.fromkeys(universe))
         at = {v: k for k, v in enumerate(vertices)}
         records = [(at[v], at[u]) for v in vertices for u in neighbours(v)]
-        conflict = (Conflict * max(len(records), 1))(*[Conflict(a, b, GIVEN, k, 0, SIZE, SIZE)
-                                                        for k, (a, b) in enumerate(records)])
-        return cls(vertices, Relation.create(len(vertices), 0, None, len(records), conflict))
+        return cls(vertices, Relation.from_edges(len(vertices), records))
 
     # the rows a search follows: outgoing (row_first, mesh_graph_relation_head) or incoming (in_first,
     # mesh_graph_relation_incoming_head, resolved on use)
