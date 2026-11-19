@@ -25,7 +25,9 @@ from operation work, bytes, mapping and machine rates using XLA's GPU performanc
 Waterman and Patterson, 2009). Routing and scheduling consume these costs; unequal-shards consumes their size dependence.
 The edge-cost producer can supply Hockney's `alpha + bytes * beta` model (*The communication challenge for MPP*,
 1994; MSCCLang §5.1; HEFT, Topcuoglu et al. 2002), fitting startup and per-byte time from measurements of at least
-two transfer sizes. Each routed hop receives its cable's resulting cost.
+two transfer sizes. Each directed node pair supplies its aggregate transfer rate and startup cost to the route optimizer.
+A relayed range incurs a startup at each dependent hop and consumes capacity on every traversed adjacency.
+[Operator U59](operator-turns-2026-11-04-to-06.md) · [Relay startup, bottlenecks and competing paths](../../mesh-byte-extents-20261024/design/data-model.md#8-writes-over-many-hops-and-many-paths)
 
 ### A4. Collective lowering produces page transfers
 
@@ -64,7 +66,7 @@ Each static schedule has its own FIFO of delivered messages at each node (Lee an
 bounds and the program's IPC graph determine its capacity through BSL §4.3's self-timed buffer bound. Feedforward
 edges use Convert-to-SC-graph and DetermineDelays (BSL §9, Figs. 6/8); the common graph module computes these results.
 The bridge consumes the FIFOs by a multiway merge of sequence numbers (Knuth, vol. 3, §5.4.1). Function-call delivery
-uses sequencer order; page transfers use each cable's compiled order and data availability.
+uses sequencer order; the bridge issues eligible peer transfers using the compiled dependences and the available transport capacity.
 
 ### A8. The IR operand carries solved results
 
@@ -99,7 +101,7 @@ counts and the ordering between their uses. Each invocation uses its compiled re
 retains per-function execution order while the compiled dependency relation determines overlap.
 
 Independent flow sets contain one demand's pages on one route, consumed in any order under R4. Each execution
-applies one Fisher–Yates permutation to the set's positions across every hop, parallel cable and consumer task
+applies one Fisher–Yates permutation to the set's positions across every logical hop and consumer task
 (Fisher and Yates; Durstenfeld 1964; MSCCLang's channel subsequences). Threefry-4×64-20 supplies the draws, keyed
 by the compiled function's name and counter `(execution, set)` (Salmon et al., *Parallel Random Numbers: As Easy
 as 1, 2, 3*, SC 2011, §4.2). Lemire's unbiased bounded-integer method (2019) supplies each shuffle index.
