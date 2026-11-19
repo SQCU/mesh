@@ -7,6 +7,7 @@
 #define MESH_ORDER_H
 #include "mesh.h"
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* A piece: at most one allocation block (the region's `block` pages of `pgsz`, equal at both ends of every cable:
@@ -284,69 +285,106 @@ static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int
    another's).  Raisers need no agreement: every done count only rises, so each one's reading of them is true of the
    queue pairs (a transfer it finds done is done, and one it finds before another not done was not done when read),
    every word is raised to the greatest value any raiser computes (order_raise) and `raised` is moved only up
-   (order_raised_to).  A raiser's cursors are its own: the words of the segments from the prefix's on (each program's
-   at most ORDER_PROGRAM_WORDS a direction: mesh-call.c program_valid), found again when a segment is declared or the
-   generation moves */
-#define ORDER_WORDS 256u
-#define ORDER_PROGRAM_WORDS 16u
+   (order_raised_to).  A raiser indexes each distinct completion word of the segments from the prefix on, rebuilding
+   at a declaration or generation change only where a completed piece lies beyond that prefix. */
 #define ORDER_SCAN 256u
 struct order_cursor { uint64_t word,at,hint; };
-struct order_raiser { uint64_t seen,hint,segments,generation; uint32_t words; struct order_cursor cursor[ORDER_WORDS]; };
+struct order_raiser {
+  uint64_t seen,hint,segments,generation;
+  size_t words,capacity;
+  struct order_cursor *cursor;
+  int pending;
+};
+static inline void order_raiser_clear(struct order_raiser *r){
+  free(r->cursor);*r=(struct order_raiser){0};
+}
+static inline struct order_cursor *order_cursor_at(struct order_cursor *cursor,size_t capacity,uint64_t word){
+  const uint64_t hash=word*UINT64_C(11400714819323198485);
+  size_t i=(hash^(hash>>32))&(capacity-1);
+  while(cursor[i].word && cursor[i].word!=word)i=(i+1)&(capacity-1);
+  return cursor+i;
+}
+static inline int order_word_add(struct order_raiser *r,uint64_t word,uint64_t from,uint64_t segment){
+  struct order_cursor *entry=r->capacity?order_cursor_at(r->cursor,r->capacity,word):NULL;
+  if(entry && entry->word)return 0;
+  if(r->words==r->capacity/2){
+    if(r->capacity>SIZE_MAX/(2*sizeof *r->cursor))return ENOMEM;
+    const size_t capacity=r->capacity?2*r->capacity:8;
+    struct order_cursor *grown=calloc(capacity,sizeof *grown);
+    if(!grown)return ENOMEM;
+    for(size_t i=0;i<r->capacity;i++)if(r->cursor[i].word)
+      *order_cursor_at(grown,capacity,r->cursor[i].word)=r->cursor[i];
+    free(r->cursor);r->cursor=grown;r->capacity=capacity;
+    entry=order_cursor_at(grown,capacity,word);
+  }
+  *entry=(struct order_cursor){word,from,segment};r->words++;return 0;
+}
 static inline void order_raised_to(_Atomic uint64_t *raised,uint64_t value){
   uint64_t old=atomic_load_explicit(raised,memory_order_relaxed);
   while(old<value && !atomic_compare_exchange_weak_explicit(raised,&old,value,memory_order_release,memory_order_relaxed)){}
 }
 /* the raiser's words found again: every done word of direction d of the programs of the segments from the one holding
    piece `from` on, each cursor at `from` */
-static inline void order_words(const struct hdr *m,const struct mesh_node *x,uint64_t segments,int d,uint64_t from,struct order_raiser *r){
-  r->words=0;r->segments=segments;r->generation=atomic_load_explicit(&x->generation,memory_order_acquire);
-  if(!segments)return;
+static inline int order_words(const struct hdr *m,const struct mesh_node *x,uint64_t segments,uint64_t generation,int d,uint64_t from,struct order_raiser *r){
+  r->words=0;
+  if(r->capacity)memset(r->cursor,0,r->capacity*sizeof *r->cursor);
+  unsigned char visited[MESH_PROGRAMS]={0};
   const uint64_t oldest=segments>MESH_SEGMENTS?segments-MESH_SEGMENTS:0;
-  uint64_t s=segments-1;
+  uint64_t s=segments?segments-1:0;
   while(s>oldest && order_segment(x,s)->start[d]>from)s--;
   for(;s<segments;s++){
     const struct mesh_segment *g=order_segment(x,s);
     for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
       if(g->slot[k]>=MESH_PROGRAMS)continue;
-      const struct mesh_declared *p=x->program+g->slot[k];
+      const uint32_t slot=g->slot[k];
+      if(visited[slot])continue;
+      visited[slot]=1;
+      const struct mesh_declared *p=x->program+slot;
       const struct mesh_crossing *t=order_table(m,p,d);
       for(uint64_t i=0;t && i<p->program.transfers[d];i++){
         const uint64_t word=t[i].done;
-        if(!word || word%8 || word+8>m->length)continue;
-        uint32_t w=0;
-        while(w<r->words && r->cursor[w].word!=word)w++;
-        if(w==r->words && r->words<ORDER_WORDS)r->cursor[r->words++]=(struct order_cursor){word,from,s};
+        if(!mesh_region_holds(m,word,8,8))continue;
+        const int error=order_word_add(r,word,from,s);
+        if(error)return error;
       }
     }
   }
+  r->segments=segments;r->generation=generation;
+  return 0;
 }
-static inline void order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,const uint64_t *done,
+static inline int order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,const uint64_t *done,
                                     struct order_raiser *r){
   /* nothing to raise where no queue pair has done more since the last pass and no segment was declared */
   const uint64_t generation=atomic_load_explicit(&x->generation,memory_order_acquire);
   uint64_t sum=segments+(generation<<40);
   const struct mesh_epoch *final=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
   for(uint32_t c=0,k=0;c<final->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<final->cable[c].lanes;l++,k++)sum+=done[k]*(k+1);
-  if(sum==r->seen)return;
-  r->seen=sum;
+  if(sum==r->seen && !r->pending)return 0;
+  r->seen=sum;r->pending=0;
   uint64_t raised=atomic_load_explicit(&x->raised[d],memory_order_acquire);
   const uint64_t through=order_done_through(x,epochs,d,done);
   if(through>raised){
     const uint64_t reached=order_raise_through(m,x,segments,d,raised,through,&r->hint);
     if(reached>raised)order_raised_to(&x->raised[d],raised=reached);
   }
-  if(segments!=r->segments || generation!=r->generation)order_words(m,x,segments,d,raised,r);
   /* past the latest piece any queue pair has done, no transfer is whole: each cursor stops there */
   uint64_t latest=0;
   for(uint32_t c=0,k=0;c<final->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<final->cable[c].lanes;l++,k++)
     if(done[k]){const uint64_t p=order_unit_piece(x,epochs,d,final->cable[c].port,l,done[k]-1);if(p!=ORDER_NONE && p+1>latest)latest=p+1;}
+  if(latest<=raised)return 0;
+  if(segments!=r->segments || generation!=r->generation){
+    const int error=order_words(m,x,segments,generation,d,raised,r);
+    if(error){r->pending=1;return error;}
+  }
   const uint64_t Q=order_qps(final),boundary=final->first[d];
-  for(uint32_t w=0;w<r->words;w++){
+  for(size_t w=0;w<r->capacity;w++){
     struct order_cursor *c=r->cursor+w;
+    if(!c->word)continue;
     uint64_t n=c->at>raised?c->at:raised;
     /* the word's transfers in turn from its cursor, others' passed over (at most ORDER_SCAN a pass: the next pass goes
        on from there), up to its first not wholly done */
-    for(uint32_t k=0;k<ORDER_SCAN && n<latest;k++){
+    uint32_t k=0;
+    for(;k<ORDER_SCAN && n<latest;k++){
       struct order_at at;
       if(!order_locate(m,x,segments,d,n,&c->hint,&at))break;
       const uint64_t last=n-at.span+at.t->units-1;
@@ -363,7 +401,9 @@ static inline void order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t e
       n=last+1;
     }
     c->at=n;
+    if(k==ORDER_SCAN && n<latest)r->pending=1;
   }
+  return 0;
 }
 
 /* ---- Composition: a declaration's next segment (mesh-call.c mesh_declare, under the node's `declaring`) ----------
