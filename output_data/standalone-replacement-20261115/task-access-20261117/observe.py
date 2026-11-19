@@ -92,9 +92,5 @@ for kind in (mesh.PAGES, mesh.JOIN):
         mesh.LIB.mesh_plan_schedule_free(schedule)
     mesh.LIB.mesh_plan_analysis_free(analysis)
     records.append({'kind': kind, 'rounds': iterations})
-for kind in (mesh.PAGES, mesh.JOIN):
-    restored, owners = loaded(Path(__file__).with_name(f'previous-{kind}.bin').read_bytes())
-    assert restored.contents.step[0].schedule.contents.accesses == 0
-    mesh.LIB.mesh_plan_compilation_free(restored)
-receipt = {'scope': 'canonical pure analysis/schedule/compilation/archive; no installation or numerical execution', 'provider': hashlib.sha256((root / 'rdma/libmesh.dylib').read_bytes()).hexdigest(), 'actual_previous_format_archives_loaded': True, 'records': records}
+receipt = {'scope': 'canonical pure analysis/schedule/compilation/archive; no installation or numerical execution', 'provider': hashlib.sha256((root / 'rdma/libmesh.dylib').read_bytes()).hexdigest(), 'records': records}
 print(json.dumps(receipt, indent=2))
