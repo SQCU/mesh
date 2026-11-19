@@ -519,6 +519,9 @@ LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C
 LIB.mesh_graph_longest.restype = C.c_int
 LIB.mesh_graph_longest.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.c_double), C.POINTER(C.c_double)]
 LIB.mesh_graph_relation_heap_permutation.argtypes = [C.c_void_p, C.POINTER(C.c_double), _U, _U]
+LIB.mesh_graph_relation_edges.argtypes = [C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_void_p)]
+LIB.mesh_graph_completion_times.argtypes = [C.c_uint32, C.POINTER(C.c_double), _U, C.c_uint32,
+                                           C.c_size_t, _U, _U, C.POINTER(C.c_double)]
 LIB.mesh_graph_boundaries.restype = C.c_int
 LIB.mesh_graph_boundaries.argtypes = [C.c_void_p, _U, C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte)]
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
@@ -584,6 +587,16 @@ class Task(C.Structure):
 
 class Dependence(C.Structure):
     _fields_ = [('source', C.c_uint32), ('sink', C.c_uint32), ('delay', C.c_uint64)]
+
+
+LIB.mesh_graph_resource_cycles.argtypes = [C.c_uint32, _U, C.c_uint32, _U, C.c_int,
+                                          C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+
+
+def resource_cycles(order, resources, resource):
+    edges, n = (Dependence * len(order))(), C.c_size_t()
+    _check(LIB.mesh_graph_resource_cycles(len(order), order, resources, resource, 1, edges, C.byref(n)))
+    return tuple((e.source, e.sink, e.delay) for e in edges[:n.value] if resource[e.source])
 
 
 class Grouping(C.Structure):
@@ -803,6 +816,18 @@ def _check(status):
 def _array(kind, items):
     items = list(items)
     return (kind * max(len(items), 1))(*items), len(items)
+
+
+def completion_order(length, resource, resources, edges):
+    """R5. Solve completion times and order the vertices of the same dependence relation."""
+    count = len(length)
+    before, after = (_array(C.c_uint32, (e[k] for e in edges))[0] for k in range(2))
+    times, made = (C.c_double * count)(), C.c_void_p()
+    _check(LIB.mesh_graph_completion_times(count, length, resource, resources, len(edges), before, after, times))
+    _check(LIB.mesh_graph_relation_edges(count, len(edges), before, after, C.byref(made)))
+    graph = Graph(range(count), Relation(made.value))
+    order = graph.heap_order(lambda i: -times[i])
+    return graph, times, order.owner[1], order.items
 
 
 # mesh-graph.h mesh_graph_actor_time: (t(v) in ns over the recorded operands, whether every operand it needs is recorded)
