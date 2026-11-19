@@ -2660,7 +2660,10 @@ static void spares_give(struct ncclComm *comm, uint64_t holder) {
    the failure formatted */
 /* design/declared-programs.md: the process's declared program's types (its functions: "The process's declared
    program", below) */
-struct crossing_rec { uint64_t spans, units, gate, gate_base, done, done_value; uint32_t step, node, list, padding; };
+/* a captured transfer: its entry, gate and done word, its step, node and list, and its place in the wire's order: its
+   step's `phase` (the first step of the steps declared alongside it: ncclMeshDeclareAlongside) and its repeat (`frame`,
+   nccl.h ncclMeshFused repeats; 0 for a group of one) */
+struct crossing_rec { uint64_t spans, units, gate, gate_base, done, done_value; uint32_t step, node, list, phase, frame; };
 struct step_part {
   struct ncclComm *comm;
   struct call *calls;            /* the captured calls, their steps bound and operands placed */
@@ -2672,6 +2675,7 @@ struct step_part {
   int metal;
   uint32_t repeats;
   size_t stride;
+  uint32_t phase;                /* the first step of the steps declared alongside it (ncclMeshDeclareAlongside), else its own */
 };
 struct comm_counts { struct ncclComm *comm; uint64_t gates; uint64_t (*count)[2]; mesh_pages (*pages)[2]; };
 struct node_program { uint32_t node; struct mesh_ctx *context; struct mesh_order order; struct mesh_run run; void *tables; };
@@ -2686,6 +2690,7 @@ struct declaration {
   uint32_t nnodes;
   uint64_t key, issued;
   int failed;
+  int alongside;                 /* the next step declared alongside the one before it (ncclMeshDeclareAlongside) */
 };
 /* the program running (`running`) and the one being captured (`capturing`), under group_lock; the declarations made */
 static struct declaration *running, *capturing;
@@ -2864,8 +2869,11 @@ static void channel_log(struct ncclComm *comm, const struct channel *ch, int lis
    list's and then its landing list's: a SEND's gate the channel's `ready` (its span s once `ready` passes the pages
    before it and s + 1 of its own), or, a relay's, the landed count of the receive whose bytes it sends on; a landing's
    gated as gate_of says (word 0: at its issue); a SEND's done word the channel's `sent`, a landing's its `landed`, each
-   raised to `end` (its last unit's count).  `visit` takes each, with its message and channel */
-typedef int (*entry_visit)(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end);
+   raised to `end` (its last unit's count).  `visit` takes each, with its channel and its repeat (a fused crossing's
+   entries laid repeat after repeat: group_bound) */
+/* a call's repeats (nccl.h ncclMeshFused repeats; 1 for a group of one) */
+static uint32_t repeats_of(const struct call *c) { return c->fused && c->fused->repeats ? c->fused->repeats : 1; }
+typedef int (*entry_visit)(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end, uint32_t repeat);
 static int group_entries(struct ncclComm *comm, const struct schedule *plans, entry_visit visit, void *context) {
   const struct hdr *mapped = comm->attach->context.M;
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -2881,7 +2889,7 @@ static int group_entries(struct ncclComm *comm, const struct schedule *plans, en
       if (dependency >= 0) {
         const uint32_t incoming = s->channel[dependency];
         const struct schedule *received = plans + incoming;
-        const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
+        const uint32_t repeats = repeats_of(m->c);
         const size_t repeat = k / (p->outs / repeats);
         const struct message *from = received->in + s->entry[dependency] - received->first[1] -
                                      (repeats - 1 - repeat) * (received->ins / repeats);
@@ -2892,18 +2900,18 @@ static int group_entries(struct ncclComm *comm, const struct schedule *plans, en
           before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
         entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
       }
-      status = visit(context, comm, h, 0, entry, pages_to_word(m->end));
+      status = visit(context, comm, h, 0, entry, pages_to_word(m->end), (uint32_t)(k / (p->outs / repeats_of(m->c))));
     }
     for (size_t k = 0; !status && k < p->ins; k++)
       if (p->in[k].pages.n)
         status = visit(context, comm, h, 1, (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base},
-                       pages_to_word(p->in[k].end));
+                       pages_to_word(p->in[k].end), (uint32_t)(k / (p->ins / repeats_of(p->in[k].c))));
     if (status) return status;
   }
   return 0;
 }
-static int entry_logged(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end) {
-  (void)context; (void)end;
+static int entry_logged(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end, uint32_t repeat) {
+  (void)context; (void)end; (void)repeat;
   channel_log(comm, comm->channels + h, list, entry);
   return 0;
 }
@@ -2988,7 +2996,7 @@ static int comm_counted(struct declaration *d, struct ncclComm *comm) {
   d->ncomms++;
   return 0;
 }
-static int entry_recorded(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end) {
+static int entry_recorded(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end, uint32_t repeat) {
   struct declaration *d = context;
   if (d->recs_count == d->recs_room) {
     const size_t room = d->recs_room ? 2 * d->recs_room : 64;
@@ -2999,7 +3007,7 @@ static int entry_recorded(void *context, struct ncclComm *comm, uint32_t h, int 
   const struct hdr *m = comm->attach->context.M;
   d->recs[d->recs_count++] = (struct crossing_rec){.spans = entry.spans, .units = entry.units, .gate = entry.word, .gate_base = entry.base,
     .done = (uint64_t)((char *)(list ? comm->channels[h].view.landed : comm->channels[h].view.sent) - (char *)m), .done_value = end,
-    .step = d->count - 1, .node = comm->channels[h].node, .list = (uint32_t)list};
+    .step = d->count - 1, .node = comm->channels[h].node, .list = (uint32_t)list, .phase = d->parts[d->count - 1].phase, .frame = repeat};
   return 0;
 }
 /* the next step of the capture: a part of comm's (its own holder, never given back while the program lives) */
@@ -3012,8 +3020,11 @@ static ncclResult_t step_capture(struct ncclComm *comm, int metal, struct step_p
     d->parts = grown; d->room = room;
   }
   if (comm_counted(d, comm)) return fail(ncclSystemError, "out of memory");
+  /* its phase: the phase of the step before it where it is declared alongside that one, else its own */
+  const uint32_t phase = d->alongside && d->count ? d->parts[d->count - 1].phase : d->count;
+  d->alongside = 0;
   struct step_part *p = d->parts + d->count++;
-  *p = (struct step_part){.comm = comm, .holder = comm->groups, .metal = metal};
+  *p = (struct step_part){.comm = comm, .holder = comm->groups, .metal = metal, .phase = phase};
   *out = p;
   return ncclSuccess;
 }
@@ -3187,12 +3198,44 @@ ncclResult_t ncclMeshDeclareBegin(void) {
   pthread_mutex_unlock(&group_lock);
   return result;
 }
-/* the capture's tables toward node `node`, in a lease of the process's (each direction's transfers in the steps' order:
-   mesh.h struct mesh_crossing), its declaration made from them */
+ncclResult_t ncclMeshDeclareAlongside(void) {
+  pthread_mutex_lock(&group_lock);
+  ncclResult_t result = ncclSuccess;
+  if (!capturing) result = fail(ncclInvalidUsage, "ncclMeshDeclareAlongside outside a declaration (ncclMeshDeclareBegin)");
+  else if (!capturing->count) result = fail(ncclInvalidUsage, "ncclMeshDeclareAlongside before the declaration's first group: there is none to run beside");
+  else capturing->alongside = 1;
+  pthread_mutex_unlock(&group_lock);
+  return result;
+}
+/* the wire's order of a capture's transfers (nccl.h ncclMeshDeclareAlongside): by phase, then repeat, then step, then
+   as captured; a pure function of the declarations, alike at both ends of every channel */
+static int rec_before(const struct crossing_rec *a, size_t i, const struct crossing_rec *b, size_t j) {
+  if (a->phase != b->phase) return a->phase < b->phase;
+  if (a->frame != b->frame) return a->frame < b->frame;
+  if (a->step != b->step) return a->step < b->step;
+  return i < j;
+}
+static void recs_order(const struct crossing_rec *recs, size_t *at, size_t *scratch, size_t n) {
+  /* a merge sort of indices through `scratch` (n of them) */
+  if (n < 2) return;
+  const size_t half = n / 2;
+  recs_order(recs, at, scratch, half); recs_order(recs, at + half, scratch, n - half);
+  size_t a = 0, b = half, k = 0;
+  while (a < half || b < n)
+    scratch[k++] = b >= n || (a < half && rec_before(recs + at[a], at[a], recs + at[b], at[b])) ? at[a++] : at[b++];
+  memcpy(at, scratch, n * sizeof *at);
+}
+/* the capture's tables toward node `node`, in a lease of the process's (each direction's transfers in the wire's order,
+   recs_order: mesh.h struct mesh_crossing), its declaration made from them */
 static ncclResult_t node_declare(struct declaration *d, struct node_program *np) {
   const struct hdr *m = NULL;
   uint64_t transfers[2] = {0, 0};
   for (size_t i = 0; i < d->recs_count; i++) if (d->recs[i].node == np->node) transfers[d->recs[i].list]++;
+  const size_t all = transfers[0] + transfers[1];
+  size_t *order = malloc((2 * all + 1) * sizeof *order), placed = 0;
+  if (!order) return fail(ncclSystemError, "out of memory");
+  for (size_t i = 0; i < d->recs_count; i++) if (d->recs[i].node == np->node) order[placed++] = i;
+  recs_order(d->recs, order, order + all, placed);
   for (uint32_t k = 0; k < d->ncomms && !m; k++)
     for (uint32_t h = 0; h < d->comms[k].comm->count && !m; h++)
       if (d->comms[k].comm->channels[h].node == np->node) {
@@ -3200,19 +3243,18 @@ static ncclResult_t node_declare(struct declaration *d, struct node_program *np)
         np->context = &comm->attach->context; np->order = comm->attach->holds[comm->channels[h].stream].order;
         m = np->context->M;
       }
-  if (!m) return fail(ncclInternalError, "a declared step's node %u has no channel", np->node);
-  ncclResult_t result = ncclMemAlloc(&np->tables, (transfers[0] + transfers[1] + 1) * sizeof(struct mesh_crossing));
-  if (result) return result;
+  ncclResult_t result = m ? ncclMemAlloc(&np->tables, (transfers[0] + transfers[1] + 1) * sizeof(struct mesh_crossing)) : ncclSuccess;
+  if (result || !m) { free(order); return result ? result : fail(ncclInternalError, "a declared step's node %u has no channel", np->node); }
   struct mesh_crossing *table[2] = {np->tables, (struct mesh_crossing *)np->tables + transfers[0]};
   uint64_t filled[2] = {0, 0}, pieces[2] = {0, 0};
-  for (size_t i = 0; i < d->recs_count; i++) {
-    const struct crossing_rec *r = d->recs + i;
-    if (r->node != np->node) continue;
+  for (size_t k = 0; k < placed; k++) {
+    const struct crossing_rec *r = d->recs + order[k];
     table[r->list][filled[r->list]++] = (struct mesh_crossing){.spans = r->spans, .units = r->units, .first = pieces[r->list],
       .step = r->step, .gate = r->gate, .gate_base = r->gate_base, .gate_step = execution_delta(d, r->gate, m),
       .done = r->done, .done_value = r->done_value, .done_step = execution_delta(d, r->done, m)};
     pieces[r->list] += r->units;
   }
+  free(order);
   const uint64_t at = (uint64_t)((char *)np->tables - (char *)m);
   const struct mesh_declaration program = {.key = d->key, .period = d->count, .count = 1,
     .table = {transfers[0] ? at : 0, transfers[1] ? at + transfers[0] * sizeof(struct mesh_crossing) : 0},

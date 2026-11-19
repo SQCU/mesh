@@ -62,7 +62,7 @@ int main(int argc,char **argv){
   const char *lagging=getenv("LAG");
   const uint32_t lag=lagging && *lagging?(uint32_t)strtoul(lagging,NULL,0):UINT32_MAX;
   signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGUSR1,dump_asked);
-  wire_make(&w,cables,lanes,256);
+  wire_make(&w,cables,lanes,getenv("ROOM")?(uint32_t)strtoul(getenv("ROOM"),NULL,0):256);
   /* BURST: every queue pair's matches a turn drained up to it (the wire's jitter then in which queue pairs are served) */
   w.burst=getenv("BURST")?strtoull(getenv("BURST"),NULL,0):0;
   node_make(0,a,b,strtoull(argv[5],NULL,0));node_make(1,b,a,strtoull(argv[5],NULL,0));

@@ -1113,6 +1113,15 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int co
    its previous one first in the stream's order (its landings reuse the step's leases). */
 ncclResult_t ncclMeshDeclareBegin(void);
 ncclResult_t ncclMeshDeclareEnd(void);
+/* The next group of the declaration runs alongside the group declared before it (design/declared-programs.md section
+   4): the two, and every group declared alongside either, are independent work the code issues back to back (one
+   micro-batch's fused crossing beside another's, on streams of their own), so their transfers cross repeat by repeat:
+   toward each node, repeat j of every group of the run (nccl.h ncclMeshFused repeats; a group of one repeat is repeat 0)
+   precedes repeat j + 1 of any, groups of one repeat in the order declared.  Called between two groups of a declaration
+   (ncclInvalidUsage elsewhere).  The wire's order is a function of these declarations alone: nothing is observed at run
+   time.  The code then issues the run's groups in the order declared, each one's repeats published in its own order;
+   a repeat of one may wait on the run's earlier repeats of another (the queue pairs are shared in the wire's order) */
+ncclResult_t ncclMeshDeclareAlongside(void);
 /* Compiler-derived useful directed bytes for one entire declared function.
    demand has nranks*nranks entries (source-major); group repeats are included.
    Relay amplification is excluded. Query after configuration, before execution;

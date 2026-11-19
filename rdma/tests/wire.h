@@ -18,7 +18,7 @@ struct wire_fifo { struct wire_piece *sends,*receives; uint64_t sent_head,sent_t
 struct wire_node {
   struct hdr *m; struct mesh_node *x;
   uint64_t posted[2][WIRE_CABLES][WIRE_LANES],done[2][WIRE_CABLES][WIRE_LANES];
-  uint64_t hint[2][WIRE_CABLES][WIRE_LANES],raise_hint[2],raise_seen[2];
+  uint64_t hint[2][WIRE_CABLES][WIRE_LANES],raise_hint[WIRE_CABLES][2],raise_seen[WIRE_CABLES][2];
 };
 struct wire {
   struct wire_node node[2];
@@ -79,8 +79,8 @@ static inline void wire_match(struct wire *w,uint32_t d,uint32_t c,uint32_t j,ui
     w->node[d].done[0][c][j]++;w->node[1-d].done[1][c][j]++;
   }
 }
-/* node n's done words raised through what its queue pairs have done (by the generation's first cable's process in the
-   bridge: here, the node's one step) */
+/* node n's done words raised through what its queue pairs have done, by each of its cables' raisers in turn, each with
+   its own state (the bridge's port children: mesh-link.c order_pass) */
 static inline void wire_raise(struct wire *w,uint32_t n){
   struct wire_node *v=w->node+n;
   const uint32_t epochs=atomic_load_explicit(&v->x->epochs,memory_order_acquire);
@@ -90,7 +90,7 @@ static inline void wire_raise(struct wire *w,uint32_t n){
   for(int way=0;way<2;way++){
     uint64_t done[WIRE_CABLES*WIRE_LANES];uint32_t k=0;
     for(uint32_t c=0;c<last->cables;c++)for(uint32_t j=0;j<last->cable[c].lanes;j++)done[k++]=v->done[way][last->cable[c].port][j];
-    order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raise_hint[way],&v->raise_seen[way]);
+    for(uint32_t c=0;c<last->cables;c++)order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raise_hint[c][way],&v->raise_seen[c][way]);
   }
 }
 /* both nodes' epoch over cables [0, cables), from the later of the two ends' bounds each way (mesh-link.c order_turn:

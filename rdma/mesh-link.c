@@ -214,9 +214,10 @@ static void link_receive(struct port *port,uint32_t served){
    (mesh-order.h order_unit_piece), which is a span of a transfer of an execution of a declared program
    (order_locate); it is posted while its step is issued and its gate holds (order_ready) and the lane has room, and
    the lane's next unit is then the next piece placed on it.  Nothing is searched for and nothing skipped: a lane waits
-   at its own next piece.  On the generation's first cable (its first epoch's first, which the generation keeps), the
-   pieces of every lane of the order that are done told through to their done words, in the pieces' order
-   (order_done_through, order_raise_through), and the piece below which every done word is raised published (`raised`) */
+   at its own next piece.  Then, on every cable of the order (each port's child alike, the one that sees a completion
+   first raising its words: no completion waits on another process's pass), the pieces of every lane of the order that
+   are done told through to their done words, in the pieces' order (order_raise_pass), and the piece below which every
+   done word is raised published (`raised`, moved only up) */
 static void order_pass(struct port *port){
   struct link *l=&port->link;
   struct mesh_node *x=link_order(l);
@@ -237,7 +238,6 @@ static void order_pass(struct port *port){
         if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,n))break;
         if(dud)order_raise(M,at.t->done,UINT64_MAX);
       }
-  if(x->epoch[0].cable[0].port!=port->index)return;
   const struct mesh_epoch *last=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
   for(int way=0;way<2;way++){
     uint64_t done[MESH_PORTS*MESH_LINK_LANES];uint32_t k=0;

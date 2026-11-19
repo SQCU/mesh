@@ -224,13 +224,21 @@ static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int
     if(last->cable[i].port==port)return lane<last->cable[i].lanes && done[k+lane]>u;
   return 0;
 }
-/* The done words of direction d raised, by one process of the generation only (the port of its first cable): those of
+/* The done words of direction d raised, by every process that serves the order (each port's child, on every pass in
+   which some queue pair's done count moved; tests/wire.h's one step), whichever sees a completion first: those of
    every transfer wholly below the pieces every queue pair of the last epoch has done (`done`, a count each in the
    epoch's cable and lane order: order_done_through), in the pieces' order, with the piece below which all are raised
    published (`raised`); then, of the next ORDER_AHEAD transfers, each one wholly done whose done word no earlier one of
    them not yet done names (a word several transfers count on rises only as their prefix; a transfer held by its gate
-   holds back no other's word) */
+   holds back no other's word).  Raisers need no agreement: every done count only rises, so each one's reading of them
+   is true of the queue pairs (a transfer it finds done is done, and one it finds before another not done was not done
+   when read), every word is raised to the greatest value any raiser computes (order_raise) and `raised` is moved only
+   up (order_raised_to) */
 #define ORDER_AHEAD 64u
+static inline void order_raised_to(_Atomic uint64_t *raised,uint64_t value){
+  uint64_t old=atomic_load_explicit(raised,memory_order_relaxed);
+  while(old<value && !atomic_compare_exchange_weak_explicit(raised,&old,value,memory_order_release,memory_order_relaxed)){}
+}
 static inline void order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,const uint64_t *done,
                                     uint64_t *hint,uint64_t *seen){
   /* nothing to raise where no queue pair has done more since the last pass and no segment was declared */
@@ -239,11 +247,11 @@ static inline void order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t e
   for(uint32_t c=0,k=0;c<final->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<final->cable[c].lanes;l++,k++)sum+=done[k]*(k+1);
   if(sum==*seen)return;
   *seen=sum;
-  uint64_t raised=atomic_load_explicit(&x->raised[d],memory_order_relaxed);
+  uint64_t raised=atomic_load_explicit(&x->raised[d],memory_order_acquire);
   const uint64_t through=order_done_through(x,epochs,d,done);
   if(through>raised){
     const uint64_t reached=order_raise_through(m,x,segments,d,raised,through,hint);
-    if(reached>raised)atomic_store_explicit(&x->raised[d],raised=reached,memory_order_release);
+    if(reached>raised)order_raised_to(&x->raised[d],raised=reached);
   }
   /* past the latest piece any queue pair has done, no transfer is whole: the look ahead ends there */
   uint64_t latest=0;
