@@ -2089,13 +2089,20 @@ static uint64_t span_units(const struct mesh_span_plan *p, uint64_t offset, uint
   return span_after(p, offset + bytes - 1) - span_after(p, offset) + 1;
 }
 
+/* All indices name the original solver hop (one based, zero for the source/no successor).
+   prefix and arrival are positions in the producing peer views, in native DMA units. */
+struct scatter_slice {
+  uint32_t head, next, producer, local;
+  uint64_t prefix, arrival, low, high;
+  int cuts;
+};
 struct scatter_schedule {
   _Atomic uint32_t references;
   struct steps *rank;
   struct mesh_scatter_link *link;
   struct mesh_scatter_group *group;
   struct mesh_scatter_send *send;
-  unsigned char *forwarded;
+  struct scatter_slice *slice;
   uint32_t links, groups, count;
   uint64_t piece;
 };
@@ -2274,7 +2281,7 @@ static void steps_drop(struct steps *s, int owns_layout) {
 static void scatter_release(struct scatter_schedule *schedule) {
   if (!schedule || atomic_fetch_sub(&schedule->references, 1) != 1) return;
   if (schedule->rank) steps_drop(schedule->rank, 1);
-  free(schedule->forwarded); free(schedule->link); free(schedule->group); free(schedule->send); free(schedule);
+  free(schedule->slice); free(schedule->link); free(schedule->group); free(schedule->send); free(schedule);
 }
 
 static void steps_free(struct steps *s) {
@@ -2441,7 +2448,7 @@ static ncclResult_t counted_steps(struct call *c) {
    Its bridge places the channel's pieces on the cables and queue pairs of the current epoch. */
 /* One extent can stream from one producer. The receive's landed prefix then enables every forwarded
    page at its own offset (group_entries). Each edge's wire order stays the solver's order. */
-static ncclResult_t scatter_extents(struct scatter_schedule *schedule, uint32_t n, uint64_t *extent) {
+static ncclResult_t scatter_extents(struct scatter_schedule *schedule, uint32_t n, uint64_t page, uint64_t *extent) {
   if (!schedule->count) return ncclSuccess;
   size_t group_first[65] = {0};
   for (uint32_t g = 0; g < schedule->groups; g++) {
@@ -2451,9 +2458,9 @@ static ncclResult_t scatter_extents(struct scatter_schedule *schedule, uint32_t 
     group_first[g+1] = group_first[g] + pieces;
   }
   uint32_t *received = calloc(group_first[schedule->groups] * n, sizeof *received);
-  struct endpoint { uint32_t head, source; } *open = calloc((size_t)n*n, sizeof *open);
-  schedule->forwarded = calloc(schedule->count, 1);
-  if (!received || !open || !schedule->forwarded) { free(received); free(open); return fail(ncclSystemError, "out of memory"); }
+  struct endpoint { uint32_t head, tail; uint64_t units; } *open = calloc((size_t)n*n, sizeof *open);
+  schedule->slice = calloc(schedule->count, sizeof *schedule->slice);
+  if (!received || !open || !schedule->slice) { free(received); free(open); return fail(ncclSystemError, "out of memory"); }
   ncclResult_t result = ncclSuccess;
   for (uint32_t k = 0; k < schedule->count; k++) {
     const struct mesh_scatter_send *hop = schedule->send + k;
@@ -2461,16 +2468,31 @@ static ncclResult_t scatter_extents(struct scatter_schedule *schedule, uint32_t 
     const struct mesh_scatter_group *group = schedule->group + hop->group;
     const size_t piece = group_first[hop->group] + (hop->first - group->first) / schedule->piece;
     uint32_t *at = received + piece * n;
-    const uint32_t source = at[link->from];
-    if (!source && link->from != group->source) { result = fail(ncclInternalError, "scatter forwards an unavailable piece"); break; }
-    if (source) schedule->forwarded[source-1] = 1;
-    struct endpoint *e = open + (size_t)link->from*n + link->to;
-    const struct mesh_scatter_send *head = e->head ? schedule->send + e->head - 1 : NULL;
-    if (!head || head->group != hop->group || e->source != source || head->first + extent[e->head-1] != hop->first) {
-      e->head = k+1; e->source = source;
+    const uint32_t parent = at[link->from];
+    if ((!parent && link->from != group->source) || at[link->to] || link->to == group->source) {
+      result = fail(ncclInternalError, "scatter piece does not have a unique producer"); break;
     }
+    struct scatter_slice *slice = schedule->slice + k;
+    if (parent) {
+      const struct scatter_slice *arrival = &schedule->slice[parent-1];
+      slice->producer = arrival->head; slice->arrival = arrival->prefix;
+      schedule->slice[arrival->head-1].cuts = 1;
+    }
+    struct endpoint *e = open + (size_t)link->from*n + link->to;
+    if (!e->head || schedule->send[e->head-1].group != hop->group ||
+        schedule->slice[e->head-1].producer != slice->producer) {
+      *e = (struct endpoint){.head=k+1};
+      slice->low = hop->first;
+    }
+    struct scatter_slice *head = &schedule->slice[e->head-1];
+    slice->head = e->head; slice->prefix = e->units;
+    if (slice->producer && slice->arrival != head->arrival + slice->prefix) head->cuts = 1;
+    if (hop->first < head->low) head->low = hop->first;
+    if (hop->first + hop->bytes > head->high) head->high = hop->first + hop->bytes;
+    if (e->tail) schedule->slice[e->tail-1].next = k+1;
+    e->tail = k+1; e->units += pages_of(hop->bytes, page).n;
     extent[e->head-1] += hop->bytes;
-    at[link->to] = e->head;
+    at[link->to] = k+1;
   }
   free(received); free(open);
   return result;
@@ -2481,7 +2503,7 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
   const uint32_t rank = (uint32_t)comm->rank, n = (uint32_t)comm->nranks;
   uint64_t *extent = calloc((size_t)schedule->count + 1, sizeof *extent);
   if (!extent) return fail(ncclSystemError, "out of memory");
-  ncclResult_t result = scatter_extents(schedule, n, extent);
+  ncclResult_t result = scatter_extents(schedule, n, comm->page, extent);
   if (result) { free(extent); return result; }
   uint32_t count = 0;
   for (uint32_t k = 0; k < schedule->count; k++) {
@@ -2493,7 +2515,7 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
   if (!s || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
       !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
-      !(s->prior_first = calloc(room, sizeof *s->prior_first)) || !(s->buffer = calloc(1, sizeof *s->buffer)) ||
+      !(s->prior = calloc(room, sizeof *s->prior)) || !(s->prior_first = calloc(room, sizeof *s->prior_first)) || !(s->buffer = calloc(1, sizeof *s->buffer)) ||
       !(s->demand = calloc((size_t)n * n, sizeof *s->demand))) {
     free(extent); steps_free(s); return fail(ncclSystemError, "out of memory");
   }
@@ -2515,11 +2537,16 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
     }
     struct mesh_operand view = operand;
     view.elements = extent[k] / operand.element_bytes;
+    const uint32_t producer = schedule->slice[k].producer;
+    s->prior_first[s->count] = s->priors;
+    if (edge->from == rank && producer) s->prior[s->priors++] = schedule->slice[producer-1].local;
+    schedule->slice[k].local = s->count;
     s->cable[s->count] = cable[peer];
     s->steps[s->count++] = (struct mesh_step){edge->from == rank ? MESH_STEP_SEND : MESH_STEP_COPY, peer, k, 0,
-                                               send->first / operand.element_bytes, view};
+                                               schedule->slice[k].low / operand.element_bytes, view};
   }
   free(extent);
+  s->prior_first[s->count] = s->priors;
   s->scatter = schedule; schedule->rank = s;
   atomic_fetch_add(&schedule->references, 1);
   c->bound = s;
@@ -2719,6 +2746,7 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
 static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page) {
   if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
   const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
+  if (s->scatter) return (int32_t)r;
   const struct mesh_step *a = s->steps + r, *b = s->steps + k;
   return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
          (b->first - a->first) * b->piece.element_bytes % page == 0 ? (int32_t)r : -1;
@@ -2765,7 +2793,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
   }
   for (size_t i = 0; i < n && !result; i++) {
     struct steps *st = list[i].bound;
-    if (st) {
+    if (st && !st->scatter) {
       for (uint32_t k = 0; k < st->count; k++) {
         st->prior_first[k] = st->priors;
         for (uint32_t j = 0; j < k; j++)
@@ -3124,6 +3152,22 @@ static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + pa
    table; the bridge reads each row's page in the range's order).  0, else the
    call fails as a value, naming the piece (ncclInvalidUsage: the piece's buffer is no lease, or its cut, NCCL's, does
    not lie on a page; nothing is copied to move it), nothing presented */
+static ncclResult_t scatter_spans(const struct hdr *m, const struct scatter_schedule *schedule, uint32_t head,
+                                  uint64_t low_address, uint64_t page, struct message *out) {
+  uint64_t unit = 0;
+  for (uint32_t i = head+1; i; i = schedule->slice[i-1].next) {
+    const struct mesh_scatter_send *hop = &schedule->send[i-1];
+    const uint64_t address = low_address + (hop->first - schedule->slice[head].low);
+    for (uint64_t at = 0; at < hop->bytes; at += page) {
+      const struct mesh_dma_span span = {address+at, hop->bytes-at < page ? hop->bytes-at : page};
+      if (unit >= out->pages.n || !mesh_dma_span_valid(m, span))
+        return fail(ncclInvalidUsage, "scatter DMA span is outside the registered extent");
+      out->spans[unit++] = span;
+    }
+  }
+  return unit == out->pages.n ? ncclSuccess : fail(ncclInternalError, "scatter spans do not cover the peer view");
+}
+
 static ncclResult_t place_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder) {
   const struct hdr *m = comm->attach->context.M;
   const unsigned char *region = (const unsigned char *)m;
@@ -3151,7 +3195,8 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
            first/last logical bytes do not bound its physical addresses. */
         const struct where checked = write && write->views ? origin : x->data;
         const unsigned char *checked_address = address_of(checked);
-        const uint64_t extent = write && write->views ? write->view_extent :
+        const struct scatter_slice *scatter = st->scatter ? st->scatter->slice + step->round : NULL;
+        const uint64_t extent = scatter ? scatter->high-scatter->low : write && write->views ? write->view_extent :
           x->bytes ? write_displacement(write, x->offset + x->bytes - 1) - displacement + 1 : 0;
         const int inside = in_region(comm, checked, extent);
         pthread_mutex_lock(&attach_lock);
@@ -3166,6 +3211,11 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
             !(x->spans = spare_take(comm, x->pages.n * sizeof *x->spans, holder)))
           return fail(ncclSystemError, "allocating exact DMA span descriptors");
         x->table = (uint64_t)((unsigned char *)x->spans - region);
+        if (scatter) {
+          ncclResult_t result = scatter_spans(m, st->scatter, step->round, (uint64_t)(address-region), page, x);
+          if (result) return result;
+          continue;
+        }
         const uint64_t logical = step->first * step->piece.element_bytes;
         uint64_t at = 0;
         const struct mesh_span_plan *packets = x->c->write_plan ? &x->c->write_plan->packets : NULL;
@@ -3195,7 +3245,8 @@ static ncclResult_t bind_retirements(struct ncclComm *comm, struct schedule *pla
     const struct mesh_step *step = st->steps + m->step;
     /* Explicit WRITEs have one immutable generation per logical transaction;
        intermediate COPY/SEND pieces have identical, disjoint indexed views. */
-    if (m->c->write_plan) continue;
+    /* scatter_extents proved a unique arrival per rank, group and piece; forwarding reads that arrival. */
+    if (m->c->write_plan || st->scatter) continue;
     const struct where target = step->op == MESH_STEP_REDUCE ? shifted(st->buffer[step->buffer], m->offset) : m->data;
     const uintptr_t begin = (uintptr_t)address_of(target), end = begin + m->bytes;
     for (uint32_t q = 0; q < comm->count; q++) for (size_t j = 0; j < plans[q].outs; j++) {
@@ -3277,16 +3328,19 @@ typedef int (*entry_visit)(void *context, struct ncclComm *comm, uint32_t h, int
 static int visit_crossings(struct ncclComm *comm, uint32_t h, int list, const struct message *m,
                            struct mesh_entry entry, entry_visit visit, void *context) {
   const struct steps *s = m->c->bound;
-  const uint64_t grain = s->scatter && s->scatter->forwarded[s->steps[m->step].round] ?
-    s->scatter->piece / comm->page : m->pages.n;
+  const struct scatter_schedule *schedule = s->scatter;
+  const uint32_t round = s->steps[m->step].round;
+  if (!schedule || !schedule->slice[round].cuts)
+    return m->pages.n ? visit(context, comm, h, list, entry, m->end.n) : 0;
   const uint64_t end = m->end.n-m->pages.n;
-  for (uint64_t first = 0; first < m->pages.n;) {
-    entry.units = m->pages.n-first < grain ? m->pages.n-first : grain;
-    first += entry.units;
-    const int status = visit(context, comm, h, list, entry, end+first);
+  const uint64_t base = entry.base;
+  for (uint32_t i = round+1; i; i = schedule->slice[i-1].next) {
+    const struct scatter_slice *slice = schedule->slice+i-1;
+    entry.units = pages_of(schedule->send[i-1].bytes, comm->page).n;
+    entry.spans = m->table + slice->prefix * sizeof(struct mesh_dma_span);
+    if (!list) entry.base = slice->producer ? base - schedule->slice[round].arrival + slice->arrival : base + slice->prefix;
+    const int status = visit(context, comm, h, list, entry, end + slice->prefix + entry.units);
     if (status) return status;
-    entry.spans += entry.units * sizeof(struct mesh_dma_span);
-    if (!list) entry.base += entry.units;
   }
   return 0;
 }
@@ -3312,7 +3366,8 @@ static int group_entries(struct ncclComm *comm, const struct schedule *plans, en
         entry.word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)mapped);
         const struct mesh_step *before = s->steps + dependency;
         const uint64_t delta = m->offset - from->offset;
-        const mesh_pages units = m->c->write_plan ? (mesh_pages){span_units(&m->c->write_plan->packets,
+        const mesh_pages units = s->scatter ? (mesh_pages){s->scatter->slice[s->steps[m->step].round].arrival} :
+          m->c->write_plan ? (mesh_pages){span_units(&m->c->write_plan->packets,
           before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
         entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
       }
@@ -4576,6 +4631,11 @@ static int plan_direct(struct call *c, struct where own) {
   const struct where map = {send.buffer, send.offset - (size_t)lo * z};
   for (uint32_t k = 0; direct && k < st->count; k++) {
     const struct mesh_step *step = st->steps + k;
+    if (st->scatter) {
+      if (step->op == MESH_STEP_COPY) st->needed[step->buffer] = 1;
+      else if (!st->scatter->slice[step->round].producer) st->read[k] = map;
+      continue;
+    }
     const uint64_t from = step->first, to = step->first + step->piece.elements;
     const int meet = spans_meet(w + step->buffer, from, to), inside = from >= lo && to <= hi;
     if (meet < 0 || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
