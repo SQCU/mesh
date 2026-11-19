@@ -1200,6 +1200,8 @@ def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None) -> to
     # it into its input); another its whole value in its original layout and extent (`required` where that differs);
     # each user output's realization its whole value there, then the output's own transfer once
     values = mesh_graph.forward(nodes[:-1], operands, place_value)
+    graph_module.meta["partitions"] = {source: values[copied[source]] for source in original.graph.nodes
+                                       if source.op != "output"}
     processor = stated[output]
 
     def realize(node, read):
