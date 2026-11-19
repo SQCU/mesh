@@ -2,13 +2,14 @@
 #include "mesh-peer-private.h"
 #include "mesh-peer-plan.h"
 
-enum { OFFER=1,ACCEPT,OPEN,ISSUE,ABORT,ADMITTED };
+enum { OFFER=1,ACCEPT,OPEN,ISSUE,ABORT,ADMITTED,LOCAL_GATES };
+enum { ORDERED_LANDING=1 };
 struct signal {uint32_t kind,row,channel,lane;uint64_t first,offset,count;};
 struct notice {struct notice *next;uint32_t count;struct signal events[];};
 struct pipe_stream {
   uint32_t stream,users;uint64_t wire,assigned[2];
   struct job *fast;
-  const struct mesh_peer_transfer *last_gate;
+  uint32_t last_row;
   _Atomic int failure;
   struct mesh_stream_view view;
 };
@@ -22,10 +23,11 @@ struct job {
   struct job *next;
   uint32_t peer;uint64_t group,owner,expires;
   int fd,pinned,prepared,accepted,started,sent,reported,remote_admitted; _Atomic int closed;
-  uint64_t lease_first,lease_end,drain_deadline;
+  uint64_t lease_first,lease_end,drain_deadline,control_messages;
   _Atomic int failed,finished,admitted,mail;
   void *offer,*remote;size_t local_bytes,remote_bytes;
   struct mesh_peer_transfer *records;
+  const struct peer_record *remote_rows;
   struct peer_plan plan;
   struct mesh_ctx context;struct mesh_section table;uint32_t holds;
   struct channel channel[MESH_STREAMS];struct queue queues[MESH_STREAMS][2][2];
@@ -100,6 +102,18 @@ static int owned_range(struct job *j,uint64_t off,uint64_t bytes){
 static int row_ready(struct mesh_peer_transfer r){
   return mesh_peer_ready(M,r.ready,r.threshold,r.reserved);
 }
+static int follows_gate(const struct mesh_peer_transfer *next,const struct mesh_peer_transfer *prior){
+  struct mesh_peer_gate n={next->ready,next->threshold},p={prior->ready,prior->threshold};
+  const struct mesh_peer_gate *a=next->reserved?(const void *)((const char *)M+next->ready):&n;
+  const struct mesh_peer_gate *b=prior->reserved?(const void *)((const char *)M+prior->ready):&p;
+  uint32_t na=next->reserved?next->reserved:1,nb=prior->reserved?prior->reserved:1;
+  for(uint32_t i=0;i<nb;i++){
+    uint32_t k=0;
+    while(k<na && (a[k].word!=b[i].word || a[k].threshold<b[i].threshold))k++;
+    if(k==na)return 0;
+  }
+  return 1;
+}
 static int offer(struct job *j,struct mesh_peer_request req){
   struct mesh_client *client=mesh_client_at(M,req.owner);
   uint64_t other=0;
@@ -121,7 +135,7 @@ static int offer(struct job *j,struct mesh_peer_request req){
     for(uint32_t t=0;t<r.reserved;t++)if(g[t].word%8 || g[t].threshold==UINT64_MAX || !owned_range(j,g[t].word,8))return EINVAL;
     units+=(uint32_t)r.units;
   }
-  struct peer_offer h={n,req.count,units,0};int error=peer_layout_size(h,&j->local_bytes);
+  struct peer_offer h={n,req.count,units,ORDERED_LANDING};int error=peer_layout_size(h,&j->local_bytes);
   if(error || j->local_bytes>64u*1024*1024-sizeof(struct message))return EOVERFLOW;
   j->offer=calloc(1,j->local_bytes);if(!j->offer)return ENOMEM;
   memcpy(j->offer,&h,sizeof h);struct peer_layout l;
@@ -134,6 +148,8 @@ static int offer(struct job *j,struct mesh_peer_request req){
     break;
   }
   units=0;
+  const struct mesh_peer_transfer *previous=NULL;
+  uint64_t chain=0;
   for(uint32_t i=0;i<req.count;i++){
     struct mesh_peer_transfer r=j->records[i];
     struct mesh_dma_span *spans=(void *)((char *)M+r.spans);uint64_t bytes=0;
@@ -143,6 +159,10 @@ static int offer(struct job *j,struct mesh_peer_request req){
     }
     int ready=row_ready(r);if(ready<0)return -ready;
     l.row[i]=(struct peer_record){r.match,bytes,!ready,0,units,(uint32_t)r.units,r.land?j->peer:M->node,i};
+    if(!ready && r.land){
+      if(!previous || !follows_gate(&r,previous))chain++;
+      l.row[i].gate=chain;l.row[i].threshold=i+1;previous=j->records+i;
+    }
     memcpy(l.spans+units,spans,r.units*sizeof *spans);units+=r.units;
   }
   void *wire=malloc(j->local_bytes);if(!wire)return ENOMEM;memcpy(wire,j->offer,j->local_bytes);
@@ -180,18 +200,6 @@ static int hold(uint64_t wire,struct pipe_stream **out){
   }
   atomic_store_explicit(&x->peer_mode,physical.client,memory_order_release);*out=s;return 0;
 }
-static int follows_gate(const struct mesh_peer_transfer *next,const struct mesh_peer_transfer *prior){
-  struct mesh_peer_gate n={next->ready,next->threshold},p={prior->ready,prior->threshold};
-  const struct mesh_peer_gate *a=next->reserved?(const void *)((const char *)M+next->ready):&n;
-  const struct mesh_peer_gate *b=prior->reserved?(const void *)((const char *)M+prior->ready):&p;
-  uint32_t na=next->reserved?next->reserved:1,nb=prior->reserved?prior->reserved:1;
-  for(uint32_t i=0;i<nb;i++){
-    uint32_t k=0;
-    while(k<na && (a[k].word!=b[i].word || a[k].threshold<b[i].threshold))k++;
-    if(k==na)return 0;
-  }
-  return 1;
-}
 static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int fast){
   struct peer_row *r=j->plan.row+row;size_t written=0;
   pthread_mutex_lock(&ledger_lock);
@@ -207,8 +215,15 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
     for(size_t i=r->first;i<r->end;i++){
       if(i>r->first && j->plan.piece[i].channel==j->plan.piece[i-1].channel)continue;
       struct pipe_stream *s=j->channel[j->plan.piece[i].channel].pipe;
-      if(s->fast && (s->fast!=j || !follows_gate(&r->logical,s->last_gate))){
-        pthread_mutex_unlock(&ledger_lock);return 0;
+      if(s->fast){
+        int compatible=s->fast==j;
+        if(compatible){
+          const struct peer_row *prev=j->plan.row+s->last_row;
+          const struct peer_record *old=j->remote_rows+s->last_row,*next=j->remote_rows+row;
+          compatible=(prev->local_open || (!r->local_open && follows_gate(&r->logical,&prev->logical))) &&
+            (!old->gate || (next->gate==old->gate && next->threshold>=old->threshold));
+        }
+        if(!compatible){pthread_mutex_unlock(&ledger_lock);return 0;}
       }
     }
     r->fast=1;
@@ -220,7 +235,7 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
     ledger[j->channel[e].pipe->stream/MESH_LINK_STREAMS].bytes+=bytes;
     struct pipe_stream *s=j->channel[e].pipe;size_t count=last-first;
     unsigned lane=0;size_t split=count;
-    if(fast){s->fast=j;s->last_gate=&r->logical;}
+    if(fast){s->fast=j;s->last_row=row;}
     else{
       if(s->fast)lane=1;
       else{
@@ -229,7 +244,7 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
         lane=b<a;split=(count+1)/2;
       }
     }
-    out[written++]=(struct signal){ISSUE,row,e,lane,s->assigned[lane],first-r->first,split};
+    out[written++]=(struct signal){fast && !r->remote_open?LOCAL_GATES:ISSUE,row,e,lane,s->assigned[lane],first-r->first,split};
     s->assigned[lane]+=split;
     if(split<count){lane^=1;out[written++]=(struct signal){ISSUE,row,e,lane,s->assigned[lane],first-r->first+split,count-split};s->assigned[lane]+=count-split;}
   }
@@ -239,6 +254,7 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
 static int queue_ticket(struct job *j,struct signal signal){
   if(signal.row>=j->plan.rows || signal.channel>=j->plan.links || signal.lane>=2)return EPROTO;
   struct peer_row *r=j->plan.row+signal.row;struct queue *q=&j->queues[signal.channel][r->logical.land][signal.lane];
+  if(signal.kind==LOCAL_GATES && r->logical.land)r->fast=1;
   if(!signal.count || signal.offset>=r->end-r->first || signal.count>r->end-r->first-signal.offset)return EPROTO;
   size_t matched=0;
   for(size_t i=r->first+signal.offset;i<r->first+signal.offset+signal.count;i++){
@@ -271,6 +287,7 @@ static int prepare(struct job *j){
   if(!error)error=peer_layout(j->remote,j->remote_bytes,&b);
   if(!error)error=peer_plan_compile(&j->plan,M->node,j->peer,a,b,j->records,M->data_off,MESH_FRAME);
   if(error)return error;
+  j->remote_rows=b.row;
   struct completion *order=calloc(j->plan.rows,sizeof *order);if(!order)return ENOMEM;
   for(uint32_t k=0;k<j->plan.rows;k++){
     struct mesh_peer_transfer r=j->plan.row[k].logical;order[k]=(struct completion){r.completed,r.value,k};
@@ -305,7 +322,7 @@ static int prepare(struct job *j){
     uint32_t k=j->plan.order[i];
     struct peer_row *r=j->plan.row+k;if(r->logical.land)continue;
     if(r->primed)n+=record_tickets(j,k,assign+n,0);
-    else if(r->remote_open)n+=record_tickets(j,k,assign+n,1);
+    else if(r->remote_open || (b.head.pad&ORDERED_LANDING))n+=record_tickets(j,k,assign+n,1);
   }
   for(size_t i=0;!error && i<n;i++)error=queue_ticket(j,assign[i]);
   if(!error)error=peer_send(j,ACCEPT,assign,n*sizeof *assign);
@@ -342,7 +359,7 @@ static int run(struct job *j){
           struct signal s=note->events[i];if(s.row>=p->rows){error=EPROTO;break;}
           struct peer_row *r=p->row+s.row;
           if(s.kind==OPEN && !r->logical.land){r->remote_open=1;continue;}
-          if(s.kind!=ISSUE || !r->logical.land){error=EPROTO;break;}
+          if((s.kind!=ISSUE && s.kind!=LOCAL_GATES) || !r->logical.land){error=EPROTO;break;}
           error=queue_ticket(j,s);
         }
         free(note);note=next;
@@ -351,6 +368,7 @@ static int run(struct job *j){
     size_t n=0;uint32_t remaining=0;
     for(uint32_t i=0;i<watching && !error;i++){
       uint32_t k=watch[i];struct peer_row *r=p->row+k;
+      if(r->fast)continue;
       int ready=row_ready(r->logical);if(ready<0){error=-ready;break;}
       if(!ready || (!r->logical.land && !r->remote_open)){watch[remaining++]=k;continue;}
       if(r->logical.land)signals[n++]=(struct signal){.kind=OPEN,.row=k};
@@ -377,7 +395,7 @@ static int run(struct job *j){
           struct peer_row *r=p->row+piece->row;
           struct mesh_entry entry={spans+index*sizeof(struct mesh_dma_span),1,0,0};
           if(r->direct_lane && index+1==r->end)entry.units=spans+p->count*sizeof(struct mesh_dma_span)+piece->row*sizeof(struct mesh_peer_gate);
-          if(r->fast && !w){
+          if(r->fast){
             entry.word=r->logical.ready|(r->logical.reserved!=0);
             entry.base=r->logical.reserved?r->logical.reserved:r->logical.threshold;
           }
@@ -554,13 +572,18 @@ void peer_turn(void){
     struct notice *s=dequeue(j,1);
     while(s){
       struct notice *next=s->next;
-      if(!failure){int error=peer_send(j,ISSUE,s->events,s->count*sizeof *s->events);if(error)stop_job(j,error);}
+      if(!failure){
+        int error=peer_send(j,ISSUE,s->events,s->count*sizeof *s->events);
+        if(error)stop_job(j,error);else j->control_messages++;
+      }
       free(s);s=next;
     }
     if((!j->started && failure) || atomic_load(&j->finished)){
       if(j->context.M){
         if(failure)peer_send(j,ABORT,&failure,sizeof failure);
         if(j->plan.row){
+          say("peer %u group %llu runtime control messages %llu\n",j->peer,
+              (unsigned long long)j->group,(unsigned long long)j->control_messages);
           for(uint32_t k=0;failure && k<j->plan.rows;k++)if(j->plan.row[k].logical.completed && !j->plan.row[k].done)
             mesh_peer_complete(M,j->plan.row[k].logical.completed,UINT64_MAX);
           for(uint32_t e=0;e<j->holds;e++)
