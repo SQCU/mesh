@@ -141,7 +141,10 @@ static int lane_post(struct port *port,int way,uint32_t j,struct mesh_dma_span b
     struct ibv_send_wr request={.wr_id=gate_post(l->gate+lane,lane,each),.sg_list=&span,.num_sge=1,
                                 .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
     error=queue->send(queue->pair,&request,&bad);
-    if(!error){__atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;}
+    if(!error){
+      state->sent_at[state->sent&(MESH_LANE_UNITS-1)]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+      __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;
+    }
   }
   if(error){atomic_store_explicit(&x->posts[way].posted[j&1],u,memory_order_release);lane_lost(port,lane,error<0?-error:error);return 0;}
   return 1;
@@ -187,6 +190,14 @@ static void link_send(struct port *port,uint32_t served){
     const uint32_t lane=link_lane(l,done[i].qp_num);
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
     if(done[i].status){link_failed(port,(int64_t)done[i].status,2);return;}
+    /* its post -> completion, told in the lane record (the order's lanes alone: MESH_LANE_FIRST on) */
+    if(lane>=MESH_LANE_FIRST){
+      struct lane_state *state=l->lane+lane;
+      struct mesh_lanes *x=lanes_of(port,(lane-MESH_LANE_FIRST)/2);
+      const uint64_t took=clock_gettime_nsec_np(CLOCK_MONOTONIC)-state->sent_at[state->done&(MESH_LANE_UNITS-1)];
+      atomic_store_explicit(&x->send_ns,atomic_load_explicit(&x->send_ns,memory_order_relaxed)+took,memory_order_relaxed);
+      atomic_store_explicit(&x->sends,atomic_load_explicit(&x->sends,memory_order_relaxed)+1,memory_order_relaxed);
+    }
     gate_retire(l->gate+lane,done[i].wr_id);l->lane[lane].done++;completed|=UINT32_C(1)<<lane;
   }
   for(uint32_t k=MESH_LANE_FIRST;completed>>k;k++)if(completed>>k&1)lane_completed(port,k,0,l->lane[k].done);

@@ -237,7 +237,10 @@ struct mesh_lanes {
   _Atomic uint64_t bandwidth,wire;
   /* the passes its port's progress thread made (mesh-link.c port_pass; mesh-order-state reads them: a pass's period) */
   _Atomic uint64_t passes;
-  uint64_t reserved[2];
+  /* its SENDs' post -> completion (the NIC's, the wire's and the peer NIC's acknowledgement, no pass of either bridge):
+     the nanoseconds summed and the SENDs timed, both lanes of the record, by its port's progress thread (mesh-link.c
+     lane_post, link_send; mesh-order-state prints their mean) */
+  _Atomic uint64_t send_ns,sends;
   _Atomic uint32_t child,padding;
   uint64_t child_start;
   struct mesh_posts posts[2];

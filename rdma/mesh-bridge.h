@@ -108,7 +108,9 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    consume ceil(bytes/MESH_FRAME) frames; the interval-pin ring also limits
    outstanding requests independently to MESH_LANE_UNITS. Receive WR IDs carry
    the cumulative frame prefix retired by each completion. */
-struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
+/* sent_at: each SEND's post time, by its unit (sent's value at its post) modulo MESH_LANE_UNITS: an RC queue pair
+   completes its SENDs in their order, so the unit `done` counts next is the one posted at sent_at[done] */
+struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; uint64_t sent_at[MESH_LANE_UNITS]; };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
