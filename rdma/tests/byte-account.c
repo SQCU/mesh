@@ -23,7 +23,7 @@ int main(void) {
   struct mesh_byte_account account = {0};
   struct span { uint64_t offset, bytes; } spans[] = {{100, 1}, {101, 4097}, {5000, 17}, {5017, 17}};
   assert(!mesh_byte_account_append(&account, 0, &spans[0].bytes, 4, sizeof *spans));
-  assert(atomic_load(&account.head)->runs == 3);
+  assert(atomic_load(&account.head)->shape->runs == 3);
   uint64_t bytes;
   const uint64_t expected[] = {0, 1, 4098, 4115, 4132};
   for (uint64_t i = 0; i < 5; i++) {
@@ -32,7 +32,7 @@ int main(void) {
   }
   const uint64_t more[] = {3, 3, 8191};
   assert(!mesh_byte_account_append(&account, 4, more, 3, sizeof *more));
-  assert(atomic_load(&account.head)->runs == 2);
+  assert(atomic_load(&account.head)->shape->runs == 2);
   assert(!mesh_byte_account_at(&account, 7, &bytes) && bytes == 12329);
   uint64_t prefix[6];
   assert(!mesh_byte_account_prefix(&account, 1, 5, prefix));
@@ -67,6 +67,19 @@ int main(void) {
     assert(!atomic_load(&account.head) && account.bytes == bytes);
     assert(!mesh_byte_account_at(&account, 5, &bytes) && bytes == 4135);
   }
+  mesh_byte_account_destroy(&account);
+
+  struct mesh_byte_shape *shape = NULL;
+  uint64_t sizes[] = {8, 16, 4};
+  assert(!mesh_byte_shape_make(&shape, sizes, 3, sizeof *sizes));
+  for (uint64_t start=0; start<9; start+=3) {
+    assert(!mesh_byte_account_view(&account, start, shape));
+    assert(atomic_load(&account.head)->shape == shape);
+  }
+  mesh_byte_shape_release(shape);
+  mesh_byte_account_prune(&account, 3);
+  assert(!mesh_byte_account_at(&account, 7, &bytes) && bytes == 64);
+  assert(!mesh_byte_account_at(&account, 9, &bytes) && bytes == 84);
   mesh_byte_account_destroy(&account);
 
   struct concurrent c = {0};
