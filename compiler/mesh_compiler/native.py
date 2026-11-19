@@ -72,6 +72,16 @@ class Owned:
             releases.pop()()
 
 
+def archive_programs(owned, compiler, archive, count):
+    programs = []
+    for i in range(count):
+        program = compiler.metal_ir_archive_program(archive, i) or None
+        if program is not None:
+            owned(lambda program=program: compiler.metal_ir_program_free(program))
+        programs.append(program)
+    return programs
+
+
 def made(result, error, what, status=errno.EINVAL):
     if not result:
         raise OSError(status, f"{what}: {error.value.decode()}")
@@ -517,11 +527,11 @@ class Target:
     def external_roots(self, row):
         return (root for operand in self.operands for at, root in operand.occurrences if at == row)
 
-    def record(self, owned, libs, gpu, owner, programs, *, archive=None, numerical_bodies=(), schedule=None, functions=None):
+    def record(self, owned, libs, gpu, owner, programs, *, archive=None, numerical_bodies=(), schedule=None, functions=None, selected=False):
         M, _, (lib, _), _ = libs
         error = C.create_string_buffer(ROOM)
         recorder, calls = self.placed(owned, libs, gpu, owner, programs, archive is None,
-                                      numerical_bodies=numerical_bodies, selected=schedule is not None)
+                                      numerical_bodies=numerical_bodies, selected=selected or schedule is not None)
         args = (recorder, calls, len(calls), C.byref(owner.planned),
                 C.byref(owner.binding) if owner.binding is not None else None)
         if archive is not None:
@@ -538,13 +548,7 @@ class Target:
         M, compiler, _, _ = libs
         archive = M._archive_loaded(compiler, artifact, context, gpu, C.create_string_buffer(ROOM))
         owned(lambda: compiler.metal_ir_archive_free(archive))
-        programs = []
-        for i in range(len(self.rows)):
-            program = compiler.metal_ir_archive_program(archive, i) or None
-            if program is not None:
-                owned(lambda program=program: compiler.metal_ir_program_free(program))
-            programs.append(program)
-        return archive, programs
+        return archive, archive_programs(owned, compiler, archive, len(self.rows))
 
     # body k's callable interface before its lowering: each distinct input or state root (its first placeholder's), its
     # generator state, each further output root (any role but CONSTANT: the joint binding supplies every function's
