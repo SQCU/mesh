@@ -36,7 +36,7 @@ struct peer_piece { struct mesh_dma_span span;uint64_t prefix;size_t next;uint32
 struct peer_row {
   struct mesh_peer_transfer logical;
   size_t first,end;uint64_t bytes;
-  size_t retired;uint32_t remote_open,local_open,primed,fast,done,published,prev,succ,direct_lane;
+  size_t retired;uint32_t remote_open,local_open,primed,done,published,prev,succ,direct_lane;
 };
 struct peer_plan {
   struct mesh_cable cable[MESH_STREAMS];uint32_t links,packet[MESH_STREAMS][2];

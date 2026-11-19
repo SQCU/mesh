@@ -1031,7 +1031,7 @@ static void port_greet(struct port *port){
     port_lost(port,errno?errno:EIO);return;
   }
   port_watch(port,EVFILT_READ);
-  port_say(port,(struct message){.kind=HELLO,.count=1+port->budget,.code=PEER_EXTENTS},NULL,0);
+  port_say(port,(struct message){.kind=HELLO,.count=1+port->budget,.code=PEER_EXTENTS|PEER_FIXED},NULL,0);
 }
 /* design/transport.md: the port a link-local peer reached, by its interface; none for a scope of 0 (no
    interface: a LAN address, or the index of an interface that is gone) */

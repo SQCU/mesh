@@ -3,7 +3,9 @@
 #include "mesh-call.h"
 
 /* A logical record names one match in a peer group. All offsets are bytes from
-   the region base. A threshold of zero opens the record immediately. */
+   the region base. At installation the sender assigns every record a physical
+   FIFO position in the supplied priority order. Both endpoints post those
+   same positions; a local release gate controls access to its byte spans. */
 struct mesh_peer_gate { uint64_t word, threshold; };
 /* reserved > 0 names the number of mesh_peer_gate operands at ready. */
 struct mesh_peer_transfer {

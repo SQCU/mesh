@@ -137,7 +137,7 @@ enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
 enum { HELLO=1, FAREWELL, RECORD, LINK, PEER_MESSAGE };
-enum { PEER_EXTENTS=16 };
+enum { PEER_EXTENTS=16,PEER_FIXED=32 };
 void peer_service_open(void);
 void peer_service_close(void);
 void peer_service_adopt(void);
