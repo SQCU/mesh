@@ -2,14 +2,15 @@
 #include "mesh-peer-private.h"
 #include "mesh-peer-plan.h"
 
-enum { OFFER=1,ACCEPT,OPEN,ISSUE,ABORT,ADMITTED,LOCAL_GATES };
-enum { ORDERED_LANDING=1 };
+enum { OFFER=1,ACCEPT,OPEN,ISSUE,ABORT,ADMITTED,LOCAL_GATES,RECEIVED };
+enum { ORDERED_LANDING=2 };
 struct signal {uint32_t kind,row,channel,lane;uint64_t first,offset,count;};
 struct notice {struct notice *next;uint32_t count;struct signal events[];};
 struct pipe_stream {
   uint32_t stream,users;uint64_t wire,assigned[2];
   struct job *fast;
-  uint32_t last_row;
+  uint32_t last_row,receiver_peer;uint64_t receiver_group;
+  int awaiting_receiver;
   _Atomic int failure;
   struct mesh_stream_view view;
 };
@@ -22,7 +23,7 @@ static pthread_mutex_t ledger_lock=PTHREAD_MUTEX_INITIALIZER;
 struct job {
   struct job *next;
   uint32_t peer;uint64_t group,owner,expires;
-  int fd,pinned,prepared,accepted,started,sent,reported,remote_admitted; _Atomic int closed;
+  int fd,pinned,prepared,accepted,started,sent,reported,remote_admitted,notify_receiver_done; _Atomic int closed;
   uint64_t lease_first,lease_end,drain_deadline,control_messages;
   _Atomic int failed,finished,admitted,mail;
   void *offer,*remote;size_t local_bytes,remote_bytes;
@@ -200,6 +201,22 @@ static int hold(uint64_t wire,struct pipe_stream **out){
   }
   atomic_store_explicit(&x->peer_mode,physical.client,memory_order_release);*out=s;return 0;
 }
+static void drop_pipe(struct pipe_stream *s){
+  struct mesh_stream *x=mesh_stream_at(M,s->stream);
+  if((!--s->users || atomic_load(&s->failure)) && atomic_load(&x->wire)==s->wire)
+    mesh_stream_give(&physical,s->stream);
+}
+static void receiver_done(uint32_t peer,uint64_t group,int error){
+  pthread_mutex_lock(&ledger_lock);
+  for(uint32_t i=0;i<MESH_STREAMS;i++){
+    struct pipe_stream *s=wires+i;
+    if(!s->awaiting_receiver || s->receiver_peer!=peer || s->receiver_group!=group)continue;
+    s->awaiting_receiver=0;
+    if(error)atomic_store(&s->failure,1);
+    drop_pipe(s);
+  }
+  pthread_mutex_unlock(&ledger_lock);
+}
 static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int fast){
   struct peer_row *r=j->plan.row+row;size_t written=0;
   pthread_mutex_lock(&ledger_lock);
@@ -215,6 +232,9 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
     for(size_t i=r->first;i<r->end;i++){
       if(i>r->first && j->plan.piece[i].channel==j->plan.piece[i-1].channel)continue;
       struct pipe_stream *s=j->channel[j->plan.piece[i].channel].pipe;
+      if(s->awaiting_receiver && (s->receiver_peer!=j->peer || s->receiver_group!=j->group)){
+        pthread_mutex_unlock(&ledger_lock);return 0;
+      }
       if(s->fast){
         int compatible=s->fast==j;
         if(compatible){
@@ -235,9 +255,14 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
     ledger[j->channel[e].pipe->stream/MESH_LINK_STREAMS].bytes+=bytes;
     struct pipe_stream *s=j->channel[e].pipe;size_t count=last-first;
     unsigned lane=0;size_t split=count;
-    if(fast){s->fast=j;s->last_row=row;}
+    if(fast){
+      s->fast=j;s->last_row=row;
+      if(!r->remote_open && !s->awaiting_receiver){
+        s->receiver_peer=j->peer;s->receiver_group=j->group;s->awaiting_receiver=1;s->users++;
+      }
+    }
     else{
-      if(s->fast)lane=1;
+      if(s->fast || s->awaiting_receiver)lane=1;
       else{
         struct mesh_stream *x=mesh_stream_at(M,s->stream);
         uint64_t a=s->assigned[0]-atomic_load(&x->posts[0].done[0]),b=s->assigned[1]-atomic_load(&x->posts[0].done[1]);
@@ -254,7 +279,7 @@ static size_t record_tickets(struct job *j,uint32_t row,struct signal *out,int f
 static int queue_ticket(struct job *j,struct signal signal){
   if(signal.row>=j->plan.rows || signal.channel>=j->plan.links || signal.lane>=2)return EPROTO;
   struct peer_row *r=j->plan.row+signal.row;struct queue *q=&j->queues[signal.channel][r->logical.land][signal.lane];
-  if(signal.kind==LOCAL_GATES && r->logical.land)r->fast=1;
+  if(signal.kind==LOCAL_GATES && r->logical.land){r->fast=1;j->notify_receiver_done=1;}
   if(!signal.count || signal.offset>=r->end-r->first || signal.count>r->end-r->first-signal.offset)return EPROTO;
   size_t matched=0;
   for(size_t i=r->first+signal.offset;i<r->first+signal.offset+signal.count;i++){
@@ -440,6 +465,8 @@ static void stop_job(struct job *j,int error){
     peer_send(j,ABORT,&error,sizeof error);
 }
 void peer_message(uint32_t peer,uint64_t group,uint32_t kind,const void *data,uint32_t bytes){
+  if(kind==RECEIVED && !bytes){receiver_done(peer,group,0);return;}
+  if(kind==ABORT && bytes==sizeof(int))receiver_done(peer,group,1);
   struct job *j=lookup(peer,group,kind==OFFER);if(!j)return;
   int error=0;
   if(kind==OFFER){
@@ -509,9 +536,7 @@ static void release(struct job *j){
       struct pipe_stream *s=j->channel[e].pipe;
       pthread_mutex_lock(&ledger_lock);if(s->fast==j)s->fast=NULL;pthread_mutex_unlock(&ledger_lock);
       for(unsigned w=0;w<2;w++)for(unsigned l=0;l<2;l++)if(j->queues[e][w][l].retire)atomic_store(&s->failure,1);
-      struct mesh_stream *x=mesh_stream_at(M,s->stream);
-      if((!--s->users || atomic_load(&s->failure)) && atomic_load(&x->wire)==s->wire)
-        mesh_stream_give(&physical,s->stream);
+      drop_pipe(s);
     }
     if(j->table.count)mesh_lease_return(&j->context,j->table.first);
     mesh_retire(M,j->context.client);j->context.M=NULL;
@@ -549,6 +574,11 @@ static uint64_t retry_at;
 uint64_t peer_due(uint64_t normal){return retry_at && retry_at<normal?retry_at:normal;}
 void peer_turn(void){
   retry_at=0;
+  for(uint32_t i=0;i<MESH_STREAMS;i++){
+    struct pipe_stream *s=wires+i;
+    if(s->awaiting_receiver && (atomic_load(&s->failure) || !reachable(s->receiver_peer) ||
+       !mesh_stream_held(&physical,s->stream,s->wire)))receiver_done(s->receiver_peer,s->receiver_group,1);
+  }
   struct job **at=&jobs;
   while(*at){
     struct job *j=*at;
@@ -580,7 +610,10 @@ void peer_turn(void){
     }
     if((!j->started && failure) || atomic_load(&j->finished)){
       if(j->context.M){
-        if(failure)peer_send(j,ABORT,&failure,sizeof failure);
+        if(failure){
+          peer_send(j,ABORT,&failure,sizeof failure);
+          receiver_done(j->peer,j->group,1);
+        }else if(j->notify_receiver_done)peer_send(j,RECEIVED,NULL,0);
         if(j->plan.row){
           say("peer %u group %llu runtime control messages %llu\n",j->peer,
               (unsigned long long)j->group,(unsigned long long)j->control_messages);
