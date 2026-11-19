@@ -824,8 +824,8 @@ def _array(kind, items):
 def completion_order(length, resource, resources, edges, latency=None):
     """R5. Solve completion times and order the vertices of the same dependence relation."""
     count = len(length)
-    if len(resource) != count or (latency is not None and len(latency) != count):
-        raise ValueError("each scheduled instruction needs one resource, service length and supplied latency")
+    if latency is not None and len(latency) != count:
+        raise ValueError("each scheduled instruction needs one supplied latency")
     before, after = (_array(C.c_uint32, (e[k] for e in edges))[0] for k in range(2))
     times, made = (C.c_double * count)(), C.c_void_p()
     _check(LIB.mesh_graph_completion_arrivals(count, length, latency, resource, resources, len(edges), before, after, times))
