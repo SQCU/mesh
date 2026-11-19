@@ -1,5 +1,6 @@
 #include "mesh-bridge.h"
 #include <spawn.h>
+#include <netinet/tcp.h>
 #include <sys/wait.h>
 #include <crt_externs.h>
 #include <libproc.h>
@@ -988,7 +989,8 @@ void port_lost(struct port *port,int64_t code){
    off) */
 static void port_greet(struct port *port){
   int on=1,flags=fcntl(port->control,F_GETFL);
-  if(flags<0 || fcntl(port->control,F_SETFL,flags|O_NONBLOCK) || setsockopt(port->control,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on)){
+  if(flags<0 || fcntl(port->control,F_SETFL,flags|O_NONBLOCK) || setsockopt(port->control,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) ||
+     setsockopt(port->control,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on)){
     port_lost(port,errno?errno:EIO);return;
   }
   port_watch(port,EVFILT_READ);
