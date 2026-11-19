@@ -88,6 +88,15 @@ def viewed(first, base, index):
     return C.cast(base + C.sizeof(mesh.Q) * first[index], C.POINTER(mesh.Q)), first[index + 1] - first[index]
 
 
+def generation_offsets(offsets, copies, width, every, delta=0):
+    if every == 1 and not delta:
+        return offsets, copies
+    return (mesh.Q * (copies * every * width))(*(
+        offsets[copy * width + page] + delta
+        for copy in range(copies) for _ in range(every) for page in range(width)
+    )), copies * every
+
+
 # rdma/mesh-collective.h mesh_view_program `page_offsets` (each retained copy's row's page as a byte offset in the
 # owner's one view, indexed by the compiled section's relative row); metal-microbench metal_ir.h metal_ir_value_paged and
 # metal_ir_value_placed (a paged root's copies, `info.pages` frame rows each): a network owner's frame rows of a paged
@@ -97,11 +106,13 @@ def viewed(first, base, index):
 # each entry i (Target.placements: root copy i // every) its copy's first `info.pages` rows
 def framed(pages, section, every, info):
     first = section.first
-    if every == 1 and section.stride == info.pages:
-        return C.cast(C.addressof(pages) + C.sizeof(mesh.Q) * first, C.POINTER(mesh.Q)), section.count
-    return (mesh.Q * max(every * section.count * info.pages, 1))(*[
-        pages[first + i // every * section.stride + q] for i in range(every * section.count) for q in range(info.pages)
-    ]), every * section.count
+    if section.stride == info.pages:
+        offsets = C.cast(C.addressof(pages) + C.sizeof(mesh.Q) * first, C.POINTER(mesh.Q))
+    else:
+        offsets = (mesh.Q * (section.count * info.pages))(*(
+            pages[first + copy * section.stride + page] for copy in range(section.count) for page in range(info.pages)
+        ))
+    return generation_offsets(offsets, section.count, info.pages, every)
 
 
 # One preparation of a local program on its joint result (`solution`, compiler/mesh_compiler/schedule.py solve_program
@@ -366,9 +377,7 @@ class Target:
         if info.pages:
             return owner.paged(section, every, info)
         offsets, count = owner.span(first, index)
-        if every == 1 and not delta:
-            return offsets, count
-        return (mesh.Q * (every * count))(*[offsets[i // every] + delta for i in range(every * count)]), every * count
+        return generation_offsets(offsets, count, 1, every, delta)
 
     # row r's own storages and inter-call roots on the preparation owner (its prepared schedule.Solved, `solution`),
     # each root once: each run value of its call instance at its full copies (function_value_first[instance]); each
