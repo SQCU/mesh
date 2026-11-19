@@ -125,7 +125,7 @@ finish
 # a value at both ranks, never waits its deadline with the two ends apart; and the next one runs.  A pair of
 # sim-programs processes is the clients (rounds: how long it runs)
 restarting() {
-  RESTARTS=1 NOTICE=${1:-0} "$here/.build/tests/sim-wire" 11 12 "$cables" "$lanes" 768 > "$out/sim.out" 2> "$out/sim.err" &
+  RESTARTS=1 NOTICE=${1:-0} UP=${2:-500} "$here/.build/tests/sim-wire" 11 12 "$cables" "$lanes" 768 > "$out/sim.out" 2> "$out/sim.err" &
   sim=$!
   while ! grep -q ready "$out/sim.out" 2>/dev/null; do sleep 0.1; done
 }
@@ -174,7 +174,10 @@ finish
 # never be posted, so the next declaration restarts the order and fails as values (before, the next pair waited its
 # deadline behind it, the hang of the M5 Ultra pair's logit_check, 2026-11-19), and the one after runs.  Then a gone
 # pair's last pieces posted and still crossing as it ends ("inflight"): they complete through their own completions,
-# and the pair declared at once after it runs behind them, no restart
+# and the pair declared at once after it runs behind them, no restart.  The cables come back 7 s after a restart here
+# (the M5 Ultra pair took 7 s, 2026-11-19), far longer than a bootstrap phase's deadline (5 s): the pair made after the failed
+# one awaits its order before its bootstrap at both ranks, and runs (db24deb1 awaited it inside the first gather, and
+# the root's bootstrap met its deadline meanwhile)
 dangling_pair() {   # dangling_pair NAME EXECUTIONS MODE: both ranks, ended before it returns
   MESH_REGION=/mesh-sim-11 bounded "$here/.build/tests/sim-dangling" 12 "$2" "$3" > "$out/$1.0" 2>&1 &
   r0=$!
@@ -182,10 +185,10 @@ dangling_pair() {   # dangling_pair NAME EXECUTIONS MODE: both ranks, ended befo
   second=$?; wait $r0; first=$?
   echo "restarts, $1: rank 0 $first rank 1 $second"; [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/$1.0" "$out/$1.1"; }
 }
-restarting 0
+restarting 0 15000
 dangling_pair dangling 16 dangling
-programs_pair behind 6; pair_end behind either
-programs_pair cleared 6; pair_end cleared passed
+t0=$(date +%s); programs_pair behind 6; pair_end behind either; echo "restarts, behind ended after $(( $(date +%s) - t0 )) s"
+t0=$(date +%s); programs_pair cleared 6; pair_end cleared passed; echo "restarts, cleared ended after $(( $(date +%s) - t0 )) s"
 restarts=$(grep -c "the order restarts" "$out/sim.err")
 dangling_pair inflight 200000 inflight
 # its pieces still crossing as the next pair declares: node 11's raised then, short of the gone program's 200,000

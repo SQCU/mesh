@@ -51,7 +51,8 @@ static int cable_up(uint32_t c){ return !w.node[0].down[c] && !w.node[1].down[c]
 static int any_up(void){ for(uint32_t c=0;c<w.cables;c++)if(cable_up(c))return 1; return 0; }
 /* cable c lost (both ends: its queue pairs gone, every unit on them with them), made again `up_delay` turns on */
 static void cable_lose(uint32_t c,const char *why){
-  if(w.node[0].down[c] && w.node[1].down[c])return;
+  /* a cable down already (still to come up, or lost before) is made again after this loss too */
+  if(w.node[0].down[c] && w.node[1].down[c]){up_at[c]=ms_now+up_delay+c*stagger;return;}
   fprintf(stderr,"sim-wire: turn %llu: cable %u (identity %llu) lost: %s\n",(unsigned long long)turn_now,c,(unsigned long long)identity[c],why);
   for(int n=0;n<2;n++){w.node[n].down[c]=1;lost_at[n][c]=ms_now;}
   for(int d=0;d<2;d++)for(uint32_t j=0;j<w.lanes;j++){

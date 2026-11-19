@@ -124,8 +124,11 @@ execution k / period.
   it runs; every other piece of it is posted or postable and completes or fails through its own completion, and the
   next program's pieces follow it on their queue pairs, so nothing is waited for.
 - **Recovery.** A communicator made while an order toward a member's node is being made again (a node slot held, not
-  live: its cables coming up, its epochs agreed) waits for it, at most 30 s (`NCCL_MESH_ORDER_WAIT_NS`), and is made
-  once it is live, not refused with ENOLINK. A restart then loses the run it happened in, not the ones after it.
+  live: its cables coming up, its epochs agreed) waits for it before its bootstrap, at every rank alike, and is made
+  once it is live, not refused with ENOLINK; its bootstrap's phases then begin with the orders live, none of their
+  deadlines spent on the recovery. What ends the wait is the order's state (`live`); its bound, 30 s
+  (`NCCL_MESH_ORDER_WAIT_NS`), is only a recovery that never comes. A restart then loses the run it happened in, not
+  the ones after it.
 
 ## 4. Who declares what (the precondition)
 

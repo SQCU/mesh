@@ -1224,14 +1224,14 @@ static int gather(struct ncclComm *comm, int nranks, int rank, struct report *re
 }
 
 /* this rank's report of its bridge's node and the nodes it holds a live order toward (mesh-call.h mesh_nodes_reached) */
-/* the longest a communicator's making waits for an order toward a member's node to be live (its bridges recovering it
-   from a restart: the M5 Ultra pair took 7 s, 2026-11-19, cable lost to its epochs agreed again) */
+/* an order its bridges are making again (a node slot held, not live: its cables coming up, its epochs agreed) awaited
+   until it is live, before the communicator's bootstrap, at every rank alike: the ranks then begin their bootstrap with
+   their orders live, its phases' deadlines (MESH_PLATFORM_NS) none of the recovery's (db24deb1 waited inside the first
+   gather, so a root's bootstrap_open met its deadline while a rank still waited for its order: the M5 Ultra pair,
+   2026-11-19).  What ends the wait is the order's state (`live`); its bound, NCCL_MESH_ORDER_WAIT_NS, is only the
+   failure of a recovery that never comes (a cable gone for good), as every wait's deadline is */
 #define NCCL_MESH_ORDER_WAIT_NS (30ull * 1000000000ull)
-static void reach_read(struct attach *a, struct report *report) {
-  report->node = a->context.M->node;
-  /* an order its bridges are making again (a restart: its cables coming up and its epochs agreed, seconds: a node slot
-     held, not live) is waited for, at most NCCL_MESH_ORDER_WAIT_NS: a communicator made while the order recovers is
-     made once it has, not refused (ENOLINK) and its run lost */
+static void orders_await(struct attach *a) {
   for (const uint64_t until = mesh_clock_ns() + NCCL_MESH_ORDER_WAIT_NS; mesh_clock_ns() < until; usleep(1000)) {
     uint32_t recovering = 0;
     for (uint32_t n = 0; n < MESH_NODES; n++) {
@@ -1240,6 +1240,9 @@ static void reach_read(struct attach *a, struct report *report) {
     }
     if (!recovering) break;
   }
+}
+static void reach_read(struct attach *a, struct report *report) {
+  report->node = a->context.M->node;
   report->count = mesh_nodes_reached(a->context.M, report->reach, MESH_NODES);
 }
 
@@ -1374,8 +1377,10 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   made->peers = peers;
   pthread_mutex_unlock(&made->guard);
   struct report *mine = reports + rank;
+  /* the attach first, and its orders awaited where its bridges are making one again (orders_await), then the bootstrap */
+  const int making = comm_attach(made, NULL);
+  if (!making) orders_await(made->attach);
   int status = nranks > 1 ? bootstrap_open(made, made->id, reports) : 0;
-  const int making = status ? status : comm_attach(made, NULL);
   *mine = (struct report){.rank = rank, .status = making};
   if (!making) reach_read(made->attach, mine);
   if (!status && nranks > 1) status = gather(made, nranks, rank, reports, !rank);
