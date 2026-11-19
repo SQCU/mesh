@@ -2179,8 +2179,14 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
   return result;
 }
 
+static ncclResult_t prepare_counted(struct call *c, const size_t *given);
+/* a counted call's steps, compiled from its complete count matrix: its plan's (ncclMeshCommPlan), else, where it is a
+   step being declared (ncclMeshDeclareBegin: a point of configuration every rank reaches alike), its ranks' counts
+   gathered there over the communicator's bootstrap (prepare_counted), once for the program's life */
 static ncclResult_t counted_steps(struct call *c) {
-  if (!c->matrix) return fail(ncclInvalidUsage, "prepare the complete AlltoAllV count graph with ncclMeshCommPlan before execution");
+  if (!c->matrix && capturing) { const ncclResult_t gathered = prepare_counted(c, NULL); if (gathered) return gathered; }
+  if (!c->matrix) return fail(ncclInvalidUsage, "an AlltoAllV's complete count graph is a declaration's (ncclMeshDeclareBegin) or a plan's "
+                              "(ncclMeshCommPlan), made before its execution");
   const uint32_t N = (uint32_t)c->comm->nranks;
   uint32_t *first = calloc((size_t)N + 1, sizeof *first), *initialized = malloc(N * sizeof *initialized);
   uint64_t *segments = malloc(2 * (size_t)N * sizeof *segments);
