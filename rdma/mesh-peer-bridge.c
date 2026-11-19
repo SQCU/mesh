@@ -247,19 +247,21 @@ static int queue_ticket(struct job *j,struct signal signal){
     if(p->channel!=signal.channel)return EPROTO;
     if(p->prefix || signal.first>=UINT64_MAX-matched)return EPROTO;
     p->prefix=signal.first+(++matched);p->row=signal.row;
-    if(r->end-r->first==1){
-      if(r->prev==UINT32_MAX)r->direct_lane=signal.lane+1;
-      else{
-        const struct peer_row *prior=j->plan.row+r->prev;
-        const struct peer_piece *prev=j->plan.piece+prior->first;
-        if(prior->direct_lane==signal.lane+1 && prior->logical.land==r->logical.land &&
-           prev->channel==p->channel && prev->prefix<p->prefix)r->direct_lane=signal.lane+1;
-      }
-    }
     if(q->last)j->plan.piece[q->last-1].next=i+1;
     q->last=i+1;
     if(!q->post)q->post=i+1;
     if(!q->retire)q->retire=i+1;
+  }
+  const struct peer_piece *last=j->plan.piece+r->end-1;
+  if(matched==r->end-r->first && owned_range(j,last->span.offset,last->span.bytes) &&
+     r->logical.completed>=j->lease_first && r->logical.completed<=j->lease_end-sizeof(uint64_t)){
+    if(r->prev==UINT32_MAX)r->direct_lane=signal.lane+1;
+    else{
+      const struct peer_row *prior=j->plan.row+r->prev;
+      const struct peer_piece *prev=j->plan.piece+prior->end-1;
+      if(prior->direct_lane==signal.lane+1 && prior->logical.land==r->logical.land &&
+         prev->channel==last->channel && prev->prefix<last->prefix)r->direct_lane=signal.lane+1;
+    }
   }
   return matched?0:EPROTO;
 }
@@ -374,7 +376,7 @@ static int run(struct job *j){
           if(last-through>=capacity)break;
           struct peer_row *r=p->row+piece->row;
           struct mesh_entry entry={spans+index*sizeof(struct mesh_dma_span),1,0,0};
-          if(r->direct_lane)entry.units=spans+p->count*sizeof(struct mesh_dma_span)+piece->row*sizeof(struct mesh_peer_gate);
+          if(r->direct_lane && index+1==r->end)entry.units=spans+p->count*sizeof(struct mesh_dma_span)+piece->row*sizeof(struct mesh_peer_gate);
           if(r->fast && !w){
             entry.word=r->logical.ready|(r->logical.reserved!=0);
             entry.base=r->logical.reserved?r->logical.reserved:r->logical.threshold;

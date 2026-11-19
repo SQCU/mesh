@@ -292,11 +292,12 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
     struct lane_state *state=l->lane+k+lane;
     uint64_t done=way?state->got:state->done;
     if(at[lane]-done>=MESH_LANE_UNITS)break;
-    const struct taken *entry;uint64_t unit=0;uint32_t gates=0;
+    const struct taken *entry;struct mesh_entry *peer_cell=NULL;uint64_t unit=0;uint32_t gates=0;
     if(peer){
       if(at[lane]>=atomic_load_explicit(&x->peer_presented[way][lane],memory_order_acquire))break;
       struct mesh_entry *cells=(void *)((char *)M+x->lists);
-      struct mesh_entry record=cells[way*MESH_STREAM_ENTRIES+lane*(MESH_STREAM_ENTRIES/2)+at[lane]%(MESH_STREAM_ENTRIES/2)];
+      peer_cell=cells+way*MESH_STREAM_ENTRIES+lane*(MESH_STREAM_ENTRIES/2)+at[lane]%(MESH_STREAM_ENTRIES/2);
+      struct mesh_entry record=*peer_cell;
       if(record.word&1){gates=(uint32_t)record.base;record.word--;}
       if(!mesh_entry_table_valid(M,(struct mesh_entry){record.spans,1,record.word,0}) ||
          (record.units!=1 && !mesh_entry_table_valid(M,(struct mesh_entry){record.units,1,0,0}))){link_failed(port,EINVAL,way?3:2);break;}
@@ -319,6 +320,12 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
       }
     }
     if(!post_span(port,t,k+lane,way,entry->spans[unit]))break;
+    if(peer_cell && peer_cell->units!=1){
+      /* The metadata pin holds the common operand/footer lease. The posted
+         data pin holds the common payload/completion lease through this CQ. */
+      const struct mesh_peer_gate *result=(const void *)((const char *)M+peer_cell->units);
+      peer_cell->units=result->word;peer_cell->base=result->threshold;
+    }
   }
   if(pinned)metadata_pin(x,NULL);
 }
@@ -331,15 +338,8 @@ static void lane_completed(struct port *port,uint32_t t,unsigned way,unsigned la
     const struct mesh_entry *list=(const void *)((const char *)M+x->lists);
     list+=way*MESH_STREAM_ENTRIES+lane*capacity;
     for(uint64_t n=atomic_load_explicit(prefix,memory_order_relaxed);n<through;n++){
-      uint64_t footer=list[n%capacity].units;if(footer==1)continue;
-      struct taken pin={.spans=(const void *)((const char *)M+footer),.units={1}};
-      metadata_pin(x,&pin);if(!holding_kept(x,l->held[t])){metadata_pin(x,NULL);break;}
-      const struct mesh_peer_gate *result=(const void *)pin.spans;
-      uint64_t word=result->word,value=result->threshold;
-      pin.word=(const void *)((const char *)M+word);
-      metadata_pin(x,&pin);
-      if(holding_kept(x,l->held[t]))mesh_peer_complete(M,word,value);
-      metadata_pin(x,NULL);
+      const struct mesh_entry *cell=list+n%capacity;
+      if(cell->units!=1)mesh_peer_complete(M,cell->units,cell->base);
     }
   }
   atomic_store_explicit(prefix,through,memory_order_release);
