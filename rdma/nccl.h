@@ -1198,6 +1198,11 @@ ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
    pages-and-functions.md), on which each segment of a V collective and each entry starts (Memory, above).
    ncclInvalidArgument where comm or bytes is NULL. */
 ncclResult_t ncclMeshCommPage(ncclComm_t comm, size_t* bytes);
+/* Channel `channel`'s three counts as this process maps them, for a measurement to read (never to write): `ready`
+   (the pages its producer has published: the bridge's SEND gate), `sent` and `landed` (the pages the bridge has told
+   done each way: the done words).  Each only rises.  ncclInvalidArgument where comm has no such channel. */
+ncclResult_t ncclMeshCommCounts(ncclComm_t comm, int channel, const volatile uint64_t** ready, const volatile uint64_t** sent,
+                                const volatile uint64_t** landed);
 /* Whether this process holds leases or communicators of an expired region (*expired 1; Memory, above): the value a
    client reads in its own error path, after a lease or communicator failed, to free what it holds of that region, or
    end, before it leases again.  ncclInvalidArgument where expired is NULL. */

@@ -1725,6 +1725,17 @@ ncclResult_t ncclMeshCommPage(ncclComm_t comm, size_t *bytes) {
   return ncclSuccess;
 }
 
+/* nccl.h ncclMeshCommCounts */
+ncclResult_t ncclMeshCommCounts(ncclComm_t comm, int channel, const volatile uint64_t **ready, const volatile uint64_t **sent,
+                                const volatile uint64_t **landed) {
+  if (!comm || !ready || !sent || !landed) return fail(ncclInvalidArgument, "ncclMeshCommCounts: a NULL argument");
+  if (channel < 0 || (uint32_t)channel >= comm->count) return fail(ncclInvalidArgument, "ncclMeshCommCounts: no channel %d", channel);
+  const struct channel *ch = comm->channels + channel;
+  *ready = (const volatile uint64_t *)ch->view.ready; *sent = (const volatile uint64_t *)ch->view.sent;
+  *landed = (const volatile uint64_t *)ch->view.landed;
+  return ncclSuccess;
+}
+
 #include "nccl-mesh-trace.h"
 
 /* an operator made into the communicator's table (a freed slot, else one more), its handle past ncclNumOps */
