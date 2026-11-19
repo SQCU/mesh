@@ -140,6 +140,14 @@ static double arithmetic(ncclDataType_t t, double a, double b, int combine) {
       case COMBINE_MAX: if (x[i] > d[i]) d[i] = x[i]; break; \
       default: if (x[i] < d[i]) d[i] = x[i]; break; } } while (0)
 
+#define FLOAT_LOOP(S) do { \
+    S *d = (S *)dst; const S *x = (const S *)src; \
+    switch (combine) { \
+      case COMBINE_SUM: for (size_t i = 0; i < n; i++) d[i] = (S)((float)d[i] + (float)x[i]); break; \
+      case COMBINE_PROD: for (size_t i = 0; i < n; i++) d[i] = (S)((float)d[i] * (float)x[i]); break; \
+      case COMBINE_MAX: for (size_t i = 0; i < n; i++) if ((float)x[i] > (float)d[i]) d[i] = x[i]; break; \
+      default: for (size_t i = 0; i < n; i++) if ((float)x[i] < (float)d[i]) d[i] = x[i]; break; } } while (0)
+
 /* the partials merge (nccl.h ncclMeshRedOpCreatePartials) of `rows` rows of `unit` float32 [m, l, O], y into x: a row
    with l > 0 rescaled to the greater m and summed, one with none counting for none, two such the row [PARTIAL_NONE, 0,
    0] (nccl-mesh-kernels.h merge_row) */
@@ -168,6 +176,10 @@ static void combine_into(ncclDataType_t t, int combine, void *dst, const void *s
   case ncclUint32: INTEGER_LOOP(uint32_t, uint32_t); return;
   case ncclInt64: INTEGER_LOOP(int64_t, uint64_t); return;
   case ncclUint64: INTEGER_LOOP(uint64_t, uint64_t); return;
+  /* float32 and float16: the arithmetic below ((float)a op (float)b, the load into double exact) as typed loops the
+     compiler vectorizes, in place of one load, combine and store through double per element */
+  case ncclFloat32: FLOAT_LOOP(float); return;
+  case ncclFloat16: FLOAT_LOOP(_Float16); return;
   default: break;
   }
   const size_t z = SIZE[t];
