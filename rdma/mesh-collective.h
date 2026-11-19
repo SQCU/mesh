@@ -481,7 +481,7 @@ struct plan_schedule_result {
   size_t edges,entries,dependencies;
   uint32_t *reader;
   struct plan_span *consumer;
-  double *w,*cost;const double *rate;double *completion,*priority,*completed;
+  double *w,*cost;const double *rate;double *completion,*completed;
   uint32_t *resource,*from,*to,*link,*communication,*before,*after,*place;
   size_t *route;
   struct mesh_plan_analysis *owned;
@@ -588,6 +588,8 @@ struct mesh_program_completion {
   struct mesh_graph_relation *relation, *access_relation;
   size_t cycles;
   struct mesh_graph_dependence *cycle;
+  uint32_t *call_order;
+  struct mesh_graph_closure access_order;
 };
 struct mesh_plan_compilation {
   size_t references;

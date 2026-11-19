@@ -110,6 +110,8 @@ struct mesh_graph_relation;
 int mesh_graph_longest(const struct mesh_graph_relation *relation, int incoming, const uint32_t *order, ptrdiff_t step,
                        const double *weight, double *length);
 struct mesh_graph_dependence;
+int mesh_graph_resource_order(const struct mesh_graph_relation *,size_t,const struct mesh_graph_dependence *,
+                              const uint32_t *resource,const unsigned char *exclusive,struct mesh_graph_relation **);
 int mesh_graph_resource_spans(const struct mesh_graph_relation *,const uint32_t *order,size_t edges,
                               const struct mesh_graph_dependence *cycle,const double *weight,const uint64_t *nodes,
                               uint32_t ranks,double *span);
@@ -179,10 +181,11 @@ void mesh_graph_tree_free(struct mesh_graph_tree *);
    and last[v] the least and greatest position of value v's uses */
 int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, const size_t *position,
                          size_t *first, size_t *last);
-/* Row b contains a iff every access of a strictly precedes every access of b in ordering.
+/* Row b contains a iff every access of a strictly precedes every access of b in each named occurrence.
    Empty access sets are unrelated. reached has values * ceil(values/64) words. */
-int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, const uint32_t *order, uint32_t values, size_t uses,
-                              const uint32_t *value, const uint32_t *vertex, uint64_t *reached);
+int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, size_t calls, const uint32_t *base,
+                                    uint32_t values, size_t uses, const uint32_t *value, const uint32_t *vertex,
+                                    uint64_t *reached);
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context);
 void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);
@@ -343,7 +346,11 @@ struct mesh_graph_rows_view {
 /* mesh_graph_heap_order over a rows view: the same heap (priority, then index); EINVAL for a head out of range or a
    cycle */
 int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place);
+static inline void mesh_graph_inverse_permutation(uint32_t n,const uint32_t *permutation,uint32_t *inverse){
+  for(uint32_t i=0;i<n;i++)inverse[permutation[i]]=i;
+}
 int mesh_graph_relation_heap_permutation(const struct mesh_graph_relation *, const double *priority, uint32_t *place, uint32_t *order);
+int mesh_graph_completion_permutation(const struct mesh_graph_relation *,const double *completion,uint32_t *place,uint32_t *order);
 int mesh_graph_relation_heap_order(const struct mesh_graph_relation *, const double *priority, uint32_t *place);
 /* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
    Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
@@ -355,6 +362,9 @@ int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges
    these), rank[v] for every v the number of kept vertices placed before it */
 void mesh_graph_project(uint32_t vertices, const uint32_t *place, const unsigned char *kept, uint32_t *rank, uint32_t *at,
                         uint32_t *count);
+/* Stable restriction of a selected order to each occurrence's [base[i],base[i+1]) instruction IDs.
+   local is indexed by the same bases and gives body-local instruction IDs. */
+int mesh_graph_occurrence_orders(uint32_t calls,const uint32_t *base,uint32_t vertices,const uint32_t *order,uint32_t *local);
 /* design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
    buffer bound"; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997 (BSL) */
 /* BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972 */

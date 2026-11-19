@@ -508,8 +508,8 @@ GIVEN, SIZE = 3, 2 ** 64 - 1
 _U, _Z = C.POINTER(C.c_uint32), C.POINTER(C.c_size_t)
 LIB.mesh_graph_lifetimes.restype = C.c_int
 LIB.mesh_graph_lifetimes.argtypes = [C.c_uint32, C.c_size_t, _U, _Z, _Z, _Z]
-LIB.mesh_graph_lifetime_order.restype = C.c_int
-LIB.mesh_graph_lifetime_order.argtypes = [C.c_void_p, _U, C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_uint64)]
+LIB.mesh_graph_occurrence_lifetimes.argtypes = [C.POINTER(Closed), C.c_size_t, _U, C.c_uint32, C.c_size_t,
+                                                _U, _U, C.POINTER(C.c_uint64)]
 LIB.mesh_graph_search.restype = LIB.mesh_graph_breadth.restype = LIB.mesh_graph_closure.restype = C.c_int
 LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U, C.c_int,
                                   C.POINTER(C.POINTER(Searched))]
@@ -519,7 +519,7 @@ LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C
                                    C.POINTER(C.POINTER(Closed))]
 LIB.mesh_graph_longest.restype = C.c_int
 LIB.mesh_graph_longest.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.c_double), C.POINTER(C.c_double)]
-LIB.mesh_graph_relation_heap_permutation.argtypes = [C.c_void_p, C.POINTER(C.c_double), _U, _U]
+LIB.mesh_graph_completion_permutation.argtypes = LIB.mesh_graph_relation_heap_permutation.argtypes = [C.c_void_p, C.POINTER(C.c_double), _U, _U]
 LIB.mesh_graph_relation_edges.argtypes = [C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_void_p)]
 LIB.mesh_graph_completion_times.argtypes = [C.c_uint32, C.POINTER(C.c_double), _U, C.c_uint32,
                                            C.c_size_t, _U, _U, C.POINTER(C.c_double)]
@@ -596,10 +596,32 @@ LIB.mesh_graph_resource_cycles_except.argtypes = [C.c_uint32, _U, C.c_uint32, _U
                                                  C.POINTER(Dependence), C.POINTER(C.c_size_t)]
 
 
+LIB.mesh_graph_resource_order.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(Dependence), _U, C.POINTER(C.c_ubyte),
+                                          C.POINTER(C.c_void_p)]
+LIB.mesh_graph_occurrence_orders.argtypes = [C.c_uint32, _U, C.c_uint32, _U, _U]
+
+
+def occurrence_orders(base, order):
+    local = (C.c_uint32 * base[-1])()
+    _check(LIB.mesh_graph_occurrence_orders(len(base) - 1, base, len(order), order, local))
+    return local
+
+
+def resource_ancestors(graph, order, cycles, resource, exclusive):
+    relation = C.c_void_p()
+    _check(LIB.mesh_graph_resource_order(graph.relation.pointer, len(cycles), cycles.items, resource, exclusive,
+                                         C.byref(relation)))
+    selected = Relation(relation.value)
+    closure = C.POINTER(Closed)()
+    _check(LIB.mesh_graph_closure(selected.data.vertices, selected.data.in_first, LIB.mesh_graph_relation_incoming_head,
+                                  selected.descriptor, order, 1, C.byref(closure)))
+    return Owned(closure, LIB.mesh_graph_closure_free, selected)
+
+
 def resource_cycles(order, resources, resource):
     edges, n = (Dependence * len(order))(), C.c_size_t()
     _check(LIB.mesh_graph_resource_cycles_except(len(order), order, resources, resource, 1, 0, edges, C.byref(n)))
-    return tuple((e.source, e.sink, e.delay) for e in edges[:n.value])
+    return View(edges, edges, range(n.value), lambda e: (e.source, e.sink, e.delay))
 
 
 class Grouping(C.Structure):
@@ -835,8 +857,9 @@ def completion_order(length, resource, resources, edges, latency=None):
     _check(LIB.mesh_graph_completion_arrivals(count, length, latency, resource, resources, len(edges), before, after, times))
     _check(LIB.mesh_graph_relation_edges(count, len(edges), before, after, C.byref(made)))
     graph = Graph(range(count), Relation(made.value))
-    order = graph.heap_order(lambda i: -times[i])
-    return graph, times, order.owner[1], order.items
+    place, order = (C.c_uint32 * count)(), (C.c_uint32 * count)()
+    _check(LIB.mesh_graph_completion_permutation(graph.relation.pointer, times, place, order))
+    return graph, times, place, order
 
 
 # mesh-graph.h mesh_graph_actor_time: (t(v) in ns over the recorded operands, whether every operand it needs is recorded)

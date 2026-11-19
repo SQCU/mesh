@@ -251,7 +251,7 @@ class ProgramCompletion(C.Structure):
         ('length', C.POINTER(D)), ('completion', C.POINTER(D)), ('key', C.POINTER(ScheduleResource)),
         ('name', C.POINTER(C.c_char)), ('cross_edge', C.POINTER(Z)),
         ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p), ('access_relation', C.c_void_p), ('cycles', Z),
-        ('cycle', C.POINTER(mesh_graph.Dependence))]
+        ('cycle', C.POINTER(mesh_graph.Dependence)), ('call_order', C.POINTER(U)), ('access_order', mesh_graph.Closed)]
 
     @property
     def cross(self):
@@ -497,7 +497,7 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('first', U), ('tasks', U), ('instructions', U), ('edges', Z), ('entries', Z),
                 ('dependencies', Z), ('reader', C.POINTER(U)), ('consumer', C.POINTER(PlanSpan)),
                 ('w', C.POINTER(D)), ('cost', C.POINTER(D)), ('rate', C.POINTER(D)),
-                ('completion', C.POINTER(D)), ('priority', C.POINTER(D)), ('completed', C.POINTER(D)), ('resource', C.POINTER(U)),
+                ('completion', C.POINTER(D)), ('completed', C.POINTER(D)), ('resource', C.POINTER(U)),
                 ('from', C.POINTER(U)), ('to', C.POINTER(U)), ('link', C.POINTER(U)),
                 ('communication', C.POINTER(U)), ('before', C.POINTER(U)), ('after', C.POINTER(U)),
                 ('place', C.POINTER(U)), ('route', C.POINTER(Z)), ('owned', C.POINTER(PlanAnalysis)),

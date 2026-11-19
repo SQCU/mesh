@@ -167,7 +167,7 @@ void mesh_plan_schedule_retain(struct plan_schedule_result *s){
 void mesh_plan_schedule_free(struct plan_schedule_result *s){
   if(!s || __atomic_fetch_sub(&s->references,1,__ATOMIC_ACQ_REL)!=1)return;
   if(!s->owned){
-    free(s->reader);free(s->consumer);free(s->w);free(s->cost);free(s->completion);free(s->priority);
+    free(s->reader);free(s->consumer);free(s->w);free(s->cost);free(s->completion);
     free(s->completed);free(s->resource);free(s->from);free(s->to);free(s->link);free(s->communication);
     free(s->before);free(s->after);free(s->place);free(s->route);
     free(s->page_first);free(s->page_edge);free(s->access_role);
@@ -1225,8 +1225,7 @@ int mesh_plan_schedule_graph(struct mesh_plan_flow_geometry *geometry,const stru
   double *w=kept->w=status?NULL:malloc(((size_t)instructions+1)*sizeof *w),
          *latency=kept->latency=status?NULL:calloc((size_t)instructions+1,sizeof *latency),
          *cost=kept->cost=status?NULL:malloc(((size_t)edges+1)*sizeof *cost),
-         *completion=kept->completion=status?NULL:malloc(((size_t)instructions+1)*sizeof *completion),
-         *priority=kept->priority=status?NULL:malloc(((size_t)instructions+1)*sizeof *priority);
+         *completion=kept->completion=status?NULL:malloc(((size_t)instructions+1)*sizeof *completion);
   uint64_t *nodes=kept->instruction_nodes=status?NULL:calloc((size_t)instructions+1,sizeof *nodes);
   uint32_t *resource=kept->resource=status?NULL:malloc(((size_t)instructions+1)*sizeof *resource),
            *from=kept->from=status?NULL:malloc(((size_t)edges+1)*sizeof *from),
@@ -1239,7 +1238,7 @@ int mesh_plan_schedule_graph(struct mesh_plan_flow_geometry *geometry,const stru
   size_t *route=kept->route=status?NULL:malloc(((size_t)edges+1)*sizeof *route);
   kept->order=status?NULL:malloc(((size_t)instructions+1)*sizeof *kept->order);
   kept->resource_cycle=status?NULL:malloc(((size_t)instructions+1)*sizeof *kept->resource_cycle);
-  if(!status && (!nodes || !w || !latency || !cost || !completion || !priority || !resource || !from || !to || !link || !communication ||
+  if(!status && (!nodes || !w || !latency || !cost || !completion || !resource || !from || !to || !link || !communication ||
                  !before || !after || !place || !route || !kept->order || !kept->resource_cycle))status=ENOMEM;
   if(!status){
     /* design/aot-compilation-change-request.md A3; design/plan-to-bridge-change-request.md R5 */
@@ -1376,27 +1375,26 @@ int mesh_plan_schedule_graph(struct mesh_plan_flow_geometry *geometry,const stru
 }
 
 /* design/plan-to-bridge-change-request.md R5: a body's restriction of the program order. */
-int mesh_plan_schedule_project(struct plan_schedule_result *s,const double *completion,const uint32_t *position,uint32_t base){
-  if(!s || !completion || s->completed || s->owned)return EINVAL;
-  completion+=base;
-  if(position)position+=base;
+static int plan_schedule_resources(struct plan_schedule_result *s){
   const struct mesh_plan_flow *flow=s->geometry->source;
   const uint32_t virtual_resource=(uint32_t)plan_virtual_resource(flow,s->function);
   s->completed=calloc((size_t)flow->transfers+1,sizeof *s->completed);
   if(!s->completed)return ENOMEM;
-  for(uint32_t v=0;v<s->instructions;v++){
-    s->completion[v]=completion[v];
-    s->priority[v]=position?-(double)position[v]:-completion[v];
-  }
   for(uint32_t t=0;t<flow->transfers;t++)for(uint32_t q=0;q<s->consumer[t].count;q++){
-    const double at=completion[s->consumer[t].first+q];
+    const double at=s->completion[s->consumer[t].first+q];
     if(at>s->completed[t])s->completed[t]=at;
   }
-  int status=mesh_graph_relation_heap_permutation(s->ordering,s->priority,s->place,s->order);
-  if(!status)status=mesh_graph_resource_cycles_except(s->instructions,s->order,virtual_resource+1,s->resource,
-                                                      1,virtual_resource,s->resource_cycle,&s->resource_edges);
-  if(!status)status=plan_rank_times(s);
-  return status;
+  int status=mesh_graph_resource_cycles_except(s->instructions,s->order,virtual_resource+1,s->resource,
+                                               1,virtual_resource,s->resource_cycle,&s->resource_edges);
+  return status?status:plan_rank_times(s);
+}
+
+int mesh_plan_schedule_project(struct plan_schedule_result *s,const double *completion,const uint32_t *call_order,uint32_t base){
+  if(!s || !completion || !call_order || s->completed || s->owned)return EINVAL;
+  memcpy(s->completion,completion+base,s->instructions*sizeof *s->completion);
+  memcpy(s->order,call_order+base,s->instructions*sizeof *s->order);
+  mesh_graph_inverse_permutation(s->instructions,s->order,s->place);
+  return plan_schedule_resources(s);
 }
 
 int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mesh_function *function,
@@ -1408,7 +1406,8 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   const uint32_t resources=(uint32_t)plan_virtual_resource(geometry->source,function)+1;
   status=mesh_graph_completion_arrivals(s->instructions,s->w,s->latency,s->resource,resources,s->dependencies,
                                      s->before,s->after,s->completion);
-  if(!status)status=mesh_plan_schedule_project(s,s->completion,NULL,0);
+  if(!status)status=mesh_graph_completion_permutation(s->ordering,s->completion,s->place,s->order);
+  if(!status)status=plan_schedule_resources(s);
   if(status){mesh_plan_schedule_free(s);*out=NULL;}
   return status;
 }
@@ -4109,7 +4108,7 @@ done:
 struct plan_saved_local { uint64_t magic,bytes,arena,offsets,orders,horizon,values,relation,words,uses;
                           uint32_t functions,roots,ncalls,norders,chained,closed,used,padding; uint64_t quantum; };
 struct plan_saved_local_function { uint64_t outstanding; uint32_t values,tasks,scheduled,padding; };
-#define PLAN_SAVED_LOCAL UINT64_C(0x464c434f4c48534d)
+#define PLAN_SAVED_LOCAL UINT64_C(0x474c434f4c48534d)
 /* the local sections at the archive's next 8-byte offset (mesh_local_save's whole archive, mesh_plan_compilation_save's first
    sections), their header's `bytes` the sections' length */
 struct plan_saved_arrays { uint32_t count,dependences,tasks,befores,resources,padding; uint64_t pairs; };
@@ -4774,7 +4773,7 @@ static int plan_placement_get(struct plan_archive *in,uint32_t functions,struct 
 }
 #define PLAN_SCHEDULE_ARRAYS(X) \
   X(reader,s->geometry->source->demands) X(consumer,s->geometry->source->transfers) X(w,s->instructions) X(cost,s->edges) \
-  X(completion,s->instructions) X(priority,s->instructions) X(completed,s->geometry->source->transfers) \
+  X(completion,s->instructions) X(completed,s->geometry->source->transfers) \
   X(resource,s->instructions) X(from,s->edges) X(to,s->edges) X(link,s->entries) X(communication,s->entries) \
   X(before,s->dependencies) X(after,s->dependencies) X(place,s->instructions) X(route,s->edges+1) X(rank_time,s->geometry->source->n) X(instruction_nodes,s->instructions) X(latency,s->instructions)
 static void plan_relation_put(struct plan_archive *out,const struct mesh_graph_relation *relation){
@@ -5324,7 +5323,7 @@ static int plan_storage_get(struct plan_archive *in,struct mesh_planned *planned
   return in->status;
 }
 struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range rows,arena[2]; uint64_t used[2],signature,completion; };
-#define PLAN_SAVED_COMPILATION UINT64_C(0x424d4f435048534d)
+#define PLAN_SAVED_COMPILATION UINT64_C(0x434d4f435048534d)
 #define PLAN_STEP_ARRAYS(X) \
   X(item,p->flow->givens) X(sync,(uint64_t)p->waits+p->tells) X(wait_row,(uint64_t)p->flow->calls+1)
 #define PLAN_COMPILATION_ARRAYS(X) \
@@ -5345,6 +5344,8 @@ static void program_completion_put(struct plan_archive *out,const struct mesh_pr
   plan_relation_put(out,s->access_relation);
   plan_archive_put(out,&s->cycles,sizeof s->cycles);
   plan_archive_put(out,s->cycle,s->cycles*sizeof *s->cycle);
+  plan_archive_put(out,s->call_order,s->base[s->calls]*sizeof *s->call_order);
+  plan_archive_put(out,s->access_order.reached,(size_t)s->vertices*s->access_order.words*sizeof(uint64_t));
 }
 static int program_completion_get(struct plan_archive *in,struct mesh_graph_context *graph,struct plan_bytes *owner,
                                   struct mesh_plan_compilation *c){
@@ -5377,6 +5378,11 @@ static int program_completion_get(struct plan_archive *in,struct mesh_graph_cont
     s->cycles=*n;s->cycle=(void *)(uintptr_t)plan_archive_view(in,*n,sizeof *s->cycle);
     if(in->status)return in->status;
     for(size_t i=0;i<*n;i++)if(s->cycle[i].from>=s->vertices || s->cycle[i].to>=s->vertices)return EINVAL;
+    s->call_order=(void *)(uintptr_t)plan_archive_view(in,s->base[s->calls],sizeof *s->call_order);
+    size_t words=((size_t)s->vertices+63)/64;
+    s->access_order=(struct mesh_graph_closure){s->vertices,words,
+      (void *)(uintptr_t)plan_archive_view(in,(size_t)s->vertices*words,sizeof(uint64_t))};
+    if(in->status)return in->status;
   }
   return rc;
 }

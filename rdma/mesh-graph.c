@@ -630,7 +630,7 @@ int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *hea
   for (uint32_t v = 0; !result && v < vertices; v++) out[v + 1] += out[v];
   for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) heads[out[head[k]] + at[head[k]]++] = v;
   if (!result) result = mesh_graph_order(vertices, out, depth_head, heads, indegree, ordinal);
-  for (uint32_t v = 0; !result && v < vertices; v++) order[ordinal[v]] = v;
+  if (!result) mesh_graph_inverse_permutation(vertices,ordinal,order);
   for (uint32_t p = 0; !result && p < vertices; p++) {
     const uint32_t v = order[p];
     depth[v] = 0;
@@ -647,23 +647,33 @@ int mesh_graph_resource_spans(const struct mesh_graph_relation *relation,const u
                               uint32_t ranks,double *span) {
   return mesh_graph_arrival_spans(relation,order,cycles,cycle,weight,NULL,nodes,ranks,span);
 }
+int mesh_graph_resource_order(const struct mesh_graph_relation *relation,size_t cycles,
+                              const struct mesh_graph_dependence *cycle,const uint32_t *resource,
+                              const unsigned char *exclusive,struct mesh_graph_relation **selected) {
+  const struct mesh_graph_relation_data *d=mesh_graph_relation_data(relation);
+  size_t room;
+  if(__builtin_add_overflow(d->edges,cycles,&room) || room>=SIZE_MAX/sizeof(uint32_t))return ENOMEM;
+  uint32_t *from=malloc((room+1)*sizeof *from),*to=malloc((room+1)*sizeof *to);
+  int status=from && to?0:ENOMEM;
+  size_t edges=d->edges;
+  for(size_t e=0;!status && e<edges;e++){from[e]=d->edge[e].from;to[e]=d->edge[e].to;}
+  for(size_t e=0;!status && e<cycles;e++)if(!cycle[e].delay && (!exclusive || exclusive[resource[cycle[e].from]])){
+    from[edges]=cycle[e].from;to[edges++]=cycle[e].to;
+  }
+  if(!status)status=mesh_graph_relation_edges(d->vertices,edges,from,to,selected);
+  free(from);free(to);
+  return status;
+}
 int mesh_graph_arrival_spans(const struct mesh_graph_relation *relation,const uint32_t *order,size_t cycles,
                               const struct mesh_graph_dependence *cycle,const double *weight,const double *latency,const uint64_t *nodes,
                               uint32_t ranks,double *span) {
-  const struct mesh_graph_relation_data *d=mesh_graph_relation_data(relation);
   if(ranks>64)return EINVAL;
-  size_t room;
-  if(__builtin_add_overflow(d->edges,cycles,&room) || room>=SIZE_MAX/sizeof(double))return ENOMEM;
-  uint32_t *from=malloc((room+1)*sizeof *from),*to=malloc((room+1)*sizeof *to);
-  double *length=malloc((d->vertices+1ULL)*sizeof *length),*cost=malloc((room+1)*sizeof *cost);
-  int status=from && to && length && cost?0:ENOMEM;
-  size_t edges=d->edges;
   struct mesh_graph_relation *selected=NULL;
-  for(size_t e=0;!status && e<edges;e++){from[e]=d->edge[e].from;to[e]=d->edge[e].to;}
-  for(size_t e=0;!status && e<cycles;e++)if(!cycle[e].delay){from[edges]=cycle[e].from;to[edges++]=cycle[e].to;}
-  if(!status)status=mesh_graph_relation_edges(d->vertices,edges,from,to,&selected);
-  free(from);free(to);
-  const struct mesh_graph_relation_data *dag=selected?mesh_graph_relation_data(selected):NULL;
+  int status=mesh_graph_resource_order(relation,cycles,cycle,NULL,NULL,&selected);
+  if(status)return status;
+  const struct mesh_graph_relation_data *d=mesh_graph_relation_data(relation),*dag=mesh_graph_relation_data(selected);
+  double *length=calloc((size_t)dag->vertices+1,sizeof *length),*cost=calloc(dag->edges+1,sizeof *cost);
+  if(!length || !cost)status=ENOMEM;
   for(uint32_t v=0;!status && v<ranks;v++){
     for(size_t e=0;e<dag->edges;e++){
       uint32_t x=dag->edge[e].from;
@@ -962,39 +972,45 @@ int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, co
   return 0;
 }
 
-int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, const uint32_t *order, uint32_t values, size_t uses,
-                              const uint32_t *value, const uint32_t *vertex, uint64_t *reached) {
+int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, size_t calls, const uint32_t *base,
+                                    uint32_t values, size_t uses, const uint32_t *value, const uint32_t *vertex,
+                                    uint64_t *reached) {
   struct mesh_graph_grouping *groups = NULL;
-  struct mesh_graph_closure *ancestors = NULL;
-  const struct mesh_graph_relation_data *graph = mesh_graph_relation_data(ordering);
   int status = mesh_graph_group(values, uses, mesh_graph_row_head, value, &groups);
-  if (!status) status = mesh_graph_closure(graph->vertices, graph->in_first, mesh_graph_relation_incoming_head,
-                                          graph, order, 1, &ancestors);
-  for (size_t k = 0; !status && k < uses; k++) if (vertex[k] >= ancestors->vertices) status = EINVAL;
-  uint64_t *common = NULL;
-  if (!status && !(common = malloc((ancestors->words + 1) * sizeof *common))) status = ENOMEM;
+  if (status) return status;
+  for (size_t k = 0; k < uses; k++)
+    for (size_t i = 0; i < calls; i++)
+      if ((uint64_t)base[i] + vertex[k] >= ancestors->vertices) { mesh_graph_group_free(groups); return EINVAL; }
+  uint64_t *common = malloc((ancestors->words + 1) * sizeof *common);
+  if (!common) { mesh_graph_group_free(groups); return ENOMEM; }
   const size_t words = ((size_t)values + 63) / 64;
-  for (uint32_t b = 0; !status && b < values; b++) {
-    uint64_t *row = reached + b * words;
-    memset(row, 0, words * sizeof *row);
+  memset(reached, 0, values * words * sizeof *reached);
+  for (uint32_t b = 0; b < values; b++) {
     if (groups->first[b] == groups->first[b + 1]) continue;
-    memset(common, 0xff, ancestors->words * sizeof *common);
-    for (size_t k = groups->first[b]; k < groups->first[b + 1]; k++) {
-      const uint64_t *parents = ancestors->reached + vertex[groups->order[k]] * ancestors->words;
-      for (size_t w = 0; w < ancestors->words; w++) common[w] &= parents[w];
-    }
-    for (uint32_t a = 0; a < values; a++) {
-      size_t k = groups->first[a], end = groups->first[a + 1];
-      if (k == end) continue;
-      for (; k < end; k++) {
-        const uint32_t v = vertex[groups->order[k]];
-        if (!(common[v / 64] >> (v % 64) & 1)) break;
+    uint64_t *row = reached + b * words;
+    for (size_t i = 0; i < calls; i++) {
+      memset(common, 0xff, ancestors->words * sizeof *common);
+      for (size_t k = groups->first[b]; k < groups->first[b + 1]; k++) {
+        uint32_t v = base[i] + vertex[groups->order[k]];
+        const uint64_t *parents = ancestors->reached + (size_t)v * ancestors->words;
+        for (size_t w = 0; w < ancestors->words; w++) common[w] &= parents[w];
       }
-      if (k == end) row[a / 64] |= UINT64_C(1) << (a % 64);
+      for (uint32_t a = 0; a < values; a++) {
+        uint64_t bit = UINT64_C(1) << (a % 64);
+        if (i && !(row[a / 64] & bit)) continue;
+        size_t k = groups->first[a], end = groups->first[a + 1];
+        if (k == end) continue;
+        for (; k < end; k++) {
+          uint32_t v = base[i] + vertex[groups->order[k]];
+          if (!(common[v / 64] >> (v % 64) & 1)) break;
+        }
+        if (k == end) row[a / 64] |= bit;
+        else row[a / 64] &= ~bit;
+      }
     }
   }
-  free(common); mesh_graph_closure_free(ancestors); mesh_graph_group_free(groups);
-  return status;
+  free(common); mesh_graph_group_free(groups);
+  return 0;
 }
 
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
@@ -2357,7 +2373,8 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
   const size_t vertices = 2 * (size_t)items + 2;
   const size_t rows = (size_t)items + 1;
   size_t *first = malloc(rows * sizeof *first), *into_first = malloc(rows * sizeof *into_first);
-  size_t *order = malloc(rows * sizeof *order), *into = NULL;
+  uint32_t *order = malloc(rows * sizeof *order);
+  size_t *into = NULL;
   size_t *level = malloc(vertices * sizeof *level), *queue = malloc(vertices * sizeof *queue);
   size_t *at = malloc(vertices * sizeof *at), *path = malloc(vertices * sizeof *path);
   uint32_t *indegree = malloc(rows * sizeof *indegree), *ordinal = malloc(rows * sizeof *ordinal), *head = NULL,
@@ -2399,7 +2416,7 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
       for (uint64_t k = in[i]; k < count[i]; k++) chain[o + k] = next++;
       o += count[i];
     }
-    for (uint32_t i = 0; i < items; i++) order[ordinal[i]] = i;
+    mesh_graph_inverse_permutation(items,ordinal,order);
     for (uint32_t p = 0; p < items; p++) {
       const size_t i = order[p];
       uint64_t from = place[i];
@@ -2924,6 +2941,14 @@ int mesh_graph_relation_heap_permutation(const struct mesh_graph_relation *relat
   const struct mesh_graph_rows_view rows = {data->vertices, data, relation_degree, relation_row_head};
   return heap_order(&rows, priority, place, order);
 }
+int mesh_graph_completion_permutation(const struct mesh_graph_relation *relation,const double *completion,uint32_t *place,uint32_t *order){
+  uint32_t n=mesh_graph_relation_data(relation)->vertices;
+  double *priority=calloc((size_t)n+1,sizeof *priority);
+  if(!priority)return ENOMEM;
+  for(uint32_t i=0;i<n;i++)priority[i]=-completion[i];
+  int status=mesh_graph_relation_heap_permutation(relation,priority,place,order);
+  free(priority);return status;
+}
 int mesh_graph_relation_heap_order(const struct mesh_graph_relation *relation, const double *priority, uint32_t *place) {
   return mesh_graph_relation_heap_permutation(relation, priority, place, NULL);
 }
@@ -2976,7 +3001,7 @@ int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges
    restricted to the `kept` vertices */
 void mesh_graph_project(uint32_t vertices, const uint32_t *place, const unsigned char *kept, uint32_t *rank, uint32_t *at,
                         uint32_t *count) {
-  for (uint32_t v = 0; v < vertices; v++) at[place[v]] = v;
+  mesh_graph_inverse_permutation(vertices,place,at);
   uint32_t made = 0;
   for (uint32_t p = 0; p < vertices; p++) {
     const uint32_t v = at[p];
@@ -2984,6 +3009,33 @@ void mesh_graph_project(uint32_t vertices, const uint32_t *place, const unsigned
     if (kept[v]) at[made++] = v;
   }
   *count = made;
+}
+
+struct occurrence_rows {const uint32_t *order,*call;};
+static uint32_t occurrence_row(const void *context,size_t i){
+  const struct occurrence_rows *rows=context;
+  return rows->call[rows->order[i]];
+}
+int mesh_graph_occurrence_orders(uint32_t calls,const uint32_t *base,uint32_t vertices,const uint32_t *order,uint32_t *local){
+  if(base[0] || base[calls]>vertices || calls==UINT32_MAX)return EINVAL;
+  uint32_t *call=calloc((size_t)vertices+1,sizeof *call);
+  size_t *first=calloc((size_t)calls+2,sizeof *first),*index=calloc((size_t)vertices+1,sizeof *index);
+  int status=call && first && index?0:ENOMEM;
+  for(uint32_t i=0;!status && i<calls;i++){
+    if(base[i]>base[i+1] || base[i+1]>vertices){status=EINVAL;break;}
+    for(uint32_t v=base[i];v<base[i+1];v++)call[v]=i;
+  }
+  for(uint32_t i=0;!status && i<vertices;i++)if(order[i]>=vertices)status=EINVAL;
+  if(!status){
+    for(uint32_t v=base[calls];v<vertices;v++)call[v]=calls;
+    mesh_graph_rows(calls+1,vertices,occurrence_row,&(struct occurrence_rows){order,call},first,index);
+    for(uint32_t i=0;i<calls;i++){
+      if(first[i+1]!=base[i+1]){status=EINVAL;break;}
+      for(size_t k=first[i];k<first[i+1];k++)local[k]=order[index[k]]-base[i];
+    }
+  }
+  free(call);free(first);free(index);
+  return status;
 }
 
 /* design/aot-compilation-change-request.md, appendix item 2, "Its room is fixed at compile time, by the self-timed
