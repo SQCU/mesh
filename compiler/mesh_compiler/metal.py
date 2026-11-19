@@ -136,8 +136,11 @@ def _lent(owner, load, adopted):
 # relations made in `context` (the loading compilation's one rdma/mesh_graph.py Context, which the archive retains).
 # The caller's own reference to the archive is released with metal_ir_archive_free
 def _archive_loaded(compiler, data, context, device, error):
-    archive = _lent(data, lambda release, owner: compiler.metal_ir_archive_load(context.pointer, data, len(data), device,
-                                                                              release, owner, error, len(error)), bool)
+    import numpy as np
+
+    view = np.frombuffer(data, dtype=np.uint8)
+    archive = _lent(view, lambda release, owner: compiler.metal_ir_archive_load(
+        context.pointer, view.ctypes.data, view.nbytes, device, release, owner, error, len(error)), bool)
     if not archive:
         raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
     return archive
