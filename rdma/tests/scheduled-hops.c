@@ -108,9 +108,13 @@ int main(void){
          calls[0].comm->schedule.sends-calls[0].comm->schedule.via_relays);
   for(unsigned r=0;r<RANKS;r++){
     struct steps *view=steps_copy(calls[r].bound);
-    assert(view && view->scatter==calls[r].bound->scatter);steps_free(view);
+    assert(view && view->scatter==calls[r].bound->scatter && view->steps==calls[r].bound->steps &&
+           view->demand==calls[r].bound->demand && view->prior==calls[r].bound->prior && view->done!=calls[r].bound->done);
+    steps_free(calls[r].bound);
+    assert(view->demand[1] && view->count && view->steps[0].piece.elements);
+    steps_free(view);
     for(unsigned h=0;h<comm[r].count;h++){free(plans[r][h].out);free(plans[r][h].in);}
-    steps_free(calls[r].bound);free(calls[r].contributors);free(calls[r].recipients);free(data[r]);
+    free(calls[r].contributors);free(calls[r].recipients);free(data[r]);
   }
   printf("scheduled broadcast: %llu direct, %llu and %llu forwarded bytes, %u relay gates, 3 generations verified\n",
          directed[0][3],directed[1][3],directed[2][3],gates);
