@@ -140,6 +140,7 @@ enum { HELLO=1, FAREWELL, RECORD, LINK, PEER_MESSAGE };
 enum { PEER_EXTENTS=1 };
 void peer_service_open(void);
 void peer_service_close(void);
+void peer_service_adopt(void);
 void peer_message(uint32_t,uint64_t,uint32_t,const void *,uint32_t);
 void peer_event(int);
 void peer_turn(void);

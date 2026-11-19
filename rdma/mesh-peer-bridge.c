@@ -150,14 +150,21 @@ static int prepare(struct job *j){
   free(order);
   j->context=(struct mesh_ctx){.fd=-1,.len=(size_t)M->length};
   if((error=mesh_slot_take(&j->context,M)))return error;
-  atomic_store(&mesh_client_at(M,j->context.client)->peer_stream,j->context.client);
+
   size_t words=(size_t)j->plan.rows+1;
-  if(j->plan.count>(SIZE_MAX-words*8)/sizeof(struct mesh_dma_span))return EOVERFLOW;
-  if((error=mesh_section_create(&j->context,words*8+j->plan.count*sizeof(struct mesh_dma_span),1,&j->table)))return error;
+  size_t footer=(size_t)j->plan.rows*sizeof(struct mesh_peer_gate);
+  if(j->plan.count>(SIZE_MAX-words*8-footer)/sizeof(struct mesh_dma_span))return EOVERFLOW;
+  if((error=mesh_section_create(&j->context,words*8+j->plan.count*sizeof(struct mesh_dma_span)+footer,1,&j->table)))return error;
   uint64_t *start=mesh_section_address(&j->context,j->table,0);*start=UINT64_MAX-1;
   memset(start+1,0,j->plan.rows*8ull);
   struct mesh_dma_span *table=(void *)(start+words);
   for(size_t i=0;i<j->plan.count;i++)table[i]=j->plan.piece[i].span;
+  struct mesh_peer_gate *records=(void *)(table+j->plan.count);
+  for(uint32_t k=0;k<j->plan.rows;k++)
+    records[k]=(struct mesh_peer_gate){j->plan.row[k].logical.completed,j->plan.row[k].logical.value};
+  struct mesh_client *slot=mesh_client_at(M,j->context.client);
+  slot->peer_words=(uint64_t)((char *)records-(char *)M);slot->peer_count=j->plan.rows;slot->peer_client=j->owner;
+  atomic_store_explicit(&slot->peer_stream,j->context.client,memory_order_release);
   for(uint32_t e=0;e<j->plan.links;e++){
     struct channel *c=j->channel+e;
     if((error=mesh_stream_take(&j->context,j->plan.cable[e].wire,&c->stream)))return error;
@@ -259,11 +266,11 @@ static int run(struct job *j){
             spans+work.piece*sizeof(struct mesh_dma_span),1,gate,w?base:base-1});
           if(status==EAGAIN)break;
           if(status){error=status;break;}
-          c->bytes[w]+=p->piece[work.piece].span.bytes;
         }
         uint64_t count=atomic_load_explicit(w?c->view.landed:c->view.sent,memory_order_acquire);
         if(count==UINT64_MAX || count>q->posted){error=EIO;break;}
         for(;q->retired<count;q->retired++){
+          c->bytes[w]+=p->piece[q->items[q->retired].piece].span.bytes;
           uint32_t k=q->items[q->retired].row;struct peer_row *r=p->row+k;
           if(++r->retired==r->end-r->first){r->done=1;done++;publish(j,k);}
         }
@@ -352,6 +359,7 @@ void peer_event(int fd){
 }
 static void release(struct job *j){
   if(j->context.M){
+    mesh_client_at(M,j->context.client)->peer_count=0;
     for(uint32_t e=0;e<j->holds;e++)mesh_stream_give(&j->context,j->channel[e].stream);
     if(j->table.count)mesh_lease_return(&j->context,j->table.first);
     mesh_retire(M,j->context.client);j->context.M=NULL;
@@ -400,7 +408,8 @@ void peer_turn(void){
         }
         release(j);
       }
-      if((j->closed || j->fd<0) && !held(j)){
+      if((j->closed || j->fd<0) && held(j))wake();
+      else if(j->closed || j->fd<0){
         if(j->fd>=0){respond(j->fd,failure);close(j->fd);}
         if(j->pinned){
           int another=0;for(struct job *i=jobs;i;i=i->next)another|=i!=j && i->pinned && i->owner==j->owner;
@@ -413,4 +422,21 @@ void peer_turn(void){
     }
     at=&j->next;
   }
+}
+
+
+void peer_service_adopt(void){
+  struct mesh_client *slots=(void *)((char *)M+M->client_off);
+  for(uint32_t i=0;i<MESH_CLIENTS;i++){
+    struct mesh_client *s=slots+i;uint64_t service=atomic_load(&s->peer_stream);
+    if(!service || service!=atomic_load(&s->owner) || !s->peer_client ||
+       atomic_load(&mesh_client_at(M,s->peer_client)->peer_owner)!=s->peer_client)continue;
+    if(s->peer_words%8 || s->peer_words<M->data_off || s->peer_words>M->length ||
+       s->peer_count>(M->length-s->peer_words)/sizeof(struct mesh_peer_gate))continue;
+    const struct mesh_peer_gate *g=(const void *)((char *)M+s->peer_words);
+    for(uint64_t k=0;k<s->peer_count;k++)
+      if(g[k].word>=M->data_off && !(g[k].word%8) && g[k].word<=M->length-8 && read_word(g[k].word)<g[k].threshold)
+        completed(g[k].word,UINT64_MAX);
+  }
+  for(uint32_t i=0;i<MESH_CLIENTS;i++){atomic_store(&slots[i].peer_owner,0);atomic_store(&slots[i].peer_stream,0);}
 }

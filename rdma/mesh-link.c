@@ -1887,6 +1887,7 @@ static int region_open(const struct hdr *geometry,int *out){
    same end), the closed rows released, a map or health serial a bridge that died mid-write left odd made even (its
    readers wait while it is odd), and the map's records this bridge's to write again (map_adopt) */
 static void region_adopt(void){
+  peer_service_adopt();
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_stream *x=mesh_stream_at(M,s);
     atomic_store(&x->live,0);atomic_store(&x->owner,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
