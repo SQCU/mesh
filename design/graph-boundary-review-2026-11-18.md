@@ -16,6 +16,8 @@ The source work retained FX operation identities and found legal communication r
 
 ### Outstanding properties
 
+The [19 November revision queue](../output_data/compiler-review-20261119/urgent-revisions.md) identifies the cross-call placement change and traces which compiler properties the placement, fusion, replay and gradient evaluations actually exercised.
+
 | Scope | What the reviewed path establishes | What still has to hold |
 |---|---|---|
 | Frontend, complete call graph | The multi-function producer reads the outer FX graph. Its call nodes name the bodies and bind their arguments. The producer projects FX dependencies and storage accesses into the planner. | Check the same projection on joint forward/backward graphs and the identity and advancement of random generators across calls. [Source constructor](../../../compiler-emit/compiler_emit/source.py) · [A1 and A10](aot-compilation-change-request.md) |

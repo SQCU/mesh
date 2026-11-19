@@ -1,0 +1,44 @@
+scheduled 3 call parts 3 positions 1 residues 1 phases 3 plan order edges 2 kept of the unrolled dependences 2 fence waits 0 program-thread waits 0 send-completion waits 0 start waits
+OBS start False 0 regions 0 issue (0, 1, 2)
+prepared retained order 5 dispatches 4 commands 0 native entries 1 later passes
+prepared dataflow 20 values 6820 bytes 5 schedule positions
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 0 0 0 0 source af11d1607e9d50353ccf53c1841286b8291cd26fe336d7503c18842907d74cf3
+prepared kernel 1 synchronization unknown (no final IR) source 87e61ccd5c7d91fb9d851cfc9b5f4b022790e8d81eb9ce8c00730dd641ef86c7
+prepared kernel 2 synchronization unknown (no final IR) source 41ebc3024c3b4e92017cfb88fb0bba7c48d58c26c48e4af855986a9d89e0879b
+prepared kernel 3 synchronization 0 0 0 0 source 89100b99b238da2ee595a3477a71a4bd25c74106a9563aa7355803c2ef1db04b
+prepared kernel 4 synchronization unknown (no final IR) source 74819d2d9500b71a2d890b4be4f1acdf8fe4f4ecd20f509cccabc01c74556f92
+prepared dependencies 3 barriers 4 commands
+OBS end False 0
+scheduled 1 call parts 17 positions 1 residues 3 phases 0 plan order edges 48 kept of the unrolled dependences 0 fence waits 0 program-thread waits 32 send-completion waits 0 start waits
+OBS start False 1 regions 0 issue (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+prepared retained order 2 dispatches 2 commands 0 native entries 0 later passes
+prepared dataflow 12 values 9532 bytes 2 schedule positions
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 0 0 0 0 source af11d1607e9d50353ccf53c1841286b8291cd26fe336d7503c18842907d74cf3
+prepared kernel 1 synchronization unknown (no final IR) source 6d6a5511101f803c37d6596829ffe71446704520e8ced6ea299e42516fbb0615
+prepared dependencies 2 barriers 2 commands
+OBS end False 1
+OBS eager match False
+scheduled 3 call parts 3 positions 1 residues 1 phases 3 plan order edges 2 kept of the unrolled dependences 2 fence waits 0 program-thread waits 0 send-completion waits 0 start waits
+OBS start True 0 regions 2 issue (0, 1, 2)
+prepared retained order 5 dispatches 4 commands 0 native entries 1 later passes
+prepared dataflow 20 values 6820 bytes 5 schedule positions
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 0 0 0 0 source af11d1607e9d50353ccf53c1841286b8291cd26fe336d7503c18842907d74cf3
+prepared kernel 1 synchronization unknown (no final IR) source 87e61ccd5c7d91fb9d851cfc9b5f4b022790e8d81eb9ce8c00730dd641ef86c7
+prepared kernel 2 synchronization unknown (no final IR) source 41ebc3024c3b4e92017cfb88fb0bba7c48d58c26c48e4af855986a9d89e0879b
+prepared kernel 3 synchronization 0 0 0 0 source 89100b99b238da2ee595a3477a71a4bd25c74106a9563aa7355803c2ef1db04b
+prepared kernel 4 synchronization unknown (no final IR) source 74819d2d9500b71a2d890b4be4f1acdf8fe4f4ecd20f509cccabc01c74556f92
+prepared dependencies 3 barriers 4 commands
+OBS end True 0
+scheduled 1 call parts 17 positions 1 residues 3 phases 0 plan order edges 48 kept of the unrolled dependences 0 fence waits 0 program-thread waits 32 send-completion waits 0 start waits
+OBS start True 1 regions 2 issue (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+prepared retained order 2 dispatches 2 commands 0 native entries 0 later passes
+prepared dataflow 12 values 9532 bytes 2 schedule positions
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 0 0 0 0 source af11d1607e9d50353ccf53c1841286b8291cd26fe336d7503c18842907d74cf3
+prepared kernel 1 synchronization unknown (no final IR) source 6d6a5511101f803c37d6596829ffe71446704520e8ced6ea299e42516fbb0615
+prepared dependencies 2 barriers 2 commands
+OBS end True 1
+OBS eager match True
