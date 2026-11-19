@@ -103,7 +103,7 @@ static struct event pop(void){
 static struct mesh_switch_fabric fabric;
 static const double unit=64;   /* ns, the lines' time unit */
 enum { FIXED, SAMPLED, TREES, POLICY };
-static struct mesh_switch_policy policy;static double score[MESH_SWITCH_FEATURES],current_S;
+static struct mesh_switch_policy policy;static double last_utilisation;static double score[MESH_SWITCH_FEATURES],current_S;
 #define PREFER_COMMODITIES 24
 #define PREFER_NODES 8
 #define PREFER_LANES 32
@@ -226,6 +226,8 @@ static double execute(int kind,double S,double page){
     view[link[l].from][l]=own[l];seen[link[l].from][l]=execution+1;
   }
   own_execution=++execution;
+  double b=0;for(uint32_t l=0;l<links;l++)b+=busy[l];
+  last_utilisation=T>0?b/(links*T):0;
   return T;
 }
 
@@ -295,6 +297,33 @@ static void optimum(int kind,double S,double page){
   }
 }
 
+/* the floor: the larger of the cut bound and the slowest source-destination pair's shortest delay for one piece. The
+   cut bound is the most bytes a compute node must take in over its inbound rate, or put out over its outbound rate:
+   - all-gather: in (n - 1) S (every other rank's partial), out S (its own, once);
+   - all-reduce: in 2 (n - 1) S / n (the other ranks' partials of the pages it owns, then the other owners' reduced
+     pages), out the same (its partials of the pages others own, then its own reduced pages, once). */
+static double floor_of(int kind,double S,double page){
+  double cut=0;
+  const double need=kind?2*(ncompute-1)*S/ncompute:(ncompute-1)*S,give=kind?2*(ncompute-1)*S/ncompute:S;
+  for(uint32_t v=0;v<nodes;v++){
+    double in=0,out=0;
+    for(uint32_t l=0;l<links;l++){if(link[l].to==v)in+=link[l].rate;if(link[l].from==v)out+=link[l].rate;}
+    if(!(all_compute()>>v&1))continue;
+    if(in>0 && need/in>cut)cut=need/in;
+    if(out>0 && give/out>cut)cut=give/out;
+  }
+  /* the slowest pair's shortest delay for one piece (no larger than a page) */
+  const double q=S<page?S:page;
+  double dist[MESH_SWITCH_NODES][MESH_SWITCH_NODES];
+  for(uint32_t a=0;a<nodes;a++)for(uint32_t b=0;b<nodes;b++)dist[a][b]=a==b?0:INFINITY;
+  for(uint32_t l=0;l<links;l++){const double c=link[l].latency+q/(link[l].rate/cables[l]);if(c<dist[link[l].from][link[l].to])dist[link[l].from][link[l].to]=c;}
+  for(uint32_t k=0;k<nodes;k++)for(uint32_t a=0;a<nodes;a++)for(uint32_t b=0;b<nodes;b++)if(dist[a][k]+dist[k][b]<dist[a][b])dist[a][b]=dist[a][k]+dist[k][b];
+  double reach=0;
+  for(uint32_t a=0;a<ncompute;a++)for(uint32_t b=0;b<ncompute;b++)if(a!=b && dist[compute[a]][compute[b]]>reach)reach=dist[compute[a]][compute[b]];
+  const double floor=cut>reach?cut:reach;
+  return floor;
+}
+
 /* One (transaction, size)'s learned state: the lines, their predictors and views, and its optimum and preferences.
    Saved and restored by copying, so the policy can be trained over every subgoal at once. */
 struct world {
@@ -311,63 +340,54 @@ struct world {
   memcpy(tree_first,(w)->tree_first,sizeof tree_first);ncommodities=(w)->ncommodities;memcpy(csrc,(w)->csrc,sizeof csrc);memcpy(cto,(w)->cto,sizeof cto);\
   memcpy(tdemand,(w)->tdemand,sizeof tdemand);tree_fluid=(w)->tree_fluid;memcpy(prefer,(w)->prefer,sizeof prefer);}while(0)
 
-/* the min-norm point of the convex hull of n gradients in R^F (Frank-Wolfe on the simplex) */
-static void min_norm(double g[][MESH_SWITCH_FEATURES],int n,double *out){
-  double lambda[64];for(int i=0;i<n;i++)lambda[i]=1.0/n;
-  for(int it=0;it<200;it++){
-    double v[MESH_SWITCH_FEATURES]={0};
-    for(int i=0;i<n;i++)for(int f=0;f<MESH_SWITCH_FEATURES;f++)v[f]+=lambda[i]*g[i][f];
-    int best=0;double low=INFINITY;
-    for(int i=0;i<n;i++){double dot=0;for(int f=0;f<MESH_SWITCH_FEATURES;f++)dot+=g[i][f]*v[f];if(dot<low){low=dot;best=i;}}
-    double d[MESH_SWITCH_FEATURES],dd=0,dv=0;
-    for(int f=0;f<MESH_SWITCH_FEATURES;f++){d[f]=g[best][f]-v[f];dd+=d[f]*d[f];dv+=d[f]*v[f];}
-    if(dd<=0)break;
-    double step=-dv/dd;if(step<=0)break;if(step>1)step=1;
-    for(int i=0;i<n;i++)lambda[i]*=1-step;lambda[best]+=step;
+/* The policy, trained by online Jacobian descent over the two goals, each averaged over every (transaction, size) and
+   every sampled execution: latency, E[T / floor] (completion against its roofline), and utilisation, E[busy lane time
+   / (lanes x T)], to be raised. Each relative to its value at the start. Their gradients in the policy's weights come
+   from simultaneous perturbation (SPSA: the weights at +c and -c along a random sign vector, each side on the same
+   draws, averaged over M independent sign vectors), which doesn't grow noisier with the number of decisions an
+   execution makes. The step is a (Spall's
+   schedule) times the min-norm point of the two gradients' hull (MGDA for two, closed form). After each step, every
+   (transaction, size) runs once more at the new weights, so its lines follow the policy. */
+struct goals { double latency,utilisation; };
+static struct goals evaluate(const double *rows,int sizes,double page,int K,struct world **slot,const double *floor,int keep){
+  struct goals g={0,0};
+  for(int q=0;q<2*sizes;q++){
+    const int kind=q/sizes;const double S=rows[q%sizes]*1536*2;
+    LOAD(slot[q]);mode=POLICY;
+    for(int e=0;e<K;e++){const double T=execute(kind,S,page);g.latency+=T/floor[q]/(2*sizes*K);g.utilisation+=last_utilisation/(2*sizes*K);}
+    if(keep)SAVE(slot[q]);
   }
-  for(int f=0;f<MESH_SWITCH_FEATURES;f++){out[f]=0;for(int i=0;i<n;i++)out[f]+=lambda[i]*g[i][f];}
+  return g;
 }
-
-/* The policy, trained by online Jacobian descent over every (transaction, size)'s mean and spread at once. Each
-   subgoal's gradient in the policy's weights comes from simultaneous perturbation (SPSA): the weights at +c and -c
-   along a random sign vector, each side run K executions on the same draws (the same execution numbers). The
-   policy has few weights, so this estimate doesn't grow noisier with the number of decisions an execution makes (the
-   score function's does). Each subgoal is relative to its value at the start and its gradient scaled to unit length;
-   the step is a (Spall's schedule) times the min-norm point of their convex hull, short where the subgoals conflict. */
-static void train(const double *rows,int sizes,double page,int iterations,struct world **slot,struct stats *start){
-  enum { K=4 };
-  const int combos=2*sizes;
+static void train(const double *rows,int sizes,double page,int iterations,struct world **slot,const double *floor){
+  enum { K=2, M=8 };   /* executions a side, and independent perturbations an iteration (one is rank one: every
+                          subgoal's estimate would be a multiple of the same sign vector) */
+  const struct goals start=evaluate(rows,sizes,page,K,slot,floor,1);
   for(int k=0;k<iterations;k++){
-    const double a=2.0/pow(k+1,0.602),c=1.0/pow(k+1,0.101);
-    double delta[MESH_SWITCH_FEATURES];
-    uint64_t r=mesh_switch_mix(0x51a5ULL+(uint64_t)k);
-    for(int f=0;f<MESH_SWITCH_FEATURES;f++){r=mesh_switch_mix(r);delta[f]=r&1?1:-1;}
+    const double a=10.0/pow(k+1,0.602),c=1.0/pow(k+1,0.101);
     const struct mesh_switch_policy base=policy;
-    double g[64][MESH_SWITCH_FEATURES];int n=0;
-    for(int q=0;q<combos;q++){
-      const int kind=q/sizes;const double S=rows[q%sizes]*1536*2;
-      struct stats side[2];
-      for(int sgn=0;sgn<2;sgn++){
-        LOAD(slot[q]);mode=POLICY;
-        for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]=base.w[f]+(sgn?-c:c)*delta[f];
-        side[sgn]=measure(kind,S,page,K);
-      }
-      policy=base;
-      LOAD(slot[q]);execution+=K;SAVE(slot[q]);   /* the next iteration's draws are new ones */
-      const double m0=start[q].mean,v0=fmax(start[q].sd,start[q].mean*1e-2);
+    double g1[MESH_SWITCH_FEATURES]={0},g2[MESH_SWITCH_FEATURES]={0},g11=0,g22=0,g12=0;
+    for(int m=0;m<M;m++){
+      double delta[MESH_SWITCH_FEATURES];
+      uint64_t r=mesh_switch_mix(0x51a5ULL+(uint64_t)k*M+(uint64_t)m);
+      for(int f=0;f<MESH_SWITCH_FEATURES;f++){r=mesh_switch_mix(r);delta[f]=r&1?1:-1;}
+      for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]=base.w[f]+c*delta[f];
+      const struct goals plus=evaluate(rows,sizes,page,K,slot,floor,0);
+      for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]=base.w[f]-c*delta[f];
+      const struct goals minus=evaluate(rows,sizes,page,K,slot,floor,0);
       for(int f=0;f<MESH_SWITCH_FEATURES;f++){
-        g[n][f]=(side[0].mean-side[1].mean)/m0/(2*c)*delta[f];
-        g[n+1][f]=(side[0].sd-side[1].sd)/v0/(2*c)*delta[f];
+        g1[f]+=(plus.latency-minus.latency)/start.latency/(2*c)*delta[f]/M;
+        g2[f]-=(plus.utilisation-minus.utilisation)/start.utilisation/(2*c)*delta[f]/M;   /* raised: its negative falls */
       }
-      for(int i=n;i<n+2;i++){   /* each subgoal's gradient at unit length, so every subgoal counts alike */
-        double l2=0;for(int f=0;f<MESH_SWITCH_FEATURES;f++)l2+=g[i][f]*g[i][f];
-        l2=sqrt(l2);if(l2>0)for(int f=0;f<MESH_SWITCH_FEATURES;f++)g[i][f]/=l2;
-      }
-      n+=2;
     }
-    double d[MESH_SWITCH_FEATURES];
-    min_norm(g,n,d);
-    for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]-=a*d[f];
+    policy=base;
+    for(int f=0;f<MESH_SWITCH_FEATURES;f++){g11+=g1[f]*g1[f];g22+=g2[f]*g2[f];g12+=g1[f]*g2[f];}
+    const double den=g11-2*g12+g22;
+    double lambda=den>0?(g22-g12)/den:0.5;
+    if(lambda<0)lambda=0;
+    if(lambda>1)lambda=1;
+    for(int f=0;f<MESH_SWITCH_FEATURES;f++)policy.w[f]-=a*(lambda*g1[f]+(1-lambda)*g2[f]);
+    evaluate(rows,sizes,page,1,slot,floor,1);   /* the lines follow the policy */
   }
 }
 
@@ -382,17 +402,17 @@ int main(int argc,char **argv){
   static const double rows[]={2,8,32,128,1024,4096};
   enum { SIZES=6 };
   struct stats policy_row[2*SIZES]={{0,0}};
-  if(descent){   /* the policy: each (transaction, size) warmed up, then trained on all at once */
-    struct world *slot[2*SIZES];struct stats start[2*SIZES];
+  if(descent){   /* the policy: each (transaction, size) warmed up, then trained on the two goals over all of them */
+    struct world *slot[2*SIZES];double floor[2*SIZES];
     memset(&policy,0,sizeof policy);policy.w[2]=-8;   /* it starts as the sampled router: the drawn arrival */
     for(int c=0;c<2*SIZES;c++){
       const int kind=c/SIZES;const double S=rows[c%SIZES]*1536*2;
       slot[c]=calloc(1,sizeof *slot[c]);assert(slot[c]);
       reset(POLICY);optimum(kind,S,page);
       for(int k=0;k<LEARN;k++)execute(kind,S,page);
-      start[c]=measure(kind,S,page,8);SAVE(slot[c]);
+      floor[c]=floor_of(kind,S,page);SAVE(slot[c]);
     }
-    train(rows,SIZES,page,iterations,slot,start);
+    train(rows,SIZES,page,iterations,slot,floor);
     for(int c=0;c<2*SIZES;c++){LOAD(slot[c]);mode=POLICY;policy_row[c]=measure(c/SIZES,rows[c%SIZES]*1536*2,page,MEASURE);free(slot[c]);}
     printf("policy weights:");for(int f=0;f<MESH_SWITCH_FEATURES;f++)printf(" %.2f",policy.w[f]);printf("\n");
   }
@@ -403,23 +423,7 @@ int main(int argc,char **argv){
     reset(SAMPLED);for(int k=0;k<LEARN;k++)execute(kind,S,page);const struct stats sampled=measure(kind,S,page,MEASURE);
     reset(TREES);optimum(kind,S,page);const struct stats tr=measure(kind,S,page,MEASURE);
     const struct stats ds=policy_row[kind*SIZES+i];
-    double cut=0;
-    if(kind==0)for(uint32_t v=0;v<nodes;v++){
-      double in=0,out=0;
-      for(uint32_t l=0;l<links;l++){if(link[l].to==v)in+=link[l].rate;if(link[l].from==v)out+=link[l].rate;}
-      if(!(all_compute()>>v&1))continue;
-      if(in>0 && S*(ncompute-1)/in>cut)cut=S*(ncompute-1)/in;
-      if(out>0 && S/out>cut)cut=S/out;
-    }
-    /* the slowest pair's shortest delay for one piece (no larger than a page) */
-    const double q=S<page?S:page;
-    double dist[MESH_SWITCH_NODES][MESH_SWITCH_NODES];
-    for(uint32_t a=0;a<nodes;a++)for(uint32_t b=0;b<nodes;b++)dist[a][b]=a==b?0:INFINITY;
-    for(uint32_t l=0;l<links;l++){const double c=link[l].latency+q/(link[l].rate/cables[l]);if(c<dist[link[l].from][link[l].to])dist[link[l].from][link[l].to]=c;}
-    for(uint32_t k=0;k<nodes;k++)for(uint32_t a=0;a<nodes;a++)for(uint32_t b=0;b<nodes;b++)if(dist[a][k]+dist[k][b]<dist[a][b])dist[a][b]=dist[a][k]+dist[k][b];
-    double reach=0;
-    for(uint32_t a=0;a<ncompute;a++)for(uint32_t b=0;b<ncompute;b++)if(a!=b && dist[compute[a]][compute[b]]>reach)reach=dist[compute[a]][compute[b]];
-    const double floor=cut>reach?cut:reach;
+    const double floor=floor_of(kind,S,page);
     printf("%-10s %9.0f %7.2fus %8.2f+-%6.2fus %8.2f+-%6.2fus ",kind?"all-reduce":"all-gather",S,fixed/1e3,sampled.mean/1e3,sampled.sd/1e3,tr.mean/1e3,tr.sd/1e3);
     if(descent)printf("%10.2f+-%6.2fus ",ds.mean/1e3,ds.sd/1e3);else printf("%20s ","-");
     printf("%7.2fus %7.2fus\n",tree_fluid/1e3,floor/1e3);
