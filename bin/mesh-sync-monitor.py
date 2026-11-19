@@ -1,6 +1,7 @@
 #!/usr/bin/env mesh-python
 """design/synchronization-signature-change-request.md items 3, 4 and 5"""
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'rdma'))
 import mesh_graph
+import mesh_public_trace
 
 REVIEWS = os.path.join(HERE, '..', '..', '..', 'metal-microbench', 'output_data', 'change-request-reviews.jsonl')
 KINDS, PRIMITIVES = mesh_graph.KINDS, mesh_graph.PRIMITIVES
@@ -119,7 +121,7 @@ def periodic(operations, order):
     return period, len(rows), [step(k) for k in range(period)]
 
 
-def generate(processors, operations, orders, observe, addresses):
+def generate(processors, operations, orders, observe, addresses, public=None):
     act = 'printf("mesh-sync-monitor: failure target pid %d\\n", pid); ustack(); ' + (
         'exit(1);' if observe else 'stop(); exit(1);')
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
@@ -127,6 +129,8 @@ def generate(processors, operations, orders, observe, addresses):
     lines += ['self int inapi, bound, applying, called;', 'self uint64_t at, cand, objects, plan, arrives, queue;',
               'self uint64_t om[uint64_t];', 'BEGIN { printf("mesh-sync-monitor: attached\\n"); }'] + SAVED + APPLY
     lines += ['%sentry { self->inapi++; }' % INTERPRETER, '%sreturn /self->inapi/ { self->inapi--; }' % INTERPRETER]
+    if public is not None:
+        lines.extend(mesh_public_trace.probes(public))
     shapes = [periodic(operations, order) for order in orders]
     local = []
     for order in orders:
@@ -137,6 +141,8 @@ def generate(processors, operations, orders, observe, addresses):
         name, probe, point, obj, val = row[:5]
         at = probe + point
         satisfied = ' && arg1 != 0' if point == 'return' and obj else ''
+        if public is not None:
+            satisfied += mesh_public_trace.body_guard(name, probe)
         if point == 'return':
             lines.append('%sentry { self->inapi++; }' % probe)
             lines.append('%sreturn /self->inapi/ { self->inapi--; }' % probe)
@@ -172,9 +178,12 @@ def generate(processors, operations, orders, observe, addresses):
     name, probe, obj, val = FEEDBACK
     lines.append('%sentry /!this->checked || !this->m/ { printf("mesh-sync-monitor: signal %%d %%d\\n", %s, %s); }' %
                  (probe, obj, val))
-    lines.append('%s /self->bound && self->inapi == 0/ { printf("mesh-sync-monitor: unexpected %%s %%s at step %%d of '
-                 'thread %%d\\n", probeprov, probefunc, self->at, tid); %s }' %
-                 (',\n'.join(u for u in UNLISTED if addresses or 'os_sync' not in u), act))
+    active = '(self->bound || self->handoff || self->issuing || self->ending)' if public is not None else 'self->bound'
+    for u in UNLISTED:
+        if addresses or 'os_sync' not in u:
+            nested = ' && !self->checkout' if public and 'dispatch_semaphore_wait' in u else ''
+            lines.append('%s /%s && self->inapi == 0%s/ { printf("mesh-sync-monitor: unexpected %%s %%s at step %%d of '
+                         'thread %%d\\n", probeprov, probefunc, self->at, tid); %s }' % (u, active, nested, act))
     return '\n'.join(lines) + '\n', shapes
 
 
@@ -310,19 +319,23 @@ def main(argv):
     if len(argv) < 3 or argv[1] not in ('generate', 'run', 'cover'):
         sys.stderr.write('usage: mesh-sync-monitor.py generate SIGNATURE.record [--node N] [--observe]\n'
                          '       mesh-sync-monitor.py run SIGNATURE.record [--node N] [--observe] '
-                         '[--bridge PID --group GROUP] -p PID\n'
+                         '[--public INVOCATION.json] [--bridge PID --group GROUP] -p PID\n'
                          '       mesh-sync-monitor.py cover SIGNATURE.record\n')
         return 2
     mode, path, rest = argv[1], argv[2], argv[3:]
     if mode == 'cover':
         return cover(path)
-    pid, observe, bridge, group, node = None, False, None, None, None
+    pid, observe, bridge, group, node, public = None, False, None, None, None, None
     while rest:
         if rest[0] == '-p': pid, rest = rest[1], rest[2:]
         elif rest[0] == '--observe': observe, rest = True, rest[1:]
         elif rest[0] == '--bridge': bridge, rest = rest[1], rest[2:]
         elif rest[0] == '--group': group, rest = int(rest[1], 0), rest[2:]
         elif rest[0] == '--node': node, rest = int(rest[1]), rest[2:]
+        elif rest[0] == '--public':
+            with open(rest[1]) as f:
+                public = json.load(f)
+            rest = rest[2:]
         else:
             sys.stderr.write('mesh-sync-monitor: unknown argument %s\n' % rest[0])
             return 2
@@ -336,13 +349,23 @@ def main(argv):
         return 2
     node = nodes[0] if node is None else node
     which = classify(processors, operations, node)
+    if public is not None:
+        with open(path, 'rb') as f:
+            digest = hashlib.file_digest(f, 'sha256').hexdigest()
+        if public['format'] != 'mesh-public-metal-1' or public['body'] != digest or public['node'] != node or (
+                pid and int(pid) != public['pid']):
+            raise ValueError('the public binding belongs to a different body, rank or process')
+        start, end = public['span']
+        if not 0 <= start <= end <= len(operations):
+            raise ValueError('invalid public submission span')
+        which = [kind if start <= i < end else 'prior' for i, kind in enumerate(which)]
     orders = sequences(processors, operations, which, node)
     coverage = {c: which.count(c) for c in CLASSES if c in which}
     if len(orders) > 64:
         sys.stderr.write('mesh-sync-monitor: %d threads on node %d\n' % (len(orders), node))
         return 2
     addresses = not any(COUNT <= operations[i].object < SUBMISSION for order in orders for i in order)
-    script, shapes = generate(processors, operations, orders, observe, addresses)
+    script, shapes = generate(processors, operations, orders, observe, addresses, public)
     target_path = os.path.splitext(path)[0] + '.monitor.d'
     open(target_path, 'w').write(script)
     before = []
@@ -385,7 +408,7 @@ def main(argv):
         watcher = subprocess.Popen(['sudo', 'dtrace', '-q', '-s', bridge_path, bridge], stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
     done = subprocess.Popen(['sudo', 'dtrace'] + ([] if observe else ['-w']) + ['-Z', '-s', target_path, '-p', pid],
-                            stdout=subprocess.PIPE, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     text = []
     for line in done.stdout:
         text.append(line)
@@ -400,8 +423,19 @@ def main(argv):
                    for line in watcher.communicate()[0].splitlines()) if m]
     threads, signals, failures = trace_log(''.join(text), operations, orders)
     failures[:0] = before
+    failures.extend(line.strip() for line in text if line.startswith('dtrace:') and
+                    any(word in line.lower() for word in ('error', 'drop', 'failed')))
     if status:
         failures.append('dtrace exited %d' % status)
+    if public is not None:
+        submits = sum(PRIMITIVES[operations[i].primitive] == 'submit' for order in orders for i in order)
+        events, reasons = mesh_public_trace.compare(public, text, submits)
+        failures.extend(reasons)
+        binding_digest = hashlib.sha256(json.dumps(public, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        record.update(sha256=binding_digest, body_sha256=compiled['digest'],
+                      public=dict(events=events, reasons=reasons, binding=public))
+        print('mesh-sync-monitor: public binding %s, %d public API and boundary events observed: %s' %
+              (binding_digest, sum(events.values()), json.dumps(events, sort_keys=True)))
     observed = observed_operations(processors, operations, which, orders, threads, signals, failures)
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'feedback', 'static')}
     scope = {'program', 'feedback'}
