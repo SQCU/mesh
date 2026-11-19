@@ -202,7 +202,6 @@ static int plan_key_order(const void *a,const void *b){
 static int plan_leaf(const void *context,uint32_t d,uint32_t v){
   return (int)(((const uint64_t *)context)[d]>>v&1);
 }
-static uint32_t plan_at(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
 uint64_t mesh_plan_quantum(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
 uint64_t mesh_plan_quanta(uint64_t bytes,uint64_t quantum){ return bytes/quantum+(bytes%quantum!=0); }
 static uint64_t plan_quantum(const struct mesh_plan_geometry *m){ return (uint64_t)m->block*m->pgsz; }
@@ -1533,7 +1532,6 @@ static int plan_signed_put(struct plan_signed *o,struct mesh_graph_repeated x){
   o->row[o->count++]=x;
   return 0;
 }
-static uint32_t plan_tell_key(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
 static int plan_signature(struct plan_step *plans,uint32_t count,const uint32_t *calls,uint32_t J,uint64_t program,uint32_t s,
                           uint32_t n,uint32_t V,const double *time,const struct mesh_graph_task *task,const uint32_t *node,
                           const uint32_t *observer,const uint64_t *lagged,const uint32_t *actor,
@@ -1564,7 +1562,7 @@ static int plan_signature(struct plan_step *plans,uint32_t count,const uint32_t 
                                                            .vertex=MESH_GRAPH_NONE,.object=MESH_GRAPH_PLAN_COUNT+a,
                                                            .startup=MESH_GRAPH_NONE});
   }
-  if(!status)mesh_graph_rows(n*count,added,plan_tell_key,key,first,tell);
+  if(!status)mesh_graph_rows(n*count,added,mesh_graph_row_head,key,first,tell);
   for(uint32_t v=0;!status && v<n;v++){
     if(!(program>>v&1))continue;
     for(uint32_t j=0;!status && j<J;j++){
@@ -1732,7 +1730,7 @@ static int plan_graph(struct plan_step *plans,const struct mesh_plan_analysis *a
     }
   }
   struct plan_room_edges graph={from,to,delay,0,cause,{MESH_PLANNED_PROGRAM,UINT32_MAX}};
-  mesh_graph_rows(n+1,V,plan_at,key,first,rows);
+  mesh_graph_rows(n+1,V,mesh_graph_row_head,key,first,rows);
   if(!(task=kept->task=malloc(((size_t)V+1)*sizeof *task))){status=ENOMEM;goto done;}
   for(uint32_t v=0;v<=n;v++)for(size_t q=first[v];q<first[v+1];q++){
     const uint32_t x=(uint32_t)rows[q];
@@ -1861,10 +1859,10 @@ static int plan_graph(struct plan_step *plans,const struct mesh_plan_analysis *a
     from[built+a]=tail;to[built+a]=head;
     key[a]=node[head]*J+(uint32_t)row[calls[h]]+place[h];
   }
-  mesh_graph_rows(n*J,added,plan_at,key,wait_first,wait_order);
+  mesh_graph_rows(n*J,added,mesh_graph_row_head,key,wait_first,wait_order);
   for(uint32_t q=0;q<added;q++)entry[wait_order[q]]=q;
   for(uint32_t a=0;a<added;a++)key[a]=node[added_from[a]]==self?calls[observer[added_from[a]]]:count;
-  mesh_graph_rows(count+1,added,plan_at,key,tell_first,tell_order);
+  mesh_graph_rows(count+1,added,mesh_graph_row_head,key,tell_first,tell_order);
   for(uint32_t f=0;f<count;f++){
     struct plan_step *p=plans+f;
     const size_t *waits=wait_first+(size_t)self*J+row[f];
@@ -1894,7 +1892,7 @@ static int plan_graph(struct plan_step *plans,const struct mesh_plan_analysis *a
   if((status=plan_signature(plans,count,calls,J,program,s,n,V,t,task,node,observer,lagged,actor,place,row,built,added,
                              from,to,delay,added_delay,lambda,wait_first,wait_order,&planned->signature)))goto done;
   /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (5) */
-  if((status=mesh_graph_group(V,built+added,plan_at,from,&kept->room_rows)) ||
+  if((status=mesh_graph_group(V,built+added,mesh_graph_row_head,from,&kept->room_rows)) ||
      (status=mesh_graph_lag_prepare(V,kept->room_rows->first,plan_room_head,plan_room_lag,kept,&kept->room_graph)))goto done;
   kept->room_query=malloc((2*(size_t)J+1)*sizeof *kept->room_query);
   if(!kept->room_query){status=ENOMEM;goto done;}
@@ -2052,7 +2050,7 @@ int mesh_plan_cut(const struct mesh_plan_geometry *geometry,const struct mesh_pl
   return status;
 }
 static int plan_instructions(struct mesh_plan_flow *p,const struct mesh_plan_geometry *m){
-  int status=mesh_graph_group(p->demands,p->transfers,plan_at,p->of,&p->transfer_rows);
+  int status=mesh_graph_group(p->demands,p->transfers,mesh_graph_row_head,p->of,&p->transfer_rows);
   if(status)return status;
   p->endpoint=malloc((2*(uint64_t)p->transfers+1)*sizeof *p->endpoint);
   p->cuts=calloc((size_t)p->demands+1,sizeof *p->cuts);
@@ -2428,7 +2426,7 @@ static int plan_routes(struct mesh_plan_analysis *a,const double *routing,const 
   if(status)return status;
   r->order=malloc(((size_t)r->trees+1)*sizeof *r->order);
   if(!r->order)return ENOMEM;
-  mesh_graph_rows(count,r->trees,plan_at,r->demand,r->first,r->order);
+  mesh_graph_rows(count,r->trees,mesh_graph_row_head,r->demand,r->first,r->order);
   for(uint32_t t=0;r->rate && t<r->trees;t++)r->rate[t]=r->rate[t]*r->volume[r->demand[t]]/8e9;
   for(uint32_t f=0;f<a->functions;f++)if(a->flow[f].demands && (status=plan_route_runs(a->flow+f,r)))return status;
   return 0;
@@ -2952,7 +2950,7 @@ static int plan_analysis_new(const struct mesh_function *functions,uint32_t coun
   a->flow=calloc((size_t)count+1,sizeof *a->flow);
   a->carried=calloc((size_t)nroots+1,1);
   int status=a->flow && a->carried?0:ENOMEM;
-  if(!status)status=mesh_graph_group(count,ncalls,plan_at,calls,&a->call_group);
+  if(!status)status=mesh_graph_group(count,ncalls,mesh_graph_row_head,calls,&a->call_group);
   if(!status && !pairs)status=mesh_graph_chain_pairs(ncalls,chains,&source->owned_pairs);
   a->chain_pairs=pairs?pairs:source->owned_pairs;
   for(uint32_t f=0;!status && f<count;f++){
@@ -3462,7 +3460,7 @@ static int plan_program_adjacency(struct mesh_plan_compilation *compiled){
     for(uint64_t set=compiled->step[f].geometry->toward;set;set&=set-1){
       compiled->toward[q]=(uint32_t)__builtin_ctzll(set);compiled->place[q++]=f;
     }
-  mesh_graph_rows(nodes,places,plan_at,compiled->toward,compiled->rows_by,compiled->listed);
+  mesh_graph_rows(nodes,places,mesh_graph_row_head,compiled->toward,compiled->rows_by,compiled->listed);
   for(uint32_t i=0;i<=nodes;i++)compiled->adjacency[i]=(uint32_t)compiled->rows_by[i];
   for(size_t q=0;q<places;q++)compiled->adjacency[nodes+1+q]=compiled->place[compiled->listed[q]];
   return 0;
@@ -4340,7 +4338,7 @@ static int plan_group_get(struct plan_archive *in,const void *context,struct mes
   if(!saved)return in->status;
   struct mesh_graph_grouping *g=malloc(sizeof *g);
   if(!g)return ENOMEM;
-  *out=g;*g=*saved;g->key=plan_at;g->context=context;
+  *out=g;*g=*saved;g->key=mesh_graph_row_head;g->context=context;
   g->first=(void *)(uintptr_t)plan_archive_view(in,(uint64_t)g->keys+1,sizeof *g->first);
   g->order=(void *)(uintptr_t)plan_archive_view(in,g->items,sizeof *g->order);
   g->ordinal=(void *)(uintptr_t)plan_archive_view(in,g->items,sizeof *g->ordinal);

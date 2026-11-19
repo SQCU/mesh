@@ -796,6 +796,8 @@ int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mes
                                struct mesh_graph_relation **out);
 const struct mesh_graph_relation_data *mesh_graph_relation_data(const struct mesh_graph_relation *);
 /* Incoming closure from the original incoming-row search's postorder; freed by mesh_graph_closure_free. */
+int mesh_graph_relation_closure(const struct mesh_graph_relation *,int incoming,const uint32_t *order,ptrdiff_t step,
+                                struct mesh_graph_closure **made);
 int mesh_graph_relation_ancestors(const struct mesh_graph_relation *, struct mesh_graph_closure **made);
 int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t classes, const uint32_t *class_of,
                                  void (*release)(void *), void *owner, struct mesh_graph_relation **out);

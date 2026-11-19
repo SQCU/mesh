@@ -307,6 +307,13 @@ int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(
   return closure_rows(vertices, first, head, context, order, step, NULL, vertices, NULL, made);
 }
 
+int mesh_graph_relation_closure(const struct mesh_graph_relation *relation,int incoming,const uint32_t *order,ptrdiff_t step,
+                                struct mesh_graph_closure **made){
+  const struct mesh_graph_relation_data *d=mesh_graph_relation_data(relation);
+  return mesh_graph_closure(d->vertices,incoming?d->in_first:d->row_first,
+                            incoming?mesh_graph_relation_incoming_head:mesh_graph_relation_head,d,order,step,made);
+}
+
 int mesh_graph_relation_ancestors(const struct mesh_graph_relation *relation, struct mesh_graph_closure **made) {
   *made = NULL;
   const struct mesh_graph_relation_data *d = mesh_graph_relation_data(relation);
@@ -316,8 +323,7 @@ int mesh_graph_relation_ancestors(const struct mesh_graph_relation *relation, st
   struct mesh_graph_search *search = NULL;
   int status = mesh_graph_search(d->vertices, d->in_first, mesh_graph_relation_incoming_head, d,
                                  d->vertices, roots, 0, &search);
-  if (!status) status = mesh_graph_closure(d->vertices, d->in_first, mesh_graph_relation_incoming_head, d,
-                                           search->postorder, 1, made);
+  if (!status) status = mesh_graph_relation_closure(relation, 1, search->postorder, 1, made);
   mesh_graph_search_free(search);
   free(roots);
   return status;
@@ -620,7 +626,6 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
 }
 
 
-static uint32_t depth_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth) {
   size_t *out = calloc((size_t)vertices + 2, sizeof *out), *at = calloc((size_t)vertices + 1, sizeof *at);
   uint32_t *heads = malloc((first[vertices] + 1) * sizeof *heads), *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
@@ -629,7 +634,7 @@ int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *hea
   for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) out[head[k] + 1]++;
   for (uint32_t v = 0; !result && v < vertices; v++) out[v + 1] += out[v];
   for (uint32_t v = 0; !result && v < vertices; v++) for (size_t k = first[v]; k < first[v + 1]; k++) heads[out[head[k]] + at[head[k]]++] = v;
-  if (!result) result = mesh_graph_order(vertices, out, depth_head, heads, indegree, ordinal);
+  if (!result) result = mesh_graph_order(vertices, out, mesh_graph_row_head, heads, indegree, ordinal);
   if (!result) mesh_graph_inverse_permutation(vertices,ordinal,order);
   for (uint32_t p = 0; !result && p < vertices; p++) {
     const uint32_t v = order[p];
@@ -978,10 +983,11 @@ int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, 
   struct mesh_graph_grouping *groups = NULL;
   int status = mesh_graph_group(values, uses, mesh_graph_row_head, value, &groups);
   if (status) return status;
-  for (size_t k = 0; k < uses; k++)
-    for (size_t i = 0; i < calls; i++)
-      if ((uint64_t)base[i] + vertex[k] >= ancestors->vertices) { mesh_graph_group_free(groups); return EINVAL; }
-  uint64_t *common = malloc((ancestors->words + 1) * sizeof *common);
+  uint32_t last = 0;
+  for (size_t k = 0; k < uses; k++) if (vertex[k] > last) last = vertex[k];
+  for (size_t i = 0; i < calls; i++)
+    if (uses && (uint64_t)base[i] + last >= ancestors->vertices) { mesh_graph_group_free(groups); return EINVAL; }
+  uint64_t *common = malloc(((size_t)last / 64 + 2) * sizeof *common);
   if (!common) { mesh_graph_group_free(groups); return ENOMEM; }
   const size_t words = ((size_t)values + 63) / 64;
   memset(reached, 0, values * words * sizeof *reached);
@@ -989,11 +995,12 @@ int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, 
     if (groups->first[b] == groups->first[b + 1]) continue;
     uint64_t *row = reached + b * words;
     for (size_t i = 0; i < calls; i++) {
-      memset(common, 0xff, ancestors->words * sizeof *common);
+      size_t first_word = base[i] / 64, words_used = (base[i] + last) / 64 + 1 - first_word;
+      memset(common, 0xff, words_used * sizeof *common);
       for (size_t k = groups->first[b]; k < groups->first[b + 1]; k++) {
         uint32_t v = base[i] + vertex[groups->order[k]];
-        const uint64_t *parents = ancestors->reached + (size_t)v * ancestors->words;
-        for (size_t w = 0; w < ancestors->words; w++) common[w] &= parents[w];
+        const uint64_t *parents = ancestors->reached + (size_t)v * ancestors->words + first_word;
+        for (size_t w = 0; w < words_used; w++) common[w] &= parents[w];
       }
       for (uint32_t a = 0; a < values; a++) {
         uint64_t bit = UINT64_C(1) << (a % 64);
@@ -1002,7 +1009,7 @@ int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, 
         if (k == end) continue;
         for (; k < end; k++) {
           uint32_t v = base[i] + vertex[groups->order[k]];
-          if (!(common[v / 64] >> (v % 64) & 1)) break;
+          if (!(common[v / 64 - first_word] >> (v % 64) & 1)) break;
         }
         if (k == end) row[a / 64] |= bit;
         else row[a / 64] &= ~bit;
@@ -2405,9 +2412,9 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
     into = malloc((edges + 1) * sizeof *into);
     if (!flow || !into) result = ENOMEM;
   }
-  if (!result) result = mesh_graph_order(items, first, depth_head, head, indegree, ordinal);
+  if (!result) result = mesh_graph_order(items, first, mesh_graph_row_head, head, indegree, ordinal);
   if (!result) {
-    mesh_graph_rows(items, edges, depth_head, head, into_first, into);
+    mesh_graph_rows(items, edges, mesh_graph_row_head, head, into_first, into);
     struct chains_net net = {items, count, first, into_first, into, head, tail, flow, out, in};
     while (chains_layer(&net, level, queue)) chains_block(&net, level, at, path);
     uint64_t next = 0, o = 0;
@@ -2727,7 +2734,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
       index[nonzeros] = (HighsInt)i; value[nonzeros++] = -1;
     }
     if (Highs_addRows(highs, total, lower, upper, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
-    mesh_graph_rows(resources, vertices, depth_head, resource, first, member);
+    mesh_graph_rows(resources, vertices, mesh_graph_row_head, resource, first, member);
   }
   int second = 0;
   uint64_t entries = 2 * room;
@@ -2971,7 +2978,7 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
   size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
   int result = !first || !order ? ENOMEM : 0;
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    mesh_graph_rows(vertices, edges, mesh_graph_row_head, from, first, order);
     const struct flat_rows flat = {first, order, to};
     const struct mesh_graph_rows_view rows = {vertices, &flat, flat_degree, flat_head};
     result = mesh_graph_heap_order_view(&rows, priority, place);
@@ -3147,7 +3154,7 @@ int mesh_graph_components(uint32_t vertices, size_t edges, const uint32_t *from,
   struct graph_scratch s;
   result = scratch_alloc(&s, vertices, edges);
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, s.first, s.order);
+    mesh_graph_rows(vertices, edges, mesh_graph_row_head, from, s.first, s.order);
     *count = components_search(&s, vertices, to, component);
   }
   scratch_free(&s);
@@ -3329,7 +3336,7 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
   if (!result && (!least || !link || !sources || !sinks || !entered || !left)) result = ENOMEM;
   uint32_t count = 0, m = 0, k = 0;
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, s.first, s.order);
+    mesh_graph_rows(vertices, edges, mesh_graph_row_head, from, s.first, s.order);
     count = components_search(&s, vertices, to, s.component);
     for (uint32_t c = 0; c < count; c++) { least[c] = UINT32_MAX; entered[c] = 0; left[c] = 0; }
     for (size_t e = 0; e < edges; e++)
@@ -4515,7 +4522,7 @@ int mesh_graph_levels(uint32_t vertices, size_t edges, const uint32_t *from, con
   size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
   int result = first && order ? 0 : ENOMEM;
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    mesh_graph_rows(vertices, edges, mesh_graph_row_head, from, first, order);
     const struct flat_rows flat = {first, order, to};
     const struct mesh_graph_rows_view rows = {vertices, &flat, flat_degree, flat_head};
     result = mesh_graph_levels_view(&rows, level);

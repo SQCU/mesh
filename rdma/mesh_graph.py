@@ -251,9 +251,8 @@ class Graph:
     # first element by its step: v's set the vertices whose rows lead to v (rows of predecessors: v's own closure row;
     # `successors`: the transposed column)
     def ancestors(self, order, successors=False, incoming=False):
-        made, (first, head) = C.POINTER(Closed)(), self.rows(incoming)
-        _check(LIB.mesh_graph_closure(self.data.vertices, first, head, self.context, *self._order(order),
-                                      C.byref(made)))
+        made = C.POINTER(Closed)()
+        _check(LIB.mesh_graph_relation_closure(self.relation.pointer, incoming, *self._order(order), C.byref(made)))
         return Closures(Owned(made, LIB.mesh_graph_closure_free, self, (order,)), successors)
 
     # mesh_graph_closure_labels (resolved on use) over the rows (`incoming`) processed in `order` (as ancestors'): v's
@@ -345,14 +344,12 @@ class IncidenceQuotient:
         self.components = components(vertices + targets, self.equality_edges)
         self.classes = range(max(self.components, default=-1) + 1)
         self.source_classes, self.target_classes = self.components[:vertices], self.components[vertices:]
-        grouped = C.POINTER(Grouping)()
-        target = C.byref(self.components.items, vertices * C.sizeof(C.c_uint32))
-        _check(LIB.mesh_graph_group(len(self.classes), targets, C.cast(LIB.mesh_graph_row_head, C.c_void_p),
-                                    target, C.byref(grouped)))
-        owner = Owned(grouped, LIB.mesh_graph_group_free, graph, self.components)
-        self.target_first = C.cast(grouped.contents.first, C.POINTER(C.c_size_t * (len(self.classes) + 1))).contents
+        target = (C.c_uint32 * targets).from_buffer(self.components.items, vertices * C.sizeof(C.c_uint32))
+        owner = grouping(len(self.classes), target)
+        grouped = owner.made.contents
+        self.target_first = C.cast(grouped.first, C.POINTER(C.c_size_t * (len(self.classes) + 1))).contents
         self.target_first.owner = owner
-        self.target_order = View(owner, grouped.contents.order, range(targets), int)
+        self.target_order = View(owner, grouped.order, range(targets), int)
         self.contracted = graph.contract(self.kept)
         self.quotient = self.contracted.quotient(self.classes, self.source_classes)
 
@@ -513,8 +510,7 @@ LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_ui
                                   C.POINTER(C.POINTER(Searched))]
 LIB.mesh_graph_breadth.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U,
                                    C.POINTER(C.POINTER(Searched))]
-LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C.c_ssize_t,
-                                   C.POINTER(C.POINTER(Closed))]
+LIB.mesh_graph_relation_closure.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.POINTER(Closed))]
 LIB.mesh_graph_longest.restype = C.c_int
 LIB.mesh_graph_longest.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.c_double), C.POINTER(C.c_double)]
 LIB.mesh_graph_completion_permutation.argtypes = LIB.mesh_graph_relation_heap_permutation.argtypes = [C.c_void_p, C.POINTER(C.c_double), _U, _U]
@@ -611,8 +607,7 @@ def resource_ancestors(graph, order, cycles, resource, exclusive):
                                          C.byref(relation)))
     selected = Relation(relation.value)
     closure = C.POINTER(Closed)()
-    _check(LIB.mesh_graph_closure(selected.data.vertices, selected.data.in_first, LIB.mesh_graph_relation_incoming_head,
-                                  selected.descriptor, order, 1, C.byref(closure)))
+    _check(LIB.mesh_graph_relation_closure(selected.pointer, True, order, 1, C.byref(closure)))
     return Owned(closure, LIB.mesh_graph_closure_free, selected)
 
 
@@ -625,6 +620,12 @@ def resource_cycles(order, resources, resource):
 class Grouping(C.Structure):
     _fields_ = [('keys', C.c_uint32), ('items', C.c_size_t), ('key', C.c_void_p), ('context', C.c_void_p),
                 ('first', _Z), ('order', _Z), ('ordinal', _Z)]
+
+
+def grouping(keys, labels):
+    made = C.POINTER(Grouping)()
+    _check(LIB.mesh_graph_group(keys, len(labels), C.cast(LIB.mesh_graph_row_head, C.c_void_p), labels, C.byref(made)))
+    return Owned(made, LIB.mesh_graph_group_free, labels)
 
 
 class Tree(C.Structure):
@@ -1145,22 +1146,17 @@ def components(vertices, edges):
 
 
 # mesh-graph.h mesh_graph_rows: items bucketed by key, stable; first[keys + 1], order the items grouped by key
-ROW_KEY = C.CFUNCTYPE(C.c_uint32, C.c_void_p, C.c_size_t)
-LIB.mesh_graph_rows.restype = None
-LIB.mesh_graph_rows.argtypes = [C.c_uint32, C.c_size_t, ROW_KEY, C.c_void_p, C.POINTER(C.c_size_t),
-                                C.POINTER(C.c_size_t)]
-
-
 def rows(keys, key):
-    first, order = (C.c_size_t * (keys + 1))(), (C.c_size_t * max(len(key), 1))()
-    LIB.mesh_graph_rows(keys, len(key), ROW_KEY(lambda context, k: key[k]), None, first, order)
-    return list(first), list(order[:len(key)])
+    labels = key if isinstance(key, C.Array) and key._type_ is C.c_uint32 else (C.c_uint32 * len(key))(*key)
+    grouped = grouping(keys, labels)
+    row = grouped.made.contents
+    return row.first[:keys + 1], row.order[:len(key)]
 
 
 # design/aot-compilation-change-request.md A10: the successive pairs of each row of `rows`, a chain labelling's order
 def successive(keys, key):
-    first, order = rows(keys, key)
-    return [(order[i], order[i + 1]) for k in range(keys) for i in range(first[k], first[k + 1] - 1)]
+    result = call_successors(key, (1,) * keys)
+    return [(v, result.later[v]) for v in result.group.contents.order[:len(key)] if not result.lag[v]]
 
 
 def _text(printer, signature):
