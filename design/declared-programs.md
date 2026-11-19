@@ -1,4 +1,4 @@
-# Declared programs (wire 139, layout 157)
+# Declared programs (wire 140, layout 158)
 
 Every unit on every wire is placed by a pure function of declarations that both ends hold alike. The placement is
 computed ahead of time, so at run time a client raises only one monotone counter. This replaces the shared order of
@@ -99,6 +99,21 @@ execution k / period.
 - **Restart.** Losing a cable of the epoch restarts the order: the generation moves, every program is lost (its done
   words go to UINT64_MAX) and both ends' cables are lost. A declaration also asks for a restart when it meets a
   program of a client gone with pieces outstanding or mid-execution, because only a restart realigns the two ends.
+- **Segments agreed** (wire 140, layout 158; mesh-order.h `order_segments_turn`). The two ends place alike only while
+  their clients keep the contract, and a death breaks it: a client gone at one end while its peer client lives on at
+  the other leaves one end's next segment closing the program and the other's keeping it going. Every piece is then
+  placed apart, and both ends' GPUs wait their deadlines for pieces that never come (the M5 Ultra pair, 2026-11-19: a
+  REAL=1 run declared while a dead logit_check's peer lived on, both ranks waiting at entries 16 and 0). So the ends
+  compare what they place. An end's segments in turn, less each one closed before any of its rounds (clients sharing a
+  node may declare in a different order at each end and join only at a round both reach, so such a segment places
+  nothing), are its placing segments, the n-th of each end the n-th of the other's. Each end tells the peer each placing
+  segment's digest in a SEGMENT: the order's session (epoch 1's first cable's identity, new at every restart), the
+  segment's place, its digest (its start, round and programs: keys, bases, counts, periods, tables), whether its clients
+  issued a step in it, and, once closed, its rounds; the open segment's again as it changes. A segment's pieces are
+  posted only once the peer's digest at its place is the end's own (`agreed`, `order_next`). Where the ends cannot
+  come to agree (their segments at a place differ and both ends' clients issued in them, or the peer's closed at fewer
+  rounds than this end's clients began in it), the end restarts the order, and both ends' clients fail as values.
+  The cost is a control message a declaration, before its first piece.
 
 ## 4. Who declares what (the precondition)
 
@@ -175,14 +190,22 @@ Re-read for this document: none. Each entry below is recalled, and says where a 
   - a Metal-path program (tests/sim-metal.m);
   - a one-way WRITE plan and an AlltoAllV of uneven counts (tests/sim-programs.c);
   - two process pairs, each running its own one-step program of 12,000 Broadcasts ahead of its receiver over a queue
-    pair served once in 64 turns, the two programs composed by rounds.
+    pair served once in 64 turns, the two programs composed by rounds;
+  - restarts (sim-wire `RESTARTS`: the bridges' parents run as order_turn runs them, cables coming up in turn and
+    epochs agreed by ORDER over a message queue, segments by SEGMENT, every restart losing every cable, clients gone
+    retired): a client gone at one node as the other loses a cable, then a pair made at once (it runs or fails as
+    values at both ranks); a client gone at one node while its peer lives on, then a pair declared
+    meanwhile (it fails as values at both ranks, no deadline met), then one more (it runs); a declaration at a node
+    whose bridge sees the other's restart 300 ms late, then one more. No pair may wait a deadline, and the wire's
+    check must stand.
 - **Python.** The native extraction tests (`test_native_byte_plans`, `test_indexed_write`, `test_diagnostics`) take
   the new production functions.
 
 ## 8. What may fall short on hardware
 
-- **The ORDER exchange for a cable joining mid-run** (the bound, its proposal, the extension) is exercised only in
-  tests/order.c's in-memory form, not by the simulator's processes or by hardware.
+- **The ORDER exchange for a cable joining mid-run** (the bound, its proposal, the extension) is exercised in
+  tests/order.c's in-memory form and by the simulator's restarts (cables joining under a running pair), but over the
+  simulator's message queue, not the bridges' sockets.
 - **Striping.** Consecutive pieces stripe over every queue pair (all 6 on the M5 pair), not one lane a transfer per
   cable as before. A transfer's latency is therefore its slowest queue pair's. A transfer held by its gate holds every
   queue pair its pieces are on, and a transfer longer than Q pieces is on all of them. tests/peer-groups.c's

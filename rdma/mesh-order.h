@@ -187,7 +187,7 @@ static inline int order_next(const struct hdr *m,const struct mesh_node *x,uint3
                              uint32_t lane,uint64_t u,uint64_t *hint,uint64_t *n,struct order_at *at){
   *n=order_unit_piece(x,epochs,d,port,lane,u);
   return *n!=ORDER_NONE && *n<atomic_load_explicit(&x->limit[d],memory_order_acquire) && order_locate(m,x,segments,d,*n,hint,at) &&
-         order_ready(m,x,at,d);
+         at->segment<atomic_load_explicit(&x->agreed,memory_order_acquire) && order_ready(m,x,at,d);
 }
 /* queue pair q of epoch e as its cable and lane (order_qp's inverse): 1, else 0 where the epoch has no queue pair q */
 static inline int order_qp_cable(const struct mesh_epoch *e,uint32_t q,uint32_t *cable,uint32_t *lane){
@@ -413,7 +413,7 @@ static inline void order_restart(struct hdr *m,struct mesh_node *x){
     atomic_store(&declared->owner,0);atomic_store(&declared->issued,0);atomic_store(&declared->closed,UINT64_MAX);
     atomic_store(&declared->end[0],UINT64_MAX);atomic_store(&declared->end[1],UINT64_MAX);
   }
-  atomic_store(&x->segments,0);atomic_store(&x->declaring,0);atomic_store(&x->restart,0);
+  atomic_store(&x->segments,0);atomic_store(&x->declaring,0);atomic_store(&x->restart,0);atomic_store(&x->agreed,0);
   for(int d=0;d<2;d++){atomic_store(&x->limit[d],UINT64_MAX);atomic_store(&x->raised[d],0);}
 }
 /* the next epoch appended: from `first` each way, over `cables` (both ends' agreed set, sorted by identity); 0, or
@@ -526,6 +526,136 @@ static inline int order_agree_turn(struct mesh_node *x,int leader,struct order_a
     .boundary={bound[0],bound[1]},.echo={proposal.boundary[0],proposal.boundary[1]}};
   memcpy(say->wire,proposal.wire,proposal.cables*sizeof *proposal.wire);
   return ORDER_EXTENDED|ORDER_SAY;
+}
+
+/* ---- The two ends' segments agreed (the bridge's parent: mesh-link.c order_turn; tests/sim-wire.c, tests/wire.h) -------
+   A segment is what both ends' clients declared at the same point of their code, so both ends place every piece alike
+   only while the clients keep that contract.  A client gone at one end while its peer client lives on at the other
+   breaks it: one end's next segment closes the gone program, the other's keeps it going, and every piece is placed apart
+   (the M5 Ultra pair, 2026-11-19: both ranks of a REAL=1 run waiting past their deadlines; tests/sim-two-nodes.sh's
+   restarts reproduce it).  So the two ends compare what they place.  Their segments in turn, less every one closed
+   before any of its rounds (an end's clients may declare in a different order at each end and join only at a round both
+   reach: such a segment places nothing), are the order's placing segments, the n-th of each end the n-th of the other's
+   (its `place`).  Each end tells the peer each placing segment's digest (SEGMENT: the order's session, its place, its
+   digest, whether its clients issued in it (`committed`) and, once closed, its rounds), the open one's again whenever it
+   changes; it posts a segment's pieces only once the peer's digest at that place is its own (`agreed`, the segments
+   below which every one is agreed or places nothing: order_next).  It restarts the order (ORDER_LOST) where the two ends
+   cannot come to agree: their segments at a place differ and both ends' clients issued in them, or the peer's closed
+   at fewer rounds than this end's clients issued in it.  Both ends' clients then fail as values (their programs lost),
+   never with their placements apart.  The session is the generation's first cable's identity (epoch 1's, alike at both
+   ends and new at every restart): a message of another generation is let be */
+struct segment_message { uint64_t session,place,digest,committed,rounds; };
+#define ORDER_TELLS 8u
+struct order_segments {
+  uint64_t scanned,placing,told;                 /* segments looked at, placing segments closed, of them told */
+  uint64_t local[MESH_SEGMENTS];                 /* a closed placing segment's segment, by its place */
+  uint64_t open[3];                              /* the open segment as last told: place + 1, digest, committed */
+  uint64_t heard[MESH_SEGMENTS][4];              /* the peer's, by place: place + 1, digest, committed, rounds */
+};
+static inline uint64_t order_hash(uint64_t h,uint64_t v){ for(int i=0;i<8;i++){h^=(v>>(8*i))&0xff;h*=UINT64_C(0x100000001b3);} return h; }
+/* the order's session: its first epoch's first cable's identity (0: no epoch) */
+static inline uint64_t order_session(const struct mesh_node *x){
+  return atomic_load_explicit(&x->epochs,memory_order_acquire)?x->epoch[0].cable[0].wire:0;
+}
+/* segment s's digest, alike at both ends: its directions in the pair's order (`lower`: this end the lower node, its
+   direction 0 first; else its direction 1), its start and round, and each program in its order: its key, base, count,
+   period, and each direction's pieces and transfers and every transfer's units and step */
+static inline uint64_t order_segment_digest(const struct hdr *m,const struct mesh_node *x,uint64_t s,int lower){
+  const struct mesh_segment *g=order_segment(x,s);
+  uint64_t h=order_hash(UINT64_C(0xcbf29ce484222325),g->programs);
+  for(int k=0;k<2;k++){const int d=lower?k:1-k;h=order_hash(h,g->start[d]);h=order_hash(h,g->round[d]);}
+  for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
+    if(g->slot[k]>=MESH_PROGRAMS){h=order_hash(h,UINT64_MAX);continue;}
+    const struct mesh_declared *p=x->program+g->slot[k];
+    h=order_hash(h,p->program.key);h=order_hash(h,g->base[k]);h=order_hash(h,p->program.count);h=order_hash(h,p->program.period);
+    for(int dd=0;dd<2;dd++){
+      const int d=lower?dd:1-dd;
+      const struct mesh_crossing *t=order_table(m,p,d);
+      h=order_hash(h,p->program.pieces[d]);h=order_hash(h,p->program.transfers[d]);
+      for(uint64_t i=0;t && i<p->program.transfers[d];i++){h=order_hash(h,t[i].units);h=order_hash(h,t[i].step);}
+    }
+  }
+  return h;
+}
+/* the rounds segment s's clients began in it (its programs' executions begun there over its counts, the least: what
+   it places at most) and whether any issued a step in it at all */
+static inline uint64_t order_segment_issued(const struct mesh_node *x,uint64_t s,int *committed){
+  const struct mesh_segment *g=order_segment(x,s);
+  uint64_t rounds=UINT64_MAX;*committed=0;
+  for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
+    if(g->slot[k]>=MESH_PROGRAMS)continue;
+    const struct mesh_declared *p=x->program+g->slot[k];
+    const uint64_t period=p->program.period,count=p->program.count;
+    /* its executions begun (an execution's first step issued begins it) */
+    const uint64_t executions=period?(atomic_load_explicit(&p->issued,memory_order_acquire)+period-1)/period:0;
+    const uint64_t within=executions>g->base[k]?executions-g->base[k]:0;
+    if(within)*committed=1;
+    const uint64_t r=count?(within+count-1)/count:0;
+    if(r<rounds)rounds=r;
+  }
+  return rounds==UINT64_MAX?0:rounds;
+}
+/* the peer's SEGMENT heard: kept by its place, where it is of this end's session */
+static inline void order_segments_heard(struct order_segments *a,const struct mesh_node *x,const struct segment_message *heard){
+  const uint64_t session=order_session(x);
+  if(!session || heard->session!=session)return;
+  uint64_t *e=a->heard[heard->place%MESH_SEGMENTS];
+  e[0]=heard->place+1;e[1]=heard->digest;e[2]=heard->committed;e[3]=heard->rounds;
+}
+/* one turn: what this end has not yet told (*say, at most ORDER_TELLS messages, *says of them: the caller sends each in
+   turn, and where it cannot, calls order_segments_untold), and the agreement moved as far as the peer's digests are
+   this end's (`agreed`); ORDER_LOST where the two ends cannot come to agree (the caller restarts the order), else 0 */
+static inline int order_segments_turn(const struct hdr *m,struct mesh_node *x,int lower,struct order_segments *a,
+                                      struct segment_message *say,uint32_t *says){
+  *says=0;
+  const uint64_t session=order_session(x);
+  if(!session)return 0;
+  const uint64_t segments=atomic_load_explicit(&x->segments,memory_order_acquire);
+  if(!segments)return 0;
+  /* the segments closed since, each a placing one where it has rounds (its `rounds` set as the next was published) */
+  for(;a->scanned+1<segments;a->scanned++)
+    if(atomic_load_explicit(&order_segment(x,a->scanned)->rounds,memory_order_acquire))a->local[a->placing++%MESH_SEGMENTS]=a->scanned;
+  for(;a->told<a->placing && *says<ORDER_TELLS;a->told++){
+    const uint64_t s=a->local[a->told%MESH_SEGMENTS];
+    say[(*says)++]=(struct segment_message){session,a->told,order_segment_digest(m,x,s,lower),1,
+                                            atomic_load_explicit(&order_segment(x,s)->rounds,memory_order_acquire)};
+  }
+  const uint64_t open=segments-1,place=a->placing;
+  int committed;
+  const uint64_t issued=order_segment_issued(x,open,&committed),digest=order_segment_digest(m,x,open,lower);
+  if(*says<ORDER_TELLS && a->told==a->placing && (a->open[0]!=place+1 || a->open[1]!=digest || a->open[2]!=(uint64_t)committed)){
+    say[(*says)++]=(struct segment_message){session,place,digest,(uint64_t)committed,UINT64_MAX};
+    a->open[0]=place+1;a->open[1]=digest;a->open[2]=(uint64_t)committed;
+  }
+  /* the peer's segment at the open one's place closed at fewer rounds than this end's clients issued in it: the two
+     ends' next segments apart */
+  const uint64_t *peer=a->heard[place%MESH_SEGMENTS];
+  if(peer[0]==place+1 && peer[3]!=UINT64_MAX && issued>peer[3])return ORDER_LOST;
+  /* the agreement: every segment from `agreed` on that places nothing passed, each placing one agreed where the
+     peer's digest at its place is its own */
+  uint64_t agreed=atomic_load_explicit(&x->agreed,memory_order_acquire),at=0;
+  for(uint64_t k=0;k<a->placing;k++)if(a->local[k%MESH_SEGMENTS]<agreed)at=k+1;
+  for(;agreed<segments;agreed++){
+    const int last=agreed==open;
+    if(!last && !atomic_load_explicit(&order_segment(x,agreed)->rounds,memory_order_acquire))continue;
+    const uint64_t *e=a->heard[at%MESH_SEGMENTS];
+    if(e[0]!=at+1)break;
+    const uint64_t mine=last?digest:order_segment_digest(m,x,agreed,lower);
+    if(e[1]!=mine){
+      int here=1;
+      if(last)here=committed;
+      if(here && e[2])return ORDER_LOST;
+      break;
+    }
+    at++;
+  }
+  atomic_store_explicit(&x->agreed,agreed,memory_order_release);
+  return 0;
+}
+/* a message order_segments_turn made and the caller could not send: told again at the next turn */
+static inline void order_segments_untold(struct order_segments *a,const struct segment_message *m){
+  if(m->rounds==UINT64_MAX)a->open[0]=0;
+  else if(m->place<a->told)a->told=m->place;
 }
 
 #endif

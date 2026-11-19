@@ -120,5 +120,52 @@ for pid in $pids; do wait $pid || failed=1; done
 echo "run-ahead: $programs programs sharing the nodes, $calls Broadcasts each, queue pair $lag lagging:"
 cat "$out"/ahead.*
 finish
+# restarts (sim-wire RESTARTS: the bridges' parents as mesh-link.c order_turn runs them, cables coming up in turn and
+# epochs agreed by ORDER, segments agreed by SEGMENT, a restart losing every cable): a program either runs or fails as
+# a value at both ranks, never waits its deadline with the two ends apart; and the next one runs.  A pair of
+# sim-programs processes is the clients (rounds: how long it runs)
+restarting() {
+  RESTARTS=1 NOTICE=${1:-0} "$here/.build/tests/sim-wire" 11 12 "$cables" "$lanes" 768 > "$out/sim.out" 2> "$out/sim.err" &
+  sim=$!
+  while ! grep -q ready "$out/sim.out" 2>/dev/null; do sleep 0.1; done
+}
+programs_pair() {   # programs_pair NAME ROUNDS: ranks 0 and 1 in the background (r0, r1)
+  port=$((port + 8))
+  MESH_REGION=/mesh-sim-11 NCCL_COMM_ID="::1:$port" bounded "$here/.build/tests/sim-programs" 0 "$2" > "$out/$1.0" 2>&1 &
+  r0=$!
+  MESH_REGION=/mesh-sim-12 NCCL_COMM_ID="::1:$port" bounded "$here/.build/tests/sim-programs" 1 "$2" > "$out/$1.1" 2>&1 &
+  r1=$!
+}
+# the pair's end: both ranks' exits; neither waited its deadline (the two ends apart), the simulator's wire still
+# checking; `$2` passed: both 0; failed: both ranks ended, either way, with no deadline met
+pair_end() {
+  wait $r0; first=$?; wait $r1; second=$?
+  apart=$(cat "$out/$1.0" "$out/$1.1" | grep -c "past its deadline")
+  alive=1; kill -0 $sim 2>/dev/null || alive=0
+  echo "restarts, $1: rank 0 $first rank 1 $second, deadlines met $apart, the wire $([ $alive = 1 ] && echo checking || echo ENDED)"
+  [ $apart = 0 ] && [ $alive = 1 ] || { failed=1; cat "$out/$1.0" "$out/$1.1" "$out/sim.err"; }
+  if [ "$2" = passed ]; then [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/$1.0" "$out/$1.1"; }; fi
+}
+restarting 0
+programs_pair first 100000000; sleep 2
+# a client gone at node 12 as node 11's bridge loses a cable: the order restarts at both; the next pair, made at once,
+# runs or fails as values at both ranks
+kill -9 $r1; kill -USR2 $sim; wait $r0 2>/dev/null; wait $r1 2>/dev/null
+programs_pair recovered 6; pair_end recovered either
+# a client gone at node 12 while its peer at node 11 lives on (stopped): a pair declared meanwhile composes the live
+# program at 11 and not at 12, so the two ends' segments cannot agree: the order restarts and the pair fails as values
+programs_pair stopped 100000000; sleep 2
+kill -STOP $r0; held=$r0; kill -9 $r1; wait $r1 2>/dev/null; sleep 0.5
+programs_pair apart 6; pair_end apart either
+kill -9 $held; wait $held 2>/dev/null
+programs_pair after 6; pair_end after passed
+finish
+# a declaration at node 12 before its bridge has seen node 11's restart (it notices 300 ms late): either way, then a run
+restarting 300
+programs_pair before 6; wait $r0; wait $r1
+kill -USR2 $sim
+programs_pair unseen 6; pair_end unseen either
+sleep 1; programs_pair seen 6; pair_end seen passed
+finish
 echo "two simulated nodes: $([ $failed = 0 ] && echo passed || echo FAILED)"
 exit $failed

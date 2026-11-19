@@ -20,6 +20,10 @@ struct wire_node {
   uint64_t posted[2][WIRE_CABLES][WIRE_LANES],done[2][WIRE_CABLES][WIRE_LANES];
   uint64_t hint[2][WIRE_CABLES][WIRE_LANES];
   struct order_raiser raiser[WIRE_CABLES][2];
+  /* with `served` (tests/sim-wire.c RESTARTS: the bridges' cables lost and made again), each cable as its port's child
+     serves it: posted on and raised from only while up (`down` 0) and while the order's generation is the one its lanes
+     opened in (`generation`: mesh-link.c lanes_open, order_pass, order_done) */
+  int served; uint8_t down[WIRE_CABLES]; uint64_t generation[WIRE_CABLES];
 };
 struct wire {
   struct wire_node node[2];
@@ -27,6 +31,8 @@ struct wire {
   struct wire_fifo fifo[2][WIRE_CABLES][WIRE_LANES];
   uint32_t cables,lanes,room;
   uint64_t matched,bytes,random,burst;   /* burst: the most matches a queue pair makes a turn (0: 1 to 8 at random) */
+  int told;   /* the segments agreed by SEGMENT messages (tests/sim-wire.c RESTARTS), not by wire_agree */
+  struct order_segments segments[2];
 };
 static inline void wire_make(struct wire *w,uint32_t cables,uint32_t lanes,uint32_t room){
   w->cables=cables;w->lanes=lanes;w->room=room;w->random=0x9e3779b97f4a7c15u;
@@ -36,8 +42,12 @@ static inline void wire_make(struct wire *w,uint32_t cables,uint32_t lanes,uint3
 }
 static inline uint64_t wire_next_random(struct wire *w){ w->random^=w->random<<13;w->random^=w->random>>7;w->random^=w->random<<17;return w->random; }
 /* node n's posts on cable c (port c) queue pair j each way, as far as the bridge's step lets them and the queue holds */
+static inline int wire_serves(const struct wire_node *v,uint32_t c){
+  return !v->served || (!v->down[c] && v->generation[c]==atomic_load_explicit(&v->x->generation,memory_order_acquire));
+}
 static inline void wire_post(struct wire *w,uint32_t n,uint32_t c,uint32_t j){
   struct wire_node *v=w->node+n;
+  if(!wire_serves(v,c))return;
   const uint32_t epochs=atomic_load_explicit(&v->x->epochs,memory_order_acquire);
   const uint64_t segments=atomic_load_explicit(&v->x->segments,memory_order_acquire);
   for(int way=0;way<2;way++){
@@ -62,6 +72,7 @@ static inline void wire_post(struct wire *w,uint32_t n,uint32_t c,uint32_t j){
    head, the two ends' pieces the same piece of the same transfer and of equal length */
 static inline void wire_match(struct wire *w,uint32_t d,uint32_t c,uint32_t j,uint64_t most){
   struct wire_fifo *f=&w->fifo[d][c][j];
+  if(w->node[d].down[c] || w->node[1-d].down[c])return;
   for(;most && f->sent_head!=f->sent_tail && f->received_head!=f->received_tail;most--){
     const struct wire_piece s=f->sends[f->sent_head%w->room],r=f->receives[f->received_head%w->room];
     if(s.span.bytes!=r.span.bytes || s.key!=r.key || s.execution!=r.execution || s.transfer!=r.transfer || s.span_index!=r.span_index ||
@@ -91,7 +102,7 @@ static inline void wire_raise(struct wire *w,uint32_t n){
   for(int way=0;way<2;way++){
     uint64_t done[WIRE_CABLES*WIRE_LANES];uint32_t k=0;
     for(uint32_t c=0;c<last->cables;c++)for(uint32_t j=0;j<last->cable[c].lanes;j++)done[k++]=v->done[way][last->cable[c].port][j];
-    for(uint32_t c=0;c<last->cables;c++)order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raiser[c][way]);
+    for(uint32_t c=0;c<last->cables;c++)if(wire_serves(v,last->cable[c].port))order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raiser[last->cable[c].port][way]);
   }
 }
 /* both nodes' epoch over cables [0, cables), from the later of the two ends' bounds each way (mesh-link.c order_turn:
@@ -118,10 +129,24 @@ static inline void wire_epoch(struct wire *w,uint32_t cables,uint64_t slack){
     for(int way=0;way<2;way++)atomic_store(&w->node[n].x->limit[way],UINT64_MAX);
   }
 }
+/* both nodes' segments agreed as the bridges agree them (mesh-order.h order_segments_turn), each end's SEGMENTs
+   heard by the other at once: two ends that cannot come to agree end the process (the two ends' clients declared apart) */
+static inline void wire_agree(struct wire *w){
+  for(int n=0;n<2;n++){
+    struct wire_node *v=w->node+n,*p=w->node+1-n;
+    struct segment_message said[ORDER_TELLS];uint32_t says=0;
+    if(order_segments_turn(v->m,v->x,v->m->node<p->m->node,w->segments+n,said,&says)&ORDER_LOST){
+      fprintf(stderr,"wire: node %u's segments and node %u's cannot agree: the two ends declared apart\n",v->m->node,p->m->node);
+      exit(3);
+    }
+    for(uint32_t k=0;k<says;k++)order_segments_heard(w->segments+1-n,p->x,said+k);
+  }
+}
 /* one turn of the wire: every node's posts, then every queue pair's matches (up to `burst`, else 1 to 8 at random) in a
    rotating order with a quarter of them skipped at random, `lag` (a queue pair index, UINT32_MAX none) served once in `rarely` turns at most, then the raises */
 static inline void wire_turn(struct wire *w,uint64_t turn,uint32_t lag,uint32_t rarely){
   const uint32_t cables=w->cables,lanes=w->lanes,q=2*cables*lanes;
+  if(!w->told)wire_agree(w);
   for(uint32_t n=0;n<2;n++)for(uint32_t c=0;c<cables;c++)for(uint32_t j=0;j<lanes;j++)wire_post(w,n,c,j);
   for(uint32_t k=0;k<q;k++){
     const uint32_t at=(uint32_t)((k+turn)%q);

@@ -148,6 +148,8 @@ static int declare_held(struct mesh_ctx *context,const struct mesh_order *order,
     }
   }
   order_publish_segment(x,segments,&next);
+  /* the bridge woken: it tells the peer the segment's digest (mesh-order.h order_segments_turn) */
+  mesh_notify(&m->control);
   if(run)*run=(struct mesh_run){.order=*order,.program=joining,.issued=joining<MESH_PROGRAMS?&x->program[joining].issued:NULL};
   return 0;
 }

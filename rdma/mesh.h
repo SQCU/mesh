@@ -23,12 +23,14 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    hashes").  137 (design/declared-programs.md): every piece's cable and queue pair is a pure function of the programs
    both nodes' clients declared and of the cable epochs (mesh-order.h); the bridges exchange ORDER only as the cables
    between them change, each end proposing the piece from which a new epoch begins.  A bridge of another version is
-   not paired with (port_heard) */
-#define MESH_VERSION 139u
+   not paired with (port_heard).  140: the bridges also exchange SEGMENT, each segment's digest as its clients declared
+   it, a segment's pieces posted only once both ends' digests of it agree (mesh-order.h order_segments_turn) */
+#define MESH_VERSION 140u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
-   156 replaces the node orders' rings with declared programs and segments (struct mesh_node) */
-#define MESH_LAYOUT 157u
+   156 replaces the node orders' rings with declared programs and segments (struct mesh_node); 158 adds the segments
+   both ends agree (struct mesh_node `agreed`) */
+#define MESH_LAYOUT 158u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes it
    holds an order toward (struct mesh_node) and its client slots; and the bytes of the bridge's own pages, which it
@@ -186,7 +188,8 @@ struct mesh_epoch { uint64_t first[2]; uint32_t cables,padding; struct { uint32_
    program of an earlier one lost), the bandwidth of its cables, its epochs, its segments declared (`segments`, the
    count, monotone within a generation; segment s in slot s mod MESH_SEGMENTS) and the client declaring one
    (`declaring`, 0 none: declarations toward a node are made one at a time), a restart a declaration asked of the
-   bridge (`restart`: it met a program of a client gone with pieces outstanding), each direction's posting bound (`limit`,
+   bridge (`restart`: it met a program of a client gone with pieces outstanding), the segments whose digests the two ends
+   agree (`agreed`: a segment's pieces are posted only below it, mesh-order.h order_next), each direction's posting bound (`limit`,
    UINT64_MAX but while the bridges agree a cable's epoch) and its pieces below which every done word was raised
    (`raised`, by the port of the generation's first cable: mesh-order.h order_raise_through), and its programs */
 struct mesh_node {
@@ -194,7 +197,7 @@ struct mesh_node {
   _Atomic uint32_t live;
   _Atomic uint64_t generation,bandwidth;
   _Atomic uint32_t epochs,padding;
-  _Atomic uint64_t segments,declaring,restart;
+  _Atomic uint64_t segments,declaring,restart,agreed;
   _Alignas(64) _Atomic uint64_t limit[2];
   _Alignas(64) _Atomic uint64_t raised[2];
   struct mesh_epoch epoch[MESH_EPOCHS];

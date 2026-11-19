@@ -738,8 +738,10 @@ static void link_heard(struct port *port,const struct message *heard){
    cable of the epoch lost restarts the order (order_restart, every program lost) and loses every cable toward the node,
    so both ends restart; so does a restart a client's declaration asked (`restart`).  Nothing is sent about any
    transfer */
-/* each order's agreement of its next epoch (mesh-order.h struct order_agree, order_agree_turn) */
+/* each order's agreement of its next epoch (mesh-order.h struct order_agree, order_agree_turn) and of its segments
+   (struct order_segments, order_segments_turn) */
 static struct order_agree orders[MESH_NODES];
+static struct order_segments segmented[MESH_NODES];
 /* the node slot of the order toward `node`, made (its generation 1, no epoch, no declaration, its bounds open) as a
    port first pairs with it; MESH_ABSENT where every slot holds another node */
 static uint32_t order_slot(uint32_t node){
@@ -748,7 +750,7 @@ static uint32_t order_slot(uint32_t node){
   if(n==MESH_NODES && (n=vacant)==MESH_ABSENT){say("bridge: no order slot for node %u (mesh.h MESH_NODES)\n",node);return MESH_ABSENT;}
   struct mesh_node *x=mesh_node_at(M,n);
   if(!atomic_load(&x->node)){
-    orders[n]=(struct order_agree){0};
+    orders[n]=(struct order_agree){0};segmented[n]=(struct order_segments){0};
     order_restart(M,x);
     if(!atomic_load(&x->generation))atomic_store(&x->generation,1);
   }
@@ -777,6 +779,17 @@ static void order_heard(struct port *port,const unsigned char *payload,uint32_t 
     const uint32_t epochs=atomic_load(&x->epochs);
     (void)epochs;
     order_agree_heard(orders+n,x,&heard);
+    wake();
+  }
+}
+static void segment_heard(struct port *port,const unsigned char *payload,uint32_t bytes){
+  struct segment_message heard;
+  if(bytes!=sizeof heard || !port->peer)return;
+  memcpy(&heard,payload,sizeof heard);
+  for(uint32_t n=0;n<MESH_NODES;n++){
+    struct mesh_node *x=mesh_node_at(M,n);
+    if(atomic_load(&x->node)!=port->peer)continue;
+    order_segments_heard(segmented+n,x,&heard);
     wake();
   }
 }
@@ -814,7 +827,7 @@ static void order_turn(void){
     if(!node)continue;
     if(atomic_load(&x->restart)){
       say("order toward node %u: a declaration met a program of a client gone with pieces outstanding: the order restarts\n",node);
-      order_restart(M,x);*o=(struct order_agree){0};record_changed();order_lose(node);continue;
+      order_restart(M,x);*o=(struct order_agree){0};segmented[n]=(struct order_segments){0};record_changed();order_lose(node);continue;
     }
     uint64_t wire[MESH_PORTS];uint32_t port[MESH_PORTS];
     const uint32_t cables=order_cables(node,wire,port);
@@ -830,7 +843,7 @@ static void order_turn(void){
           (unsigned long long)last->cable[c].wire);
       lost=1;
     }
-    if(lost){order_restart(M,x);*o=(struct order_agree){0};record_changed();order_lose(node);continue;}
+    if(lost){order_restart(M,x);*o=(struct order_agree){0};segmented[n]=(struct order_segments){0};record_changed();order_lose(node);continue;}
     uint32_t lanes[MESH_PORTS];
     for(uint32_t c=0;c<cables;c++)lanes[c]=2*plan_streams(ports[port[c]].link.plan);
     struct order_message told;
@@ -838,7 +851,7 @@ static void order_turn(void){
     if(done&ORDER_LOST){
       say("order toward node %u: its agreed epoch names a cable not up here, or its generation's epochs are all used: the order "
           "restarts\n",node);
-      order_restart(M,x);*o=(struct order_agree){0};record_changed();order_lose(node);continue;
+      order_restart(M,x);*o=(struct order_agree){0};segmented[n]=(struct order_segments){0};record_changed();order_lose(node);continue;
     }
     if(done&ORDER_SAY){
       struct port *via=NULL;
@@ -847,7 +860,22 @@ static void order_turn(void){
       /* a proposal not sent is sent again at the next turn (the proposer's record of it let go); an accept not sent would
          leave the peer an epoch short: the order restarts */
       else if(told.kind==ORDER_PROPOSE)o->sent.cables=UINT32_MAX;
-      else{order_restart(M,x);*o=(struct order_agree){0};record_changed();order_lose(node);continue;}
+      else{order_restart(M,x);*o=(struct order_agree){0};segmented[n]=(struct order_segments){0};record_changed();order_lose(node);continue;}
+    }
+    /* the segments: each one's digest told the peer, and those both ends declared alike agreed (posted from) */
+    struct segment_message said[ORDER_TELLS];uint32_t says=0;
+    if(order_segments_turn(M,x,M->node<node,segmented+n,said,&says)&ORDER_LOST){
+      say("order toward node %u: its segments as declared here and there cannot agree (a program going on at one end, "
+          "closed at the other: a client gone at one end only): the order restarts\n",node);
+      order_restart(M,x);*o=(struct order_agree){0};segmented[n]=(struct order_segments){0};record_changed();order_lose(node);continue;
+    }
+    if(says){
+      struct port *via=NULL;
+      for(uint32_t p=0;p<port_count && !via;p++)if(ports[p].greeted && ports[p].peer==node)via=ports+p;
+      /* where no port toward the node is greeted now, told at a later turn */
+      for(uint32_t k=0;k<says;k++)
+        if(via)port_say(via,(struct message){.kind=SEGMENT},said+k,sizeof said[k]);else order_segments_untold(segmented+n,said+k);
+      if(says==ORDER_TELLS || !via)wake();
     }
     if(!(done&ORDER_EXTENDED))continue;
     uint64_t bandwidth=0;
@@ -868,6 +896,7 @@ static void message_heard(struct port *port,const struct message *heard,const un
   else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
   else if(heard->kind==ORDER)order_heard(port,payload,heard->bytes);
+  else if(heard->kind==SEGMENT)segment_heard(port,payload,heard->bytes);
 }
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello
    names the peer (the node it states, whatever node's hello this end dialed), and pairs the link, its plan the fewer
