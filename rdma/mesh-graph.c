@@ -747,8 +747,8 @@ void mesh_graph_chain_result_free(struct mesh_graph_chain_result *r) {
   free(r->edge); free(r);
 }
 /* BSL §3: successive firings on a resource, with one delay on its return edge. */
-int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_t resources,
-                               const uint32_t *resource, int singletons, struct mesh_graph_dependence *edge, size_t *edges) {
+int mesh_graph_resource_cycles_except(uint32_t vertices, const uint32_t *order, uint32_t resources,
+                               const uint32_t *resource, int singletons, uint32_t excluded, struct mesh_graph_dependence *edge, size_t *edges) {
   uint32_t *ends = malloc(2 * ((size_t)resources + 1) * sizeof *ends);
   if (!ends) return ENOMEM;
   uint32_t *first = ends, *last = ends + resources;
@@ -759,6 +759,7 @@ int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_
     if (v >= vertices) { free(ends); return EINVAL; }
     const uint32_t r = resource ? resource[v] : v;
     if (r >= resources) { free(ends); return EINVAL; }
+    if (r == excluded) continue;
     if (first[r] == UINT32_MAX) first[r] = v;
     else edge[(*edges)++] = (struct mesh_graph_dependence){last[r], v, 0};
     last[r] = v;
@@ -768,6 +769,11 @@ int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_
       edge[(*edges)++] = (struct mesh_graph_dependence){last[r], first[r], 1};
   free(ends);
   return 0;
+}
+
+int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_t resources,
+                               const uint32_t *resource, int singletons, struct mesh_graph_dependence *edge, size_t *edges) {
+  return mesh_graph_resource_cycles_except(vertices,order,resources,resource,singletons,UINT32_MAX,edge,edges);
 }
 
 int mesh_graph_call_submissions(const struct mesh_graph_grouping *group,const uint32_t *later,const uint64_t *lag,

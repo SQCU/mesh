@@ -1122,29 +1122,10 @@ static int plan_rank_times(struct plan_schedule_result *s){
   const uint32_t n=flow->n;
   uint32_t placed=0;
   for(uint32_t k=0;k<s->function->tasks;k++)placed|=s->function->task[k].node_plus_one;
-  uint64_t *nodes=s->instruction_nodes=calloc(s->instructions+1ULL,sizeof *nodes);
-  if(!nodes)return ENOMEM;
-  for(uint32_t x=0;x<s->instructions;x++){
-    const uint32_t r=s->resource[x];
-    if(x>=s->first && x<s->tasks){
-      const uint32_t v=s->function->task[x-s->first].node_plus_one;
-      if(v>n)return EINVAL;
-      if(v)nodes[x]=UINT64_C(1)<<(v-1);
-    }else if(r<n)nodes[x]=UINT64_C(1)<<r;
-    else if(x<s->first && s->event_first){
-      const uint32_t event=x-(s->first-3*flow->transfers);
-      const struct mesh_declared *t=flow->declared+event/3;
-      nodes[x]=UINT64_C(1)<<(event%3==1?t->destination:t->source);
-    }
-  }
-  for(size_t k=0;k<s->entries;k++){
-    const uint32_t e=s->link[k]/2;
-    nodes[s->tasks+s->communication[k]]=(UINT64_C(1)<<flow->from[e])|(UINT64_C(1)<<flow->to[e]);
-  }
   if(!placed)return 0;
   s->rank_time=calloc(n,sizeof *s->rank_time);
   if(!s->rank_time)return ENOMEM;
-  return mesh_graph_resource_spans(s->ordering,s->order,s->resource_edges,s->resource_cycle,s->w,nodes,n,s->rank_time);
+  return mesh_graph_resource_spans(s->ordering,s->order,s->resource_edges,s->resource_cycle,s->w,s->instruction_nodes,n,s->rank_time);
 }
 int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mesh_function *function,
                        size_t accesses,const struct mesh_graph_view *access,const size_t *event_first,
@@ -1154,6 +1135,8 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   const struct mesh_weight *weight=flow->weights;
   const struct mesh_dependence *dependence=flow->dependence;
   const uint32_t n=flow->n,demands=flow->demands,count=flow->transfers,dependences=flow->dependences,placed=function->tasks;
+  const uint64_t virtual_resource=n+2ULL*flow->pairs+(n+1ULL)*function->resources;
+  if(virtual_resource>=UINT32_MAX)return ENOMEM;
   if(function->count!=count || (accesses && (!access || !placed)))return EINVAL;
   if(event_first){
     if(count>=UINT32_MAX/3 || event_first[0] || (event_first[3*(size_t)count] && !event_member))return EINVAL;
@@ -1162,6 +1145,8 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   }
   if(placed && (!function->task || (count && (!function->sender || !function->receiver)) ||
                 (function->befores && !function->before)))return EINVAL;
+  for(uint32_t k=0;k<placed;k++)
+    if(function->task[k].node_plus_one>n || function->task[k].resource>=function->resources)return EINVAL;
   for(uint32_t k=0;k<function->befores;k++)
     if(function->before[k].from>=placed || function->before[k].to>=placed)return EINVAL;
   for(uint32_t i=0;placed && i<count;i++)if(function->sender[i]>=placed || function->receiver[i]>=placed)return EINVAL;
@@ -1233,6 +1218,7 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
          *rate=kept->rate=malloc((2*(size_t)flow->pairs+1)*sizeof *rate),
          *completion=kept->completion=status?NULL:malloc(((size_t)instructions+1)*sizeof *completion),
          *priority=kept->priority=status?NULL:malloc(((size_t)instructions+1)*sizeof *priority);
+  uint64_t *nodes=kept->instruction_nodes=status?NULL:calloc((size_t)instructions+1,sizeof *nodes);
   uint32_t *resource=kept->resource=status?NULL:malloc(((size_t)instructions+1)*sizeof *resource),
            *from=kept->from=status?NULL:malloc(((size_t)edges+1)*sizeof *from),
            *to=kept->to=status?NULL:malloc(((size_t)edges+1)*sizeof *to),
@@ -1244,24 +1230,38 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   size_t *route=kept->route=status?NULL:malloc(((size_t)edges+1)*sizeof *route);
   kept->order=status?NULL:malloc(((size_t)instructions+1)*sizeof *kept->order);
   kept->resource_cycle=status?NULL:malloc(((size_t)instructions+1)*sizeof *kept->resource_cycle);
-  if(!status && (!w || !cost || !rate || !completion || !priority || !resource || !from || !to || !link || !communication ||
+  if(!status && (!nodes || !w || !cost || !rate || !completion || !priority || !resource || !from || !to || !link || !communication ||
                  !before || !after || !place || !route || !kept->order || !kept->resource_cycle))status=ENOMEM;
   if(!status){
     /* design/aot-compilation-change-request.md A3; design/plan-to-bridge-change-request.md R5 */
     for(uint32_t d=0;d<demands;d++){
       const struct mesh_plan_demand *x=flow->demand+d;
       w[d]=placed?0:weight[x->first].produced;
-      resource[d]=x->source;
-      if(reader[d]!=MESH_ABSENT){w[reader[d]]=placed?0:weight[x->first].read;resource[reader[d]]=x->source;}
+      nodes[d]=UINT64_C(1)<<x->source;
+      resource[d]=w[d]?x->source:(uint32_t)virtual_resource;
+      if(reader[d]!=MESH_ABSENT){
+        uint32_t v=reader[d];
+        w[v]=placed?0:weight[x->first].read;nodes[v]=nodes[d];
+        resource[v]=w[v]?x->source:(uint32_t)virtual_resource;
+      }
     }
     for(uint32_t i=0;i<count;i++)for(uint32_t q=0;q<consumer[i].count;q++){
-      w[consumer[i].first+q]=placed?0:weight[i].consumed;
-      resource[consumer[i].first+q]=declared[i].destination;
+      uint32_t v=consumer[i].first+q;
+      w[v]=placed?0:weight[i].consumed;nodes[v]=UINT64_C(1)<<declared[i].destination;
+      resource[v]=w[v]?declared[i].destination:(uint32_t)virtual_resource;
     }
-    for(uint32_t v=event_base;event_first && v<first;v++){w[v]=0;resource[v]=n;}
+    for(uint32_t v=event_base;event_first && v<first;v++){
+      const uint32_t event=v-event_base;
+      const struct mesh_declared *t=declared+event/3;
+      w[v]=0;resource[v]=(uint32_t)virtual_resource;
+      nodes[v]=UINT64_C(1)<<(event%3==1?t->destination:t->source);
+    }
     for(uint32_t k=0;k<placed;k++){
-      w[first+k]=function->task[k].length;
-      resource[first+k]=n+2*flow->pairs+function->task[k].resource;
+      const struct mesh_task *task=function->task+k;
+      const uint32_t rank=task->node_plus_one;
+      w[first+k]=task->length;
+      if(rank)nodes[first+k]=UINT64_C(1)<<(rank-1);
+      resource[first+k]=rank || task->length?n+2*flow->pairs+rank*function->resources+task->resource:(uint32_t)virtual_resource;
     }
     double most=0;
     for(size_t v=0;v<(size_t)n*n;v++)link_of[v]=MESH_ABSENT;
@@ -1354,14 +1354,16 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
       before[k]=tail;after[k++]=to[x];
     }
     /* design/plan-to-bridge-change-request.md R5 */
-    for(uint64_t c=0;c<geometry->comms;c++){w[tasks+c]=0;resource[tasks+c]=n;}
+    for(uint64_t c=0;c<geometry->comms;c++){w[tasks+c]=0;resource[tasks+c]=(uint32_t)virtual_resource;}
     for(size_t x=0;x<edges;x++)for(size_t r=route[x];r<route[x+1];r++){
       const double occupy=cost[x]/rate[link[r]];
       if(occupy>w[tasks+communication[r]])w[tasks+communication[r]]=occupy;
       resource[tasks+communication[r]]=n+link[r];
+      const uint32_t pair=link[r]/2;
+      nodes[tasks+communication[r]]=(UINT64_C(1)<<flow->from[pair])|(UINT64_C(1)<<flow->to[pair]);
     }
     /* design/plan-to-bridge-change-request.md R5 */
-    status=mesh_graph_completion_times((uint32_t)instructions,w,resource,n+2*flow->pairs+function->resources,
+    status=mesh_graph_completion_times((uint32_t)instructions,w,resource,(uint32_t)virtual_resource+1,
                                        (size_t)dependencies,before,after,completion);
     /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2; C.-Y. Chen,
        arXiv 2205.02474, 2022, (1a) */
@@ -1372,8 +1374,8 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
       for(uint64_t j=0;j<instructions;j++)priority[j]=-completion[j];
       status=mesh_graph_relation_edges((uint32_t)instructions,(size_t)dependencies,before,after,&kept->ordering);
       if(!status)status=mesh_graph_relation_heap_permutation(kept->ordering,priority,place,kept->order);
-      if(!status)status=mesh_graph_resource_cycles((uint32_t)instructions,kept->order,n+2*flow->pairs+function->resources,
-        resource,1,kept->resource_cycle,&kept->resource_edges);
+      if(!status)status=mesh_graph_resource_cycles_except((uint32_t)instructions,kept->order,(uint32_t)virtual_resource+1,
+        resource,1,(uint32_t)virtual_resource,kept->resource_cycle,&kept->resource_edges);
     }
   }
   if(!status)status=plan_rank_times(kept);

@@ -589,14 +589,14 @@ class Dependence(C.Structure):
     _fields_ = [('source', C.c_uint32), ('sink', C.c_uint32), ('delay', C.c_uint64)]
 
 
-LIB.mesh_graph_resource_cycles.argtypes = [C.c_uint32, _U, C.c_uint32, _U, C.c_int,
-                                          C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_resource_cycles_except.argtypes = [C.c_uint32, _U, C.c_uint32, _U, C.c_int, C.c_uint32,
+                                                 C.POINTER(Dependence), C.POINTER(C.c_size_t)]
 
 
 def resource_cycles(order, resources, resource):
     edges, n = (Dependence * len(order))(), C.c_size_t()
-    _check(LIB.mesh_graph_resource_cycles(len(order), order, resources, resource, 1, edges, C.byref(n)))
-    return tuple((e.source, e.sink, e.delay) for e in edges[:n.value] if resource[e.source])
+    _check(LIB.mesh_graph_resource_cycles_except(len(order), order, resources, resource, 1, 0, edges, C.byref(n)))
+    return tuple((e.source, e.sink, e.delay) for e in edges[:n.value])
 
 
 class Grouping(C.Structure):
@@ -901,11 +901,12 @@ def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submi
     base, times, edges, queries, functions = [], [], [], [], []
     for occurrence, function in enumerate(calls):
         body = bodies[function].made.contents
+        size = body.edges if completion is None else bodies[function].resource_start
         base.append(len(times))
         here, first = base[-1], len(edges)
         times.extend(body.time[:body.vertices])
         edges.extend((here + a, here + b, d) for a, b, d in zip(
-            getattr(body, "from")[:body.edges], body.to[:body.edges], body.delay[:body.edges]))
+            getattr(body, "from")[:size], body.to[:size], body.delay[:size]))
         queries.extend(first + q for q in body.query[:body.queries])
         functions.extend([function] * body.queries)
 
@@ -921,6 +922,7 @@ def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submi
     edges.extend(admission)
     query_function = dict(outer_queries)
     if completion is not None:
+        edges.extend(completion.resource_cycle)
         owners = {(e.source, e.sink): query_function[i] for i, e in enumerate(graph.data.edge[:graph.data.edges])
                   if i in query_function}
         for a, b in completion.intercall:

@@ -670,6 +670,8 @@ struct mesh_graph_chain_result {
 };
 int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_t resources,
                                const uint32_t *resource, int singletons, struct mesh_graph_dependence *edge, size_t *edges);
+int mesh_graph_resource_cycles_except(uint32_t vertices, const uint32_t *order, uint32_t resources,
+    const uint32_t *resource, int singletons, uint32_t excluded, struct mesh_graph_dependence *edge, size_t *edges);
 int mesh_graph_call_submissions(const struct mesh_graph_grouping *,const uint32_t *,const uint64_t *,
                                 const size_t *,const uint32_t *,uint32_t,struct mesh_graph_chain_result **);
 int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out);
