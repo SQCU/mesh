@@ -52,7 +52,8 @@ int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first)
    is in (start / (block x pgsz)), a field no row names 0 (EINVAL for a row's field past the range's pages); `at`
    partition 0's byte in the storage its
    consumers' footprints are measured from (metal_ir.h: the storage root of the received value), `transfer` the
-   declared transfer of planned call `owner`'s plan whose landing it is (metal_ir.h METAL_IR_ARRIVED) */
+   declared transfer of planned call `owner`'s plan whose landing it is (metal_ir.h METAL_IR_ARRIVED). Prepared
+   extent rows carry start and end in the storage coordinates used by numerical reads, including the view offset. */
 struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_generation generation; uint32_t partitions;
                           uint64_t page; const uint32_t *field; uint64_t at; uint32_t transfer,owner;
                           const struct mesh_graph_access *extent; size_t extents; };

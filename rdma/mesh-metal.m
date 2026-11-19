@@ -120,12 +120,13 @@ static int mask_same(const void *context,uint32_t k){
 static int mask_access(const uint32_t groups[3],const uint32_t threads[3],const struct mesh_metal_access *a,
                        const struct mesh_graph_term *terms,const struct mesh_metal_range *r,uint32_t *bound,uint32_t width){
   const size_t G=(size_t)groups[0]*groups[1]*groups[2];
+  const uint64_t origin=r->extent?0:r->at;
   if(a->map){
     size_t *first=calloc(G+1,sizeof *first);
     uint32_t *list=NULL;
     if(!first)return ENOMEM;
-    int status=r->extent?mesh_graph_access_map_fields(a->map,threads,groups,r->at,r->extents,r->extent,first,&list):
-      mesh_graph_access_map_partitions(a->map,threads,groups,r->at,r->page,r->partitions,first,&list);
+    int status=r->extent?mesh_graph_access_map_fields(a->map,threads,groups,origin,r->extents,r->extent,first,&list):
+      mesh_graph_access_map_partitions(a->map,threads,groups,origin,r->page,r->partitions,first,&list);
     if(!status)for(size_t w=0;w<G;w++)for(size_t i=first[w];i<first[w+1];i++){
       if(r->extent){uint32_t f=list[i];bound[w*width+f/16]|=1u<<(2*(f%16));}
       else for(uint32_t f=0;f<r->input.pages;f++)
@@ -135,7 +136,7 @@ static int mask_access(const uint32_t groups[3],const uint32_t threads[3],const 
   }
   for(size_t w=0;w<G;w++){
     const uint32_t g[3]={(uint32_t)(w%groups[0]),(uint32_t)(w/groups[0]%groups[1]),(uint32_t)(w/groups[0]/groups[1])};
-    const __int128 low=mask_start(g,a->footprint,terms)+a->offset-r->at,high=low+a->footprint->extent;
+    const __int128 low=mask_start(g,a->footprint,terms)+a->offset-origin,high=low+a->footprint->extent;
     for(size_t i=0;i<(r->extent?r->extents:r->input.pages);i++){
       uint32_t f=r->extent?r->extent[i].vertex:(uint32_t)i;
       const __int128 start=r->extent?r->extent[i].start:(__int128)r->field[f]*r->page;
