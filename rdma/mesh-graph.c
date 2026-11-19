@@ -1038,20 +1038,24 @@ uint32_t mesh_graph_flow_startup(uint32_t n, uint32_t E, const uint32_t *from, c
   uint32_t *head=malloc(((size_t)count+1)*sizeof *head),*next=malloc(((size_t)room+1)*sizeof *next);
   unsigned char *done=calloc((size_t)n+1,1);
   double *path=startup?calloc((size_t)n+1,sizeof *path):NULL;
-  int failed=(startup && !path) || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done || !head || !next || !(eps>0);
+  int failed=(startup && !path) || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done || !head || !next ? ENOMEM : 0;
+  if(!rounds || !(eps>0))failed=EINVAL;
   for(uint32_t d=0;!failed && d<count;d++)head[d]=UINT32_MAX;
   double least=0,total=0;
-  for(uint32_t e=0;!failed && e<E;e++)if(!least || cap[e]<least)least=cap[e];
+  for(size_t arc=0;!failed && arc<(size_t)2*E;arc++){
+    if(!isfinite(cap[arc]) || cap[arc]<0){failed=EINVAL;break;}
+    if(cap[arc]>0 && (!least || cap[arc]<least))least=cap[arc];
+  }
   for(uint32_t d=0;!failed && d<count;d++)total+=upward[d]+downward[d];
   const double width=total>0 && least>0?total/rounds/least:1;
   for(uint32_t r=0;!failed && r<rounds;r++){
     double most=0;
-    for(size_t e=0;e<2*(size_t)E;e++)if(load[e]/cap[e/2]>most)most=load[e]/cap[e/2];
-    for(size_t e=0;e<2*(size_t)E;e++){len[e]=mesh_graph_exp(eps*(load[e]/cap[e/2]-most)/width)/cap[e/2];add[e]=0;}
+    for(size_t e=0;e<2*(size_t)E;e++)if(cap[e]>0)most=fmax(most,load[e]/cap[e]);
+    for(size_t e=0;e<2*(size_t)E;e++){len[e]=cap[e]>0?mesh_graph_exp(eps*(load[e]/cap[e]-most)/width)/cap[e]:0;add[e]=0;}
     for(uint32_t d=0;!failed && d<count;d++){
       const double u=upward[d],w=downward[d];
       for(uint32_t v=0;v<n;v++){dist[v]=INFINITY;up[v]=UINT32_MAX;upl[v]=UINT32_MAX;done[v]=0;tree[v]=UINT32_MAX;treel[v]=UINT32_MAX;}
-      if(root[d]>=n){failed=1;break;}
+      if(root[d]>=n){failed=EINVAL;break;}
       dist[root[d]]=0;up[root[d]]=root[d];
       if(path)path[root[d]]=0;
       for(uint32_t step=0;step<n;step++){
@@ -1062,14 +1066,15 @@ uint32_t mesh_graph_flow_startup(uint32_t n, uint32_t E, const uint32_t *from, c
         for(uint32_t e=0;e<E;e++){
           if(from[e]!=at && to[e]!=at)continue;
           const uint32_t v=from[e]==at?to[e]:from[e],toward=from[e]==v?0:1;
-          if(done[v])continue;
+          const size_t inward=2*(size_t)e+toward,outward=inward^1;
+          if(done[v] || (u && !cap[inward]) || (w && !cap[outward]))continue;
           double arc=1;
           if(startup){
             const double *ns=startup->directed;
             arc=(u>0?(ns?ns[(size_t)v*n+at]:startup->uniform):0) +
                 (w>0?(ns?ns[(size_t)at*n+v]:startup->uniform):0);
           }
-          const double weight=rate && !r?arc:u*len[2*(size_t)e+toward]+w*len[2*(size_t)e+(toward^1)];
+          const double weight=rate && !r?arc:u*len[inward]+w*len[outward];
           const double through=dist[at]+weight;
           if(through<dist[v]){
             dist[v]=through;up[v]=at;upl[v]=e;
@@ -1081,7 +1086,7 @@ uint32_t mesh_graph_flow_startup(uint32_t n, uint32_t E, const uint32_t *from, c
       double longest=0;
       for(uint32_t v=0;v<n && !failed;v++){
         if(v==root[d] || !leaf(context,d,v))continue;
-        if(up[v]==UINT32_MAX){failed=1;break;}
+        if(up[v]==UINT32_MAX){failed=EHOSTUNREACH;break;}
         if(path)longest=fmax(longest,path[v]);
         for(uint32_t at=v;tree[at]==UINT32_MAX;at=up[at]){tree[at]=up[at];treel[at]=upl[at];}
       }
@@ -1089,7 +1094,7 @@ uint32_t mesh_graph_flow_startup(uint32_t n, uint32_t E, const uint32_t *from, c
       const struct flow_same same={parent,tree,n};
       uint32_t k=mesh_graph_keyed_find(head,next,d,flow_same,&same);
       if(k==UINT32_MAX){
-        if(made>=room){failed=1;break;}
+        if(made>=room){failed=ENOSPC;break;}
         demand[made]=d;
         if(startup)startup->tree[made]=longest;
         memcpy(parent+(size_t)made*n,tree,n*sizeof *tree);
@@ -1114,12 +1119,13 @@ uint32_t mesh_graph_flow_startup(uint32_t n, uint32_t E, const uint32_t *from, c
       const int forward=tree[to[e]]==from[e],reverse=tree[from[e]]==to[e];
       if(!forward && !reverse)continue;
       size_t way=2*(size_t)e+reverse;
-      if(downward[d])congestion=fmax(congestion,load[way]/cap[e]);
-      if(upward[d])congestion=fmax(congestion,load[way^1]/cap[e]);
+      if(downward[d])congestion=fmax(congestion,load[way]/cap[way]);
+      if(upward[d])congestion=fmax(congestion,load[way^1]/cap[way^1]);
     }
     rate[k]=congestion>0?share[k]/congestion:0;
   }
   free(path);free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(hits);free(done);free(head);free(next);
+  if(failed)errno=failed;
   return failed?UINT32_MAX:made;
 }
 

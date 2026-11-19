@@ -306,6 +306,11 @@ int mesh_plan_flow_geometry(const struct mesh_plan_flow *,const struct mesh_plan
 void mesh_plan_flow_geometry_retain(struct mesh_plan_flow_geometry *);
 void mesh_plan_flow_geometry_free(struct mesh_plan_flow_geometry *);
 struct mesh_plan_slot { uint32_t root,local; };
+struct mesh_plan_links {
+  uint32_t pairs,from[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1],to[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
+  uint32_t arc[MESH_NODES_MOST][MESH_NODES_MOST];
+  double capacity[MESH_NODES_MOST*(MESH_NODES_MOST-1)],rate[MESH_NODES_MOST*(MESH_NODES_MOST-1)];
+};
 struct mesh_plan_flow {
   const struct mesh_plan_geometry *geometry;
   const struct mesh_declared *declared;
@@ -333,9 +338,7 @@ struct mesh_plan_flow {
      where the caller gave none, held until plan_free) */
   const uint32_t *of;
   struct mesh_grouped own;
-  uint32_t pairs,from[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1],to[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
-  double capacity[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
-  size_t *tree;
+  const struct mesh_plan_links *links;
   uint32_t *parent;
   uint64_t *run;
   uint32_t made;
@@ -417,6 +420,7 @@ struct mesh_plan_analysis {
   uint64_t *lag;
   size_t nsubmissions;
   struct mesh_graph_dependence *submissions;
+  struct mesh_plan_links links;
 };
 
 void mesh_plan_analysis_retain(struct mesh_plan_analysis *);
@@ -429,7 +433,7 @@ int mesh_plan_program_analyze(const struct mesh_nodes *,const struct mesh_plan_g
   const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
-/* routing[a*nodes->count+b] gives the symmetric capacity available to the flow solver. */
+/* routing[a*nodes->count+b] gives the capacity from a to b available to the flow solver. */
 int mesh_plan_program_analyze_routed(const struct mesh_nodes *,const struct mesh_plan_geometry *,uint64_t,
   struct mesh_graph_buffer_result *,const uint32_t *,const struct mesh_function *,uint32_t,
   const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
@@ -468,7 +472,7 @@ struct plan_schedule_result {
   size_t edges,entries,dependencies;
   uint32_t *reader;
   struct plan_span *consumer;
-  double *w,*cost,*rate,*completion,*priority,*completed;
+  double *w,*cost;const double *rate;double *completion,*priority,*completed;
   uint32_t *resource,*from,*to,*link,*communication,*before,*after,*place;
   size_t *route;
   struct mesh_plan_analysis *owned;

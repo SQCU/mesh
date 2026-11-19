@@ -609,7 +609,7 @@ static void flow_sets_free(struct flow *f){
    is not the map's serial as one whole reading of the map left it.  The cables between this node and
    the port's peer are the reach entries both records list for each other (each from its own side, the ports crossed),
    one cable an entry of each (mesh-map.h mesh_cables, the one per-cable join); a cable's key is (the lower node id's
-   port index, the higher's), cables in key order; its bandwidth the lesser of the two records' and its queue pairs the
+   port index, the higher's), cables in key order; its directional bandwidths the reporting ends' outbound rates and its queue pairs the
    lesser of the two (the pairing's, the same at both ends).  The pair's links are each cable's queue pairs
    0 .. qps - 1 in (key, queue pair) order, each of rate the cable's bandwidth over its queue pairs.  The plan's list
    is its template, u copies of one execution's n hops (its state's `entries` = u n at its `hops`, copy c's at [c n,
@@ -751,12 +751,14 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
   struct mesh_cable cables[MESH_PORTS];
   const uint32_t cable_count=mine && theirs?mesh_cables(mine,theirs,cables):0,end=self<peer?0:1;
   free(records);
-  double rate[MESH_PORTS*MESH_LINK_LANES];
+  double rate[2][MESH_PORTS*MESH_LINK_LANES];
   uint32_t on[MESH_PORTS*MESH_LINK_LANES],queue[MESH_PORTS*MESH_LINK_LANES],links=0;
   for(uint32_t c=0;c<cable_count;c++){
     if(cables[c].qps>MESH_LINK_LANES)return EPROTO;
     for(uint32_t q=0;q<cables[c].qps;q++){
-      rate[links]=(double)cables[c].bandwidth/(double)cables[c].qps;on[links]=c;queue[links]=q;links++;
+      rate[MESH_SEND][links]=(double)cables[c].bandwidth[end]/cables[c].qps;
+      rate[MESH_RECEIVE][links]=(double)cables[c].bandwidth[1-end]/cables[c].qps;
+      on[links]=c;queue[links]=q;links++;
     }
   }
   /* each direction's hops of the pair, its units: the template's entries naming the peer, picked once over the whole
@@ -793,7 +795,7 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     if(!units[d])continue;
     for(uint64_t k=0;k<units[d];k++)bytes[k]=list[pick[d][k]].bytes;
     if(!(assigned[d]=malloc(units[d]*sizeof *assigned[d]))){error=ENOMEM;goto failed;}
-    if(isinf(mesh_graph_list_schedule(links,rate,units[d],bytes,assigned[d],carried))){error=EHOSTUNREACH;goto failed;}
+    if(isinf(mesh_graph_list_schedule(links,rate[d],units[d],bytes,assigned[d],carried))){error=EHOSTUNREACH;goto failed;}
     for(uint64_t k=0;k<units[d];k++){
       const uint32_t a=assigned[d][k];
       if(cables[on[a]].key[end]!=port->index){assigned[d][k]=UINT32_MAX;continue;}

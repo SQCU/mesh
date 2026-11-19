@@ -186,7 +186,7 @@ uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,str
       const struct mesh_reach *f=b->reach+k;
       if(f->node!=a->node || f->port!=e->peer_port || f->peer_port!=e->port)continue;
       const struct mesh_cable cable={.key={lower?e->port:e->peer_port,lower?e->peer_port:e->port},
-        .qps=e->qps<f->qps?e->qps:f->qps,.bandwidth=e->bandwidth<f->bandwidth?e->bandwidth:f->bandwidth};
+        .qps=e->qps<f->qps?e->qps:f->qps,.bandwidth={lower?e->bandwidth:f->bandwidth,lower?f->bandwidth:e->bandwidth}};
       uint32_t at=n++;
       for(;at && (out[at-1].key[0]>cable.key[0] || (out[at-1].key[0]==cable.key[0] && out[at-1].key[1]>cable.key[1]));at--)
         out[at]=out[at-1];
@@ -201,7 +201,10 @@ static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *
   struct mesh_cable cables[MESH_PORTS];
   const uint32_t joined=mesh_cables(a,b,cables);
   uint64_t slowest=0;
-  for(uint32_t c=0;c<joined;c++)if(cables[c].bandwidth && (!slowest || cables[c].bandwidth<slowest))slowest=cables[c].bandwidth;
+  for(uint32_t c=0;c<joined;c++)for(uint32_t d=0;d<2;d++){
+    const uint64_t rate=cables[c].bandwidth[d];
+    if(rate && (!slowest || rate<slowest))slowest=rate;
+  }
   if(joined)*bandwidth=slowest;
   return joined;
 }
@@ -245,13 +248,6 @@ static void mesh_map_order(const struct mesh_record *r,uint32_t count,uint32_t *
   }
 }
 
-static uint64_t mesh_capacity(const struct mesh_record *a,const struct mesh_record *b){
-  struct mesh_cable cables[MESH_PORTS];
-  uint64_t sum=0;
-  for(uint32_t c=mesh_cables(a,b,cables);c;c--)sum+=cables[c-1].bandwidth;
-  return sum;
-}
-
 /* mesh.h mesh_seqlock_whole */
 int mesh_view_whole(struct hdr *m,uint64_t before){ return mesh_seqlock_whole(&m->view_map,before); }
 
@@ -267,7 +263,14 @@ int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   for(uint32_t i=0;i<count;i++){
     out->node[i]=r[order[i]].node;
     if(out->node[i]==c->M->node)out->self=i;
-    for(uint32_t j=0;j<i;j++)out->capacity[i][j]=out->capacity[j][i]=mesh_capacity(r+order[i],r+order[j]);
+    for(uint32_t j=0;j<i;j++){
+      struct mesh_cable cables[MESH_PORTS];
+      const uint32_t joined=mesh_cables(r+order[j],r+order[i],cables);
+      for(uint32_t k=0;k<joined;k++){
+        out->capacity[j][i]+=cables[k].bandwidth[0];
+        out->capacity[i][j]+=cables[k].bandwidth[1];
+      }
+    }
   }
   return out->self==MESH_ABSENT?ENOENT:0;
 }

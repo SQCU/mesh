@@ -73,7 +73,7 @@ struct mesh_health { uint64_t booted,available; };
 /* tag pre-return-20261103 rdma/mesh-plan.h struct mesh_reach, adapted: an entry a cable, not a stream */
 /* a cable of the record's node, as its pairing made it: `node` the peer node at its other end, `port` the record's
    node's port index and `peer_port` the peer's (the index each bridge gave its port), `qps` the queue pairs the
-   pairing negotiated, the same at both ends, and `bandwidth` its bandwidth in bits a second.  Each of the two records
+   pairing negotiated, the same at both ends, and `bandwidth` its outbound rate in bits a second.  Each of the two records
    lists the cable from its own side; a cable's id, the same at both ends, is its port at the end of the lower node
    id.  The bridges' rule reads cables (mesh-flow.c link_prepare); the collective reads only node pairs and each
    pair's capacity, the sum of its cables' bandwidth, never a port or queue pair. */
@@ -126,10 +126,10 @@ static inline struct mesh_record *mesh_view_records(struct hdr *m){ return (stru
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 /* The bridge's per-cable join (mesh-flow.c link_prepare, "The rule both ends compute"), the one matching of two
    records' cables that mesh_joined and mesh_nodes_read read too: the cables a and b both list for each other, ports
-   matching both ways, each `key` (the lower node id's port index, the higher's), sorted by key, `bandwidth` and `qps`
-   each the lesser of the two records'; `out` holds MESH_PORTS; their count.  No client API gives a cable: hidden, so
+   matching both ways, each `key` (the lower node id's port index, the higher's), sorted by key. bandwidth[end] is the rate leaving that end,
+   qps is the negotiated minimum; `out` holds MESH_PORTS; their count.  No client API gives a cable: hidden, so
    libmesh.dylib does not export it, and the bridge's image, built from mesh-dataflow.c, calls it */
-struct mesh_cable { uint32_t key[2],qps; uint64_t bandwidth; };
+struct mesh_cable { uint32_t key[2],qps; uint64_t bandwidth[2]; };
 __attribute__((visibility("hidden")))
 uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,struct mesh_cable *out /* room MESH_PORTS */);
 /* 2026-11-05 (design/compilation-coordination.md, "The revisions of f3f7cf46", SW): mesh_ports_named (the start's port

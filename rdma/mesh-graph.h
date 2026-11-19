@@ -185,7 +185,8 @@ uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint3
 void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);
 double mesh_graph_exp(double x);
 double mesh_graph_log(double x);
-/* design/joint-compilation.md §3, row 3 */
+/* capacity[2*e] is from[e] to to[e], capacity[2*e+1] the reverse. Zero omits that direction.
+   All three flow solvers return UINT32_MAX with errno set on failure. */
 uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
                          uint32_t count, const uint32_t *root, const double *up, const double *down,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
