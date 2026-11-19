@@ -145,17 +145,6 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,doub
    may route a part the long way round a ring).  Writes root, parent (nodes a tree) and log_weight for map->nodes trees,
    tree r rooted at node r; returns their count, 0 where the map does not join its nodes or has relays. */
 uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
-/* The shortest trees with each partial that crosses the map's narrowest pair (the least capacity of any linked pair,
-   as mesh_trees_shortest counts it) cut in two: share f along its shortest tree, 1 - f along the shortest tree of the
-   map without that pair (the long way round a ring), f the one of 0, 1/48, .., 1 under which the trees' most loaded
-   direction of any pair carries the least per its capacity (every root's partial one unit), the greatest such f of
-   equals; a root whose shortest tree does not cross the pair, or a map that the pair's removal parts, one tree.  The
-   bandwidth-first form of the shortest trees, for partials large enough that the narrow pair's time outweighs a hop.
-   Writes root, parent and log_weight for at most 2 x map->nodes trees, each root's in order (its shortest first);
-   returns their count (*share f, 1 where no root is cut), 0 as mesh_trees_shortest. Each root's shortest tree is
-   chosen among its shortest trees (eight at most, mesh_trees_shortest's first) jointly with f, the least most-loaded
-   direction again; at most 16 nodes. */
-uint32_t mesh_trees_split(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight,double *share);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };

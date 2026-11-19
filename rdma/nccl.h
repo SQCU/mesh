@@ -938,18 +938,13 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId com
    trees, the default's), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
    both the caller's: Blink's packing [Wang et al. 2020], every link a share), ncclMeshTreesShortest each root's one
    shortest tree (mesh-plan.h mesh_trees_shortest: the fewest hops, then the widest narrowest one; `most`, `eps` and
-   `shares` not read: a latency-first form, where the packed trees route a part the long way round), ncclMeshTreesGiven the
-   caller's `given` trees (copied with the form, checked against the map where the form is compiled: each root's trees
-   and their log weights, its segment cut among them by those weights; `most`, `eps` and `shares` not read: a split the
-   caller chose), ncclMeshTreesSplit mesh_trees_split's trees of the map (the shortest, each partial that crosses the
-   map's narrowest pair cut, a part along the shortest tree of the map without it: a ring's narrow hop at large sizes;
-   the shortest trees where no pair is narrower), a segment cut among its root's trees by
+   `shares` not read: a latency-first form, where the packed trees route a part the long way round), a segment cut among its root's trees by
    `shares` (root r's k-th tree in the packing's order, heaviest first, or the communicator's trees' order, shares[r x
    most + k], each 0 or more, a tree of 0 or past `most` carrying none, for the communicator's ranks; NULL: the
    packing's flows); an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
    reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part one entry a
    hop, a relay sending each page on as it lands (mesh-plan.h mesh_compile). */
-typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1, ncclMeshTreesShortest = 2, ncclMeshTreesGiven = 3, ncclMeshTreesSplit = 4 } ncclMeshTrees;
+typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1, ncclMeshTreesShortest = 2 } ncclMeshTrees;
 typedef struct {
   int collective;
   int root;
@@ -959,7 +954,6 @@ typedef struct {
   uint32_t most;
   double eps;
   const double* shares;
-  const struct mesh_trees* given;   /* ncclMeshTreesGiven's trees (appended: a form made zeroed has none) */
 } ncclMeshForm;
 /* A communicator's configuration operand: its forms, in order, compiled ahead of its structural table at each map read
    (Programs, above), so a call runs the first form of its collective (and root) whose bound its bytes are under, else
