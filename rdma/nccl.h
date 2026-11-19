@@ -62,10 +62,10 @@
 
    Programs.  A communicator's programs are a table of compiled collectives, operands made ahead of time (mesh-plan.h
    struct mesh_program): the caller's own (ncclMeshCommInitRank), or else the structural one, compiled on its map at its
-   first call that needs it, along the caller's paths (ncclMeshCommInitRank) or the map's packed trees:
-   the two-phase all-reduce, the reduce-scatter and the all-gather (segment s up and down
-   s's trees) and each root's reduce and broadcast, every one uncut (a step's piece one entry, any size, which the
-   bridge alone cuts into SENDs).  The communicator's configuration names other forms of a collective ahead of these
+   first call that needs it. Reductions use the caller's trees or the map's packed trees. Broadcast and all-gather
+   schedule their source byte ranges to the call's recipients on the full communicator topology (mesh_scatter_schedule,
+   up to 64 ranks). Caller-supplied paths and larger communicators use the tree form. The bridge stripes a peer's
+   byte ranges across its cables. The communicator's configuration names other forms of a collective ahead of these
    (ncclMeshCommForms, below), each with its own size bound,
    compiled first in the same table.  A call runs its table's first program of its collective (and root) whose size
    bound its operand is under; nothing about it is decided where it runs, no price chooses it, and
@@ -916,7 +916,7 @@ ncclResult_t pncclGroupEnd(void);
    `programs` its compiled collectives (mesh-plan.h struct mesh_program, copied, kept for its life; a call runs the
    first whose collective, and a rooted one's root, is the call's and whose `below` its bytes are under, 0 any size), or
    with none (count 0) the structural table (above), every collective along `paths` (its routing tables: each member's
-   trees; NULL: the map's packed trees), checked against its map; `small` not read; `name` the communicator's
+   trees; NULL selects the defaults described under Programs), checked against its map; `small` not read; `name` the communicator's
    (NULL: commId's).  Every rank passes the same commId,
    nranks, paths, programs and name.  `config` NULL, or its `blocking` not 0, is a blocking init.  With `blocking` 0 it
    is NCCL's non-blocking init: *comm is set at once and the init runs on a thread of its own, the call returning
@@ -934,7 +934,7 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId com
    MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) at `root` (a reduce's or a
    broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
    (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesOwn the communicator's own (its paths, else the map's packed
-   trees, the default's), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
+   trees), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
    both the caller's: Blink's packing [Wang et al. 2020], every link a share), ncclMeshTreesShortest each root's one
    shortest tree (mesh-plan.h mesh_trees_shortest: the fewest hops, then the widest narrowest one; `most`, `eps` and
    `shares` not read: a latency-first form, where the packed trees route a part the long way round), a segment cut among its root's trees by
@@ -950,7 +950,7 @@ typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1, ncclMeshTreesShort
    call itself), from the communicator's map (every cable between two ranks a link, a relay-only rank's among them) and
    its measured rates (ncclMeshCommLinkRates; without them a cable's bandwidth as the bridges' records give it, no
    latency): the piece and the schedule of least completion over every link both ways, every rank a store and forward
-   relay; the schedule's sends the program's moves, a piece a part, in their start order. */
+   relay. The compiler binds the selected peer hops and their exact extents in wire order. A relay can forward each completed piece. */
 typedef struct {
   int collective;
   int root;

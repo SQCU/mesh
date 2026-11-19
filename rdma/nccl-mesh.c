@@ -309,6 +309,7 @@ struct ncclComm {
   struct mesh_fabric fabric;
   uint32_t *endpoint;
   struct mesh_paths *writes, *tree_hops;
+  int write_routes_given;
   double *write_release;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
@@ -558,21 +559,9 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
   return result;
 }
 
-/* the communicator's table on its map: its configured forms first, in their order (compile_form), then the caller's
-   programs where it listed some (ncclMeshCommInitRank), else, along the caller's paths (checked against the map) or
-   else the map's links packed (mesh_trees_pack: every member's trees at once for the all-reduce, the reduce-scatter and
-   the all-gather, each root's alone for its reduce and broadcast, every link in use and each tree's part its flow's
-   share, so a part crosses every route and the routes end together [Garg & Konemann 1998; Blink, Wang et al. 2020]),
-   the all-reduce two-phase (the reduce-scatter and then the all-gather over every pair [Patarasuk & Yuan 2009]), the
-   reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, each
-   tree's part one entry, a relay sending on each page as it lands (present_group, forwards), of any size (mesh_compile;
-   mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a
-   call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
-   bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
-   whose links do not join its members fails it, naming two: a route crosses ranks alone, so a node a route is to cross
-   takes part as a rank, and in this table, compiled with no contributors (compile_entry), it combines its own operand
-   into what it sends on; the identity at a rank with no work (design/data-model.md section 9) is only a caller's
-   programs' (mesh-plan.h mesh_compile's contributors) */
+/* Configured forms precede caller programs or the structural defaults (nccl.h, Programs). Reductions use the
+   packed trees or the caller's trees. The native scatter solves broadcast and gather from their operand roles
+   on the full map, including participating relay-only ranks. Explicit routes and trees select the tree form. */
 static int ranks_joined(const struct mesh_link_map *map, uint32_t *apart);
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
@@ -619,17 +608,19 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     comm->entries[comm->programs++].below = comm->given[e].below;
   }
   if (comm->listed) return ncclSuccess;
-  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 0) ||
-      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 0))
-    return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
+  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 0))
+    return fail(ncclInternalError, "the reduction along the communicator's trees does not compile");
   for (uint32_t r = 0; r < n; r++)
-    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, 0) || compile_entry(comm, rooted, MESH_BROADCAST, r, 0, 0))
-      return fail(ncclInternalError, "the reduce or broadcast of root %u along the communicator's trees does not compile", r);
-  return ncclSuccess;
+    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, 0))
+      return fail(ncclInternalError, "the reduce of root %u along the communicator's trees does not compile", r);
+  const ncclMeshTrees scatter = n <= 64 && !comm->paths.count && !comm->write_routes_given ? ncclMeshTreesScheduled : ncclMeshTreesOwn;
+  const ncclMeshForm gather = {.collective = MESH_ALLGATHER, .trees = scatter};
+  const ncclMeshForm broadcast = {.collective = MESH_BROADCAST, .root = -1, .trees = scatter};
+  ncclResult_t result = compile_form(comm, along, &gather);
+  return result ? result : compile_form(comm, rooted, &broadcast);
 }
 
-/* The communicator's logical programs name rank endpoints. Physical lowering
-   expands every transaction over the configured cables and relay paths. */
+/* Compile the collective table for this topology. Call geometry determines the scheduled entries at capture. */
 static ncclResult_t comm_compile(struct ncclComm *comm) {
   if (comm->compiled) return ncclSuccess;
   ncclResult_t result = comm_routes(comm);
@@ -816,6 +807,8 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
   struct mesh_paths *to = comm->writes + source * comm->nranks + destination;
   paths_free(to); *to = (struct mesh_paths){P, first, cable, weights};
   if (comm->tree_hops) comm->tree_hops[to - comm->writes] = *to;
+  if (!comm->write_routes_given) routes_free(comm, 0);
+  comm->write_routes_given = 1;
   plan_free(comm, comm->plan); comm->plan = NULL;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
