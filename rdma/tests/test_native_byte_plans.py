@@ -41,14 +41,18 @@ struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule
 struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; int active; };
 struct mesh_ctx { struct hdr *M; };
 struct mesh_entry { uint64_t spans,units,word,base; };
+/* an entry the bridge could hold declared: its span table the region's, each span valid */
 static int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
-  const struct mesh_crossing t={.spans=e.spans,.units=e.units,.gate=e.word,.base=e.base};
-  return e.base<UINT64_MAX-e.units && mesh_crossing_valid(m,&t);
+  if(!e.units || e.base>=UINT64_MAX-e.units || !mesh_region_holds(m,e.spans,e.units*sizeof(struct mesh_dma_span),8))return 0;
+  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+e.spans);
+  for(uint64_t i=0;i<e.units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
+  return 1;
 }
+typedef int (*entry_visit)(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end);
 struct channel_view { _Atomic uint64_t *landed,*ready,*sent; };
 struct hold { uint64_t wire,generation; };
 struct attach { struct mesh_ctx context; struct hold holds[2]; };
-struct channel { uint32_t stream,node,cable; struct channel_view view; void *buffer; size_t sent;
+struct channel { uint32_t stream,node,cable; struct channel_view view; void *buffer; size_t sent; uint64_t ready_at;
   uint64_t published,consumed,waited; const uint64_t *wire; struct mesh_byte_account payload[2]; unsigned trace_readers; };
 struct ncclComm { struct attach *attach; uint64_t page; uint32_t count; struct plan *plan; const char *name;
   struct channel channels[2]; uint32_t endpoint[2]; int rank; void *violation; };
@@ -91,14 +95,11 @@ static int all_writes(const struct call *l,size_t n){(void)l;(void)n;return 1;}
 static ncclResult_t order_writes(const struct ncclComm *c,const struct call *l,size_t n,struct schedule *s){
   (void)c;(void)l;(void)n;(void)s;return ncclSuccess;
 }
-static int room_for(const struct ncclComm *comm,const struct channel *c,int direction,uint64_t n){(void)comm;(void)c;(void)direction;(void)n;return 1;}
-static ncclResult_t room_wait(struct ncclComm *c,const struct channel *ch,int direction,uint64_t n){
-  (void)c;(void)ch;(void)direction;(void)n;assert(!"unexpected wait");return ncclInternalError;
-}
-static int channel_present(struct ncclComm *comm,const struct channel *ch,int land,struct mesh_entry e,uint64_t end){
+/* an issued entry as the trace log takes it: each one as the bridge holds it declared */
+static void channel_log(struct ncclComm *comm,const struct channel *ch,int land,struct mesh_entry e){
   const uint32_t stream=ch->stream;
-  assert(stream<2 && observed_count[stream][land]<8 && mesh_entry_valid(comm->attach->context.M,e) && end>=e.units);
-  observed[stream][land][observed_count[stream][land]++]=e;return 0;
+  assert(stream<2 && observed_count[stream][land]<8 && mesh_entry_valid(comm->attach->context.M,e));
+  observed[stream][land][observed_count[stream][land]++]=e;
 }
 '''
 
@@ -219,7 +220,7 @@ static void relay_prefix(void){
   struct message out={.c=&call,.step=1,.offset=4096,.bytes=4099,.pages={span_units(&p.packets,4096,4099)}};
   in.end=in.pages;out.end=out.pages;
   struct schedule schedules[]={{.in=&in,.ins=1},{.out=&out,.outs=1}};
-  assert(!place_group(NULL,&comm,schedules,1));assert(!present_group(&comm,schedules));
+  assert(!place_group(NULL,&comm,schedules,1));assert(!issue_entries(&comm,schedules));
   const struct mesh_entry e=observed[1][0][0];
   assert(e.word==(uint64_t)((char *)&region->control-(char *)region));
   assert(e.base==2 && e.units==2); /* MR tail 3 + 4093, not one 4096-byte page. */
@@ -258,7 +259,8 @@ class NativeBytePlans(unittest.TestCase):
         source = (ROOT / 'nccl-mesh.c').read_text()
         names = ('named', 'shifted', 'address_of', 'write_displacement', 'span_after', 'span_units',
                  'page_up', 'schedules_free', 'group_at', 'repeat_of', 'group_bound', 'place_group',
-                 'forwards', 'channel_account_prune', 'channel_account_append', 'present_group')
+                 'forwards', 'channel_account_prune', 'channel_account_append', 'group_entries', 'entry_logged',
+                 'issue_entries')
         bodies = '\n\n'.join(function(source, name) for name in names)
         self.compile_and_run(MOCKS + bodies + CASES, 'native exact byte plans PASS')
 

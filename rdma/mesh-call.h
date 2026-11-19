@@ -27,8 +27,8 @@ struct mesh_run { struct mesh_order order; uint32_t program,padding; _Atomic uin
    in key order (mesh-order.h order_compose).  Both ends' clients declare the same program, its directions swapped, at
    the same point of their code; nothing is sent.  0; EINVAL (a table, span, gate or done word the region does not hold,
    a span longer than a piece, a step past the period); ENOLINK where the order is not the one opened (or was restarted
-   here: a program of a client gone held pieces outstanding); EBUSY where another declaration toward the node is under
-   way or the programs going on are not at one round boundary; ENOSPC where the node's programs or segments are all in
+   here: a program of a client gone held pieces outstanding); EBUSY where another client's declaration toward the node
+   held it past MESH_PLATFORM_NS or the programs going on are not at one round boundary; ENOSPC where the node's programs or segments are all in
    use */
 int mesh_declare(struct mesh_ctx *,const struct mesh_order *,const struct mesh_declaration *,struct mesh_run *);
 /* the client's program ended at the steps it issued (a whole number of executions): the node's next segment without it

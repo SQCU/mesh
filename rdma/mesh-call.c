@@ -147,7 +147,11 @@ static int declare(struct mesh_ctx *context,const struct mesh_order *order,const
   struct hdr *m=context->M;
   if(program && !program_valid(m,program))return EINVAL;
   struct mesh_node *x=mesh_node_at(m,order->slot);
-  int error=declaring_take(m,x,context->client);
+  /* another client's declaration toward the node under way is awaited (declarations are made one at a time), at most
+     MESH_PLATFORM_NS */
+  int error;
+  for(const uint64_t until=mesh_clock_ns()+MESH_PLATFORM_NS;(error=declaring_take(m,x,context->client)) && mesh_clock_ns()<until;)
+    __asm__ volatile("yield");
   if(error)return error;
   error=declare_held(context,order,x,program,only,run);
   uint64_t held=context->client;

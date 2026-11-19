@@ -206,7 +206,7 @@ class IndexedWrite(unittest.TestCase):
         source = (ROOT/'nccl-mesh.c').read_text()
         names = ('named', 'shifted', 'address_of', 'write_displacement', 'span_after', 'span_units',
                  'page_up', 'schedules_free', 'group_at', 'repeat_of', 'group_bound', 'place_group',
-                 'forwards', 'channel_account_prune', 'channel_account_append', 'present_group',
+                 'forwards', 'channel_account_prune', 'channel_account_append', 'group_entries', 'entry_logged', 'issue_entries',
                  'write_view_compare', 'write_view_validate', 'write_view_packets')
         body = native.MOCKS + structure(source, 'write_binding_report') + '\n'.join(function(source, name) for name in names)
         cases = native.CASES.replace('int main(void){', INDEXED+'\nint main(void){').replace(
@@ -223,7 +223,7 @@ class IndexedWrite(unittest.TestCase):
         mocks += '\n#include <unistd.h>\n'+source[size_start:source.index(';', size_start)+1]
         names = ('named', 'shifted', 'address_of', 'write_displacement', 'write_plan_drop', 'span_after', 'span_units',
                  'page_up', 'schedules_free', 'group_at', 'repeat_of', 'group_bound', 'place_group',
-                 'forwards', 'channel_account_prune', 'channel_account_append', 'present_group',
+                 'forwards', 'channel_account_prune', 'channel_account_append', 'group_entries', 'entry_logged', 'issue_entries',
                  'write_view_compare', 'write_view_validate', 'write_view_packets', 'where_of')
         body = mocks+structure(source, 'write_binding_report')+'\n'.join(function(source, name) for name in names)
         body += PREPARE+'\n'.join(function(source, name) for name in
