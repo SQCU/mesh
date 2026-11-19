@@ -95,16 +95,51 @@ static int separate_groups(struct mesh_ctx *ctx,uint32_t peer,uint64_t first,int
   return status;
 }
 
+static int three_groups(struct mesh_ctx *ctx,uint32_t peer,uint64_t first,int receiver){
+  struct mesh_section lease;int status=mesh_section_create(ctx,3*sizeof(struct storage),1,&lease);if(status)return status;
+  struct storage *s=mesh_section_address(ctx,lease,0);memset(s,0,3*sizeof *s);
+  uint64_t handles[3]={0};
+  for(unsigned i=0;i<3 && !status;i++){
+    uint64_t off=(uint64_t)((char *)(s+i)-(char *)ctx->M);unsigned count=i==2?2:1;
+    for(unsigned k=0;k<count;k++){
+      int land=k?!receiver:receiver;
+      s[i].payload[k][0]=0x1c;s[i].payload[k][1]=land?0:0x39+i+k;s[i].payload[k][2]=0x21;
+      s[i].spans[k]=(struct mesh_dma_span){off+offsetof(struct storage,payload)+k*3+1,1};
+      uint64_t gate=land || (i==2 && !k)?0:off+offsetof(struct storage,release_first);
+      s[i].second[k]=(struct mesh_peer_transfer){k,off+offsetof(struct storage,spans)+k*sizeof s[i].spans[0],1,
+        gate,1,off+offsetof(struct storage,complete)+8*k,1,(uint32_t)land,0};
+    }
+    status=mesh_peer_install(ctx,peer,first+i,off+offsetof(struct storage,second),count,handles+i);
+    if(!status)status=mesh_peer_wait(ctx,handles[i],MESH_PLATFORM_NS);
+  }
+  if(!status)status=wait_word(s[2].complete);
+  if(!status && (atomic_load(s[0].complete) || atomic_load(s[1].complete) || s[2].payload[0][1]!=0x3b))status=EILSEQ;
+  if(!status && receiver)atomic_store_explicit(&s[2].release_first,1,memory_order_release);
+  if(!status)status=wait_word(s[2].complete+1);
+  for(int i=1;i>=0 && !status;i--){
+    if(!receiver)atomic_store_explicit(&s[i].release_first,1,memory_order_release);
+    status=wait_word(s[i].complete);
+  }
+  for(unsigned i=0;i<3;i++)for(unsigned k=0;k<(i==2?2u:1u);k++)
+    if(!status && (s[i].payload[k][0]!=0x1c || s[i].payload[k][1]!=0x39+i+k || s[i].payload[k][2]!=0x21))status=EILSEQ;
+  for(unsigned i=0;i<3;i++)if(handles[i]){int r=mesh_peer_release(ctx,handles[i]);if(!status)status=r;}
+  int closed=mesh_lease_return(ctx,lease.first);if(!status)status=closed;
+  if(!status)printf("{\"two_held_while_third_completed\":true,\"guards\":true,\"role\":\"%s\"}\n",receiver?"receive":"send");
+  return status;
+}
+
 int main(int argc,char **argv){
   if((argc!=4 && argc!=5) || (strcmp(argv[1],"send") && strcmp(argv[1],"receive")) ||
-     (argc==5 && strcmp(argv[4],"concurrent") && strcmp(argv[4],"sequential"))){
-    fprintf(stderr,"usage: %s send|receive PEER_NODE GROUP [concurrent|sequential]\n",argv[0]);return 2;
+     (argc==5 && strcmp(argv[4],"concurrent") && strcmp(argv[4],"sequential") && strcmp(argv[4],"blocked"))){
+    fprintf(stderr,"usage: %s send|receive PEER_NODE GROUP [concurrent|sequential|blocked]\n",argv[0]);return 2;
   }
   struct mesh_ctx ctx={.fd=-1};int status=mesh_attach(&ctx);
   uint32_t peer=(uint32_t)strtoul(argv[2],NULL,0);uint64_t group=strtoull(argv[3],NULL,0);
   if(!status)status=mesh_peer_capable(&ctx,peer);
   if(!status){int receive=!strcmp(argv[1],"receive");
-    status=argc==5?separate_groups(&ctx,peer,group,receive,!strcmp(argv[4],"concurrent")):sample(&ctx,peer,group,receive);
+    if(argc==4)status=sample(&ctx,peer,group,receive);
+    else if(!strcmp(argv[4],"blocked"))status=three_groups(&ctx,peer,group,receive);
+    else status=separate_groups(&ctx,peer,group,receive,!strcmp(argv[4],"concurrent"));
   }
   if(ctx.M)mesh_detach(&ctx);
   if(status)fprintf(stderr,"%s: %s (%d)\n",argv[0],strerror(status),status);

@@ -195,6 +195,7 @@ struct mesh_stream {
   _Atomic uint64_t sends,lands;
   struct mesh_cpu_pin metadata;
   _Alignas(64) _Atomic uint64_t ready;
+  _Atomic uint64_t peer_presented[2][2],peer_mode;
   _Alignas(64) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];
   _Atomic uint32_t child;

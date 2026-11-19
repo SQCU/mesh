@@ -124,7 +124,7 @@ static inline uint64_t lanes_through(const uint64_t *u){
 /* A taken-entry ring; units/base/count refer to transport units. `base` is
    the pairing-wide prefix before this holding. Tables stay immutable through
    final unit completion; taking an entry releases only its list slot. */
-struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count; };
+struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count;uint64_t origin[2]; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served
@@ -137,7 +137,7 @@ enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
 enum { HELLO=1, FAREWELL, RECORD, LINK, PEER_MESSAGE };
-enum { PEER_EXTENTS=4 };
+enum { PEER_EXTENTS=8 };
 void peer_service_open(void);
 void peer_service_close(void);
 void peer_service_adopt(void);

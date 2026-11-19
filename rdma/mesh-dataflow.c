@@ -140,7 +140,7 @@ static uint64_t peer_capacity(struct mesh_record *a,struct mesh_record *b){
       const struct mesh_reach y=b->reach[j];
       if(y.node!=a->node)continue;
       if(!x.padding || !y.padding){
-        uint64_t rate;
+        uint64_t rate=0;
         const uint32_t common=mesh_join(a,b,&rate);
         return (uint64_t)common*rate;
       }
