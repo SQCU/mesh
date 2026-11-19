@@ -28,6 +28,17 @@ struct mesh_write_routes_walk {
   unsigned char *seen;
 };
 
+/* fabric_discover realizes one channel per adjacent rank pair. The tree has already
+   selected those hops. Its descriptors borrow the channel from the write paths;
+   logical edges spanning nonadjacent ranks retain their complete path operand. */
+static inline struct mesh_paths mesh_tree_hop(const struct mesh_paths *routes) {
+  static const uint32_t first[] = {0, 1};
+  for (uint32_t p = 0; p < routes->count; p++)
+    if (routes->first[p + 1] - routes->first[p] == 1)
+      return (struct mesh_paths){1, first, routes->cable + routes->first[p], routes->log_weight + p};
+  return *routes;
+}
+
 /* Count first, then fill exactly the same paths. The explicit DFS stack keeps
    depth off the C call stack. `next` is the next cable index at each depth;
    visiting a destination ends that path rather than forwarding through it. */

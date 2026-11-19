@@ -25,6 +25,7 @@ HEAD = r'''
 #include "nccl.h"
 #include "mesh.h"
 #include "mesh-plan.h"
+#include "mesh-write-routes.h"
 #include "nccl-mesh-metal.h"
 #include <assert.h>
 #include <errno.h>
@@ -39,7 +40,9 @@ HEAD = r'''
 struct fixture_context { struct hdr *M; };
 struct attach { struct fixture_context context; };
 struct ncclComm { int rank,nranks; const char *name; uint64_t page;
-  struct mesh_fabric fabric; struct mesh_paths *writes; struct attach *attach; uint32_t count; };
+  struct mesh_fabric fabric; struct mesh_paths *writes,*tree_hops; struct attach *attach; uint32_t count;
+  struct mesh_link_map map; ncclMeshLinkRate *rates; int nrates,scheduled; ncclMeshScheduleStats schedule;
+  struct { uint32_t peer,cable; } *channels; };
 void *metal_contents(void *buffer) { return buffer; }
 '''
 
@@ -89,7 +92,7 @@ static void expected_physical(uint32_t what,int whole,struct mesh_routed_program
     initialized[r]=1+program.scratch;
     offsets[r+1]=offsets[r]+mesh_program_steps_cut(&program,r,(struct mesh_operand){ncclInt64+1,8,ELEMENTS},NULL,1,logical+offsets[r]);
   }
-  assert(!mesh_routed_compile(&fabric,paths,offsets,logical,initialized,1,physical));
+  assert(!mesh_routed_compile(&fabric,comms[0].tree_hops,offsets,logical,initialized,1,physical));
   free(segment);free(first);free(weights);free(move);free(logical);
 }
 
@@ -171,7 +174,22 @@ static uint64_t lower_and_run(uint32_t what,int whole){
       free(schedules[e].out);free(schedules[e].in);
     }
   }
-  simulate(&actual,data); /* Includes use of every physical cable. */
+  if(comms[0].tree_hops==paths)simulate(&actual,data);
+  else {
+    uint32_t used=0;
+    uint64_t bytes=0,demand=0;
+    for(uint32_t r=0;r<N;r++){
+      const struct mesh_routed_rank *rank=actual.rank+r;
+      assert(rank->buffers==rank->initialized);
+      for(uint32_t k=0;k<rank->count;k++){
+        const struct mesh_transfer *t=rank->transfer+k;
+        used|=1u<<t->cable;
+        if(t->step.op==MESH_STEP_SEND)bytes+=t->step.piece.elements*t->step.piece.element_bytes;
+      }
+      for(uint32_t d=0;d<N;d++)demand+=expected.demand[r*N+d];
+    }
+    assert(bytes==demand);simulate_cables(&actual,data,used);
+  }
   for(uint32_t r=0;r<N;r++){
     int64_t output[ELEMENTS];for(uint32_t x=0;x<ELEMENTS;x++)output[x]=-1;
     calls[r].sum=(struct where){NULL,(size_t)data[r][0]};
@@ -269,7 +287,7 @@ int main(void){
   attachment.context.M=calloc(1,1u<<20);assert(attachment.context.M);
   attachment.context.M->length=1u<<20;attachment.context.M->data_off=4096;
   for(uint32_t r=0;r<N;r++)comms[r]=(struct ncclComm){.rank=(int)r,.nranks=N,.name="member fixture",.page=1,
-      .fabric=fabric,.writes=paths,.attach=&attachment};
+      .fabric=fabric,.writes=paths,.tree_hops=paths,.attach=&attachment};
   const uint64_t weighted=lower_and_run(MESH_REDUCE,0); /* root3 has no source operand */
   double saved[N*N];memcpy(saved,tree_weights,count*sizeof *saved);
   for(uint32_t t=0;t<count;t++)tree_weights[t]=-3*tree_weights[t];
@@ -280,6 +298,10 @@ int main(void){
   inactive_nullable_and_avg();direct_source_binding();invalid_roles();explicit_program_validation();
   input_mask=output_mask=(1u<<N)-1;certified_aliases=0;
   lower_and_run(MESH_ALLREDUCE,0);lower_and_run(MESH_ALLREDUCE,1);assert(certified_aliases);
+  struct mesh_paths hops[N*N];
+  for(uint32_t p=0;p<N*N;p++)hops[p]=mesh_tree_hop(paths+p);
+  for(uint32_t r=0;r<N;r++)comms[r].tree_hops=hops;
+  certified_aliases=0;lower_and_run(MESH_ALLREDUCE,0);lower_and_run(MESH_ALLREDUCE,1);assert(certified_aliases);
   free(attachment.context.M);
   puts("native roles, selected trees/phase, all cables, nullable inputs, contributor Avg PASS");return 0;
 }
@@ -300,10 +322,11 @@ class NativeMembers(unittest.TestCase):
         native = (ROOT/'nccl-mesh.c').read_text()
         routed_test = (ROOT/'tests/routed.c').read_text()
         arithmetic = native[native.index('enum { WHAT_COUNTED'):native.index('/* -- communicators')]
-        declarations = '\n'.join(structure(native, name) for name in ('where', 'entry', 'steps', 'call', 'message', 'schedule', 'spans'))
+        declarations = '\n'.join(structure(native, name) for name in ('where', 'entry', 'scatter_schedule', 'steps', 'call', 'message', 'schedule', 'spans'))
         functions = ('named', 'shifted', 'address_of', 'bind_retirements', 'program_free', 'reducing', 'unit_of', 'counted', 'rank_member',
             'call_contributes', 'call_receives', 'call_participants', 'call_bind_roles', 'elements', 'seg_first', 'segment_at',
-            'call_name', 'sent_bytes', 'steps_free', 'bind_routed_steps', 'routed_steps', 'collective_steps',
+            'call_name', 'sent_bytes', 'scatter_release', 'steps_free', 'bind_routed_steps', 'routed_steps',
+            'scatter_steps', 'scheduled_program', 'collective_steps',
             'stage', 'finish', 'in_region', 'spans_meet', 'spans_add', 'plan_direct', 'declared_members')
         body = '\n'.join(function(native, name) for name in functions)
         simulation = routed_test[routed_test.index('enum { N='):routed_test.index('static void check_collective')]
@@ -313,7 +336,6 @@ class NativeMembers(unittest.TestCase):
         cases = CASES
         head = HEAD
         if live:
-            head += '#include "mesh-write-routes.h"\n'
             start = simulation.index('enum { N=')
             end = simulation.index('static const struct mesh_fabric')
             simulation = simulation[:start] + '''enum { N=3, E=6, ELEMENTS=131101 };
@@ -335,7 +357,7 @@ int main(void){
   attachment.context.M=calloc(1,1u<<24);assert(attachment.context.M);
   attachment.context.M->length=1u<<24;attachment.context.M->data_off=4096;
   for(uint32_t r=0;r<N;r++)comms[r]=(struct ncclComm){.rank=(int)r,.nranks=N,.name="live fixture",.page=16384,
-      .fabric=fabric,.writes=paths,.attach=&attachment};
+      .fabric=fabric,.writes=paths,.tree_hops=paths,.attach=&attachment};
   input_mask=output_mask=7;lower_and_run(MESH_ALLREDUCE,0);
   input_mask=3;output_mask=4;lower_and_run(MESH_ALLREDUCE,1);
   input_mask=3;output_mask=5;lower_and_run(MESH_ALLREDUCE,0);

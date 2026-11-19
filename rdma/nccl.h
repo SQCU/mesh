@@ -62,12 +62,11 @@
 
    Programs.  A communicator's programs are a table of compiled collectives, operands made ahead of time (mesh-plan.h
    struct mesh_program): the caller's own (ncclMeshCommInitRank), or else the structural one, compiled on its map at its
-   first call that needs it, along the caller's paths (ncclMeshCommInitRank) or else the map's shortest-path trees (each
-   member's in-tree of the routes between its members): the single-phase all-reduce (each member's sum up its own tree; the
-   direct exchange where every two members are linked), the reduce-scatter and the all-gather (segment s up and down
+   first call that needs it, along the caller's paths (ncclMeshCommInitRank) or the map's packed trees:
+   the two-phase all-reduce, the reduce-scatter and the all-gather (segment s up and down
    s's trees) and each root's reduce and broadcast, every one uncut (a step's piece one entry, any size, which the
    bridge alone cuts into SENDs).  The communicator's configuration names other forms of a collective ahead of these
-   (ncclMeshCommForms, below: the packed trees, the two-phase all-reduce, chunked pipelining, each below a size bound),
+   (ncclMeshCommForms, below), each with its own size bound,
    compiled first in the same table.  A call runs its table's first program of its collective (and root) whose size
    bound its operand is under; nothing about it is decided where it runs, no price chooses it, and
    ncclCollConfig_t.algSelection is not read.  Every member compiles the same programs from the same map and the same
@@ -917,7 +916,7 @@ ncclResult_t pncclGroupEnd(void);
    `programs` its compiled collectives (mesh-plan.h struct mesh_program, copied, kept for its life; a call runs the
    first whose collective, and a rooted one's root, is the call's and whose `below` its bytes are under, 0 any size), or
    with none (count 0) the structural table (above), every collective along `paths` (its routing tables: each member's
-   trees; NULL: the map's shortest-path trees), checked against its map; `small` not read; `name` the communicator's
+   trees; NULL: the map's packed trees), checked against its map; `small` not read; `name` the communicator's
    (NULL: commId's).  Every rank passes the same commId,
    nranks, paths, programs and name.  `config` NULL, or its `blocking` not 0, is a blocking init.  With `blocking` 0 it
    is NCCL's non-blocking init: *comm is set at once and the init runs on a thread of its own, the call returning
@@ -1001,6 +1000,8 @@ ncclResult_t ncclMeshCommNodes(ncclComm_t comm, uint32_t* nodes, int room);
 struct mesh_fabric;
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
 struct mesh_paths;
+/* These directed paths override the lowering of the pair in tree collectives as well as logical writes.
+   Otherwise each selected tree hop uses its adjacent peer channel. */
 ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths);
 /* Configuration-time inspection of the installed paths, including actual log
    weights. The borrowed value remains valid until that pair is reconfigured or
