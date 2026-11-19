@@ -1,0 +1,273 @@
+mesh-sync-monitor: /private/tmp/mesh-joint-public-final-fwj0b99d/issued.monitor.d written, digest eccb9befa4b1f2e3c17b34de4f21151c2e71f3e05d04a799aca5bcda53b29481, node 0, threads [(7, 1)] (operations an execution, executions); operations by class {'program': 7}; edge states {'image': 2, 'stronger': 0, 'false': 0, 'unmatched': 0, 'satisfied': 0, 'transformed': 0, 'scoped': 0}
+dtrace: system integrity protection is on, some features will not be available
+mesh-sync-monitor: attached
+mesh-public 4606253525166 checkout 4334717312
+mesh-public 4606253548041 checkout_wait 4334705808 18446744073709551615
+mesh-public 4606253550791 checkout_result 0
+mesh-public 4606253582875 checked_out 52592181248
+mesh-public 4606253597916 mps_signal 52592181248 52762466048 2
+mesh-public 4606253625541 checkout 4334717312
+mesh-public 4606253626958 checkout_wait 4334705808 18446744073709551615
+mesh-public 4606253628291 checkout_result 0
+mesh-public 4606253629250 checked_out 52592182144
+mesh-public 4606253641541 mps_commit 52592181248
+mesh-public 4606253663291 ingress 52762280960 52762466048 2
+mesh-public 4606253696166 issue 52584154624 1 1 52762467776 4697172144 3
+mesh-sync-monitor: op 108667548 0 1 5 0
+mesh-sync-monitor: op 108667548 1 1 3 0
+mesh-sync-monitor: op 108667548 2 1 5 0
+mesh-sync-monitor: op 108667548 3 1 4 0
+mesh-sync-monitor: op 108667548 4 1 5 0
+mesh-public 4606253921833 group_enter 52762643104
+mesh-sync-monitor: op 108667548 5 1 0 1
+mesh-public 4606253937291 completion_signal 52762280960 52762467776 2
+mesh-sync-monitor: op 108667548 6 1 1 2
+mesh-public 4606253946250 group_enter 52762643104
+mesh-public 4606253948208 residency 52762467776 2
+mesh-public 4606253969000 issued 0
+mesh-public 4606257569666 group_leave 52762643104
+mesh-public 4606257575500 group_leave 52762643104
+mesh-public 4606273989000 end 52584154624 52762467776
+mesh-public 4606273996333 completion 52762467776 2
+mesh-public 4606274002125 value 52762467776 2
+mesh-public 4606274003875 group_wait 52762643104
+mesh-public 4606274006791 ended 0
+
+
+mesh-sync-monitor: public binding e3d18468859dee57e3ca22b7fb65f8064c308299508a70fc3dea1c3624e39598, 24 public API and boundary events observed: {"checked_out": 2, "checkout": 2, "checkout_result": 2, "checkout_wait": 2, "completion": 1, "completion_signal": 1, "end": 1, "ended": 1, "group_enter": 2, "group_leave": 2, "group_wait": 1, "ingress": 1, "issue": 1, "issued": 1, "mps_commit": 1, "mps_signal": 1, "residency": 1, "value": 1}
+mesh-sync-monitor: compiled matrix_market
+%%MatrixMarket matrix coordinate integer general
+% synchronization signature: row and column i are operation i; entry (i, j) is an edge from operation i to operation j, its value the edge's delay in executions
+% processor 0 queue 0 submit=2 queue_signal=2 fence_update=2 fence_wait=2 pass_barrier=6
+% processor 1 host 0
+% processor 2 bridge 0
+% processor 3 host 64
+% processor 4 kernel 0
+% task 0 processor 1 place 0 label 3 copy 0
+% task 1 processor 1 place 1 label 0 copy 0
+% task 2 processor 0 place 2 label 0 copy 0
+% task 3 processor 1 place 3 label 1 copy 0
+% task 4 processor 0 place 4 label 1 copy 0
+% task 5 processor 1 place 5 label 0 copy 0
+% task 6 processor 0 place 6 label 0 copy 0
+% task 7 processor 0 place 7 label 3 copy 0
+% task 8 processor 1 place 8 label 3 copy 1
+% task 9 processor 1 place 9 label 0 copy 1
+% task 10 processor 0 place 10 label 0 copy 1
+% task 11 processor 1 place 11 label 1 copy 1
+% task 12 processor 0 place 12 label 1 copy 1
+% task 13 processor 1 place 13 label 0 copy 1
+% task 14 processor 0 place 14 label 0 copy 1
+% task 15 processor 0 place 15 label 3 copy 1
+% operation 1 processor 0 position 0 pass_barrier task 2 object 4294967295 execution 0 value 0 native_site 3
+% operation 2 processor 0 position 1 fence_update task 2 object 0 execution 0 value 1 native_site 6
+% operation 3 processor 0 position 2 pass_barrier task 4 object 4294967295 execution 0 value 0 native_site 9
+% operation 4 processor 0 position 3 fence_wait task 6 object 0 execution 0 value 1 native_site 14
+% operation 5 processor 0 position 4 pass_barrier task 6 object 4294967295 execution 0 value 0 native_site 15
+% operation 6 processor 0 position 5 submit task 6 object 4294967295 execution 0 value 1 native_site 19
+% operation 7 processor 0 position 6 queue_signal task 7 object 3 execution 0 value 1 native_site 20
+% operation 8 processor 0 position 7 pass_barrier task 10 object 4294967295 execution 1 value 0 native_site 3
+% operation 9 processor 0 position 8 fence_update task 10 object 0 execution 1 value 2 native_site 6
+% operation 10 processor 0 position 9 pass_barrier task 12 object 4294967295 execution 1 value 0 native_site 9
+% operation 11 processor 0 position 10 fence_wait task 14 object 0 execution 1 value 2 native_site 14
+% operation 12 processor 0 position 11 pass_barrier task 14 object 4294967295 execution 1 value 0 native_site 15
+% operation 13 processor 0 position 12 submit task 14 object 4294967295 execution 1 value 1 native_site 19
+% operation 14 processor 0 position 13 queue_signal task 15 object 3 execution 1 value 2 native_site 20
+% synchronized wait 4 signal 2 image kept delay 0 dependence 0 witness -
+% synchronized wait 11 signal 9 image kept delay 0 dependence 1 witness -
+% dependence 0 task 2 task 6 delay 0 least 0 covered
+% dependence 1 task 10 task 14 delay 0 least 0 covered
+% event object 3 role 1 argument 4 lookback 1
+% span 0 first 0 count 1 begin 0 end 7
+% span 1 first 1 count 1 begin 7 end 14
+% totals operations 14 synchronized 2 image 2 stronger 0 false 0 unmatched 0 satisfied 0 transformed 0 redundant 0 uncovered 0 unwaited 2
+14 14 15
+1 2 0
+2 3 0
+3 4 0
+4 5 0
+5 6 0
+6 7 0
+7 8 0
+8 9 0
+9 10 0
+10 11 0
+11 12 0
+12 13 0
+13 14 0
+2 4 0
+9 11 0
+
+mesh-sync-monitor: observed matrix_market
+%%MatrixMarket matrix coordinate integer general
+% synchronization signature: row and column i are operation i; entry (i, j) is an edge from operation i to operation j, its value the edge's delay in executions
+% processor 0 queue 0 submit=1 queue_signal=1 fence_update=1 fence_wait=1 pass_barrier=3
+% processor 1 host 0
+% processor 2 bridge 0
+% processor 3 host 64
+% processor 4 kernel 0
+% task 0 processor 1 place 0 label 3 copy 0
+% task 1 processor 1 place 1 label 0 copy 0
+% task 2 processor 0 place 2 label 0 copy 0
+% task 3 processor 1 place 3 label 1 copy 0
+% task 4 processor 0 place 4 label 1 copy 0
+% task 5 processor 1 place 5 label 0 copy 0
+% task 6 processor 0 place 6 label 0 copy 0
+% task 7 processor 0 place 7 label 3 copy 0
+% task 8 processor 1 place 8 label 3 copy 1
+% task 9 processor 1 place 9 label 0 copy 1
+% task 10 processor 0 place 10 label 0 copy 1
+% task 11 processor 1 place 11 label 1 copy 1
+% task 12 processor 0 place 12 label 1 copy 1
+% task 13 processor 1 place 13 label 0 copy 1
+% task 14 processor 0 place 14 label 0 copy 1
+% task 15 processor 0 place 15 label 3 copy 1
+% operation 1 processor 0 position 0 pass_barrier task 10 object 4294967295 execution 1 value 0 native_site 3
+% operation 2 processor 0 position 1 fence_update task 10 object 0 execution 1 value 2 native_site 6
+% operation 3 processor 0 position 2 pass_barrier task 12 object 4294967295 execution 1 value 0 native_site 9
+% operation 4 processor 0 position 3 fence_wait task 14 object 0 execution 1 value 2 native_site 14
+% operation 5 processor 0 position 4 pass_barrier task 14 object 4294967295 execution 1 value 0 native_site 15
+% operation 6 processor 0 position 5 submit task 14 object 4294967295 execution 1 value 1 native_site 19
+% operation 7 processor 0 position 6 queue_signal task 15 object 3 execution 1 value 2 native_site 20
+% synchronized wait 4 signal 2 image kept delay 0 dependence 1 witness -
+% dependence 0 task 2 task 6 delay 0 least - uncovered
+% dependence 1 task 10 task 14 delay 0 least 0 covered
+% totals operations 7 synchronized 1 image 1 stronger 0 false 0 unmatched 0 satisfied 0 transformed 0 redundant 0 uncovered 1 unwaited 1
+7 7 7
+1 2 0
+2 3 0
+3 4 0
+4 5 0
+5 6 0
+6 7 0
+2 4 0
+
+mesh-sync-monitor: compiled dot
+digraph signature {
+  node [shape=box];
+  subgraph cluster_0 {
+    label="0 queue 0";
+    o1 [label="1 pass_barrier\ntask 2 execution 0\nobject 4294967295 value 0 native_site 3"];
+    o2 [label="2 fence_update\ntask 2 execution 0\nobject 0 value 1 native_site 6"];
+    o1 -> o2 [style=dotted];
+    o3 [label="3 pass_barrier\ntask 4 execution 0\nobject 4294967295 value 0 native_site 9"];
+    o2 -> o3 [style=dotted];
+    o4 [label="4 fence_wait\ntask 6 execution 0\nobject 0 value 1 native_site 14"];
+    o3 -> o4 [style=dotted];
+    o5 [label="5 pass_barrier\ntask 6 execution 0\nobject 4294967295 value 0 native_site 15"];
+    o4 -> o5 [style=dotted];
+    o6 [label="6 submit\ntask 6 execution 0\nobject 4294967295 value 1 native_site 19"];
+    o5 -> o6 [style=dotted];
+    o7 [label="7 queue_signal\ntask 7 execution 0\nobject 3 value 1 native_site 20"];
+    o6 -> o7 [style=dotted];
+    o8 [label="8 pass_barrier\ntask 10 execution 1\nobject 4294967295 value 0 native_site 3"];
+    o7 -> o8 [style=dotted];
+    o9 [label="9 fence_update\ntask 10 execution 1\nobject 0 value 2 native_site 6"];
+    o8 -> o9 [style=dotted];
+    o10 [label="10 pass_barrier\ntask 12 execution 1\nobject 4294967295 value 0 native_site 9"];
+    o9 -> o10 [style=dotted];
+    o11 [label="11 fence_wait\ntask 14 execution 1\nobject 0 value 2 native_site 14"];
+    o10 -> o11 [style=dotted];
+    o12 [label="12 pass_barrier\ntask 14 execution 1\nobject 4294967295 value 0 native_site 15"];
+    o11 -> o12 [style=dotted];
+    o13 [label="13 submit\ntask 14 execution 1\nobject 4294967295 value 1 native_site 19"];
+    o12 -> o13 [style=dotted];
+    o14 [label="14 queue_signal\ntask 15 execution 1\nobject 3 value 2 native_site 20"];
+    o13 -> o14 [style=dotted];
+  }
+  subgraph cluster_1 {
+    label="1 host 0";
+  }
+  subgraph cluster_2 {
+    label="2 bridge 0";
+  }
+  subgraph cluster_3 {
+    label="3 host 64";
+  }
+  subgraph cluster_4 {
+    label="4 kernel 0";
+  }
+  o2 -> o4 [label="0 image"];
+  o9 -> o11 [label="0 image"];
+}
+
+mesh-sync-monitor: observed dot
+digraph signature {
+  node [shape=box];
+  subgraph cluster_0 {
+    label="0 queue 0";
+    o1 [label="1 pass_barrier\ntask 10 execution 1\nobject 4294967295 value 0 native_site 3"];
+    o2 [label="2 fence_update\ntask 10 execution 1\nobject 0 value 2 native_site 6"];
+    o1 -> o2 [style=dotted];
+    o3 [label="3 pass_barrier\ntask 12 execution 1\nobject 4294967295 value 0 native_site 9"];
+    o2 -> o3 [style=dotted];
+    o4 [label="4 fence_wait\ntask 14 execution 1\nobject 0 value 2 native_site 14"];
+    o3 -> o4 [style=dotted];
+    o5 [label="5 pass_barrier\ntask 14 execution 1\nobject 4294967295 value 0 native_site 15"];
+    o4 -> o5 [style=dotted];
+    o6 [label="6 submit\ntask 14 execution 1\nobject 4294967295 value 1 native_site 19"];
+    o5 -> o6 [style=dotted];
+    o7 [label="7 queue_signal\ntask 15 execution 1\nobject 3 value 2 native_site 20"];
+    o6 -> o7 [style=dotted];
+  }
+  subgraph cluster_1 {
+    label="1 host 0";
+  }
+  subgraph cluster_2 {
+    label="2 bridge 0";
+  }
+  subgraph cluster_3 {
+    label="3 host 64";
+  }
+  subgraph cluster_4 {
+    label="4 kernel 0";
+  }
+  o2 -> o4 [label="0 image"];
+}
+
+mesh-sync-monitor: compiled space_time
+0 queue 0
+  1 host 0
+    2 bridge 0
+      3 host 64
+        4 kernel 0
+o | | | |  1 pass_barrier task 2 execution 0 object 4294967295 value 0 native_site 3
+o | | | |  2 fence_update task 2 execution 0 object 0 value 1 native_site 6
+o | | | |  3 pass_barrier task 4 execution 0 object 4294967295 value 0 native_site 9
+* | | | |  2 -> 4 image delay 0
+o | | | |  4 fence_wait task 6 execution 0 object 0 value 1 native_site 14
+o | | | |  5 pass_barrier task 6 execution 0 object 4294967295 value 0 native_site 15
+o | | | |  6 submit task 6 execution 0 object 4294967295 value 1 native_site 19
+o | | | |  7 queue_signal task 7 execution 0 object 3 value 1 native_site 20
+o | | | |  8 pass_barrier task 10 execution 1 object 4294967295 value 0 native_site 3
+o | | | |  9 fence_update task 10 execution 1 object 0 value 2 native_site 6
+o | | | |  10 pass_barrier task 12 execution 1 object 4294967295 value 0 native_site 9
+* | | | |  9 -> 11 image delay 0
+o | | | |  11 fence_wait task 14 execution 1 object 0 value 2 native_site 14
+o | | | |  12 pass_barrier task 14 execution 1 object 4294967295 value 0 native_site 15
+o | | | |  13 submit task 14 execution 1 object 4294967295 value 1 native_site 19
+o | | | |  14 queue_signal task 15 execution 1 object 3 value 2 native_site 20
+
+mesh-sync-monitor: observed space_time
+0 queue 0
+  1 host 0
+    2 bridge 0
+      3 host 64
+        4 kernel 0
+o | | | |  1 pass_barrier task 10 execution 1 object 4294967295 value 0 native_site 3
+o | | | |  2 fence_update task 10 execution 1 object 0 value 2 native_site 6
+o | | | |  3 pass_barrier task 12 execution 1 object 4294967295 value 0 native_site 9
+* | | | |  2 -> 4 image delay 0
+o | | | |  4 fence_wait task 14 execution 1 object 0 value 2 native_site 14
+o | | | |  5 pass_barrier task 14 execution 1 object 4294967295 value 0 native_site 15
+o | | | |  6 submit task 14 execution 1 object 4294967295 value 1 native_site 19
+o | | | |  7 queue_signal task 15 execution 1 object 3 value 2 native_site 20
+
+mesh-sync-monitor: --observe: no destructive action; an unexpected operation ends the trace and fails the run, the process is not stopped at the call (item 4 not exercised)
+mesh-sync-monitor: pass; 7 operations observed at run time; 0 kernel records from compiled IR (not runtime-observed); other unobserved classes none
+
+READY 71314 {'format': 'mesh-public-metal-1', 'pid': 71314, 'node': 0, 'first': 1, 'span': [7, 14], 'body': '20cc87b38cd6a418a57ac64dea741e3f32fea27002e8869ca5050803301e0994', 'program': 52584154624, 'queue': 52762280960, 'ended': 52762467776, 'notifications': 52762643104, 'ingress': True, 'residency': True, 'argument_table': 4697172144, 'arguments': [[52762599296, 0], [0, 0], [52762598848, 0]], 'prefix_base': 0, 'prefix_table': 0, 'prefixes': [], 'fields': []}
+RETURNED
+VERIFIED issued program returned both eager results
+
+client 0 monitor 0
