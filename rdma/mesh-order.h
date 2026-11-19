@@ -232,6 +232,12 @@ static inline int order_next(struct hdr *m,const struct mesh_node *x,uint32_t ep
   if(ready<0 && at->t->done)order_raise(m,at->t->done,UINT64_MAX);
   return ready>0;
 }
+/* The lane publishes its tentative unit count before this read. If a new epoch has already
+   reopened posting, the next pass selects the piece using that epoch's placement. */
+static inline int order_can_post(const struct mesh_node *x,int way,const struct order_post *post){
+  return post->piece<atomic_load_explicit(&x->limit[way],memory_order_seq_cst) &&
+         post->epochs==atomic_load_explicit(&x->epochs,memory_order_acquire);
+}
 /* queue pair q of epoch e as its cable and lane (order_qp's inverse): 1, else 0 where the epoch has no queue pair q */
 static inline int order_qp_cable(const struct mesh_epoch *e,uint32_t q,uint32_t *cable,uint32_t *lane){
   for(uint32_t l=0;;l++){

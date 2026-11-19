@@ -107,7 +107,7 @@ static inline struct mesh_node *link_order(const struct link *l){ return l->orde
    gate, a receive (1) within the lane's frame share.  A span the region does not hold (`dud`) moves the bridge's own
    block of the link instead, so the lane stays the peer's (its transfer lost: order_pass).  1 posted; 0 not (no room in
    the lane, or the bound: the pass resumes at this piece) */
-static int lane_post(struct port *port,int way,uint32_t j,struct mesh_dma_span bytes,int dud,uint64_t n){
+static int lane_post(struct port *port,int way,uint32_t j,struct mesh_dma_span bytes,int dud,const struct order_post *post){
   struct link *l=&port->link;
   const uint32_t lane=MESH_LANE_FIRST+j;struct lane_state *state=l->lane+lane;
   struct mesh_lanes *x=lanes_of(port,j/2);
@@ -126,7 +126,7 @@ static int lane_post(struct port *port,int way,uint32_t j,struct mesh_dma_span b
   }
   mesh_pin_store(mesh_unit_pin(M,x->rows,way,(int)(j&1),u),u,bytes);
   atomic_store_explicit(&x->posts[way].posted[j&1],u+1,memory_order_seq_cst);
-  if(n>=atomic_load_explicit(&order->limit[way],memory_order_seq_cst)){
+  if(!order_can_post(order,way,post)){
     atomic_store_explicit(&x->posts[way].posted[j&1],u,memory_order_seq_cst);
     return 0;
   }
@@ -246,7 +246,7 @@ static void order_pass(struct port *port){
         if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,post))break;
         const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)M+post->at.t->spans))[post->at.span];
         const int dud=!mesh_dma_span_valid(M,bytes) || bytes.bytes>piece;
-        if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,post->piece))break;
+        if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,post))break;
         if(dud)order_raise(M,post->at.t->done,UINT64_MAX);
       }
 }

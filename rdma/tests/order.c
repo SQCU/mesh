@@ -207,8 +207,12 @@ int main(void){
   assert(!order_extend(idle.x,first,1,&port,&lanes,&wire));
   order_agree_bound(idle.x,agree_frontier,&idle,bounds);
   assert(bounds[0]==0 && bounds[1]==0);
+  struct order_post pending={.epochs=1,.piece=10};
+  atomic_store(&idle.x->limit[0],UINT64_MAX);
+  assert(order_can_post(idle.x,0,&pending));
   first[0]=80;first[1]=30;
   assert(!order_extend(idle.x,first,1,&port,&lanes,&wire));
+  assert(!order_can_post(idle.x,0,&pending));
   idle.frontier[0]=90;idle.frontier[1]=25;
   order_agree_bound(idle.x,agree_frontier,&idle,bounds);
   assert(bounds[0]==90 && bounds[1]==30);
