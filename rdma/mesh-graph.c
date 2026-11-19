@@ -932,17 +932,19 @@ static int flow_same(const void *context,uint32_t k){
   return !memcmp(s->parent+(size_t)k*s->n,s->tree,s->n*sizeof *s->tree);
 }
 
-uint32_t mesh_graph_flow_rates(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,
+uint32_t mesh_graph_flow_startup(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,
                          uint32_t count, const uint32_t *root, const double *upward, const double *downward,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
-                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *rate){
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *rate,
+                         const struct mesh_graph_startup *startup){
   double *load=calloc(2*(size_t)E+1,sizeof *load),*add=calloc(2*(size_t)E+1,sizeof *add),
          *len=calloc(2*(size_t)E+1,sizeof *len),*dist=calloc((size_t)n+1,sizeof *dist);
   uint32_t *up=calloc((size_t)n+1,sizeof *up),*upl=calloc((size_t)n+1,sizeof *upl),*tree=calloc((size_t)n+1,sizeof *tree),
            *treel=calloc((size_t)n+1,sizeof *treel),*hits=calloc((size_t)room+1,sizeof *hits),made=0;
   uint32_t *head=malloc(((size_t)count+1)*sizeof *head),*next=malloc(((size_t)room+1)*sizeof *next);
   unsigned char *done=calloc((size_t)n+1,1);
-  int failed=!load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done || !head || !next || !(eps>0);
+  double *path=startup?calloc((size_t)n+1,sizeof *path):NULL;
+  int failed=(startup && !path) || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !hits || !done || !head || !next || !(eps>0);
   for(uint32_t d=0;!failed && d<count;d++)head[d]=UINT32_MAX;
   double least=0,total=0;
   for(uint32_t e=0;!failed && e<E;e++)if(!least || cap[e]<least)least=cap[e];
@@ -957,6 +959,7 @@ uint32_t mesh_graph_flow_rates(uint32_t n, uint32_t E, const uint32_t *from, con
       for(uint32_t v=0;v<n;v++){dist[v]=INFINITY;up[v]=UINT32_MAX;upl[v]=UINT32_MAX;done[v]=0;tree[v]=UINT32_MAX;treel[v]=UINT32_MAX;}
       if(root[d]>=n){failed=1;break;}
       dist[root[d]]=0;up[root[d]]=root[d];
+      if(path)path[root[d]]=0;
       for(uint32_t step=0;step<n;step++){
         uint32_t at=n;
         for(uint32_t v=0;v<n;v++)if(!done[v] && dist[v]<INFINITY && (at==n || dist[v]<dist[at]))at=v;
@@ -966,15 +969,26 @@ uint32_t mesh_graph_flow_rates(uint32_t n, uint32_t E, const uint32_t *from, con
           if(from[e]!=at && to[e]!=at)continue;
           const uint32_t v=from[e]==at?to[e]:from[e],toward=from[e]==v?0:1;
           if(done[v])continue;
-          const double weight=rate && !r?1.0:u*len[2*(size_t)e+toward]+w*len[2*(size_t)e+(toward^1)];
+          double arc=1;
+          if(startup){
+            const double *ns=startup->directed;
+            arc=(u>0?(ns?ns[(size_t)v*n+at]:startup->uniform):0) +
+                (w>0?(ns?ns[(size_t)at*n+v]:startup->uniform):0);
+          }
+          const double weight=rate && !r?arc:u*len[2*(size_t)e+toward]+w*len[2*(size_t)e+(toward^1)];
           const double through=dist[at]+weight;
-          if(through<dist[v]){dist[v]=through;up[v]=at;upl[v]=e;}
+          if(through<dist[v]){
+            dist[v]=through;up[v]=at;upl[v]=e;
+            if(path)path[v]=path[at]+arc;
+          }
         }
       }
       tree[root[d]]=root[d];
+      double longest=0;
       for(uint32_t v=0;v<n && !failed;v++){
         if(v==root[d] || !leaf(context,d,v))continue;
         if(up[v]==UINT32_MAX){failed=1;break;}
+        if(path)longest=fmax(longest,path[v]);
         for(uint32_t at=v;tree[at]==UINT32_MAX;at=up[at]){tree[at]=up[at];treel[at]=upl[at];}
       }
       if(failed)break;
@@ -983,6 +997,7 @@ uint32_t mesh_graph_flow_rates(uint32_t n, uint32_t E, const uint32_t *from, con
       if(k==UINT32_MAX){
         if(made>=room){failed=1;break;}
         demand[made]=d;
+        if(startup)startup->tree[made]=longest;
         memcpy(parent+(size_t)made*n,tree,n*sizeof *tree);
         mesh_graph_keyed_add(head,next,d,made);
         k=made++;
@@ -1010,8 +1025,15 @@ uint32_t mesh_graph_flow_rates(uint32_t n, uint32_t E, const uint32_t *from, con
     }
     rate[k]=congestion>0?share[k]/congestion:0;
   }
-  free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(hits);free(done);free(head);free(next);
+  free(path);free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(hits);free(done);free(head);free(next);
   return failed?UINT32_MAX:made;
+}
+
+uint32_t mesh_graph_flow_rates(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,
+                         uint32_t count, const uint32_t *root, const double *upward, const double *downward,
+                         int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *rate){
+  return mesh_graph_flow_startup(n,E,from,to,cap,count,root,upward,downward,leaf,context,eps,rounds,room,demand,parent,share,rate,NULL);
 }
 
 uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,

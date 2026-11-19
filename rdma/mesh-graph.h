@@ -190,6 +190,14 @@ uint32_t mesh_graph_flow_rates(uint32_t vertices, uint32_t edges, const uint32_t
                          uint32_t count, const uint32_t *root, const double *up, const double *down,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
                          uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *rate);
+/* directed[parent*n+child] is the startup in ns for a send, or uniform when directed is NULL.
+   tree[k] receives the maximum root-to-leaf delay along the selected tree's directed transfers. */
+struct mesh_graph_startup { double uniform; const double *directed; double *tree; };
+uint32_t mesh_graph_flow_startup(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
+                         uint32_t count, const uint32_t *root, const double *up, const double *down,
+                         int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *rate,
+                         const struct mesh_graph_startup *startup);
 /* N. Garg and J. Könemann, FOCS 1998 */
 uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const uint32_t *through,
                          const uint32_t *crossing, uint32_t hops, const double *capacity,

@@ -426,6 +426,13 @@ int mesh_plan_program_analyze_chains(const struct mesh_nodes *,const struct mesh
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,const double *,struct mesh_graph_chain_result *,
   struct mesh_plan_analysis **);
+/* startup_ns[source*count+destination] gives the directed link startup in ns. NULL selects nodes->relay_ns. */
+int mesh_plan_program_analyze_startup(const struct mesh_nodes *,const struct mesh_plan_geometry *,uint64_t,
+  struct mesh_graph_buffer_result *,const uint32_t *,const struct mesh_function *,uint32_t,
+  const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
+  const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
+  const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,const double *,struct mesh_graph_chain_result *,const double *,
+  struct mesh_plan_analysis **);
 int mesh_plan_local_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_local *);
 struct plan_sync { uint32_t node,function,entry,every; int64_t base; };
 struct plan_entry { const struct mesh_plan_entry *source; uint32_t place; };
