@@ -2669,7 +2669,7 @@ static void spares_give(struct ncclComm *comm, uint64_t holder) {
 /* a captured transfer: its entry, gate and done word, its step, node and list, and its place in the wire's order: its
    step's `phase` (the first step of the steps declared alongside it: ncclMeshDeclareAlongside) and its repeat (`frame`,
    nccl.h ncclMeshFused repeats; 0 for a group of one) */
-struct crossing_rec { uint64_t spans, units, gate, gate_base, done, done_value; uint32_t step, node, list, phase, frame; };
+struct crossing_rec { uint64_t spans, units, gate, gate_base, done, done_value; uint32_t step, node, list, phase, frame, flags; };
 struct step_part {
   struct ncclComm *comm;
   struct call *calls;            /* the captured calls, their steps bound and operands placed */
@@ -2855,6 +2855,18 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate) {
   }
 }
 
+/* a Metal-path group of immutable landings' (a fused crossing's, one-way writes'): every landing entry gated on the
+   group's start in the stream, the communicator's gate word at the group's value of it, which the group's first dispatch
+   stores (*gate): an execution's landings are posted as its GPU work begins, after the stream's earlier work, which
+   read the previous execution's (the step's landing leases are its own, reused every execution) */
+static void gate_start(struct ncclComm *comm, struct schedule *plans, int *gate) {
+  for (uint32_t h = 0; h < comm->count; h++) {
+    struct schedule *p = plans + h;
+    if (!p->ins) continue;
+    p->word = comm->gate_at; p->base = comm->gates + 1; *gate = 1;
+  }
+}
+
 /* the communicators a program touched, each once, until its end (program_end); a program holds group_lock from its
    begin to its end, so the list is empty at every taking of the lock */
 static struct ncclComm *touching;
@@ -3013,7 +3025,9 @@ static int entry_recorded(void *context, struct ncclComm *comm, uint32_t h, int 
   const struct hdr *m = comm->attach->context.M;
   d->recs[d->recs_count++] = (struct crossing_rec){.spans = entry.spans, .units = entry.units, .gate = entry.word, .gate_base = entry.base,
     .done = (uint64_t)((char *)(list ? comm->channels[h].view.landed : comm->channels[h].view.sent) - (char *)m), .done_value = end,
-    .step = d->count - 1, .node = comm->channels[h].node, .list = (uint32_t)list, .phase = d->parts[d->count - 1].phase, .frame = repeat};
+    .step = d->count - 1, .node = comm->channels[h].node, .list = (uint32_t)list, .phase = d->parts[d->count - 1].phase, .frame = repeat,
+    /* a Metal-path step's gates are words its GPU work moves as each execution runs: each is the transfer's issue */
+    .flags = d->parts[d->count - 1].metal && entry.word ? MESH_GATE_ISSUES : 0};
   return 0;
 }
 /* the next step of the capture: a part of comm's (its own holder, never given back while the program lives) */
@@ -3135,7 +3149,7 @@ static ncclResult_t step_record(struct ncclComm *comm, struct step_part *part, s
   int gate = 0;
   schedule_laid(comm, plans);
   result = bind_retirements(comm, plans);
-  if (!result && metal && !immutable_writes) gate_of(comm, plans, &gate);
+  if (!result && metal) (immutable_writes ? gate_start : gate_of)(comm, plans, &gate);
   if (!result && group_entries(comm, plans, entry_recorded, capturing)) result = fail(ncclSystemError, "out of memory");
   if (result) return result;
   if (gate) comm->gates++;
@@ -3256,7 +3270,7 @@ static ncclResult_t node_declare(struct declaration *d, struct node_program *np)
   for (size_t k = 0; k < placed; k++) {
     const struct crossing_rec *r = d->recs + order[k];
     table[r->list][filled[r->list]++] = (struct mesh_crossing){.spans = r->spans, .units = r->units, .first = pieces[r->list],
-      .step = r->step, .gate = r->gate, .gate_base = r->gate_base, .gate_step = execution_delta(d, r->gate, m),
+      .step = r->step, .flags = r->flags, .gate = r->gate, .gate_base = r->gate_base, .gate_step = execution_delta(d, r->gate, m),
       .done = r->done, .done_value = r->done_value, .done_step = execution_delta(d, r->done, m)};
     pieces[r->list] += r->units;
   }
@@ -3333,7 +3347,7 @@ static ncclResult_t schedule(struct metal_program *program, struct ncclComm *com
   (void)holder;
   schedule_laid(comm, plans);
   ncclResult_t result = bind_retirements(comm, plans);
-  if (!result && program && !immutable_writes) gate_of(comm, plans, gate);
+  if (!result && program) (immutable_writes ? gate_start : gate_of)(comm, plans, gate);
   if (!result) result = issue_entries(comm, plans);
   if (result) return result;
   if (*gate) comm->gates++;

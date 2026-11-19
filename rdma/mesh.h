@@ -126,11 +126,16 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    pieces of the table before it in one execution.  In execution e, a SEND of span s is posted once the step is issued
    and the word at `gate` reaches gate_base + s + 1 + e gate_step (`flags` MESH_GATE_WHOLE: gate_base + e gate_step for
    every span); a receive once the step is issued and the word reaches gate_base + e gate_step (gate 0: the step's
-   issue alone).  Once every byte of execution e has crossed, the
+   issue alone; MESH_GATE_ISSUES, below: the gate alone).  Once every byte of execution e has crossed, the
    word at `done` (0: none) is raised to done_value + e done_step; done words rise in the order of the node's pieces, so
    a count kept over several transfers is a prefix.  A lost transfer (a cable of the node lost, the order restarted)
    raises every done word of its program to UINT64_MAX */
 #define MESH_GATE_WHOLE 1u
+/* `flags` MESH_GATE_ISSUES: the gate is the transfer's issue: its word moves past execution e's threshold only as the
+   client runs execution e (a GPU's publication count, a group's opening word, a relay's landing), so the transfer is
+   posted once its gate holds, its step's count of issued steps unread.  A Metal-path step's transfers are declared so
+   (libnccl-mesh): nothing the bridge posts for them waits on the host's encoding of the step */
+#define MESH_GATE_ISSUES 2u
 struct mesh_crossing {
   uint64_t spans,units,first;
   uint32_t step,flags;

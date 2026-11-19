@@ -63,6 +63,16 @@ static int program_valid(const struct hdr *m,const struct mesh_declaration *p){
       pieces+=t[i].units;
     }
     if(pieces!=p->pieces[d])return 0;
+    /* at most ORDER_PROGRAM_WORDS distinct done words a direction (mesh-order.h struct order_raiser: a cursor a word) */
+    uint64_t words[ORDER_PROGRAM_WORDS];uint32_t distinct=0;
+    for(uint64_t i=0;i<n;i++){
+      if(!t[i].done)continue;
+      uint32_t w=0;
+      while(w<distinct && words[w]!=t[i].done)w++;
+      if(w<distinct)continue;
+      if(distinct==ORDER_PROGRAM_WORDS)return 0;
+      words[distinct++]=t[i].done;
+    }
   }
   return 1;
 }

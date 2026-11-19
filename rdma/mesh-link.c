@@ -254,7 +254,7 @@ static void order_done(struct port *port){
     for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
       for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof done/sizeof *done;lane++,k++)
         done[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1],memory_order_acquire);
-    order_raise_pass(M,x,epochs,segments,way,done,&l->raise_hint[way],&l->raise_seen[way]);
+    order_raise_pass(M,x,epochs,segments,way,done,&l->raiser[way]);
   }
 }
 
@@ -528,7 +528,7 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   l->order=MESH_ABSENT;
   for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(M,n)->node)==node)l->order=n;
   l->generation=l->order<MESH_NODES?atomic_load(&mesh_node_at(M,l->order)->generation):0;
-  memset(l->hint,0,sizeof l->hint);memset(l->raise_hint,0,sizeof l->raise_hint);
+  memset(l->hint,0,sizeof l->hint);memset(l->raiser,0,sizeof l->raiser);
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
