@@ -200,7 +200,39 @@ static void agree_test(void){
   }
   printf("order: epochs agreed over 400 orders of cables coming up and delayed messages: passed\n");
 }
+static void independent_words(void){
+  enum { TRANSFERS=600 };
+  region_make(0,11,12);
+  struct hdr *m=w.node[0].m;struct mesh_node *x=w.node[0].x;
+  uint64_t first[2]={0},wire=1;uint32_t port=0,lanes=2;
+  assert(!order_extend(x,first,1,&port,&lanes,&wire));
+  const uint64_t table=take(0,TRANSFERS*sizeof(struct mesh_crossing)),words=take(0,8*TRANSFERS);
+  const uint64_t spans=take(0,sizeof(struct mesh_dma_span));
+  *(struct mesh_dma_span *)((char *)m+spans)=(struct mesh_dma_span){take(0,1),1};
+  struct mesh_crossing *row=(struct mesh_crossing *)((char *)m+table);
+  for(uint32_t i=0;i<TRANSFERS;i++)
+    row[i]=(struct mesh_crossing){.first=i,.units=1,.spans=spans,.done=words+8*i,.done_value=1};
+  row[TRANSFERS-1].done=words;row[TRANSFERS-1].done_value=2;
+  struct mesh_declaration program={.key=1,.period=1,.count=1,.table={table,0},
+    .pieces={TRANSFERS,0},.transfers={TRANSFERS,0}};
+  struct mesh_ctx c=client(0,CLIENT_A);struct mesh_order order;struct mesh_run run;
+  assert(!mesh_order_open(&c,12,&order) && !mesh_declare(&c,&order,&program,&run));
+  mesh_issue(&run,1);
+  struct order_raiser raiser={0};
+  uint64_t segments=atomic_load(&x->segments);
+  atomic_store(wire_done(w.node,0,0,1),TRANSFERS/2);
+  for(unsigned pass=0;pass<4;pass++)assert(!order_raise_pass(m,x,1,segments,0,&raiser));
+  for(unsigned i=0;i<TRANSFERS-1;i++)assert(atomic_load(word(0,words+8*i))==(i&1));
+  atomic_store(wire_done(w.node,0,0,0),TRANSFERS/2);
+  assert(!order_raise_pass(m,x,1,segments,0,&raiser));
+  assert(atomic_load(word(0,words))==2 && atomic_load(&x->raised[0])==TRANSFERS);
+  for(unsigned i=1;i<TRANSFERS-1;i++)assert(atomic_load(word(0,words+8*i))==1);
+  assert(!mesh_close(&c,&run));order_raiser_clear(&raiser);free(m);
+  w.node[0]=(struct wire_node){0};cursor[0]=0;
+  puts("order: 599 independent completion words, unequal lane progress and a repeated word: passed");
+}
 int main(void){
+  independent_words();
   struct agree_end idle={0};
   idle.x=calloc(1,sizeof *idle.x);assert(idle.x);
   uint64_t bounds[2],first[2]={0,0},wire=7;uint32_t port=0,lanes=2;
