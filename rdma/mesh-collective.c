@@ -1078,7 +1078,7 @@ static int mesh_scatter_put(struct mesh_scatter_run *run,struct mesh_scatter_sen
 }
 /* one piece size's schedule (mesh_scatter_schedule's greedy), into run */
 static int mesh_scatter_at(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
-                           uint32_t groups,uint64_t q,struct mesh_scatter_run *run){
+                           uint32_t groups,uint64_t q,const struct mesh_trees *trees,struct mesh_scatter_run *run){
   uint64_t most=0,total=0;
   uint64_t *pieces=malloc(((size_t)groups+1)*sizeof *pieces),*at=malloc(((size_t)groups+1)*sizeof *at);
   if(!pieces || !at){free(pieces);free(at);return ENOMEM;}
@@ -1090,13 +1090,29 @@ static int mesh_scatter_at(uint32_t nodes,const struct mesh_scatter_link *link,u
   double *hold=malloc(((size_t)total*nodes+1)*sizeof *hold),*free_at=calloc((size_t)links+1,sizeof *free_at),*dist=malloc(((size_t)nodes+1)*sizeof *dist);
   uint32_t *via=malloc(((size_t)nodes+1)*sizeof *via),*path=malloc(((size_t)nodes+1)*sizeof *path);
   unsigned char *done=malloc((size_t)nodes+1);
+  uint64_t *used=trees?calloc((size_t)groups*trees->count,sizeof *used):NULL;
+  double *share=trees?malloc(trees->count*sizeof *share):NULL;
   int error=hold && free_at && dist && via && path && done?0:ENOMEM;
+  if(trees && (!used || !share))error=ENOMEM;
+  if(trees && !error)for(uint32_t t=0;t<trees->count;t++)share[t]=mesh_exp(trees->log_weight[t]);
   for(size_t k=0;!error && k<(size_t)total*nodes;k++)hold[k]=INFINITY;
   run->makespan=0;
   for(uint64_t k=0;!error && k<most;k++)for(uint32_t g=0;!error && g<groups;g++){
     if(k>=pieces[g])continue;
     double *h=hold+(at[g]+k)*nodes;
     const uint64_t first=group[g].first+k*q,bytes=k+1<pieces[g]?q:group[g].bytes-k*q;
+    const uint32_t *parent=NULL;
+    if(trees){
+      uint64_t *issued=used+(size_t)g*trees->count;
+      double next=INFINITY;
+      uint32_t best=trees->count;
+      for(uint32_t t=0;t<trees->count;t++)if(trees->root[t]==group[g].source && share[t]>0){
+        const double finish=((double)issued[t]+bytes)/share[t];
+        if(finish<next){best=t;next=finish;}
+      }
+      if(best==trees->count){error=EINVAL;break;}
+      issued[best]+=bytes;parent=trees->parent+(size_t)best*nodes;
+    }
     h[group[g].source]=0;
     for(;;){
       /* every node's earliest holding of the piece over the links as they stand (Dijkstra: a link's start the later
@@ -1108,7 +1124,7 @@ static int mesh_scatter_at(uint32_t nodes,const struct mesh_scatter_link *link,u
         if(u==nodes)break;
         done[u]=1;
         for(uint32_t l=0;l<links;l++){
-          if(link[l].from!=u || done[link[l].to])continue;
+          if(link[l].from!=u || done[link[l].to] || (parent && parent[link[l].to]!=u))continue;
           const double start=dist[u]>free_at[l]?dist[u]:free_at[l];
           const double arrive=start+mesh_scatter_span(link,links,free_at,l,start,bytes)+link[l].latency;
           if(arrive<dist[link[l].to]){dist[link[l].to]=arrive;via[link[l].to]=l;}
@@ -1134,7 +1150,7 @@ static int mesh_scatter_at(uint32_t nodes,const struct mesh_scatter_link *link,u
       }
     }
   }
-  free(pieces);free(at);free(hold);free(free_at);free(dist);free(via);free(path);free(done);
+  free(pieces);free(at);free(hold);free(free_at);free(dist);free(via);free(path);free(done);free(share);free(used);
   return error;
 }
 static int mesh_scatter_order(const void *a,const void *b){
@@ -1193,7 +1209,7 @@ static int scatter_intervals(uint32_t nodes,const struct mesh_scatter_link *link
   free(ordinal);free(parts);free(parents);free(first);
   return 0;
 }
-int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
+int mesh_scatter_schedule_trees(const struct mesh_trees *trees,uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
                           uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,uint32_t *count,uint64_t *piece_bytes,
                           double *makespan,double *bound){
   if(!nodes || nodes>64 || (links && !link) || (groups && !group) || !page || !sends || !count)return EINVAL;
@@ -1203,17 +1219,25 @@ int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,ui
   for(uint32_t g=0;g<groups;g++)if(group[g].source>=nodes)return EINVAL;
   uint64_t largest=0;
   for(uint32_t g=0;g<groups;g++)if(group[g].bytes>largest)largest=group[g].bytes;
+  int multicast=0;
+  for(uint32_t g=0;g<groups;g++){
+    const uint64_t to=group[g].to & ~(UINT64_C(1)<<group[g].source);
+    multicast|=group[g].bytes && (to & (to-1));
+  }
+  if(trees && trees->nodes!=nodes)return EINVAL;
   struct mesh_scatter_run best={0};
   uint64_t chosen=page;
   best.makespan=INFINITY;
   for(uint32_t k=0;k<=6;k++){
     const uint64_t q=page<<k;
     if(k && (page<<(k-1))>=largest)break;   /* the piece before already held the largest group whole */
-    struct mesh_scatter_run run={0};
-    const int error=mesh_scatter_at(nodes,link,links,group,groups,q,&run);
-    if(error){free(run.send);free(best.send);return error;}
-    if(run.makespan<best.makespan){free(best.send);best=run;chosen=q;}
-    else free(run.send);
+    for(int packed=0;packed<=!!(multicast && trees && trees->count);packed++){
+      struct mesh_scatter_run run={0};
+      const int error=mesh_scatter_at(nodes,link,links,group,groups,q,packed?trees:NULL,&run);
+      if(error){free(run.send);free(best.send);return error;}
+      if(run.makespan<best.makespan){free(best.send);best=run;chosen=q;}
+      else free(run.send);
+    }
   }
   qsort(best.send,best.count,sizeof *best.send,mesh_scatter_order);
   const int error=scatter_intervals(nodes,link,group,groups,chosen,&best);
@@ -1241,4 +1265,10 @@ int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,ui
   if(makespan)*makespan=best.makespan;
   if(bound)*bound=lower;
   return 0;
+}
+
+int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
+                          uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,uint32_t *count,uint64_t *piece_bytes,
+                          double *makespan,double *bound){
+  return mesh_scatter_schedule_trees(NULL,nodes,link,links,group,groups,page,sends,count,piece_bytes,makespan,bound);
 }

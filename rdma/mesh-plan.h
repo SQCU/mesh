@@ -369,6 +369,12 @@ int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,ui
                           uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,uint32_t *count,uint64_t *piece_bytes,
                           double *makespan,double *bound);
 
+/* Also compare the communicator's packed trees for multicast. Their normalized log shares split each
+   source's bytes. The same directed-link model times every candidate and returns the selected sends. */
+int mesh_scatter_schedule_trees(const struct mesh_trees *trees,uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,
+                                const struct mesh_scatter_group *group,uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,
+                                uint32_t *count,uint64_t *piece_bytes,double *makespan,double *bound);
+
 #ifdef __cplusplus
 }
 #endif

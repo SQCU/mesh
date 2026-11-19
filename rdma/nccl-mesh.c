@@ -2607,8 +2607,9 @@ static ncclResult_t scheduled_program(struct call *c, const struct entry *entry,
   schedule->links = links; schedule->groups = groups;
   double makespan = 0, bound = 0;
   const uint64_t t0 = mesh_clock_ns();
-  const int status = mesh_scatter_schedule(n, link, links, group, groups, comm->page, &schedule->send, &schedule->count,
-                                           &schedule->piece, &makespan, &bound);
+  const struct mesh_trees *trees = groups == 1 ? &comm->rooted : &comm->trees;
+  const int status = mesh_scatter_schedule_trees(trees->count ? trees : NULL, n, link, links, group, groups, comm->page,
+                                                 &schedule->send, &schedule->count, &schedule->piece, &makespan, &bound);
   const uint64_t solve = mesh_clock_ns() - t0;
   ncclResult_t result = status ? fail(status == ENOMEM ? ncclSystemError : ncclInvalidUsage,
                                       "the scatter's schedule: %s", strerror(status)) : scatter_steps(c, schedule, operand);
