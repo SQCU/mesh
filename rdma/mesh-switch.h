@@ -300,70 +300,151 @@ static inline int mesh_switch_spt(const struct mesh_switch_fabric *f,uint32_t sr
   return 0;
 }
 
-/* A learned policy over trees, as a plain network. A piece chooses, at its source, one of n candidate trees, and every
-   hop forwards it on to its children in that tree. Each candidate's input is one concatenated vector of what the node
-   knows, with nothing chosen for it:
-   - which lanes the tree uses (one per lane);
-   - each lane's predicted wait now in this node's lines, and this node's posted backlog on each of its own lanes
-     (log(1 + us), one per lane each);
-   - the tree's share in the multicast optimum, and whether it is in it;
-   - the transaction's size, the piece's and the time now (log(1 + bytes / page), log(1 + bytes / page),
-     log(1 + us));
-   - the tree's unloaded completion and its completion under the lines' predicted waits, from now (log(1 + us));
-   - its SENDs.
-   One tanh hidden layer, then a logit; a softmax over the candidates, sampled with the swizzled quantile of the
-   piece's name (never an argmax). The weights are the learner's (mesh_switch_net_init: Gaussian, scaled by fan-in). */
-#define MESH_NET_LANES 32
-#define MESH_NET_IN (3*MESH_NET_LANES+8)
-#define MESH_NET_H 16
-struct mesh_switch_net { float w1[MESH_NET_H][MESH_NET_IN],b1[MESH_NET_H],w2[MESH_NET_H],b2; };
-#define MESH_NET_PARAMS (sizeof(struct mesh_switch_net)/sizeof(float))
+/* A learned policy over trees. A piece chooses, at its source, one of n candidate trees, and every hop forwards it on
+   to its children in that tree. The choice is a sample from a softmax, never an argmax.
 
+   The model: a residual stream of width MESH_NET_D (64) through two layers, each a GRU block on the stream and a
+   feed-forward block expanding it to MESH_NET_E (192), both added back to the stream. It is recurrent over the
+   source node's refreshes of its published weighting: each refresh's input is the node's context and the expected
+   features of its last weighting's choice, and each layer's GRU state carries over to the next refresh. A candidate tower takes each candidate's
+   features to the same width (a projection and one feed-forward block); a candidate's logit is the stream's output
+   dotted with its embedding, over sqrt(MESH_NET_D).
+
+   The inputs are statistics of what the node knows, the same size on any fabric, so one model serves any topology:
+   context (MESH_NET_CTX): the transaction's size and the piece's (log(1 + bytes / page)), the time since the
+     transaction began, this node's total and largest posted backlog (log(1 + us)), its out-degree, the candidates and
+     destinations (each / 8), the fabric's mean lane rate (GB/s / 10) and latency (us / 10), whether the transaction is
+     an all-reduce and whether this piece is a reduced page;
+   candidate (MESH_NET_CAND): its unloaded and its predicted completion (log(1 + us) from now), its depth in hops and
+     its SENDs (/ 8), the sum and largest of its lanes' predicted waits (log(1 + us)), its narrowest lane's rate
+     (GB/s / 10), its first lanes' largest backlog (log(1 + us)), its share in the multicast optimum and whether it is
+     in it, and whether it is the unloaded or the predicted shortest-path tree. */
+#define MESH_NET_D 64
+#define MESH_NET_E 192
+#define MESH_NET_CTX 12
+#define MESH_NET_CAND 12
+struct mesh_switch_block { float z[MESH_NET_D][2*MESH_NET_D],r[MESH_NET_D][2*MESH_NET_D],c[MESH_NET_D][2*MESH_NET_D],bz[MESH_NET_D],br[MESH_NET_D],
+                           bc[MESH_NET_D],up[MESH_NET_E][MESH_NET_D],bu[MESH_NET_E],down[MESH_NET_D][MESH_NET_E],bd[MESH_NET_D]; };
+struct mesh_switch_net {
+  float in[MESH_NET_D][MESH_NET_CTX+MESH_NET_CAND],bin[MESH_NET_D];
+  struct mesh_switch_block layer[2];
+  float cin[MESH_NET_D][MESH_NET_CAND],bcin[MESH_NET_D],cup[MESH_NET_E][MESH_NET_D],bcu[MESH_NET_E],cdown[MESH_NET_D][MESH_NET_E],bcd[MESH_NET_D];
+};
+#define MESH_NET_PARAMS (sizeof(struct mesh_switch_net)/sizeof(float))
+/* a node's recurrent state: each layer's GRU state, and the features of its last choice */
+struct mesh_switch_net_state { float h[2][MESH_NET_D],last[MESH_NET_CAND]; };
+
+/* Gaussian weights scaled by fan-in, biases zero */
 static inline void mesh_switch_net_init(struct mesh_switch_net *net,uint64_t seed){
-  for(uint32_t h=0;h<MESH_NET_H;h++){
-    for(uint32_t i=0;i<MESH_NET_IN;i++){seed=mesh_switch_mix(seed);net->w1[h][i]=(float)(mesh_switch_draw(seed)/sqrt(MESH_NET_IN));}
-    net->b1[h]=0;seed=mesh_switch_mix(seed);net->w2[h]=(float)(mesh_switch_draw(seed)/sqrt(MESH_NET_H));
+  float *p=(float *)net;
+  #define MESH_NET_FILL(field,fan) do{float *q=(float *)&(field);for(size_t i=0;i<sizeof(field)/sizeof(float);i++){seed=mesh_switch_mix(seed);q[i]=(float)(mesh_switch_draw(seed)/sqrt(fan));}}while(0)
+  for(size_t i=0;i<MESH_NET_PARAMS;i++)p[i]=0;
+  MESH_NET_FILL(net->in,MESH_NET_CTX+MESH_NET_CAND);
+  for(int l=0;l<2;l++){
+    MESH_NET_FILL(net->layer[l].z,2*MESH_NET_D);MESH_NET_FILL(net->layer[l].r,2*MESH_NET_D);MESH_NET_FILL(net->layer[l].c,2*MESH_NET_D);
+    MESH_NET_FILL(net->layer[l].up,MESH_NET_D);MESH_NET_FILL(net->layer[l].down,MESH_NET_E);
   }
-  net->b2=0;
+  MESH_NET_FILL(net->cin,MESH_NET_CAND);MESH_NET_FILL(net->cup,MESH_NET_D);MESH_NET_FILL(net->cdown,MESH_NET_E);
+  #undef MESH_NET_FILL
+}
+static inline float mesh_net_sig(float v){ return 1/(1+expf(-v)); }
+/* one feed-forward block on x, added back: x += down . relu(up . x + bu) + bd */
+static inline void mesh_net_ffn(float *x,const float (*up)[MESH_NET_D],const float *bu,const float (*down)[MESH_NET_E],const float *bd){
+  float e[MESH_NET_E],y[MESH_NET_D];
+  for(int i=0;i<MESH_NET_E;i++){float a=bu[i];for(int j=0;j<MESH_NET_D;j++)a+=up[i][j]*x[j];e[i]=a>0?a:0;}
+  for(int i=0;i<MESH_NET_D;i++){float a=bd[i];for(int j=0;j<MESH_NET_E;j++)a+=down[i][j]*e[j];y[i]=a;}
+  for(int i=0;i<MESH_NET_D;i++)x[i]+=y[i];
+}
+/* the stream for one decision, the state carried on */
+static inline void mesh_switch_net_step(const struct mesh_switch_net *net,struct mesh_switch_net_state *st,const float *context,float *out){
+  float x[MESH_NET_D];
+  for(int i=0;i<MESH_NET_D;i++){
+    float a=net->bin[i];
+    for(int j=0;j<MESH_NET_CTX;j++)a+=net->in[i][j]*context[j];
+    for(int j=0;j<MESH_NET_CAND;j++)a+=net->in[i][MESH_NET_CTX+j]*st->last[j];
+    x[i]=a;
+  }
+  for(int l=0;l<2;l++){
+    const struct mesh_switch_block *b=net->layer+l;float *h=st->h[l],z[MESH_NET_D],r[MESH_NET_D],n[MESH_NET_D];
+    for(int i=0;i<MESH_NET_D;i++){
+      float az=b->bz[i],ar=b->br[i];
+      for(int j=0;j<MESH_NET_D;j++){az+=b->z[i][j]*h[j]+b->z[i][MESH_NET_D+j]*x[j];ar+=b->r[i][j]*h[j]+b->r[i][MESH_NET_D+j]*x[j];}
+      z[i]=mesh_net_sig(az);r[i]=mesh_net_sig(ar);
+    }
+    for(int i=0;i<MESH_NET_D;i++){
+      float a=b->bc[i];
+      for(int j=0;j<MESH_NET_D;j++)a+=b->c[i][j]*r[j]*h[j]+b->c[i][MESH_NET_D+j]*x[j];
+      n[i]=tanhf(a);
+    }
+    for(int i=0;i<MESH_NET_D;i++){h[i]=(1-z[i])*h[i]+z[i]*n[i];x[i]+=h[i];}
+    mesh_net_ffn(x,b->up,b->bu,b->down,b->bd);
+  }
+  for(int i=0;i<MESH_NET_D;i++)out[i]=x[i];
+}
+static inline float mesh_switch_net_score(const struct mesh_switch_net *net,const float *stream,const float *candidate){
+  float e[MESH_NET_D];
+  for(int i=0;i<MESH_NET_D;i++){float a=net->bcin[i];for(int j=0;j<MESH_NET_CAND;j++)a+=net->cin[i][j]*candidate[j];e[i]=a;}
+  mesh_net_ffn(e,net->cup,net->bcu,net->cdown,net->bcd);
+  float s=0;for(int i=0;i<MESH_NET_D;i++)s+=stream[i]*e[i];
+  return s/8;
 }
 
-static inline uint32_t mesh_switch_choose_tree(const struct mesh_switch_fabric *f,uint32_t src,double now,uint64_t to,double bytes,
-                                               double total,uint64_t key,const double *ahead,const struct mesh_switch_line *view,
-                                               double unit,const struct mesh_switch_tree *cand,uint32_t n,
-                                               const struct mesh_switch_net *net){
+/* The published routing weighting for one commodity at source `src`, `now` ns into the transaction (`total` bytes a
+   rank, `kind` 1 an all-reduce, `reduced` a reduced page): one recurrent step of the node's state, then each of the n
+   candidate trees scored against the stream, written as probabilities. spt[c] is 1 for the unloaded shortest-path
+   tree, 2 for the predicted one, 0 otherwise. The bridge runs this off the posting path, as a double buffer: every
+   refresh replaces the published weighting, and a piece posted meanwhile samples the current one (mesh_switch_sample)
+   with no model in its way. */
+static inline void mesh_switch_tree_weights(const struct mesh_switch_fabric *f,uint32_t src,double now,uint64_t to,double bytes,
+                                            double total,int kind,int reduced,const double *ahead,const struct mesh_switch_line *view,
+                                            double unit,const struct mesh_switch_tree *cand,const uint8_t *spt,uint32_t n,
+                                            const struct mesh_switch_net *net,struct mesh_switch_net_state *st,double *p){
   if(n>64)n=64;
-  /* the context every candidate shares, through the first layer once */
-  float context[MESH_NET_H];
-  for(uint32_t h=0;h<MESH_NET_H;h++){
-    double a=net->b1[h];
-    for(uint32_t l=0;l<f->links && l<MESH_NET_LANES;l++){
-      a+=net->w1[h][MESH_NET_LANES+l]*log1p(mesh_switch_wait(view?view+l:NULL,unit,now,0)/1000);
-      a+=net->w1[h][2*MESH_NET_LANES+l]*(f->link[l].from==src?log1p(ahead[l]/1000):0);
-    }
-    a+=net->w1[h][3*MESH_NET_LANES+2]*log1p(total/f->page)+net->w1[h][3*MESH_NET_LANES+3]*log1p(bytes/f->page)
-      +net->w1[h][3*MESH_NET_LANES+4]*log1p(now/1000);
-    context[h]=(float)a;
+  static const double none[256]={0};
+  float context[MESH_NET_CTX],stream[MESH_NET_D],feature[64][MESH_NET_CAND];
+  double backlog=0,most=0,rate=0,latency=0;uint32_t degree=0,dests=0;
+  for(uint32_t l=0;l<f->links;l++){
+    rate+=f->link[l].rate;latency+=f->link[l].latency;
+    if(f->link[l].from==src){degree++;backlog+=ahead[l];if(ahead[l]>most)most=ahead[l];}
   }
-  double logit[64],most=-INFINITY;
+  for(uint32_t d=0;d<f->nodes;d++)dests+=to>>d&1 && d!=src;
+  context[0]=(float)log1p(total/f->page);context[1]=(float)log1p(bytes/f->page);context[2]=(float)log1p(now/1000);
+  context[3]=(float)log1p(backlog/1000);context[4]=(float)log1p(most/1000);context[5]=degree/8.0f;context[6]=n/8.0f;
+  context[7]=dests/8.0f;context[8]=(float)(rate/f->links/10);context[9]=(float)(latency/f->links/1e4);context[10]=(float)kind;
+  context[11]=(float)reduced;
   for(uint32_t c=0;c<n;c++){
     double idle;uint32_t sends;
-    const double done=mesh_switch_tree_completion(f,cand+c,src,to,now,bytes,ahead,view,unit,&idle,&sends);
-    double out=net->b2;
-    for(uint32_t h=0;h<MESH_NET_H;h++){
-      double a=context[h];
-      for(uint32_t v=0;v<f->nodes;v++)if(cand[c].lane[v]!=UINT32_MAX && cand[c].lane[v]<MESH_NET_LANES)a+=net->w1[h][cand[c].lane[v]];
-      a+=net->w1[h][3*MESH_NET_LANES]*cand[c].share+net->w1[h][3*MESH_NET_LANES+1]*(cand[c].share>0)
-        +net->w1[h][3*MESH_NET_LANES+5]*log1p((idle-now)/1000)+net->w1[h][3*MESH_NET_LANES+6]*log1p((done-now)/1000)
-        +net->w1[h][3*MESH_NET_LANES+7]*sends;
-      out+=net->w2[h]*tanh(a);
+    const double done=mesh_switch_tree_completion(f,cand+c,src,to,now,bytes,ahead,view,unit,NULL,&sends);
+    mesh_switch_tree_completion(f,cand+c,src,to,now,bytes,none,NULL,unit,&idle,NULL);
+    double waits=0,worst=0,narrow=INFINITY,first=0;uint32_t depth=0;
+    for(uint32_t v=0;v<f->nodes;v++){
+      const uint32_t l=cand[c].lane[v];
+      if(l==UINT32_MAX)continue;
+      const double w=mesh_switch_wait(view?view+l:NULL,unit,now,0);
+      waits+=w;if(w>worst)worst=w;if(f->link[l].rate<narrow)narrow=f->link[l].rate;
+      if(cand[c].parent[v]==src && ahead[l]>first)first=ahead[l];
+      uint32_t h=0;for(uint32_t u=v;cand[c].parent[u]!=UINT32_MAX && h<=f->nodes;u=cand[c].parent[u])h++;
+      if(h>depth)depth=h;
     }
-    logit[c]=out;if(out>most)most=out;
+    float *q=feature[c];
+    q[0]=(float)log1p((idle-now)/1000);q[1]=(float)log1p((done-now)/1000);q[2]=depth/8.0f;q[3]=sends/8.0f;
+    q[4]=(float)log1p(waits/1000);q[5]=(float)log1p(worst/1000);q[6]=(float)(isfinite(narrow)?narrow/10:0);q[7]=(float)log1p(first/1000);
+    q[8]=(float)cand[c].share;q[9]=cand[c].share>0;q[10]=spt&&spt[c]==1;q[11]=spt&&spt[c]==2;
   }
-  double sum=0;for(uint32_t c=0;c<n;c++){logit[c]=exp(logit[c]-most);sum+=logit[c];}
+  mesh_switch_net_step(net,st,context,stream);
+  double top=-INFINITY,sum=0;
+  for(uint32_t c=0;c<n;c++){p[c]=mesh_switch_net_score(net,stream,feature[c]);if(p[c]>top)top=p[c];}
+  for(uint32_t c=0;c<n;c++){p[c]=exp(p[c]-top);sum+=p[c];}
+  for(uint32_t c=0;c<n;c++)p[c]/=sum;
+  /* the next step sees the expected choice's features */
+  for(int j=0;j<MESH_NET_CAND;j++){double e=0;for(uint32_t c=0;c<n;c++)e+=p[c]*feature[c][j];st->last[j]=(float)e;}
+}
+/* the candidate whose interval among the probabilities p holds the swizzled quantile of the key */
+static inline uint32_t mesh_switch_sample(const double *p,uint32_t n,uint64_t key){
   const double u=((mesh_switch_mix(key^0x7f4a7c15ULL)>>11)+0.5)/9007199254740992.0;
-  double c=0;
-  for(uint32_t k=0;k<n;k++){c+=logit[k]/sum;if(u<c)return k;}
-  return n-1;
+  double acc=0;
+  for(uint32_t k=0;k<n;k++){acc+=p[k];if(u<acc)return k;}
+  return n?n-1:0;
 }
 
 /* One lane's predictor at its sender: a GRU over each execution's observed waits (as log(1 + wait / 1 us) a bin),
