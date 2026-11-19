@@ -292,11 +292,12 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
     struct lane_state *state=l->lane+k+lane;
     uint64_t done=way?state->got:state->done;
     if(at[lane]-done>=MESH_LANE_UNITS)break;
-    const struct taken *entry;uint64_t unit=0;
+    const struct taken *entry;uint64_t unit=0;uint32_t gates=0;
     if(peer){
       if(at[lane]>=atomic_load_explicit(&x->peer_presented[way][lane],memory_order_acquire))break;
       struct mesh_entry *cells=(void *)((char *)M+x->lists);
       struct mesh_entry record=cells[way*MESH_STREAM_ENTRIES+lane*(MESH_STREAM_ENTRIES/2)+at[lane]%(MESH_STREAM_ENTRIES/2)];
+      if(record.word&1){gates=(uint32_t)record.base;record.word--;}
       if(!mesh_entry_table_valid(M,(struct mesh_entry){record.spans,1,record.word,0}) ||
          (record.units!=1 && !mesh_entry_table_valid(M,(struct mesh_entry){record.units,1,0,0}))){link_failed(port,EINVAL,way?3:2);break;}
       single.spans=(const void *)((const char *)M+record.spans);
@@ -309,8 +310,13 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
     if(peer || pinned!=entry){metadata_pin(x,entry);pinned=entry;if(!holding_kept(x,l->held[t]))break;}
     if(!entry->whole){link_failed(port,EINVAL,way?3:2);break;}
     if(entry->word){
-      uint64_t ready=mesh_units_load(entry->word).n;
-      if(peer?(ready==UINT64_MAX || ready<entry->base.n):(way?ready<entry->base.n:ready<=entry->base.n+unit))break;
+      if(peer){
+        uint64_t word=(uint64_t)((const char *)entry->word-(const char *)M);
+        if(mesh_peer_ready(M,word,entry->base.n,gates)<=0)break;
+      }else{
+        uint64_t ready=mesh_units_load(entry->word).n;
+        if(way?ready<entry->base.n:ready<=entry->base.n+unit)break;
+      }
     }
     if(!post_span(port,t,k+lane,way,entry->spans[unit]))break;
   }
