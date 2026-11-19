@@ -2480,13 +2480,13 @@ static ncclResult_t scatter_extents(struct scatter_schedule *schedule, uint32_t 
     }
     struct endpoint *e = open + (size_t)link->from*n + link->to;
     if (!e->head || schedule->send[e->head-1].group != hop->group ||
-        schedule->slice[e->head-1].producer != slice->producer) {
+        slice->producer >= e->head) {
       *e = (struct endpoint){.head=k+1};
       slice->low = hop->first;
     }
     struct scatter_slice *head = &schedule->slice[e->head-1];
     slice->head = e->head; slice->prefix = e->units;
-    if (slice->producer && slice->arrival != head->arrival + slice->prefix) head->cuts = 1;
+    if (slice->producer != head->producer || (slice->producer && slice->arrival != head->arrival + slice->prefix)) head->cuts = 1;
     if (hop->first < head->low) head->low = hop->first;
     if (hop->first + hop->bytes > head->high) head->high = hop->first + hop->bytes;
     if (e->tail) schedule->slice[e->tail-1].next = k+1;
@@ -2515,7 +2515,7 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
   if (!s || !(s->steps = calloc(room, sizeof *s->steps)) || !(s->done = calloc(room, 1)) ||
       !(s->channel = calloc(room, sizeof *s->channel)) || !(s->entry = calloc(room, sizeof *s->entry)) ||
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
-      !(s->prior = calloc(room, sizeof *s->prior)) || !(s->prior_first = calloc(room, sizeof *s->prior_first)) || !(s->buffer = calloc(1, sizeof *s->buffer)) ||
+      !(s->prior = calloc((size_t)schedule->count + 1, sizeof *s->prior)) || !(s->prior_first = calloc(room, sizeof *s->prior_first)) || !(s->buffer = calloc(1, sizeof *s->buffer)) ||
       !(s->demand = calloc((size_t)n * n, sizeof *s->demand))) {
     free(extent); steps_free(s); return fail(ncclSystemError, "out of memory");
   }
@@ -2537,9 +2537,15 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
     }
     struct mesh_operand view = operand;
     view.elements = extent[k] / operand.element_bytes;
-    const uint32_t producer = schedule->slice[k].producer;
     s->prior_first[s->count] = s->priors;
-    if (edge->from == rank && producer) s->prior[s->priors++] = schedule->slice[producer-1].local;
+    if (edge->from == rank) for (uint32_t i = k+1; i; i = schedule->slice[i-1].next) {
+      const uint32_t producer = schedule->slice[i-1].producer;
+      if (!producer) continue;
+      const uint32_t parent = schedule->slice[producer-1].local;
+      uint32_t j = s->prior_first[s->count];
+      while (j < s->priors && s->prior[j] != parent) j++;
+      if (j == s->priors) s->prior[s->priors++] = parent;
+    }
     schedule->slice[k].local = s->count;
     s->cable[s->count] = cable[peer];
     s->steps[s->count++] = (struct mesh_step){edge->from == rank ? MESH_STEP_SEND : MESH_STEP_COPY, peer, k, 0,
@@ -2746,7 +2752,6 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
 static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page) {
   if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
   const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
-  if (s->scatter) return (int32_t)r;
   const struct mesh_step *a = s->steps + r, *b = s->steps + k;
   return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
          (b->first - a->first) * b->piece.element_bytes % page == 0 ? (int32_t)r : -1;
@@ -3325,27 +3330,43 @@ static void channel_log(struct ncclComm *comm, const struct channel *ch, int lis
 typedef int (*entry_visit)(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end);
 /* The segment's wire digest includes each crossing's units at both ends. Preserve matching
    boundaries at each relay ingress publication; a subrange uses the original span table. */
-static int visit_crossings(struct ncclComm *comm, uint32_t h, int list, const struct message *m,
-                           struct mesh_entry entry, entry_visit visit, void *context) {
+static void forwarding_gate(const struct ncclComm *comm, const struct schedule *plans, uint32_t h, size_t k,
+                            const struct message *m, uint32_t dependency, const struct scatter_slice *slice,
+                            struct mesh_entry *entry) {
+  const struct steps *s = m->c->bound;
+  const uint32_t incoming = s->channel[dependency];
+  const struct schedule *received = plans + incoming;
+  const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
+  const size_t repeat = k / (plans[h].outs / repeats);
+  const struct message *from = received->in + s->entry[dependency] - received->first[1] -
+                               (repeats - 1 - repeat) * (received->ins / repeats);
+  entry->word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)comm->attach->context.M);
+  const uint64_t delta = m->offset - from->offset;
+  const struct mesh_step *before = s->steps + dependency;
+  const uint64_t units = slice ? slice->arrival : m->c->write_plan ?
+    span_units(&m->c->write_plan->packets, before->first * before->piece.element_bytes, delta) : pages_of(delta, comm->page).n;
+  entry->base = from->end.n - from->pages.n + units;
+}
+static int visit_crossings(struct ncclComm *comm, const struct schedule *plans, uint32_t h, int list, size_t k,
+                           const struct message *m, struct mesh_entry entry, entry_visit visit, void *context) {
   const struct steps *s = m->c->bound;
   const struct scatter_schedule *schedule = s->scatter;
   const uint32_t round = s->steps[m->step].round;
-  if (!schedule || !schedule->slice[round].cuts)
-    return m->pages.n ? visit(context, comm, h, list, entry, m->end.n) : 0;
-  const uint64_t end = m->end.n-m->pages.n;
-  const uint64_t base = entry.base;
+  if (!schedule) return m->pages.n ? visit(context, comm, h, list, entry, m->end.n) : 0;
+  const uint64_t end = m->end.n-m->pages.n, base = entry.base;
+  const int cuts = schedule->slice[round].cuts;
   for (uint32_t i = round+1; i; i = schedule->slice[i-1].next) {
     const struct scatter_slice *slice = schedule->slice+i-1;
-    entry.units = pages_of(schedule->send[i-1].bytes, comm->page).n;
+    entry.units = cuts ? pages_of(schedule->send[i-1].bytes, comm->page).n : m->pages.n;
     entry.spans = m->table + slice->prefix * sizeof(struct mesh_dma_span);
-    if (!list) entry.base = slice->producer ? base - schedule->slice[round].arrival + slice->arrival : base + slice->prefix;
+    if (!list && slice->producer) forwarding_gate(comm, plans, h, k, m, schedule->slice[slice->producer-1].local, slice, &entry);
+    else if (!list) entry.base = base + slice->prefix;
     const int status = visit(context, comm, h, list, entry, end + slice->prefix + entry.units);
-    if (status) return status;
+    if (status || !cuts) return status;
   }
   return 0;
 }
 static int group_entries(struct ncclComm *comm, const struct schedule *plans, entry_visit visit, void *context) {
-  const struct hdr *mapped = comm->attach->context.M;
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
@@ -3355,28 +3376,16 @@ static int group_entries(struct ncclComm *comm, const struct schedule *plans, en
       if (!m->pages.n) continue;
       struct mesh_entry entry = {m->table, pages_to_word(m->pages), ch->ready_at, pages_to_word(pages_sub(m->end, m->pages))};
       const struct steps *s = m->c->bound;
-      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
-      if (dependency >= 0) {
-        const uint32_t incoming = s->channel[dependency];
-        const struct schedule *received = plans + incoming;
-        const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
-        const size_t repeat = k / (p->outs / repeats);
-        const struct message *from = received->in + s->entry[dependency] - received->first[1] -
-                                     (repeats - 1 - repeat) * (received->ins / repeats);
-        entry.word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)mapped);
-        const struct mesh_step *before = s->steps + dependency;
-        const uint64_t delta = m->offset - from->offset;
-        const mesh_pages units = s->scatter ? (mesh_pages){s->scatter->slice[s->steps[m->step].round].arrival} :
-          m->c->write_plan ? (mesh_pages){span_units(&m->c->write_plan->packets,
-          before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
-        entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
+      if (!s->scatter) {
+        const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+        if (dependency >= 0) forwarding_gate(comm, plans, h, k, m, (uint32_t)dependency, NULL, &entry);
       }
-      status = visit_crossings(comm, h, 0, m, entry, visit, context);
+      status = visit_crossings(comm, plans, h, 0, k, m, entry, visit, context);
     }
     for (size_t k = 0; !status && k < p->ins; k++) {
       const struct message *m = p->in + k;
       const struct mesh_entry entry = {m->table, m->pages.n, p->word, p->base};
-      status = visit_crossings(comm, h, 1, m, entry, visit, context);
+      status = visit_crossings(comm, plans, h, 1, k, m, entry, visit, context);
     }
     if (status) return status;
   }

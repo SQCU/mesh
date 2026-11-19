@@ -2,10 +2,10 @@
 #include "../mesh-order.h"
 #include <assert.h>
 
-enum { RANKS=4, PAGE=16384 };
-static const uint32_t pairs[][2]={{0,1},{0,2},{0,3},{1,3},{2,3}};
-static uint32_t cables[][2]={{0,1},{0,1},{0,2},{0,3},{1,3},{2,3}};
-static uint64_t bandwidth[]={80000000000,80000000000,80000000000,80000000000,80000000000,80000000000};
+enum { RANKS=5, PAGE=16384 };
+static const uint32_t pairs[][2]={{0,1},{0,2},{0,3},{1,3},{2,3},{3,4}};
+static uint32_t cables[][2]={{0,1},{0,1},{0,2},{0,3},{1,3},{2,3},{3,4},{3,4},{3,4},{3,4}};
+static uint64_t bandwidth[]={80000000000,80000000000,80000000000,80000000000,80000000000,80000000000,80000000000,80000000000,80000000000,80000000000};
 static struct {
   uint64_t pad,ready[RANKS][RANKS],landed[RANKS][RANKS];
 } words;
@@ -125,12 +125,19 @@ static void check(uint64_t recipients){
       for(unsigned q=0;q<RANKS;q++)assert(wires[r][q].at==seen[r][q]);
     }
   }
+  if(recipients==16) {
+    const struct steps *relay=calls[3].bound;
+    unsigned combined=0;
+    for(uint32_t k=0;k<relay->count;k++)
+      combined+=relay->steps[k].op==MESH_STEP_SEND && relay->prior_first[k+1]-relay->prior_first[k]>1;
+    assert(combined);
+  }
   assert(calls[0].bound->count<solved->count/4 && comm[0].schedule.via_relays);
   printf("recipient mask %llu: %u source entries, %u solved hops, three generations checked\n",recipients,calls[0].bound->count,solved->count);
   for(unsigned r=0;r<RANKS;r++){
     struct steps *view=steps_copy(calls[r].bound);
     assert(view && view->scatter==calls[r].bound->scatter && view->steps==calls[r].bound->steps && view->done!=calls[r].bound->done);
-    steps_free(calls[r].bound);assert(view->demand[1] && view->count);steps_free(view);
+    steps_free(calls[r].bound);assert(view->demand[1]);steps_free(view);
     for(unsigned h=0;h<comm[r].count;h++){free(plans[r][h].out);free(plans[r][h].in);}
     free(calls[r].contributors);free(calls[r].recipients);free(data[r]);
     for(unsigned q=0;q<RANKS;q++){
@@ -138,4 +145,4 @@ static void check(uint64_t recipients){
     }
   }
 }
-int main(void){check(8);check(15);}
+int main(void){check(8);check(15);check(16);check(31);}
