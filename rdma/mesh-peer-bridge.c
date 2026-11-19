@@ -158,7 +158,9 @@ static int hold(uint64_t wire,struct pipe_stream **out){
     wires[i].users++;*out=wires+i;return 0;
   }
   uint32_t index=0;int error=mesh_stream_take(&physical,wire,&index);if(error)return error;
-  struct pipe_stream *s=wires+index;*s=(struct pipe_stream){.stream=index,.users=1,.wire=wire};
+  struct pipe_stream *s=wires+index;
+  if(s->users){mesh_stream_give(&physical,index);return EAGAIN;}
+  *s=(struct pipe_stream){.stream=index,.users=1,.wire=wire};
   error=mesh_stream_view(&physical,index,&s->view);
   if(error){s->users=0;mesh_stream_give(&physical,index);return error;}
   struct mesh_stream *x=mesh_stream_at(M,index);
@@ -461,7 +463,7 @@ static void release(struct job *j){
       struct pipe_stream *s=j->channel[e].pipe;
       pthread_mutex_lock(&ledger_lock);if(s->fast==j)s->fast=NULL;pthread_mutex_unlock(&ledger_lock);
       for(unsigned w=0;w<2;w++)for(unsigned l=0;l<2;l++)if(j->queues[e][w][l].retire)atomic_store(&s->failure,1);
-      if(!--s->users || atomic_load(&s->failure))mesh_stream_give(&physical,s->stream);
+      if((!--s->users || atomic_load(&s->failure)) && mesh_stream_held(&physical,s->stream,s->wire))mesh_stream_give(&physical,s->stream);
     }
     if(j->table.count)mesh_lease_return(&j->context,j->table.first);
     mesh_retire(M,j->context.client);j->context.M=NULL;
