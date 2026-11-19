@@ -1,4 +1,4 @@
-# Declared programs (wire 138, layout 157)
+# Declared programs (wire 139, layout 157)
 
 Every unit on every wire is placed by a pure function of declarations that both ends hold alike. The placement is
 computed ahead of time, so at run time a client raises only one monotone counter. This replaces the shared order of
@@ -78,11 +78,12 @@ execution k / period.
   wait for another's transfers (the earlier look-ahead of 64 transfers coupled them). A program declares
   at most 16 done words a direction (`ORDER_PROGRAM_WORDS`). Raisers need no agreement: every done count only rises,
   each word is raised to the greatest value any raiser computes, and `raised` moves only up.
-- **Gates that are the issue.** A transfer flagged `MESH_GATE_ISSUES` is posted once its gate holds, its step's issued
-  count unread: its gate word passes execution e's threshold only as the client runs execution e. libnccl-mesh flags
-  every gated transfer of a Metal-path step (a send's gate is the GPU's publication count; a landing's is the group's
-  opening word its first dispatch stores, `gate_start` for a fused crossing's), so nothing the bridge posts for such a
-  step waits on the host's encoding of it.
+- **Posting is bounded by the issued steps.** A piece of execution e is posted only once its program's count of
+  issued steps passes it, whatever its gate word holds, so the pieces either end posts are those of executions its
+  client issued, and a program's end closes there. (81bc7e0d let a gate word stand for the issue on the Metal path;
+  a communicator's gate word, a lease's prior contents, read far ahead, so receives of executions that never ran were
+  posted, and the next, larger program's SENDs met them: IBV_WC_LOC_LEN_ERR on hardware, reproduced by
+  tests/sim-two-nodes.sh's programs in turn.)
 - **Composition.** Several clients' programs toward one node (a different process each) share its rounds. Each round
   is `count_p` executions of each program, in key order. A program joins or leaves only at a round that every program
   of the segment has reached. Clients agree that round between themselves, ahead of time (section 4).

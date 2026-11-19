@@ -87,6 +87,21 @@ second=$?
 wait $rank0; first=$?
 echo "Metal path: rank 0 $first rank 1 $second"; cat "$out/metal0" "$out/metal1"
 [ $first = 0 ] && [ $second = 0 ] || failed=1
+# programs in turn toward the same node: two process pairs, each on leases of pages a process wrote before (DIRTY), the
+# second's crossings larger than the first's; then one process pair redeclaring its program at four sizes, growing.
+# Every piece either end posts must be the other's same piece (the wire ends at any mismatch)
+for sizes in 6144 98304 6144,98304,393216,1572864; do
+  port=$((port + 8))
+  DIRTY=1 MESH_REGION=/mesh-sim-11 NCCL_COMM_ID="::1:$port" bounded "$here/.build/tests/sim-metal" 0 4 "$sizes" > "$out/metal0" 2>&1 &
+  rank0=$!
+  DIRTY=1 MESH_REGION=/mesh-sim-12 NCCL_COMM_ID="::1:$port" bounded "$here/.build/tests/sim-metal" 1 4 "$sizes" > "$out/metal1" 2>&1
+  second=$?
+  wait $rank0; first=$?
+  echo "Metal path in turn, $sizes bytes: rank 0 $first rank 1 $second ($(cat "$out/metal0" "$out/metal1" | grep -c '"checked":true') checked)"
+  grep -v '"checked":true' "$out/metal0" "$out/metal1"
+  kill -0 $sim 2>/dev/null || { echo "the simulator ended (its wire's check):"; cat "$out/sim.err"; failed=1; break; }
+  [ $first = 0 ] && [ $second = 0 ] || failed=1
+done
 finish
 simulate "$lag"
 rm -rf "$out/barrier"; mkdir -p "$out/barrier"

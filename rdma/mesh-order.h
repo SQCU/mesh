@@ -152,16 +152,13 @@ static inline int order_locate(const struct hdr *m,const struct mesh_node *x,uin
   }
   return 0;
 }
-/* whether the piece at `at` of direction d may be posted: its step issued (its program's counter past it; a gate that is
-   its issue, MESH_GATE_ISSUES, stands for it) and its gate holding (a SEND of span s: the word at gate_base + s + 1 + e gate_step; a receive: gate_base + e gate_step) */
+/* whether the piece at `at` of direction d may be posted: its step issued (its program's counter past it: what bounds
+   every end's posting to the executions its client runs) and its gate holding (a SEND of span s: the word at gate_base + s + 1 + e gate_step; a receive: gate_base + e gate_step) */
 static inline int order_ready(const struct hdr *m,const struct mesh_node *x,const struct order_at *at,int d){
   const struct mesh_declared *p=x->program+at->slot;
   const struct mesh_crossing *t=at->t;
-  const int gated=t->gate && t->gate%8==0 && t->gate+8<=m->length;
-  /* a gate that is the transfer's issue (MESH_GATE_ISSUES) stands for the count of issued steps */
-  if(!(gated && t->flags&MESH_GATE_ISSUES) &&
-     atomic_load_explicit(&p->issued,memory_order_acquire)<=at->execution*p->program.period+t->step)return 0;
-  if(!gated)return 1;
+  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=at->execution*p->program.period+t->step)return 0;
+  if(!t->gate || t->gate%8 || t->gate+8>m->length)return 1;
   const uint64_t threshold=t->gate_base+at->execution*t->gate_step+(d || t->flags&MESH_GATE_WHOLE?0:at->span+1);
   return atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire)>=threshold;
 }

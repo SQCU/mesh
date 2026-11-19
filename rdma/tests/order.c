@@ -217,11 +217,11 @@ int main(void){
     assert(mesh_declare(&c,o,&p.program,&r)==EINVAL);
   }
 
-  /* gates that are their transfers' issue (MESH_GATE_ISSUES), and done words raised word by word: a program of two
-     words alternating transfer by transfer (two micro-batches' frames, frame-major), every transfer gated each way,
-     nothing issued while it runs; the second word's gates held shut, the first's executions cross and its word rises
-     through them while the second's stays put; then the second's open, the client counts its executions issued, and
-     the program closes */
+  /* done words raised word by word, and posting bounded by the issued steps: a program of two words alternating
+     transfer by transfer, every transfer gated each way, its gate words set far past every execution; with its
+     executions issued, the second word's gates held shut, the first's executions cross and its word rises through them
+     while the second's stays put; then the second's open and the program closes; nothing of an execution not issued
+     was posted (the wire's queues hold nothing after) */
   {
     enum { FRAMES=12, RUNS=4 };
     struct made p[2];struct mesh_run r[2];uint64_t gate[2][2];
@@ -239,7 +239,7 @@ int main(void){
           const uint32_t k=i%2,f=i/2;
           /* SEND span: gate word k past frame f (gate_base + 0 + 1 + e FRAMES, MESH_GATE_WHOLE); a receive: word k at
              frame f's value; a done word a micro-batch, its frame count */
-          x[i]=(struct mesh_crossing){.spans=spans,.units=1,.first=i,.step=0,.flags=MESH_GATE_ISSUES|(d?0:MESH_GATE_WHOLE),
+          x[i]=(struct mesh_crossing){.spans=spans,.units=1,.first=i,.step=0,.flags=d?0:MESH_GATE_WHOLE,
             .gate=gate[n][k],.gate_base=f+1,.gate_step=FRAMES,.done=words[k],.done_value=f+1,.done_step=FRAMES};
         }
         p[n].program.table[d]=table;p[n].program.transfers[d]=2*FRAMES;p[n].program.pieces[d]=2*FRAMES;
@@ -247,26 +247,34 @@ int main(void){
       struct mesh_ctx c=client(n,CLIENT_C);
       assert(!mesh_declare(&c,o+n,&p[n].program,r+n));
     }
-    for(int n=0;n<2;n++)atomic_store(word(n,gate[n][0]),RUNS*FRAMES);
+    for(int n=0;n<2;n++){mesh_issue(r+n,RUNS);atomic_store(word(n,gate[n][0]),UINT64_MAX/2);}
     run(20000,UINT32_MAX);
     for(int n=0;n<2;n++)for(int d=0;d<2;d++){
       if(atomic_load(word(n,p[n].done[d][0]))!=RUNS*FRAMES || atomic_load(word(n,p[n].done[d][1]))!=0){
-        fprintf(stderr,"order: node %d direction %d: words %llu and %llu, not %u and 0 (issued 0, the second word's gates shut)\n",n,d,
+        fprintf(stderr,"order: node %d direction %d: words %llu and %llu, not %u and 0 (the second word's gates shut)\n",n,d,
                 (unsigned long long)atomic_load(word(n,p[n].done[d][0])),(unsigned long long)atomic_load(word(n,p[n].done[d][1])),RUNS*FRAMES);
         return 1;
       }
     }
-    for(int n=0;n<2;n++)atomic_store(word(n,gate[n][1]),RUNS*FRAMES);
+    /* the first word's posting stopped at its issued executions though its gates stood open far past them */
+    for(int n=0;n<2;n++)for(int d=0;d<2;d++){
+      uint64_t posted=0;
+      for(uint32_t c=0;c<CABLES;c++)for(uint32_t l=0;l<LANES;l++)posted+=w.node[n].posted[d][c][l];
+      if(posted!=RUNS*FRAMES){fprintf(stderr,"order: node %d direction %d posted %llu, not the first word's %u\n",n,d,(unsigned long long)posted,RUNS*FRAMES);return 1;}
+    }
+    for(int n=0;n<2;n++)atomic_store(word(n,gate[n][1]),UINT64_MAX/2);
     run(20000,UINT32_MAX);
     for(int n=0;n<2;n++){
       for(int d=0;d<2;d++)assert(atomic_load(word(n,p[n].done[d][1]))==RUNS*FRAMES);
-      mesh_issue(r+n,RUNS);
+      uint64_t posted=0;
+      for(int d=0;d<2;d++)for(uint32_t c=0;c<CABLES;c++)for(uint32_t l=0;l<LANES;l++)posted+=w.node[n].posted[d][c][l];
+      if(posted!=2*2*RUNS*FRAMES){fprintf(stderr,"order: node %d posted %llu pieces, not its issued executions' %u\n",n,(unsigned long long)posted,4*RUNS*FRAMES);return 1;}
       struct mesh_ctx c=client(n,CLIENT_C);
       assert(!mesh_close(&c,r+n));
     }
     run(200,UINT32_MAX);
     for(int n=0;n<2;n++){struct mesh_ctx c=client(n,CLIENT_C);assert(mesh_run_done(&c,r+n));}
-    printf("order: gates that are their issue, words raised word by word: passed\n");
+    printf("order: words raised word by word, posting bounded by the issued executions: passed\n");
   }
 
   /* program A: period 4, mixed shapes, run ahead; its shared prefix words */

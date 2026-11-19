@@ -1326,7 +1326,8 @@ static int fabric_realize(struct ncclComm *comm) {
   if (!status && !(comm->channels = calloc(comm->fabric.cables + 1, sizeof *comm->channels))) status = ENOMEM;
   if (!status && comm->nranks > 1 && (ncclMemAlloc(&comm->gate_word, sizeof(uint64_t)) || lease_buffer(comm->gate_word, &comm->gate, &offset) || offset))
     status = ENOMEM;
-  if (!status && comm->gate_word) comm->gate_at = (uint64_t)((char *)comm->gate_word - (char *)m);
+  /* the gate word from 0, as every group's value of it counts from there (a lease's pages hold what was last there) */
+  if (!status && comm->gate_word) { atomic_store((_Atomic uint64_t *)comm->gate_word, 0); comm->gate_at = (uint64_t)((char *)comm->gate_word - (char *)m); }
   for (uint32_t e = 0; !status && e < comm->fabric.cables; e++) {
     if (comm->endpoint[e] == UINT32_MAX) continue;
     const struct mesh_cable *c = comm->fabric.cable + e;
@@ -2666,9 +2667,8 @@ static void spares_give(struct ncclComm *comm, uint64_t holder) {
    the failure formatted */
 /* design/declared-programs.md: the process's declared program's types (its functions: "The process's declared
    program", below) */
-/* a captured transfer: its entry, gate and done word, its step, node and list, and its gate's flags (mesh.h
-   MESH_GATE_ISSUES) */
-struct crossing_rec { uint64_t spans, units, gate, gate_base, done, done_value; uint32_t step, node, list, flags; };
+/* a captured transfer: its entry, gate and done word, its step, node and list */
+struct crossing_rec { uint64_t spans, units, gate, gate_base, done, done_value; uint32_t step, node, list, padding; };
 struct step_part {
   struct ncclComm *comm;
   struct call *calls;            /* the captured calls, their steps bound and operands placed */
@@ -3019,9 +3019,7 @@ static int entry_recorded(void *context, struct ncclComm *comm, uint32_t h, int 
   const struct hdr *m = comm->attach->context.M;
   d->recs[d->recs_count++] = (struct crossing_rec){.spans = entry.spans, .units = entry.units, .gate = entry.word, .gate_base = entry.base,
     .done = (uint64_t)((char *)(list ? comm->channels[h].view.landed : comm->channels[h].view.sent) - (char *)m), .done_value = end,
-    .step = d->count - 1, .node = comm->channels[h].node, .list = (uint32_t)list,
-    /* a Metal-path step's gates are words its GPU work moves as each execution runs: each is the transfer's issue */
-    .flags = d->parts[d->count - 1].metal && entry.word ? MESH_GATE_ISSUES : 0};
+    .step = d->count - 1, .node = comm->channels[h].node, .list = (uint32_t)list};
   return 0;
 }
 /* the next step of the capture: a part of comm's (its own holder, never given back while the program lives) */
@@ -3230,7 +3228,7 @@ static ncclResult_t node_declare(struct declaration *d, struct node_program *np)
     const struct crossing_rec *r = d->recs + i;
     if (r->node != np->node) continue;
     table[r->list][filled[r->list]++] = (struct mesh_crossing){.spans = r->spans, .units = r->units, .first = pieces[r->list],
-      .step = r->step, .flags = r->flags, .gate = r->gate, .gate_base = r->gate_base, .gate_step = execution_delta(d, r->gate, m),
+      .step = r->step, .gate = r->gate, .gate_base = r->gate_base, .gate_step = execution_delta(d, r->gate, m),
       .done = r->done, .done_value = r->done_value, .done_step = execution_delta(d, r->done, m)};
     pieces[r->list] += r->units;
   }

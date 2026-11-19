@@ -24,7 +24,7 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    both nodes' clients declared and of the cable epochs (mesh-order.h); the bridges exchange ORDER only as the cables
    between them change, each end proposing the piece from which a new epoch begins.  A bridge of another version is
    not paired with (port_heard) */
-#define MESH_VERSION 138u
+#define MESH_VERSION 139u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node) */
@@ -126,16 +126,14 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    pieces of the table before it in one execution.  In execution e, a SEND of span s is posted once the step is issued
    and the word at `gate` reaches gate_base + s + 1 + e gate_step (`flags` MESH_GATE_WHOLE: gate_base + e gate_step for
    every span); a receive once the step is issued and the word reaches gate_base + e gate_step (gate 0: the step's
-   issue alone; MESH_GATE_ISSUES, below: the gate alone).  Once every byte of execution e has crossed, the
+   issue alone).  Nothing is posted for an execution its client has not issued: the set of pieces either end posts is
+   bounded by the program's issued steps, which its end closes at (a gate word's value is the client's, never trusted
+   to bound it: a lease's prior contents, or another program's moves of a shared word, would post a receive of an
+   execution that never runs, and the next program's SEND would fill it).  Once every byte of execution e has crossed, the
    word at `done` (0: none) is raised to done_value + e done_step; done words rise in the order of the node's pieces, so
    a count kept over several transfers is a prefix.  A lost transfer (a cable of the node lost, the order restarted)
    raises every done word of its program to UINT64_MAX */
 #define MESH_GATE_WHOLE 1u
-/* `flags` MESH_GATE_ISSUES: the gate is the transfer's issue: its word moves past execution e's threshold only as the
-   client runs execution e (a GPU's publication count, a group's opening word, a relay's landing), so the transfer is
-   posted once its gate holds, its step's count of issued steps unread.  A Metal-path step's transfers are declared so
-   (libnccl-mesh): nothing the bridge posts for them waits on the host's encoding of the step */
-#define MESH_GATE_ISSUES 2u
 struct mesh_crossing {
   uint64_t spans,units,first;
   uint32_t step,flags;
