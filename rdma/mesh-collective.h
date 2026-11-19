@@ -581,8 +581,9 @@ struct mesh_program_completion {
   double *length, *completion;
   struct mesh_schedule_resource *key;
   char *name;
-  struct mesh_graph_dependence *cross, *issue;
-  struct mesh_graph_relation *relation;
+  size_t *cross_edge; /* indices in access_relation */
+  struct mesh_graph_dependence *issue;
+  struct mesh_graph_relation *relation, *access_relation;
   size_t cycles;
   struct mesh_graph_dependence *cycle;
 };

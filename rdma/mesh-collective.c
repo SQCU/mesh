@@ -3345,6 +3345,7 @@ void mesh_plan_compilation_free(struct mesh_plan_compilation *c){
   }
   if(c->owned){
     if(c->completion.relation)mesh_graph_relation_free(c->completion.relation);
+    if(c->completion.access_relation)mesh_graph_relation_free(c->completion.access_relation);
     for(uint32_t f=0;c->step && f<count;f++){free(c->step[f].entry);plan_step_loaded_free(c->step+f);}
     free(c->step);
   }
@@ -5302,7 +5303,7 @@ static int plan_storage_get(struct plan_archive *in,struct mesh_planned *planned
   return in->status;
 }
 struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range rows,arena[2]; uint64_t used[2],signature,completion; };
-#define PLAN_SAVED_COMPILATION UINT64_C(0x384d4f435048534d)
+#define PLAN_SAVED_COMPILATION UINT64_C(0x394d4f435048534d)
 #define PLAN_STEP_ARRAYS(X) \
   X(item,p->flow->givens) X(sync,(uint64_t)p->waits+p->tells) X(wait_row,(uint64_t)p->flow->calls+1)
 #define PLAN_COMPILATION_ARRAYS(X) \
@@ -5313,13 +5314,14 @@ struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range r
 #define PROGRAM_COMPLETION_ARRAYS(X) \
   X(base,(size_t)s->calls+1) X(resource,s->vertices) X(order,s->vertices) X(place,s->vertices) \
   X(length,s->vertices) X(completion,s->vertices) X(key,s->resources) X(name,s->names) \
-  X(cross,s->crossings) X(issue,s->issues)
+  X(cross_edge,s->crossings) X(issue,s->issues)
 static void program_completion_put(struct plan_archive *out,const struct mesh_program_completion *s){
   plan_archive_put(out,s,offsetof(struct mesh_program_completion,base));
 #define PUT(field,n) plan_archive_put(out,s->field,(n)*sizeof *s->field);
   PROGRAM_COMPLETION_ARRAYS(PUT)
 #undef PUT
   plan_relation_put(out,s->relation);
+  plan_relation_put(out,s->access_relation);
   plan_archive_put(out,&s->cycles,sizeof s->cycles);
   plan_archive_put(out,s->cycle,s->cycles*sizeof *s->cycle);
 }
@@ -5341,11 +5343,14 @@ static int program_completion_get(struct plan_archive *in,struct mesh_graph_cont
     if(s->order[v]>=s->vertices || s->place[s->order[v]]!=v || s->resource[v]>=s->resources)return EINVAL;
   for(uint32_t r=0;r<s->resources;r++)
     if(s->key[r].name>s->names || s->key[r].bytes>s->names-s->key[r].name)return EINVAL;
-  for(size_t i=0;i<s->crossings;i++)if(s->cross[i].from>=s->base[s->calls] || s->cross[i].to>=s->base[s->calls])return EINVAL;
   for(size_t i=0;i<s->issues;i++)if(s->issue[i].from>=s->vertices || s->issue[i].to>=s->vertices)return EINVAL;
   int rc=plan_relation_get(in,graph,owner,&s->relation);
   if(!rc && mesh_graph_relation_data(s->relation)->vertices!=s->vertices)return EINVAL;
+  if(!rc)rc=plan_relation_get(in,graph,owner,&s->access_relation);
   if(!rc){
+    const struct mesh_graph_relation_data *data=mesh_graph_relation_data(s->access_relation);
+    if(data->vertices!=s->base[s->calls])return EINVAL;
+    for(size_t i=0;i<s->crossings;i++)if(s->cross_edge[i]>=data->edges)return EINVAL;
     const size_t *n=plan_archive_view(in,1,sizeof *n);
     if(!n)return in->status;
     s->cycles=*n;s->cycle=(void *)(uintptr_t)plan_archive_view(in,*n,sizeof *s->cycle);

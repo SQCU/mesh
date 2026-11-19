@@ -249,9 +249,16 @@ class ProgramCompletion(C.Structure):
     _fields_ = [(name, U) for name in ('calls', 'vertices', 'resources', 'names')] + [
         ('crossings', Z), ('issues', Z)] + [(name, C.POINTER(U)) for name in ('base', 'resource', 'order', 'place')] + [
         ('length', C.POINTER(D)), ('completion', C.POINTER(D)), ('key', C.POINTER(ScheduleResource)),
-        ('name', C.POINTER(C.c_char)), ('cross', C.POINTER(mesh_graph.Dependence)),
-        ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p), ('cycles', Z),
+        ('name', C.POINTER(C.c_char)), ('cross_edge', C.POINTER(Z)),
+        ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p), ('access_relation', C.c_void_p), ('cycles', Z),
         ('cycle', C.POINTER(mesh_graph.Dependence))]
+
+    @property
+    def cross(self):
+        if not self.crossings:
+            return ()
+        data = mesh_graph.LIB.mesh_graph_relation_data(self.access_relation).contents
+        return mesh_graph.View(self, self.cross_edge, range(self.crossings), data.edge.__getitem__)
 
     def position(self, call, instruction):
         return self.place[self.base[call] + instruction]
