@@ -103,7 +103,9 @@ static inline void wire_raise(struct wire *w,uint32_t n){
   for(int way=0;way<2;way++){
     uint64_t done[WIRE_CABLES*WIRE_LANES];uint32_t k=0;
     for(uint32_t c=0;c<last->cables;c++)for(uint32_t j=0;j<last->cable[c].lanes;j++)done[k++]=v->done[way][last->cable[c].port][j];
-    for(uint32_t c=0;c<last->cables;c++)if(wire_serves(v,last->cable[c].port))order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raiser[last->cable[c].port][way]);
+    for(uint32_t c=0;c<last->cables;c++)if(wire_serves(v,last->cable[c].port)){
+      if(order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raiser[last->cable[c].port][way]))abort();
+    }
   }
 }
 /* both nodes' epoch over cables [0, cables), from the later of the two ends' bounds each way (mesh-link.c order_turn:

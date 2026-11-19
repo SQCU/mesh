@@ -67,7 +67,7 @@ static void cable_make(uint32_t c){
     struct wire_node *v=w.node+n;
     v->down[c]=0;v->generation[c]=atomic_load(&v->x->generation);
     for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++){v->posted[way][c][j]=0;v->done[way][c][j]=0;v->post[way][c][j]=(struct order_post){0};}
-    memset(v->raiser[c],0,sizeof v->raiser[c]);
+    for(int way=0;way<2;way++)order_raiser_clear(&v->raiser[c][way]);
   }
   fprintf(stderr,"sim-wire: turn %llu: cable %u up (identity %llu)\n",(unsigned long long)turn_now,c,(unsigned long long)identity[c]);
 }

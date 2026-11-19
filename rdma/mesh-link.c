@@ -267,7 +267,9 @@ static void order_done(struct port *port,int way){
   for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
     for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof done/sizeof *done;lane++,k++)
       done[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1],memory_order_acquire);
-  order_raise_pass(M,x,epochs,segments,way,done,&l->raiser[way]);
+  if(order_raise_pass(M,x,epochs,segments,way,done,&l->raiser[way])){
+    atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&M->control);
+  }
 }
 
 /* the progress thread's tell (the epoch it has seen, the guard it holds at), its raiser woken (port_wait) */
@@ -556,7 +558,8 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   l->order=MESH_ABSENT;
   for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(M,n)->node)==node)l->order=n;
   l->generation=l->order<MESH_NODES?atomic_load(&mesh_node_at(M,l->order)->generation):0;
-  memset(l->post,0,sizeof l->post);memset(l->raiser,0,sizeof l->raiser);
+  memset(l->post,0,sizeof l->post);
+  for(int d=0;d<2;d++)order_raiser_clear(l->raiser+d);
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
