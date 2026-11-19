@@ -936,13 +936,15 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId com
    broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
    (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesOwn the communicator's own (its paths, else the map's packed
    trees, the default's), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
-   both the caller's: Blink's packing [Wang et al. 2020], every link a share), a segment cut among its root's trees by
+   both the caller's: Blink's packing [Wang et al. 2020], every link a share), ncclMeshTreesShortest each root's one
+   shortest tree (mesh-plan.h mesh_trees_shortest: the fewest hops, then the widest narrowest one; `most`, `eps` and
+   `shares` not read: a latency-first form, where the packed trees route a part the long way round), a segment cut among its root's trees by
    `shares` (root r's k-th tree in the packing's order, heaviest first, or the communicator's trees' order, shares[r x
    most + k], each 0 or more, a tree of 0 or past `most` carrying none, for the communicator's ranks; NULL: the
    packing's flows); an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
    reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part one entry a
    hop, a relay sending each page on as it lands (mesh-plan.h mesh_compile). */
-typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
+typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1, ncclMeshTreesShortest = 2 } ncclMeshTrees;
 typedef struct {
   int collective;
   int root;

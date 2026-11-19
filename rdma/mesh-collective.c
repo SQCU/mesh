@@ -804,6 +804,51 @@ static int mesh_packed_heavier(const void *a,const void *b){
   return x->flow>y->flow?-1:x->flow<y->flow;
 }
 
+uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint32_t *parent,double *log_weight){
+  if(!map || mesh_link_map_check(map) || map->relays || mesh_link_map_joined(map,NULL))return 0;
+  const uint32_t n=map->nodes;
+  /* a pair's capacity: its parallel links' bandwidths summed, or their count where none is given */
+  double *cap=calloc((size_t)n*n+1,sizeof *cap),*width=malloc(((size_t)n+1)*sizeof *width);
+  uint32_t *depth=malloc(((size_t)n+1)*sizeof *depth),*queue=malloc(((size_t)n+1)*sizeof *queue);
+  int counted=1;
+  for(uint32_t e=0;e<map->links;e++)if(map->bandwidth && map->bandwidth[e])counted=0;
+  uint32_t made=0;
+  if(!cap || !width || !depth || !queue)goto done;
+  for(uint32_t e=0;e<map->links;e++){
+    const uint32_t a=map->link[e][0],b=map->link[e][1];
+    if(a==b || a>=n || b>=n)continue;
+    const double c=counted?1.0:(double)map->bandwidth[e];
+    cap[(size_t)a*n+b]+=c;cap[(size_t)b*n+a]+=c;
+  }
+  for(uint32_t r=0;r<n;r++){
+    uint32_t *par=parent+(size_t)r*n;
+    for(uint32_t u=0;u<n;u++){depth[u]=UINT32_MAX;width[u]=0;par[u]=u;}
+    depth[r]=0;width[r]=INFINITY;
+    uint32_t head=0,tail=0;queue[tail++]=r;
+    /* breadth first: a node's parent chosen once every node one link nearer is settled (they are queued before it) */
+    while(head<tail){
+      const uint32_t v=queue[head++];
+      for(uint32_t u=0;u<n;u++)if(cap[(size_t)v*n+u]>0 && depth[u]==UINT32_MAX){depth[u]=depth[v]+1;queue[tail++]=u;}
+    }
+    if(tail!=n)goto done;
+    for(uint32_t k=1;k<n;k++){
+      const uint32_t u=queue[k];
+      uint32_t best=UINT32_MAX;double w=-1;
+      for(uint32_t p=0;p<n;p++){
+        if(depth[p]+1!=depth[u] || !(cap[(size_t)p*n+u]>0))continue;
+        const double through=width[p]<cap[(size_t)p*n+u]?width[p]:cap[(size_t)p*n+u];
+        if(through>w){w=through;best=p;}
+      }
+      par[u]=best;width[u]=w;
+    }
+    root[r]=r;log_weight[r]=0;
+  }
+  made=n;
+done:
+  free(cap);free(width);free(depth);free(queue);
+  return made;
+}
+
 uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
                          double *log_weight){
   const uint32_t n=map->nodes,N=mesh_all(map);

@@ -138,6 +138,13 @@ int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
    nodes (mesh_link_map_joined) or `roots` holds none.  At two nodes, each node's one tree. */
 uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
                          double *log_weight);
+/* Each node's one shortest tree, rooted at it: every node at its fewest links from the root, its parent among the
+   nodes one link nearer the one whose route from the root has the widest narrowest hop (a pair's capacity its parallel
+   links' bandwidths summed, or their count where the map gives the pair none), the lowest-numbered of equals; log
+   weight 0.  The latency-first trees: a part crosses the fewest hops (the packed trees, which balance every link's load,
+   may route a part the long way round a ring).  Writes root, parent (nodes a tree) and log_weight for map->nodes trees,
+   tree r rooted at node r; returns their count, 0 where the map does not join its nodes or has relays. */
+uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
