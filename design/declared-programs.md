@@ -68,12 +68,16 @@ execution k / period.
   lane has room (`order_next`, `order_ready`). The lane then waits at its own next piece. Nothing is searched for,
   skipped or retired. Measured with a throwaway loop over `order_next` on an M-series Mac (not committed): 5.8 ns a
   piece, from unit index to a posted span's address.
-- **Done words.** One process of the generation raises them: the child of the generation's first cable. From every
-  queue pair's done count, `order_done_through` takes the least piece not done, and the done words of every transfer
-  wholly below it are raised in the pieces' order (`order_raise_through`). Beyond that prefix, up to the latest piece
-  any queue pair has done, a transfer that is wholly done has its word raised if no earlier transfer not yet done names
-  the same word (`order_raise_pass`). A word several transfers count on therefore rises only as their prefix, and a
-  transfer held by its gate holds back no other transfer's word. Measured the same way: 36 ns a pass.
+- **Done words.** Every port's child raises them, in each pass right after it reads its completion queues
+  (mesh-link.c `order_done`), so the process that sees a completion first raises its words and no completion waits for
+  another process's pass. From every queue pair's done count, `order_done_through` takes the least piece not done, and
+  the done words of every transfer wholly below it are raised in the pieces' order (`order_raise_through`). Beyond that
+  prefix, up to the latest piece any queue pair has done, a transfer that is wholly done has its word raised if no
+  earlier transfer not yet done names the same word (`order_raise_pass`). A word several transfers count on therefore
+  rises only as their prefix, and a transfer held by its gate holds back no other transfer's word. Raisers need no
+  agreement: every done count only rises, so each raiser's reading is true of the queue pairs, each word is raised to
+  the greatest value any raiser computes (`order_raise`, a compare-and-swap up), and `raised` moves only up
+  (`order_raised_to`). Measured the same way: 36 ns a pass.
 - **Composition.** Several clients' programs toward one node (a different process each) share its rounds. Each round
   is `count_p` executions of each program, in key order. A program joins or leaves only at a round that every program
   of the segment has reached. Clients agree that round between themselves, ahead of time (section 4).
@@ -93,6 +97,18 @@ execution k / period.
   (libnccl-mesh: `ncclMeshDeclareBegin`, the calls, `ncclMeshDeclareEnd`). Call k is step k mod period, and a call
   that is not its step fails as a value. A program changes shape only by an explicit, symmetric declaration at the
   same point at both ends. Nothing detects a shape and nothing negotiates one.
+- **Steps alongside one another.** Independent work the code runs side by side (one micro-batch's fused crossing
+  beside another's, each on a stream of its own) is declared so: `ncclMeshDeclareAlongside` between two groups of a
+  declaration puts the next group in the run of the one before it. Toward each node the table is then ordered by run,
+  then repeat (a fused crossing's frame, nccl.h `ncclMeshFused` repeats; 0 for a group of one), then step, then capture
+  order (nccl-mesh.c `recs_order`): frame j of every group of the run precedes frame j + 1 of any. That order is
+  computed from the declarations alone, alike at both ends. The client's obligation is to produce the data in that
+  order: tp_fused (gemma-4-e2b-pareto) builds each micro-batch's step and then encodes it frame by frame across them.
+  Built one after another instead, MLX's throttle on command buffers in flight held micro-batch 1's encoding until
+  micro-batch 0's step had nearly run, so the two never overlapped whatever the wire's order, and with frames
+  interleaved on the wire that wait is a deadlock.
+- **Counted calls.** An AlltoAllV captured by a declaration gathers its ranks' counts over the bootstrap there
+  (`prepare_counted`), once for the program's life: a declaration is a point of configuration every rank reaches alike.
 - **Separate processes toward one node** compose by rounds. Each one's count is part of its declaration, and the round
   at which a program joins or leaves is the clients' own agreement, reached through their own atomics, barriers or
   semaphores. The bridge discovers nothing at run time. tests/sim-runahead.c shows one such agreement: a barrier of
@@ -157,6 +173,7 @@ Re-read for this document: none. Each entry below is recalled, and says where a 
   - libnccl-mesh communicators (1 and 2 in one program) at 6 KB, 98 KB and 1.5 MB, every value checked;
   - the same through mesh_mpi (tests/sim-mpi.py);
   - a Metal-path program (tests/sim-metal.m);
+  - a one-way WRITE plan, an AlltoAllV of uneven counts and two communicators declared alongside (tests/sim-programs.c);
   - two process pairs, each running its own one-step program of 12,000 Broadcasts ahead of its receiver over a queue
     pair served once in 64 turns, the two programs composed by rounds.
 - **Python.** The native extraction tests (`test_native_byte_plans`, `test_indexed_write`, `test_diagnostics`) take
@@ -170,11 +187,14 @@ Re-read for this document: none. Each entry below is recalled, and says where a 
   cable as before. A transfer's latency is therefore its slowest queue pair's. A transfer held by its gate holds every
   queue pair its pieces are on, and a transfer longer than Q pieces is on all of them. tests/peer-groups.c's
   late-receive-window mode now expects the second group to complete after the first.
-- **Done words are raised by the generation's first cable's child alone.** Completions on the other cables reach
-  their done words one cross-process read later.
+- **Several raisers.** Every port's child now raises done words. The simulator runs one raiser a cable in turn
+  (tests/wire.h), not concurrently. A restart racing a child's raise has the window it had with one raiser, now on
+  every cable.
 - **Program buffers are fixed per step.** Callers that allocate a collective's buffers anew each call fail with
   ncclInvalidUsage: torch.compile graphs replayed through `torch_mesh.record`, `partition`'s ops, examples/chain*.py and
-  lstm-service. They need a declaration over tensors they keep.
+  lstm-service. They need a declaration over tensors they keep. xonotic/solver/worker.py's crossings are data-dependent
+  (each request's `rows[:n]`, and a solve's shapes follow n), so it has no program to declare until its crossings are
+  of a fixed size.
 - **Process composition.** A program of a client that died mid-execution is only realigned by a restart, which loses
   every cable toward the node. Separate processes sharing a node must agree their rounds. One that issues more rounds
   than its partner programs waits for them.
