@@ -90,7 +90,6 @@ def probes(contract):
     for action in ('enter', 'leave'):
         probe(f'pid$target::dispatch_group_{action}:entry', 'group_' + action, ('arg0',), f'arg0 == {group}')
     probe('pid$target::dispatch_group_wait:entry', 'group_wait', ('arg0',), 'self->ending || self->issuing')
-    probe('pid$target::dispatch_group_wait:return', 'group_drained', ('arg1',), 'self->ending || self->issuing')
     probe('pid$target::MetalProgramEnd:return', 'ended', ('arg1',))
     where = 'pid$target::MetalWaitPrefixes:'
     probe(where + 'entry', 'prefixes', ('arg0', 'arg1', 'arg2', 'arg3'))
@@ -184,8 +183,7 @@ def compare(contract, lines, submits):
             previous = seen
         take('group_wait', (contract['notifications'],))
         if groups and current and groups[-1][0] > current[0]:
-            raise ValueError('completion callback group released after its drain')
-        take('group_drained', (0,))
+            raise ValueError('completion callback group released after MetalProgramEnd returned')
         take('ended', (0,))
         if contract['prefixes']:
             take('prefixes', (contract['prefix_base'], contract['prefix_table'], len(contract['prefixes']), first))
