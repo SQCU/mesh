@@ -401,7 +401,7 @@ class Target:
 
     def transport_state(self, owned, libs, gpu, owner, row, program):
         marks, call = row.marks, row.planned
-        if not marks["transfers"]:
+        if not marks["transfers"] and not marks["received"]:
             return None, 0
         M, compiler, _, transport = libs
         context, wires, word = mesh.Context.from_address(owner.context), M.Transport(), mesh.Q()
