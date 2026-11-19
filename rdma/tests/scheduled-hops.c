@@ -1,5 +1,6 @@
 /* Compile with the same private NCCL entry points used by plan capture and replay. */
 #include "../nccl-mesh.c"
+#include "../mesh-order.h"
 #include <assert.h>
 
 enum { RANKS=4, PAGE=16384 };
@@ -11,10 +12,13 @@ static struct {
 } words;
 static uint64_t prefixes[RANKS][RANKS],published[RANKS][RANKS];
 static unsigned gates;
+static uint64_t digest[2][RANKS][RANKS];
 
 static int recorded(void *unused,struct ncclComm *comm,uint32_t h,int list,struct mesh_entry entry,uint64_t end){
   (void)unused;
   const unsigned peer=comm->channels[h].peer;
+  uint64_t *hash = list ? &digest[1][peer][comm->rank] : &digest[0][comm->rank][peer];
+  *hash = order_hash(*hash,entry.units);
   if(list){
     assert(end==prefixes[comm->rank][peer]+entry.units);
     prefixes[comm->rank][peer]=end;
@@ -65,6 +69,7 @@ int main(void){
     schedule_laid(comm+r,plans[r]);assert(!group_entries(comm+r,plans[r],recorded,NULL));
     data[r]=malloc(bytes);assert(data[r]);
   }
+  assert(!memcmp(digest[0],digest[1],sizeof digest[0]));
   struct scatter_schedule *solved=calls[0].bound->scatter;
   uint64_t directed[RANKS][RANKS]={0};
   for(unsigned inv=0;inv<3;inv++){
