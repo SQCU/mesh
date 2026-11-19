@@ -2093,13 +2093,14 @@ struct scatter_schedule {
   struct mesh_scatter_link *link;
   struct mesh_scatter_group *group;
   struct mesh_scatter_send *send;
+  unsigned char *forwarded;
   uint32_t links, groups, count;
   uint64_t piece;
 };
 
 static void scatter_release(struct scatter_schedule *schedule) {
   if (!schedule || atomic_fetch_sub(&schedule->references, 1) != 1) return;
-  free(schedule->link); free(schedule->group); free(schedule->send); free(schedule);
+  free(schedule->forwarded); free(schedule->link); free(schedule->group); free(schedule->send); free(schedule);
 }
 
 struct steps {
@@ -2409,13 +2410,54 @@ static ncclResult_t counted_steps(struct call *c) {
 
 /* The scatter's emitted hops name exact intervals on adjacent ranks. The communicator has one channel per peer.
    Its bridge places the channel's pieces on the cables and queue pairs of the current epoch. */
+/* One extent can stream from one producer. The receive's landed prefix then enables every forwarded
+   page at its own offset (group_entries). Each edge's wire order stays the solver's order. */
+static ncclResult_t scatter_extents(struct scatter_schedule *schedule, uint32_t n, uint64_t *extent) {
+  if (!schedule->count) return ncclSuccess;
+  size_t group_first[65] = {0};
+  for (uint32_t g = 0; g < schedule->groups; g++) {
+    const struct mesh_scatter_group *group = schedule->group + g;
+    const uint64_t pieces = group->to && group->bytes ? 1 + (group->bytes - 1) / schedule->piece : 0;
+    if (pieces > SIZE_MAX / n / sizeof(uint32_t) - group_first[g]) return fail(ncclSystemError, "scatter piece table too large");
+    group_first[g+1] = group_first[g] + pieces;
+  }
+  uint32_t *received = calloc(group_first[schedule->groups] * n, sizeof *received);
+  struct endpoint { uint32_t head, source; } *open = calloc((size_t)n*n, sizeof *open);
+  schedule->forwarded = calloc(schedule->count, 1);
+  if (!received || !open || !schedule->forwarded) { free(received); free(open); return fail(ncclSystemError, "out of memory"); }
+  ncclResult_t result = ncclSuccess;
+  for (uint32_t k = 0; k < schedule->count; k++) {
+    const struct mesh_scatter_send *hop = schedule->send + k;
+    const struct mesh_scatter_link *link = schedule->link + hop->link;
+    const struct mesh_scatter_group *group = schedule->group + hop->group;
+    const size_t piece = group_first[hop->group] + (hop->first - group->first) / schedule->piece;
+    uint32_t *at = received + piece * n;
+    const uint32_t source = at[link->from];
+    if (!source && link->from != group->source) { result = fail(ncclInternalError, "scatter forwards an unavailable piece"); break; }
+    if (source) schedule->forwarded[source-1] = 1;
+    struct endpoint *e = open + (size_t)link->from*n + link->to;
+    const struct mesh_scatter_send *head = e->head ? schedule->send + e->head - 1 : NULL;
+    if (!head || head->group != hop->group || e->source != source || head->first + extent[e->head-1] != hop->first) {
+      e->head = k+1; e->source = source;
+    }
+    extent[e->head-1] += hop->bytes;
+    at[link->to] = e->head;
+  }
+  free(received); free(open);
+  return result;
+}
+
 static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *schedule, struct mesh_operand operand) {
   const struct ncclComm *comm = c->comm;
   const uint32_t rank = (uint32_t)comm->rank, n = (uint32_t)comm->nranks;
+  uint64_t *extent = calloc((size_t)schedule->count + 1, sizeof *extent);
+  if (!extent) return fail(ncclSystemError, "out of memory");
+  ncclResult_t result = scatter_extents(schedule, n, extent);
+  if (result) { free(extent); return result; }
   uint32_t count = 0;
   for (uint32_t k = 0; k < schedule->count; k++) {
     const struct mesh_scatter_link *edge = &schedule->link[schedule->send[k].link];
-    count += edge->from == rank || edge->to == rank;
+    count += extent[k] && (edge->from == rank || edge->to == rank);
   }
   const size_t room = (size_t)count + 1;
   struct steps *s = calloc(1, sizeof *s);
@@ -2424,29 +2466,31 @@ static ncclResult_t scatter_steps(struct call *c, struct scatter_schedule *sched
       !(s->cable = calloc(room, sizeof *s->cable)) || !(s->consumption = calloc(room, sizeof *s->consumption)) ||
       !(s->prior_first = calloc(room, sizeof *s->prior_first)) || !(s->buffer = calloc(1, sizeof *s->buffer)) ||
       !(s->demand = calloc((size_t)n * n, sizeof *s->demand))) {
-    steps_free(s); return fail(ncclSystemError, "out of memory");
+    free(extent); steps_free(s); return fail(ncclSystemError, "out of memory");
   }
   s->buffers = s->initialized = 1;
   uint32_t cable[64];
   for (uint32_t r = 0; r < n; r++) cable[r] = UINT32_MAX;
   for (uint32_t h = 0; h < comm->count; h++) cable[comm->channels[h].peer] = comm->channels[h].cable;
   for (uint32_t k = 0; k < schedule->count; k++) {
+    if (!extent[k]) continue;
     const struct mesh_scatter_send *send = &schedule->send[k];
     const struct mesh_scatter_link *edge = &schedule->link[send->link];
     uint64_t *demand = s->demand + (size_t)edge->from * n + edge->to;
-    if (send->bytes > UINT64_MAX - *demand) { steps_free(s); return fail(ncclInvalidUsage, "scheduled hop bytes overflow"); }
-    *demand += send->bytes;
+    if (extent[k] > UINT64_MAX - *demand) { free(extent); steps_free(s); return fail(ncclInvalidUsage, "scheduled hop bytes overflow"); }
+    *demand += extent[k];
     if (edge->from != rank && edge->to != rank) continue;
     const uint32_t peer = edge->from == rank ? edge->to : edge->from;
-    if (cable[peer] == UINT32_MAX || send->first % operand.element_bytes || send->bytes % operand.element_bytes) {
-      steps_free(s); return fail(ncclInternalError, "scheduled hop has no matching channel or element interval");
+    if (cable[peer] == UINT32_MAX || send->first % operand.element_bytes || extent[k] % operand.element_bytes) {
+      free(extent); steps_free(s); return fail(ncclInternalError, "scheduled hop has no matching channel or element interval");
     }
     struct mesh_operand view = operand;
-    view.elements = send->bytes / operand.element_bytes;
+    view.elements = extent[k] / operand.element_bytes;
     s->cable[s->count] = cable[peer];
     s->steps[s->count++] = (struct mesh_step){edge->from == rank ? MESH_STEP_SEND : MESH_STEP_COPY, peer, k, 0,
                                                send->first / operand.element_bytes, view};
   }
+  free(extent);
   s->scatter = schedule;
   atomic_fetch_add(&schedule->references, 1);
   c->bound = s;
@@ -3227,10 +3271,19 @@ static int group_entries(struct ncclComm *comm, const struct schedule *plans, en
       }
       status = visit(context, comm, h, 0, entry, pages_to_word(m->end));
     }
-    for (size_t k = 0; !status && k < p->ins; k++)
-      if (p->in[k].pages.n)
-        status = visit(context, comm, h, 1, (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base},
-                       pages_to_word(p->in[k].end));
+    for (size_t k = 0; !status && k < p->ins; k++) {
+      const struct message *m = p->in + k;
+      const struct steps *s = m->c->bound;
+      const uint64_t units = m->pages.n;
+      const uint64_t grain = s->scatter && s->scatter->forwarded[s->steps[m->step].round] ?
+        s->scatter->piece / comm->page : units;
+      for (uint64_t first = 0; !status && first < units;) {
+        const uint64_t count = units-first < grain ? units-first : grain;
+        const struct mesh_entry entry = {m->table + first * sizeof(struct mesh_dma_span), count, p->word, p->base};
+        first += count;
+        status = visit(context, comm, h, 1, entry, m->end.n-units+first);
+      }
+    }
     if (status) return status;
   }
   return 0;

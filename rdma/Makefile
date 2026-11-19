@@ -142,6 +142,8 @@ check: all
 	mkdir -p .build/tests
 	cc -O2 $(WARN) -o .build/tests/order tests/order.c -L.build -lmesh -Wl,-rpath,$(CURDIR)/.build && .build/tests/order
 	cc -std=c11 -O2 $(WARN) -I . -o .build/tests/scatter tests/scatter.c mesh-collective.c mesh-fabric.c mesh-routed.c -lm && .build/tests/scatter
+	cc -fblocks -O2 $(WARN) -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" -o .build/tests/scheduled-hops \
+	  tests/scheduled-hops.c nccl-mesh-metal.m -L.build -lmesh -Wl,-rpath,$(CURDIR)/.build -framework Metal -framework Foundation && .build/tests/scheduled-hops
 	tests/sim-two-nodes.sh
 .PHONY: check
 
