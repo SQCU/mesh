@@ -707,7 +707,7 @@ for name, result, arguments in (
 
 class Operation(C.Structure):
     _fields_ = [('processor', C.c_uint32), ('primitive', C.c_uint32), ('vertex', C.c_uint32), ('object', C.c_uint32),
-                ('execution', C.c_uint64), ('value', C.c_uint64)]
+                ('execution', C.c_uint64), ('value', C.c_uint64), ('native_site', C.c_uint32), ('padding', C.c_uint32)]
 
 
 class Synchronized(C.Structure):
@@ -1169,6 +1169,8 @@ def _immutable(data):
 
 def from_record(data):
     data, pointer = _immutable(data)
+    if len(data) < 80 or C.c_uint64.from_buffer_copy(data, 32).value > len(data):
+        raise OSError(errno.EINVAL, 'invalid signature record length')
     made = Signature()
     _check(LIB.mesh_graph_record_read(pointer, C.byref(made)))
     made.borrowed = (data, pointer)

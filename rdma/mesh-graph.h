@@ -704,10 +704,12 @@ int mesh_graph_cover_sets(uint64_t quantum, uint32_t values, uint32_t blocks, co
                            uint64_t (*extra_blocks)(const void *, uint32_t), const void *extra_context,
                            struct mesh_graph_cover_result **out);
 void mesh_graph_cover_result_free(struct mesh_graph_cover_result *);
-struct mesh_graph_operation { uint32_t processor, primitive, vertex, object; uint64_t execution, value; };
+/* native_site is the one-based site of the emitting native program, zero for an operation without a native site. */
+struct mesh_graph_operation { uint32_t processor, primitive, vertex, object; uint64_t execution, value;
+                              uint32_t native_site, padding; };
 struct mesh_graph_synchronized { uint32_t signal, wait, state, redundant, dependence, witness; uint64_t delay; };
 _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_graph_task) == 16 &&
-               sizeof(struct mesh_graph_dependence) == 16 && sizeof(struct mesh_graph_operation) == 32 &&
+               sizeof(struct mesh_graph_dependence) == 16 && sizeof(struct mesh_graph_operation) == 40 &&
                sizeof(struct mesh_graph_synchronized) == 32, "rdma/mesh_graph.py");
 /* design/algorithm-sources.md#relations-over-copies-and-classes; design/compilation-composition-change-request.md item 6.2;
    E. W. Dijkstra, Numerische Mathematik 1, 1959. mesh_graph_contract, mesh_graph_contract_unrolled and
@@ -991,9 +993,10 @@ int mesh_graph_signature_spans(struct mesh_graph_signature *, size_t spans, cons
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
    signature's one serialized form, its header then processor, task, dependence, operation, edge, least and alias in
    that order; mesh_graph_record_read derives the rest as mesh_graph_signature does */
-struct mesh_graph_record { unsigned char digest[32]; uint64_t bytes; uint32_t processors, tasks; uint64_t operations,
+#define MESH_GRAPH_RECORD UINT64_C(0x324749534853454d)
+struct mesh_graph_record { unsigned char digest[32]; uint64_t bytes, magic; uint32_t processors, tasks; uint64_t operations,
                            dependences, synchronized; };
-_Static_assert(sizeof(struct mesh_graph_record) == 72, "mesh_graph_record");
+_Static_assert(sizeof(struct mesh_graph_record) == 80, "mesh_graph_record");
 int mesh_graph_record(const struct mesh_graph_signature *signature, void *record, size_t room, size_t *made);
 int mesh_graph_record_read(const void *record, struct mesh_graph_signature *signature);
 int mesh_graph_archive(const struct mesh_graph_signature *, void *bytes, size_t room, size_t *made);

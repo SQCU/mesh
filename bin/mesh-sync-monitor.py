@@ -61,16 +61,13 @@ CLASSES = ('program', 'feedback', 'static', 'bridge', 'elsewhere')
 
 
 def load(path):
-    made = mesh_graph.from_record(open(path, 'rb').read())
-    try:
-        compiled = mesh_graph.forms(made)
-        processors = [mesh_graph.Processor.from_buffer_copy(p) for p in made.processor[:made.processors]]
-        tasks = [mesh_graph.Task.from_buffer_copy(t) for t in made.task[:made.tasks]]
-        dependences = [mesh_graph.Dependence.from_buffer_copy(d) for d in made.dependence[:made.dependences]]
-        operations = [mesh_graph.Operation.from_buffer_copy(o) for o in made.operation[:made.operations]]
-    finally:
-        mesh_graph.free(made)
-    return compiled, processors, tasks, dependences, operations
+    with open(path, 'rb') as f:
+        made = mesh_graph.from_record(f.read())
+    owner = mesh_graph.Owned(made, mesh_graph.free, None)
+    def view(rows, count):
+        return mesh_graph.View(owner, rows, range(count), lambda row: row)
+    return (mesh_graph.forms(made), view(made.processor, made.processors), view(made.task, made.tasks),
+            view(made.dependence, made.dependences), view(made.operation, made.operations))
 
 
 def classify(processors, operations, node):
@@ -246,7 +243,7 @@ def cover(path):
     return 0 if full else 1
 
 
-def trace_log(text):
+def trace_log(text, operations=(), orders=()):
     threads, signals, failures = {}, {}, []
     for line in text.splitlines():
         match = re.fullmatch(r'mesh-sync-monitor: op (\d+) (\d+) (\d+) (\d+) (-?\d+)', line)
@@ -257,8 +254,25 @@ def trace_log(text):
         if match:
             signals.setdefault(int(match.group(1)), []).append(int(match.group(2)))
         if 'mesh-sync-monitor: unexpected' in line:
+            position = re.search(r' at step (\d+) of thread (\d+)', line)
+            if position:
+                at, tid = map(int, position.groups())
+                prior = threads.get(tid)
+                mask = prior[-1][1] if prior else (1 << len(orders)) - 1
+                candidates = (operations[row[at]] for i, row in enumerate(orders) if mask >> i & 1 and at < len(row))
+                sites = sorted({o.native_site for o in candidates if o.native_site})
+                if sites:
+                    line += ' (expected compiled native_site %s)' % ', '.join(map(str, sites))
             failures.append(line)
     return threads, signals, failures
+
+
+def observed_operation(operation, primitive, value):
+    if (operation.primitive, operation.value) == (primitive, value):
+        return operation
+    observed = mesh_graph.Operation.from_buffer_copy(operation)
+    observed.primitive, observed.value = primitive, value
+    return observed
 
 
 def observed_operations(processors, operations, which, orders, threads, signals, failures):
@@ -272,9 +286,8 @@ def observed_operations(processors, operations, which, orders, threads, signals,
         taken.add(free[0])
         for at, _, primitive, value in steps:
             i = orders[free[0]][at]
-            valued = probed(operations[i], processors)[4]
-            seen[i] = mesh_graph.Operation(operations[i].processor, primitive, operations[i].vertex, operations[i].object,
-                                           operations[i].execution, value if valued else operations[i].value)
+            operation = operations[i]
+            seen[i] = observed_operation(operation, primitive, value if probed(operation, processors)[4] else operation.value)
     compiled, unbound = {}, sorted(sorted(values) for values in signals.values())
     for i, c in enumerate(which):
         if c == 'feedback':
@@ -286,6 +299,10 @@ def observed_operations(processors, operations, which, orders, threads, signals,
             seen.update((i, operations[i]) for i in rows)
     if unbound:
         failures.append('%d events signalled with values the compiled signature does not have' % len(unbound))
+    missing_sites = sorted({o.native_site for i, o in enumerate(operations)
+                            if which[i] in ('program', 'feedback') and i not in seen and o.native_site})
+    if missing_sites:
+        failures.append('unobserved operations at compiled native_site %s' % ', '.join(map(str, missing_sites)))
     return [seen[i] for i in sorted(seen)]
 
 
@@ -381,7 +398,7 @@ def main(argv):
         raised = [tuple(map(int, m.groups())) for m in
                   (re.match(r'mesh-sync-monitor: raise (\d+) (\d+) (\d+) (\d+) (\d+)$', line)
                    for line in watcher.communicate()[0].splitlines()) if m]
-    threads, signals, failures = trace_log(''.join(text))
+    threads, signals, failures = trace_log(''.join(text), operations, orders)
     if status:
         failures.append('dtrace exited %d' % status)
     observed = observed_operations(processors, operations, which, orders, threads, signals, failures)
@@ -393,8 +410,7 @@ def main(argv):
             failures.append('%d compiled bridge raises not observed (%d observed)' % (len(missing), len(made)))
         blind.pop('bridge', None)
         scope.add('bridge')
-        observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, operations[i].vertex,
-                                          operations[i].object, operations[i].execution, count) for i, count in made]
+        observed += [observed_operation(operations[i], operations[i].primitive, count) for i, count in made]
     expected = mesh_graph.signature(processors, tasks, dependences, [o for o, c in zip(operations, which) if c in scope])
     watched = mesh_graph.signature(processors, tasks, dependences, observed)
     if expected['digest'] != watched['digest']:

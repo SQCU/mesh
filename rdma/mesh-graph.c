@@ -5059,13 +5059,13 @@ static int repeated_operations(size_t repeats, const struct mesh_graph_repeated 
   size_t at = 0;
   for (size_t k = 0; k < repeats; k++)
     if (r[k].primitive == MESH_GRAPH_INITIAL)
-      o[at++] = (struct mesh_graph_operation){r[k].processor, r[k].primitive, r[k].vertex, r[k].object, 0, 0};
+      o[at++] = (struct mesh_graph_operation){r[k].processor, r[k].primitive, r[k].vertex, r[k].object, 0, 0, 0, 0};
   for (uint64_t K = 0; K < executions; K++)
     for (size_t k = 0; k < repeats; k++) {
       const struct mesh_graph_repeated *x = r + k;
       if (x->primitive == MESH_GRAPH_INITIAL) continue;
       struct mesh_graph_operation *y = o + at++;
-      *y = (struct mesh_graph_operation){x->processor, x->primitive, x->vertex, x->object, K, 0};
+      *y = (struct mesh_graph_operation){x->processor, x->primitive, x->vertex, x->object, K, 0, 0, 0};
       if (x->primitive == MESH_GRAPH_HOST_WAIT) {
         const __int128 need = (__int128)K * x->every + (__int128)x->ordinal - (__int128)x->lookback * x->every;
         y->value = need > 0 ? (uint64_t)need : 0;
@@ -5349,7 +5349,7 @@ int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t
   if (*made > room) return ERANGE;
   struct mesh_graph_record *head = record;
   memset(record, 0, *made);
-  *head = (struct mesh_graph_record){.bytes = *made, .processors = s->processors, .tasks = s->tasks,
+  *head = (struct mesh_graph_record){.bytes = *made, .magic = MESH_GRAPH_RECORD, .processors = s->processors, .tasks = s->tasks,
                                      .operations = s->operations, .dependences = s->dependences,
                                      .synchronized = s->synchronized};
   memcpy(head->digest, s->digest, sizeof head->digest);
@@ -5381,6 +5381,7 @@ static int record_restore(const void *record, struct mesh_graph_signature *s, st
   const struct mesh_graph_record *head = record;
   memset(s, 0, sizeof *s);
   s->archived = archived;
+  if (head->bytes < sizeof *head || head->magic != MESH_GRAPH_RECORD) { mesh_graph_signature_free(s); return EINVAL; }
   s->processors = head->processors; s->tasks = head->tasks; s->operations = head->operations;
   s->dependences = head->dependences; s->synchronized = head->synchronized;
   struct record_part part[7];
@@ -5443,12 +5444,12 @@ int mesh_graph_record_read(const void *record, struct mesh_graph_signature *s) {
 
 /* design/aot-compilation-change-request.md A1; the solved signature in full: its record, then its derived indices and
    its answered reads (`answers` of them), each array 8-byte sized, so each starts 8-aligned where the archive is;
-   SIGNATURE_ARCHIVE "MESHGRA2", the answered reads' version */
+   SIGNATURE_ARCHIVE "MESHGRA3", with native site references */
 struct signature_archive {
   uint64_t magic, bytes, record, uncovered, redundant, unwaited, answers, states[MESH_GRAPH_STATES];
   uint32_t primitives, padding;
 };
-#define SIGNATURE_ARCHIVE UINT64_C(0x324152474853454d)
+#define SIGNATURE_ARCHIVE UINT64_C(0x334152474853454d)
 static size_t archive_parts(const struct mesh_graph_signature *s, struct record_part part[8]) {
   const size_t n = s->operations, cells = (size_t)s->processors * MESH_GRAPH_PRIMITIVES;
   part[0] = (struct record_part){s->position, n * sizeof *s->position};
@@ -6064,6 +6065,7 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
     }
     const struct mesh_graph_operation *x = b->operation + o;
     s->operation[n] = *x;
+    if (y != SIZE_MAX && !x->native_site) s->operation[n].native_site = a->operation[y].native_site;
     s->operation[n].processor = pb[x->processor];
     s->operation[n].vertex = x->vertex == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : x->vertex + a->tasks;
     s->alias[n] = y != SIZE_MAX ? a->operation[y].vertex : b->alias[o] == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : b->alias[o] + a->tasks;
@@ -6151,6 +6153,7 @@ static void signature_number(struct graph_sink *t, uint32_t x) {
 static void signature_value(struct graph_sink *t, const struct mesh_graph_operation *x) {
   if (signature_static(x->primitive) && x->value == UINT64_MAX) graph_put(t, " value unknown");
   else graph_put(t, " value %llu", (unsigned long long)x->value);
+  if (x->native_site) graph_put(t, " native_site %u", x->native_site);
 }
 static int signature_ordered(const struct mesh_graph_signature *s, size_t o) {
   const size_t k = s->waited[o];
