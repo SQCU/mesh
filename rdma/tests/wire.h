@@ -18,7 +18,7 @@ struct wire_fifo { struct wire_piece *sends,*receives; uint64_t sent_head,sent_t
 struct wire_node {
   struct hdr *m; struct mesh_node *x;
   uint64_t posted[2][WIRE_CABLES][WIRE_LANES],done[2][WIRE_CABLES][WIRE_LANES];
-  uint64_t hint[2][WIRE_CABLES][WIRE_LANES];
+  struct order_post post[2][WIRE_CABLES][WIRE_LANES];
   struct order_raiser raiser[WIRE_CABLES][2];
   /* with `served` (tests/sim-wire.c RESTARTS: the bridges' cables lost and made again), each cable as its port's child
      serves it: posted on and raised from only while up (`down` 0) and while the order's generation is the one its lanes
@@ -56,14 +56,15 @@ static inline void wire_post(struct wire *w,uint32_t n,uint32_t c,uint32_t j){
       uint64_t *tail=way?&f->received_tail:&f->sent_tail;
       const uint64_t head=way?f->received_head:f->sent_head;
       if(*tail-head==w->room)break;
-      uint64_t piece;struct order_at at;
-      if(!order_next(v->m,v->x,epochs,segments,way,c,j,v->posted[way][c][j],&v->hint[way][c][j],&piece,&at))break;
-      const struct mesh_dma_span span=((const struct mesh_dma_span *)((const char *)v->m+at.t->spans))[at.span];
+      struct order_post *post=&v->post[way][c][j];
+      if(!order_next(v->m,v->x,epochs,segments,way,c,j,v->posted[way][c][j],post))break;
+      const struct order_at *at=&post->at;
+      const struct mesh_dma_span span=((const struct mesh_dma_span *)((const char *)v->m+at->t->spans))[at->span];
       if(!mesh_dma_span_valid(v->m,span) || span.bytes>order_piece_bytes(v->m)){
         fprintf(stderr,"wire: node %u posted an invalid span (%#llx, %llu)\n",v->m->node,(unsigned long long)span.offset,(unsigned long long)span.bytes);
         exit(3);
       }
-      (way?f->receives:f->sends)[*tail%w->room]=(struct wire_piece){span,v->x->program[at.slot].program.key,at.execution,at.transfer,at.span,piece};
+      (way?f->receives:f->sends)[*tail%w->room]=(struct wire_piece){span,v->x->program[at->slot].program.key,at->execution,at->transfer,at->span,post->piece};
       (*tail)++;v->posted[way][c][j]++;
     }
   }

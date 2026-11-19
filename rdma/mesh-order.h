@@ -172,13 +172,6 @@ static inline int order_gate(const struct hdr *m,const struct order_at *at,int d
   }
   return ready;
 }
-static inline int order_ready(struct hdr *m,const struct mesh_node *x,const struct order_at *at,int d){
-  const struct mesh_declared *p=x->program+at->slot;
-  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=at->execution*p->program.period+at->t->step)return 0;
-  const int ready=order_gate(m,at,d);
-  if(ready<0 && at->t->done)order_raise(m,at->t->done,UINT64_MAX);
-  return ready>0;
-}
 /* every done word of the transfers of direction d wholly below piece `through`, from piece `from` (a transfer's first
    piece), raised in the pieces' order to its execution's value; the piece it reached (the first transfer's first piece
    not wholly below `through`, or past the declarations as they stand) */
@@ -211,14 +204,35 @@ static inline int order_gate_shut(const struct hdr *m,const struct mesh_node *x,
   return 0;
 }
 /* ---- The bridge's two steps (mesh-link.c order_pass; tests/sim-wire.c runs the same) -----------------------------
-   A lane's next piece to post each way: the piece its unit u is (order_unit_piece), where it lies (order_locate) and
-   whether it may go (order_ready, below the order's posting bound `limit`): 1 with *n and *at filled, else 0 (the lane
-   waits at that piece: nothing is skipped) */
+   A lane continues to poll the same unit while a step, gate, epoch limit or hardware credit is pending. Its piece
+   and declaration are fixed until the epoch count, segment count or lane unit changes. Keep the original table
+   view and the required issued step. A new generation opens with empty cursors. */
+struct order_post {
+  uint64_t unit,piece,segments,hint,step;
+  uint32_t epochs;
+  struct order_at at;
+};
 static inline int order_next(struct hdr *m,const struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,uint32_t port,
-                             uint32_t lane,uint64_t u,uint64_t *hint,uint64_t *n,struct order_at *at){
-  *n=order_unit_piece(x,epochs,d,port,lane,u);
-  return *n!=ORDER_NONE && *n<atomic_load_explicit(&x->limit[d],memory_order_acquire) && order_locate(m,x,segments,d,*n,hint,at) &&
-         at->segment<atomic_load_explicit(&x->agreed,memory_order_acquire) && order_ready(m,x,at,d);
+                             uint32_t lane,uint64_t u,struct order_post *post){
+  if(!epochs || !segments)return 0;
+  if(post->epochs!=epochs || post->unit!=u){
+    post->epochs=epochs;post->unit=u;post->segments=0;
+    post->piece=order_unit_piece(x,epochs,d,port,lane,u);
+  }
+  if(post->piece>=atomic_load_explicit(&x->limit[d],memory_order_acquire))return 0;
+  if(post->segments!=segments){
+    post->segments=segments;
+    if(!order_locate(m,x,segments,d,post->piece,&post->hint,&post->at))post->at.t=NULL;
+    else post->step=post->at.execution*x->program[post->at.slot].program.period+post->at.t->step;
+  }
+  const struct order_at *at=&post->at;
+  if(!at->t || at->segment>=atomic_load_explicit(&x->agreed,memory_order_acquire) ||
+     atomic_load_explicit(&x->program[at->slot].issued,memory_order_acquire)<=post->step)return 0;
+  /* Issuance may have advanced under a new declaration while this pass held the old segment count. */
+  if(segments!=atomic_load_explicit(&x->segments,memory_order_acquire))return 0;
+  const int ready=order_gate(m,at,d);
+  if(ready<0 && at->t->done)order_raise(m,at->t->done,UINT64_MAX);
+  return ready>0;
 }
 /* queue pair q of epoch e as its cable and lane (order_qp's inverse): 1, else 0 where the epoch has no queue pair q */
 static inline int order_qp_cable(const struct mesh_epoch *e,uint32_t q,uint32_t *cable,uint32_t *lane){

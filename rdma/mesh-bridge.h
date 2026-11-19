@@ -164,11 +164,11 @@ struct link {
   uint64_t job_at;
   uint64_t wire[MESH_LINK_STREAMS];
   /* the child's: the order it serves (its node slot, MESH_ABSENT none) and the generation it connected in, each
-     lane's segment to look from each way (mesh-order.h order_locate's hint), and its raising of the done words each way
+     lane's posting cursor each way (mesh-order.h order_next), and its raising of the done words each way
      (mesh-order.h struct order_raiser: order_done) */
   uint32_t order;
   uint64_t generation;
-  uint64_t hint[2][MESH_LINK_LANES];
+  struct order_post post[2][MESH_LINK_LANES];
   struct order_raiser raiser[2];
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on

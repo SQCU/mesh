@@ -242,12 +242,12 @@ static void order_pass(struct port *port){
     for(uint32_t j=0;j<lanes;j++)
       for(uint32_t burst=0;burst<ORDER_BURST;burst++){
         const struct lane_state *state=l->lane+MESH_LANE_FIRST+j;
-        uint64_t n;struct order_at at;
-        if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,&l->hint[way][j],&n,&at))break;
-        const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)M+at.t->spans))[at.span];
+        struct order_post *post=&l->post[way][j];
+        if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,post))break;
+        const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)M+post->at.t->spans))[post->at.span];
         const int dud=!mesh_dma_span_valid(M,bytes) || bytes.bytes>piece;
-        if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,n))break;
-        if(dud)order_raise(M,at.t->done,UINT64_MAX);
+        if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,post->piece))break;
+        if(dud)order_raise(M,post->at.t->done,UINT64_MAX);
       }
 }
 /* design/declared-programs.md: the order's done words, one pass, on every cable of the order (each port's child alike,
@@ -255,7 +255,7 @@ static void order_pass(struct port *port){
    on another process's pass): the pieces of every lane of the order that are done told through to their done words, in
    the pieces' order (order_raise_pass), and the piece below which every done word is raised published (`raised`, moved
    only up) */
-static void order_done(struct port *port){
+static void order_done(struct port *port,int way){
   struct link *l=&port->link;
   struct mesh_node *x=link_order(l);
   if(!x || atomic_load_explicit(&x->generation,memory_order_acquire)!=l->generation)return;
@@ -263,13 +263,11 @@ static void order_done(struct port *port){
   if(!epochs)return;
   const uint64_t segments=atomic_load_explicit(&x->segments,memory_order_acquire);
   const struct mesh_epoch *last=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
-  for(int way=0;way<2;way++){
-    uint64_t done[MESH_PORTS*MESH_LINK_LANES];uint32_t k=0;
-    for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
-      for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof done/sizeof *done;lane++,k++)
-        done[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1],memory_order_acquire);
-    order_raise_pass(M,x,epochs,segments,way,done,&l->raiser[way]);
-  }
+  uint64_t done[MESH_PORTS*MESH_LINK_LANES];uint32_t k=0;
+  for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
+    for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof done/sizeof *done;lane++,k++)
+      done[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1],memory_order_acquire);
+  order_raise_pass(M,x,epochs,segments,way,done,&l->raiser[way]);
 }
 
 /* the progress thread's tell (the epoch it has seen, the guard it holds at), its raiser woken (port_wait) */
@@ -278,9 +276,9 @@ static void port_tell(_Atomic uint64_t *word,uint64_t value){
   os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_NONE);
 }
 /* design/transport.md section 14: one pass of a port's progress thread: the lanes the link serves (`served` read once a
-   pass: none posts on a lane its link no longer serves): its receive completions (link_receive), its part of its order
-   (order_pass: posting, the receives the completions made room for among it), the order's done words through the
-   completions (order_done), then its SEND completions and the done words through them (link_send, order_done), the
+   pass: none posts on a lane its link no longer serves): its receive completions and their done words (link_receive,
+   order_done), its part of its order (order_pass: posting, the receives the completions made room for among it),
+   then its SEND completions and their done words (link_send, order_done), the
    pass counted (`passes`).  It tells the port's epoch it began at (a conclusion around a stuck call moves it:
    ports_stalled) */
 static void port_pass(struct port *port,uint64_t *told){
@@ -289,9 +287,9 @@ static void port_pass(struct port *port,uint64_t *told){
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   const int ordered=(served>>MESH_LANE_FIRST)!=0;
   if(served)link_receive(port,served);
-  if(ordered){order_pass(port);order_done(port);}
+  if(ordered){order_done(port,1);order_pass(port);}
   if(served)link_send(port,served);
-  if(ordered)order_done(port);
+  if(ordered)order_done(port,0);
   struct mesh_lanes *counted=lanes_of(port,0);
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
@@ -558,7 +556,7 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   l->order=MESH_ABSENT;
   for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(M,n)->node)==node)l->order=n;
   l->generation=l->order<MESH_NODES?atomic_load(&mesh_node_at(M,l->order)->generation):0;
-  memset(l->hint,0,sizeof l->hint);memset(l->raiser,0,sizeof l->raiser);
+  memset(l->post,0,sizeof l->post);memset(l->raiser,0,sizeof l->raiser);
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
