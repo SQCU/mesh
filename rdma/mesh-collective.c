@@ -2291,8 +2291,9 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
     share=malloc((size_t)room*sizeof *share);
     if(!root || !up || !down || !demand || !p->parent || !share){status=ENOMEM;goto done;}
     for(uint32_t i=0;i<p->demands;i++){root[i]=p->demand[i].source;down[i]=(double)p->demand[i].bytes;}
-    const uint32_t made=mesh_graph_flow(n,E,p->from,p->to,share_capacity,p->demands,root,up,down,plan_leaf,p->demand,
-                                        MESH_PLAN_EPS,rounds,room,demand,p->parent,share);
+    double duration=0;
+    const uint32_t made=mesh_graph_flow_time(n,E,p->from,p->to,share_capacity,p->demands,root,up,down,plan_leaf,p->demand,
+                                        MESH_PLAN_EPS,rounds,room,demand,p->parent,share,&duration);
     if(made==UINT32_MAX){status=ENOMEM;goto done;}
     p->made=made;
     p->tree=malloc(((size_t)made+1)*sizeof *p->tree);
@@ -2306,7 +2307,17 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
       p->demand[i].tree=(uint32_t)trees[i];
       p->demand[i].trees=(uint32_t)(trees[i+1]-trees[i]);
     }
-    for(uint32_t j=0;j<made;j++)rate[j]=share[p->tree[j]];
+    /* design/data-model.md "The mesh", design/joint-compilation.md §3: load is bytes, capacity is bits/s.
+       Express relay startup in ns and the packed tree's rate in cut instructions/ns. */
+    for(uint32_t j=0;j<made;j++){
+      const uint32_t tree=(uint32_t)p->tree[j],i=demand[tree];
+      rate[j]=share[tree];
+      if(!nodes->relay_ns || !duration || !p->cuts[i]->instructions)continue;
+      const uint32_t hops=mesh_graph_tree_depth(n,root[i],p->parent+(size_t)tree*n);
+      if(hops==UINT32_MAX){status=ENOMEM;goto done;}
+      latency[j]=(double)(hops?hops-1:0)*nodes->relay_ns;
+      rate[j]*=(double)p->cuts[i]->instructions/(8e9*duration);
+    }
     for(uint32_t i=0;i<p->demands;i++){
       struct mesh_plan_demand *d=p->demand+i;
       mesh_graph_fill(d->trees,latency+d->tree,rate+d->tree,p->cuts[i]->instructions,p->run+d->tree);

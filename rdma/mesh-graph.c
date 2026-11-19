@@ -932,10 +932,10 @@ static int flow_same(const void *context,uint32_t k){
   return !memcmp(s->parent+(size_t)k*s->n,s->tree,s->n*sizeof *s->tree);
 }
 
-uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,
+uint32_t mesh_graph_flow_time(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,
                          uint32_t count, const uint32_t *root, const double *upward, const double *downward,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
-                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share){
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *duration){
   double *load=calloc(2*(size_t)E+1,sizeof *load),*add=calloc(2*(size_t)E+1,sizeof *add),
          *len=calloc(2*(size_t)E+1,sizeof *len),*dist=calloc((size_t)n+1,sizeof *dist);
   uint32_t *up=calloc((size_t)n+1,sizeof *up),*upl=calloc((size_t)n+1,sizeof *upl),*tree=calloc((size_t)n+1,sizeof *tree),
@@ -997,8 +997,19 @@ uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uin
     for(size_t e=0;e<2*(size_t)E;e++)load[e]+=add[e];
   }
   for(uint32_t k=0;!failed && k<made;k++)share[k]=(double)hits[k]/rounds;
+  if(!failed && duration){
+    *duration=0;
+    for(size_t e=0;e<2*(size_t)E;e++)if(load[e]/cap[e/2]>*duration)*duration=load[e]/cap[e/2];
+  }
   free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(hits);free(done);free(head);free(next);
   return failed?UINT32_MAX:made;
+}
+
+uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uint32_t *to, const double *cap,
+                         uint32_t count, const uint32_t *root, const double *upward, const double *downward,
+                         int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share){
+  return mesh_graph_flow_time(n,E,from,to,cap,count,root,upward,downward,leaf,context,eps,rounds,room,demand,parent,share,NULL);
 }
 
 struct mesh_packed { uint32_t root; double flow; uint32_t *parent; };

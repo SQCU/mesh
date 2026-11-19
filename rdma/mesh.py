@@ -319,7 +319,7 @@ NODES_MOST = 32
 
 class Nodes(C.Structure):
     _fields_ = [('serial', Q), ('count', U), ('self', U), ('node', U * NODES_MOST),
-                ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
+                ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('relay_ns', U), ('boot', Q)]
 
 
 class PlanSlot(C.Structure):

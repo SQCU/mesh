@@ -43,7 +43,7 @@ uint32_t mesh_retired_release(struct hdr *);
 /* JGroups ViewId.java */
 struct mesh_nodes { uint64_t serial; uint32_t count,self; uint32_t node[MESH_NODES_MOST];
                     uint64_t capacity[MESH_NODES_MOST][MESH_NODES_MOST];
-                    uint32_t sequencer,padding; uint64_t boot; };
+                    uint32_t sequencer,relay_ns; uint64_t boot; };
 _Static_assert(offsetof(struct mesh_nodes,capacity)==144 && offsetof(struct mesh_nodes,sequencer)==8336 &&
   offsetof(struct mesh_nodes,boot)==8344 && sizeof(struct mesh_nodes)==8352,"mesh_nodes");
 /* design/aot-compilation-change-request.md A7 */
