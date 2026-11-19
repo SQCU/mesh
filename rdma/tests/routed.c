@@ -1,6 +1,7 @@
 #include "mesh-plan.h"
 #include "mesh-write-routes.h"
 #include <assert.h>
+#include <math.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -352,6 +353,33 @@ static void shortest_ring(void){
   assert(relays);
   mesh_routed_free(&physical);mesh_write_routes_free(every,R);
   free(segment);free(first);free(shares);free(move);free(logical);
+  /* mesh_trees_split: A's and C's partials (their shortest trees cross C-A, the one-cable pair) cut, 3/4 along a
+     shortest tree (A: B and C under A, D under C; C: A and D under C, B under A: the partial already on C-A goes on
+     from its far end) and 1/4 the long way round (A-B-D-C, C-D-B-A); every direction then carries 3/4 of a partial a
+     cable at most (C-A and B->A), the shortest trees alone 1; B's and D's one tree each */
+  uint32_t sroot[2*R],sparent[2*R*R];double sweight[2*R],share=0;
+  const uint32_t T=mesh_trees_split(&map,sroot,sparent,sweight,&share);
+  assert(T==6 && share==0.75);
+  static const uint32_t sroots[6]={0,0,1,2,3,3};
+  static const uint32_t sparents[6][R]={{0,0,3,0},{0,0,1,2},{1,1,1,2},{1,2,2,2},{3,0,3,3},{1,2,3,3}};
+  for(uint32_t t=0;t<T;t++){assert(sroot[t]==sroots[t]);for(uint32_t u=0;u<R;u++)assert(sparent[t*R+u]==sparents[t][u]);}
+  assert(fabs(exp(sweight[0])-0.75)<1e-12 && fabs(exp(sweight[1])-0.25)<1e-12 && sweight[2]==0 && sweight[3]==0);
+  const struct mesh_trees split={R,T,sroot,sparent,sweight};
+  assert(!mesh_trees_check(&map,&split));
+  mesh_compile_room(&split,&parts,&moves);
+  segment=calloc(parts,sizeof *segment);first=calloc(R+1,sizeof *first);shares=calloc(parts,sizeof *shares);
+  move=calloc(moves,sizeof *move);logical=calloc(moves,sizeof *logical);
+  assert(!mesh_compile(&split,MESH_ALLGATHER,0,0,NULL,&program,segment,shares,first,move));
+  memset(offsets,0,sizeof offsets);
+  for(uint32_t r=0;r<R;r++){
+    initialized[r]=1+program.scratch;
+    offsets[r+1]=offsets[r]+mesh_program_steps_cut(&program,r,(struct mesh_operand){7,2,4*196608},NULL,16384,logical+offsets[r]);
+  }
+  for(uint32_t k=0;k<offsets[R];k++)assert(logical[k].op==MESH_STEP_SEND || logical[k].op==MESH_STEP_COPY);
+  assert(!mesh_routed_compile(&f,direct,offsets,logical,initialized,16384,&physical));
+  for(uint32_t r=0;r<R;r++)assert(physical.rank[r].buffers==initialized[r]);
+  mesh_routed_free(&physical);
+  free(segment);free(first);free(shares);free(move);free(logical);
 }
 
 int main(void){
@@ -365,6 +393,6 @@ int main(void){
   relayed_predecessor();
   publication_before_combine();
   shortest_ring();
-  puts("routed collectives: the shortest ring trees' all-gather with no relay storage over direct routes, 20 arithmetic/gather cases, counted exchange with a relay-only rank, ragged zero shares, parallel cables, alternate relays, compact leases, exact demands and mismatched declarations passed");
+  puts("routed collectives: the shortest and split ring trees' all-gathers with no relay storage over direct routes, 20 arithmetic/gather cases, counted exchange with a relay-only rank, ragged zero shares, parallel cables, alternate relays, compact leases, exact demands and mismatched declarations passed");
   return 0;
 }
