@@ -6,17 +6,20 @@
    - all-gather: each compute rank's S bytes, as pages, to every other compute rank;
    - all-reduce: each page's partial from every rank to its owner (page p's owner is compute rank p mod n), and the
      reduced page from the owner to every other rank once its last partial has landed. No barrier between the two.
-   A piece's path never revisits a node (its name's visited set).
 
-   Checked at every size: every page reaches every destination that needs it exactly once, the run ends, and no piece
-   takes more hops than there are nodes. Reported:
-   - the completion time with fixed shortest-delay routes (no backlog read), with each node's own backlog, and
-     diachronic: own backlog plus every lane's 8-byte expected-wait profile (32 bytes) carried in the names, 2 entries a name,, learned over 12 executions
-     (mean and spread from the third);
-   - for the all-gather, a lower bound: the most inbound bytes a node needs over its inbound rate, and the most bytes a
-     node must emit over its outbound rate;
-   - the share of pieces forwarded by a node that wasn't their destination, and the most hops;
-   - per-lane utilisation at the largest size.
+   Each lane's sender turns what its sends met in an execution into the lane's next line (mesh_switch_gru_step).
+   Every SEND's name carries ENTRIES of the sender's view lines, its own lanes and the others in turn, each with the
+   execution it is from, and a node keeps the newest it has seen. The transaction runs 40 times; the mean and spread
+   are of the last 20. Four ways, on the same inputs:
+   - fixed: every backlog and wait taken as none (fixed shortest-delay routes);
+   - own: each node's own lanes at their posted backlog, later hops idle;
+   - mean: own backlog, and every later hop at its line's predicted wait;
+   - sampled: own backlog, and every later hop at a wait drawn from its line (Thompson sampling, the draw a swizzle of
+     the piece, the node and the lane).
+
+   Checked every run: every page reaches every destination that needs it exactly once, the run ends, and every path
+   is simple. For the all-gather, a lower bound: the most inbound bytes a compute node needs over its inbound rate, or
+   the most bytes one must emit over its outbound rate.
 
    usage: switch [fabric [page]] */
 #include "mesh-switch.h"
@@ -24,6 +27,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define ENTRIES 4   /* view lines a name carries, 64 bytes each */
+#define RUNS 40
 
 static char names[MESH_SWITCH_NODES][16];
 static uint32_t nodes,links,compute[MESH_SWITCH_NODES],ncompute;
@@ -54,8 +60,8 @@ static void load(const char *path){
 }
 
 struct piece { uint32_t source,page; double bytes; uint64_t need,got; int phase; };
-struct event { double t; uint32_t node,piece,hops; uint64_t to,visited; uint8_t carried,lane[8],generation[8]; struct mesh_switch_envelope envelope[8];
-                uint8_t chooser[8],chose[8]; double chosen_at[8]; };   /* the hops that chose its path */
+struct event { double t; uint32_t node,piece,hops; uint64_t to,visited; uint8_t carried,lane[ENTRIES];uint32_t execution[ENTRIES];
+               struct mesh_switch_line line[ENTRIES]; };
 static struct event *heap;static size_t events,room;
 static void push(struct event e){
   if(events==room){room=room?2*room:1024;heap=realloc(heap,room*sizeof *heap);assert(heap);}
@@ -77,42 +83,43 @@ static struct event pop(void){
   return top;
 }
 
-struct result { double T,bound,relayed_share,busy[256],mean,sd; uint32_t hops; };
 static struct mesh_switch_fabric fabric;
+static const double unit=64;   /* ns, the lines' time unit */
+static int mode;   /* 0 fixed, 1 own, 2 mean, 3 sampled */
+static uint32_t execution;
 static double free_at[256],busy[256];
-static int mode;   /* 0 fixed shortest-delay routes, 1 own backlog only, 2 diachronic: own backlog and lines, 3 and coupled splitting */
-static struct mesh_switch_split *split[MESH_SWITCH_NODES];static double slack=0.5;
-#define ENTRIES 4   /* view entries a name carries: a 64-byte line each */
-static const double unit=64;   /* ns, the envelopes' time unit */
-static struct mesh_switch_envelope own[256],view[MESH_SWITCH_NODES][256];
-static struct mesh_switch_gru gru[256];static struct mesh_switch_gru_weights weights;static int predictor;
-static uint8_t own_generation,seen[MESH_SWITCH_NODES][256];static uint32_t cursor[MESH_SWITCH_NODES];
-static double *begin[256],*finish[256];   /* each lane's sends this execution: posting time, wait */static uint32_t spans[256],span_room[256];
+static double *posted[256],*waited[256];static uint32_t sends[256],send_room[256];
+static struct mesh_switch_line own[256],view[MESH_SWITCH_NODES][256];
+static uint32_t own_execution,seen[MESH_SWITCH_NODES][256],cursor[MESH_SWITCH_NODES];
+static struct mesh_switch_gru gru[256];static struct mesh_switch_gru_weights weights;
 static struct piece *pieces;static uint32_t npieces,relayed,forwarded,maxhops;
 
-static void send(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,uint32_t hops,const struct event *in){
+static void send(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,uint32_t hops){
   double ahead[256];uint32_t lane[256];uint64_t subset[256];
   for(uint32_t l=0;l<links;l++)ahead[l]=mode && free_at[l]>t?free_at[l]-t:0;
-  const uint32_t used=mode==3?mesh_switch_route_split(&fabric,from,t,to,visited,pieces[k].bytes,ahead,view[from],unit,split[from],slack,lane,subset)
-                              :mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,ahead,mode==2?view[from]:NULL,unit,lane,subset);
+  const uint64_t key=mesh_switch_mix(((uint64_t)execution<<32)^k);
+  const uint32_t used=mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,key,ahead,mode>=2?view[from]:NULL,unit,mode==3,lane,subset);
   assert(used!=UINT32_MAX && used>0);
   uint64_t covered=0;
   for(uint32_t u=0;u<used;u++){
     const uint32_t l=lane[u];const struct mesh_switch_link *x=link+l;
     assert(x->from==from && !(covered&subset[u]));covered|=subset[u];
+    assert(!(visited>>x->to&1));   /* a simple path */
     const double start=free_at[l]>t?free_at[l]:t,time=pieces[k].bytes/x->rate;
     free_at[l]=start+time;busy[l]+=time;forwarded++;
-    if(spans[l]==span_room[l]){span_room[l]=span_room[l]?2*span_room[l]:256;begin[l]=realloc(begin[l],span_room[l]*sizeof(double));finish[l]=realloc(finish[l],span_room[l]*sizeof(double));}
-    begin[l][spans[l]]=t;finish[l][spans[l]]=start-t;spans[l]++;   /* posted at t, waited start - t */
-    assert(!(visited>>x->to&1));   /* a simple path */
-    struct event e={start+time+x->latency,x->to,k,hops+1,subset[u],visited|UINT64_C(1)<<from,0,{0},{0},{{0,{0}}},{0},{0},{0}};
-    if(in){memcpy(e.chooser,in->chooser,sizeof e.chooser);memcpy(e.chose,in->chose,sizeof e.chose);memcpy(e.chosen_at,in->chosen_at,sizeof e.chosen_at);}
-    e.chooser[hops]=(uint8_t)from;e.chose[hops]=(uint8_t)l;e.chosen_at[hops]=t;   /* this hop's choice, for attribution */
-    /* the name carries ENTRIES entries of the sender's view, its own lanes and others in turn */
-    for(uint32_t m=0;m<links && e.carried<ENTRIES;m++)if(link[m].from==from){e.lane[e.carried]=(uint8_t)m;e.generation[e.carried]=own_generation;e.envelope[e.carried++]=own[m];}
+    if(sends[l]==send_room[l]){
+      send_room[l]=send_room[l]?2*send_room[l]:256;
+      posted[l]=realloc(posted[l],send_room[l]*sizeof(double));waited[l]=realloc(waited[l],send_room[l]*sizeof(double));
+    }
+    posted[l][sends[l]]=t;waited[l][sends[l]]=start-t;sends[l]++;
+    struct event e={start+time+x->latency,x->to,k,hops+1,subset[u],visited|UINT64_C(1)<<from,0,{0},{0},{{0,{0},{0},0}}};
+    /* the name carries view lines: the sender's own lanes, then the others in turn */
+    for(uint32_t m=0;m<links && e.carried<ENTRIES;m++)if(link[m].from==from){
+      e.lane[e.carried]=(uint8_t)m;e.execution[e.carried]=own_execution;e.line[e.carried++]=own[m];
+    }
     for(uint32_t tries=0;tries<links && e.carried<ENTRIES;tries++){
       const uint32_t m=cursor[from]++%links;
-      if(link[m].from!=from && seen[from][m]){e.lane[e.carried]=(uint8_t)m;e.generation[e.carried]=seen[from][m];e.envelope[e.carried++]=view[from][m];}
+      if(link[m].from!=from && seen[from][m]){e.lane[e.carried]=(uint8_t)m;e.execution[e.carried]=seen[from][m];e.line[e.carried++]=view[from][m];}
     }
     push(e);
   }
@@ -121,7 +128,7 @@ static void send(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,
 
 /* one execution; kind 0 all-gather, 1 all-reduce; S bytes a rank's partial; returns its completion */
 static double execute(int kind,double S,double page){
-  memset(free_at,0,sizeof free_at);memset(busy,0,sizeof busy);memset(spans,0,sizeof spans);
+  memset(free_at,0,sizeof free_at);memset(busy,0,sizeof busy);memset(sends,0,sizeof sends);
   const uint32_t P=(uint32_t)ceil(S/page);
   uint64_t all=0;for(uint32_t c=0;c<ncompute;c++)all|=UINT64_C(1)<<compute[c];
   npieces=0;relayed=forwarded=maxhops=0;
@@ -138,43 +145,43 @@ static double execute(int kind,double S,double page){
     const uint32_t owner=compute[p%ncompute];
     pieces[npieces++]=(struct piece){owner,p,p+1<P?page:S-page*(P-1),all&~(UINT64_C(1)<<owner),0,2};
   }
-  for(uint32_t k=0;k<first;k++)send(0,pieces[k].source,k,pieces[k].need,0,0,NULL);
-  if(kind==1)for(uint32_t p=0;p<P;p++)if(!left[p])send(0,pieces[first+p].source,first+p,pieces[first+p].need,0,0,NULL);
+  for(uint32_t k=0;k<first;k++)send(0,pieces[k].source,k,pieces[k].need,0,0);
+  if(kind==1)for(uint32_t p=0;p<P;p++)if(!left[p])send(0,pieces[first+p].source,first+p,pieces[first+p].need,0,0);
   double T=0;size_t steps=0;
   while(events){
     const struct event e=pop();
     assert(++steps<100000000);
     assert(e.hops<=nodes);if(e.hops>maxhops)maxhops=e.hops;
-    for(uint32_t c=0;c<e.carried;c++)   /* this node's view, refreshed where the entry is newer */
-      if((uint8_t)(e.generation[c]-seen[e.node][e.lane[c]])<128 && e.generation[c]){view[e.node][e.lane[c]]=e.envelope[c];seen[e.node][e.lane[c]]=e.generation[c];}
+    for(uint32_t c=0;c<e.carried;c++)   /* this node's view: the newest line of each lane */
+      if(e.execution[c]>seen[e.node][e.lane[c]]){view[e.node][e.lane[c]]=e.line[c];seen[e.node][e.lane[c]]=e.execution[c];}
     struct piece *x=pieces+e.piece;
     const uint64_t me=UINT64_C(1)<<e.node;
     if(e.to&me){
       assert(x->need&me && !(x->got&me));   /* exactly once */
       x->got|=me;if(e.t>T)T=e.t;
-      if(mode==3)for(uint32_t h=0;h<e.hops;h++)mesh_switch_split_attribute(split[e.chooser[h]],e.node,e.chose[h],e.t-e.chosen_at[h]);
-      if(x->phase==1 && !--left[x->page])send(e.t,pieces[first+x->page].source,first+x->page,pieces[first+x->page].need,0,0,NULL);
+      if(x->phase==1 && !--left[x->page])send(e.t,pieces[first+x->page].source,first+x->page,pieces[first+x->page].need,0,0);
     }else relayed++;
-    if(e.to&~me)send(e.t,e.node,e.piece,e.to&~me,e.visited,e.hops,&e);
+    if(e.to&~me)send(e.t,e.node,e.piece,e.to&~me,e.visited,e.hops);
   }
   for(uint32_t k=0;k<npieces;k++)assert(pieces[k].got==pieces[k].need);
   free(left);
-  for(uint32_t l=0;l<links;l++){   /* each sender's own lanes: what they met, and (with the predictor) what they'll meet */
-    const struct mesh_switch_envelope met=mesh_switch_envelope_fit(begin[l],finish[l],spans[l],free_at[l],unit);
-    if(predictor)mesh_switch_gru_step(gru+l,&weights,&met,unit,own+l);else own[l]=met;
+  /* each lane's sender: what its sends met, and its next line */
+  for(uint32_t l=0;l<links;l++){
+    const struct mesh_switch_line met=mesh_switch_observe(posted[l],waited[l],sends[l],free_at[l],unit);
+    mesh_switch_gru_step(gru+l,&weights,&met,unit,own+l);
   }
-  own_generation++;if(!own_generation)own_generation=1;
-  if(mode==3)for(uint32_t v=0;v<nodes;v++)mesh_switch_split_learn(&fabric,v,split[v]);   /* the attributions, carried back by the next execution */
+  own_execution=++execution;
   return T;
 }
 
-/* `runs` executions in turn, the envelopes learned across them; the mean and spread from the third on */
-static struct result run(int kind,double S,double page,int m,int runs){
-  mode=m;for(uint32_t v=0;v<nodes;v++){if(!split[v])split[v]=malloc(sizeof *split[v]);memset(split[v],0,sizeof *split[v]);}
-  memset(own,0,sizeof own);memset(gru,0,sizeof gru);memset(view,0,sizeof view);memset(seen,0,sizeof seen);memset(cursor,0,sizeof cursor);own_generation=1;
+struct result { double T,mean,sd,bound,relayed_share,busy[256]; uint32_t hops,pieces; };
+static struct result run(int kind,double S,double page,int m){
+  mode=m;memset(own,0,sizeof own);memset(view,0,sizeof view);memset(seen,0,sizeof seen);memset(cursor,0,sizeof cursor);
+  memset(gru,0,sizeof gru);execution=0;own_execution=0;
+  const int runs=m>=2?RUNS:1;
   double sum=0,sq=0,T=0;int n=0;
-  for(int i=0;i<runs;i++){T=execute(kind,S,page);if(i>=runs/2 || runs<3){sum+=T;sq+=T*T;n++;}}
-  struct result r={T,0,forwarded?(double)relayed/forwarded:0,{0},sum/n,0,maxhops};
+  for(int i=0;i<runs;i++){T=execute(kind,S,page);if(i>=runs/2 || runs==1){sum+=T;sq+=T*T;n++;}}
+  struct result r={T,sum/n,0,0,forwarded?(double)relayed/forwarded:0,{0},maxhops,npieces};
   r.sd=sqrt(fmax(0,sq/n-r.mean*r.mean));
   for(uint32_t l=0;l<links;l++)r.busy[l]=T>0?busy[l]/T:0;
   if(kind==0){
@@ -196,24 +203,20 @@ int main(int argc,char **argv){
   assert(!mesh_switch_fabric_make(&fabric,nodes,link,links,page));
   mesh_switch_gru_weights_make(&weights,20261119);
   static const double rows[]={2,8,32,128,1024,4096};
-  printf("%-10s %9s %7s %10s %10s %20s %20s %20s %10s\n","","S bytes","pieces","fixed","own","last met, mean+-sd","GRU, mean+-sd","GRU+split, mean+-sd","bound");
+  printf("%-10s %9s %7s %10s %10s %20s %20s %10s %8s\n","","S bytes","pieces","fixed","own","mean, mean+-sd","sampled, mean+-sd","bound","relayed");
   struct result last={0};
   for(int kind=0;kind<2;kind++)for(size_t i=0;i<sizeof rows/sizeof *rows;i++){
     const double S=rows[i]*1536*2;
-    const struct result f=run(kind,S,page,0,1),o=run(kind,S,page,1,1);
-    predictor=0;const struct result d=run(kind,S,page,2,40);
-    predictor=1;const struct result g=run(kind,S,page,2,40);
-    const struct result c=run(kind,S,page,3,40);
-    printf("%-10s %9.0f %7u %8.2fus %8.2fus %11.2f+-%6.2fus %11.2f+-%6.2fus %11.2f+-%6.2fus %8.2fus\n",kind?"all-reduce":"all-gather",S,npieces,
-           f.T/1e3,o.T/1e3,d.mean/1e3,d.sd/1e3,g.mean/1e3,g.sd/1e3,c.mean/1e3,c.sd/1e3,g.bound/1e3);
-    if(kind==0)assert(c.T>=c.bound*(1-1e-9));
-    if(kind==0)assert(g.T>=g.bound*(1-1e-9));
-    if(kind==0 && i+1==sizeof rows/sizeof *rows)last=c;
+    const struct result f=run(kind,S,page,0),o=run(kind,S,page,1),d=run(kind,S,page,2),g=run(kind,S,page,3);
+    printf("%-10s %9.0f %7u %8.2fus %8.2fus %11.2f+-%6.2fus %11.2f+-%6.2fus %8.2fus %7.1f%%\n",kind?"all-reduce":"all-gather",S,g.pieces,
+           f.T/1e3,o.T/1e3,d.mean/1e3,d.sd/1e3,g.mean/1e3,g.sd/1e3,g.bound/1e3,100*g.relayed_share);
+    if(kind==0)assert(g.T>=g.bound*(1-1e-9) && d.T>=d.bound*(1-1e-9));
+    if(kind==0 && i+1==sizeof rows/sizeof *rows)last=g;
   }
-  printf("lane utilisation, all-gather at %.0f rows, GRU+split:",rows[sizeof rows/sizeof *rows-1]);
+  printf("lane utilisation, all-gather at %.0f rows, sampled:",rows[sizeof rows/sizeof *rows-1]);
   for(uint32_t l=0;l<links;l++)printf(" %s>%s %.0f%%",names[link[l].from],names[link[l].to],100*last.busy[l]);
-  printf("\nswitch: every page to every destination exactly once, no cycle: passed\n");
+  printf("\nswitch: every page to every destination exactly once, every path simple: passed\n");
   free(heap);free(pieces);
-  for(uint32_t l=0;l<links;l++){free(begin[l]);free(finish[l]);}
+  for(uint32_t l=0;l<links;l++){free(posted[l]);free(waited[l]);}
   return 0;
 }
