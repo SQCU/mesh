@@ -24,7 +24,7 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    both nodes' clients declared and of the cable epochs (mesh-order.h); the bridges exchange ORDER only as the cables
    between them change, each end proposing the piece from which a new epoch begins.  A bridge of another version is
    not paired with (port_heard) */
-#define MESH_VERSION 137u
+#define MESH_VERSION 138u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node) */

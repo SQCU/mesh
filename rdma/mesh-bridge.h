@@ -116,11 +116,7 @@ struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,f
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
 enum { HELLO=1, FAREWELL, RECORD, LINK, ORDER };
-/* design/declared-programs.md: an ORDER, a bridge's proposal of its order toward the peer's next epoch, sent only as
-   the cables between the two nodes change: the epochs its order has, the cables it holds up toward the peer (`wire`,
-   sorted: each cable's identity, alike at both ends), and each way the piece from which the epoch may begin
-   (`boundary`: past every piece it posted, and the bound it posts below until the epoch is agreed) */
-struct order_message { uint32_t epochs,cables; uint64_t boundary[2]; uint64_t wire[MESH_PORTS]; };
+/* design/declared-programs.md: an ORDER (mesh-order.h struct order_message, the agreement of a node pair's next epoch) */
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }

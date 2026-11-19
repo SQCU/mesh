@@ -13,6 +13,8 @@
    port_heard), and every declared span is one piece (mesh-call.c mesh_declare) */
 static inline uint64_t order_piece_bytes(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
 #define ORDER_NONE UINT64_MAX
+/* the pieces past every piece an end has posted at which it bounds its posting while an epoch is agreed */
+#define ORDER_SLACK UINT64_C(4096)
 
 static inline _Atomic uint64_t *order_word(void *m,uint64_t at){ return (_Atomic uint64_t *)((char *)m+at); }
 /* the word at region offset `at` raised to `value` where it is lower (release) */
@@ -430,4 +432,103 @@ static inline int order_extend(struct mesh_node *x,const uint64_t first[2],uint3
   atomic_store_explicit(&x->live,1,memory_order_release);
   return 0;
 }
+/* ---- The agreement of an epoch (the bridge's parent: mesh-link.c order_turn; tests/order.c) ------------------------
+   A cable coming up is the one hardware fact two bridges agree a boundary on.  One end of each node pair proposes: the
+   end of the lower node number (`leader`).  It proposes the cables it holds up toward the peer whenever they are not its
+   latest epoch's, with its bound each way (`boundary`: it posts nothing at or past it until the epoch is appended), each
+   proposal numbered (`seq`) and the same bound kept through a proposal's renewals.  The other end takes the latest
+   proposal for the epoch it is at, and accepts it once every cable it names is up at its own end: it bounds its own
+   posting, appends the epoch (from the later of the two bounds each way) and answers ACCEPT with the cables, its bound
+   and the proposer's echoed.  The proposer appends what an ACCEPT names, from the same two bounds.  So both ends append
+   the same epochs in the same order whenever and in whatever order the cables come up: an end appends only a proposal
+   the peer accepted, and the peer accepts one proposal an epoch.  Messages of an epoch either end has passed are let be */
+enum { ORDER_PROPOSE=1, ORDER_ACCEPT=2 };
+struct order_message { uint32_t kind,seq,epochs,cables; uint64_t boundary[2],echo[2]; uint64_t wire[MESH_PORTS]; };
+struct order_agree { int proposing,pending; uint32_t seq; uint64_t bound[2]; struct order_message sent,heard; };
+/* what order_agree_turn leaves its caller to do */
+enum { ORDER_SAY=1, ORDER_EXTENDED=2, ORDER_LOST=4 };
+/* a message heard toward this end's order: a proposal kept (the latest of the epoch this end is at), an accept kept for
+   the proposer's turn */
+static inline void order_agree_heard(struct order_agree *a,const struct mesh_node *x,const struct order_message *heard){
+  if(heard->cables>MESH_PORTS || heard->epochs!=atomic_load_explicit(&x->epochs,memory_order_acquire))return;
+  if(heard->kind==ORDER_PROPOSE && (!a->pending || a->heard.kind!=ORDER_PROPOSE || heard->seq>=a->heard.seq)){a->heard=*heard;a->pending=1;}
+  else if(heard->kind==ORDER_ACCEPT){a->heard=*heard;a->pending=1;}
+}
+/* this end's bound each way: `frontier` past every piece it posted (mesh-link.c order_frontier), the bound stored first
+   and the frontier read again after it (a lane counts a unit before it reads the bound: mesh-link.c lane_post) */
+typedef uint64_t (*order_frontier_fn)(const struct mesh_node *x,int way,void *context);
+static inline void order_agree_bound(struct mesh_node *x,order_frontier_fn frontier,void *context,uint64_t bound[2]){
+  const uint32_t epochs=atomic_load_explicit(&x->epochs,memory_order_acquire);
+  for(int way=0;way<2;way++){
+    /* the first epoch begins at piece 0: before it no piece has an epoch to be placed by */
+    const uint64_t b=epochs?frontier(x,way,context)+ORDER_SLACK:0;
+    atomic_store_explicit(&x->limit[way],b,memory_order_seq_cst);
+    const uint64_t again=epochs?frontier(x,way,context):0;
+    bound[way]=again>b?again:b;
+  }
+}
+/* the epoch named by `wire` (`cables` of them) appended from this end's bound `mine` and the peer's `theirs` (each its
+   own direction 0 its sends), each cable's port and lanes this end's (`up_wire`, `up_port`, `up_lanes`, `up` cables);
+   ORDER_EXTENDED, or ORDER_LOST where a cable it names is not up here or the generation's epochs are all used */
+static inline int order_agree_append(struct mesh_node *x,uint32_t cables,const uint64_t *wire,const uint64_t mine[2],const uint64_t theirs[2],
+                                     uint32_t up,const uint64_t *up_wire,const uint32_t *up_port,const uint32_t *up_lanes){
+  uint32_t port[MESH_PORTS],lanes[MESH_PORTS];
+  for(uint32_t c=0;c<cables;c++){
+    uint32_t k=0;
+    while(k<up && up_wire[k]!=wire[c])k++;
+    if(k==up)return ORDER_LOST;
+    port[c]=up_port[k];lanes[c]=up_lanes[k];
+  }
+  const uint64_t first[2]={mine[0]>theirs[1]?mine[0]:theirs[1],mine[1]>theirs[0]?mine[1]:theirs[0]};
+  if(order_extend(x,first,cables,port,lanes,wire))return ORDER_LOST;
+  for(int way=0;way<2;way++)atomic_store_explicit(&x->limit[way],UINT64_MAX,memory_order_release);
+  return ORDER_EXTENDED;
+}
+/* one turn of the agreement toward node x, this end holding `up` cables up toward the peer (`wire` sorted, each one's
+   port and lanes): ORDER_SAY with *say to send, ORDER_EXTENDED where an epoch was appended, ORDER_LOST where the caller
+   restarts the order */
+static inline int order_agree_turn(struct mesh_node *x,int leader,struct order_agree *a,uint32_t up,const uint64_t *wire,
+                                   const uint32_t *port,const uint32_t *lanes,order_frontier_fn frontier,void *context,
+                                   struct order_message *say){
+  const uint32_t epochs=atomic_load_explicit(&x->epochs,memory_order_acquire);
+  int result=0;
+  if(a->pending && a->heard.epochs!=epochs)a->pending=0;
+  if(leader){
+    if(a->pending && a->heard.kind==ORDER_ACCEPT){
+      /* the peer appended this epoch: so does this end, from the same two bounds */
+      a->pending=0;
+      result=order_agree_append(x,a->heard.cables,a->heard.wire,a->heard.echo,a->heard.boundary,up,wire,port,lanes);
+      a->proposing=0;
+      return result;
+    }
+    const struct mesh_epoch *last=epochs?x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1:NULL;
+    int same=last && last->cables==up;
+    for(uint32_t c=0;same && c<up;c++)same=last->cable[c].wire==wire[c];
+    if(!up || same)return 0;
+    if(!a->proposing){order_agree_bound(x,frontier,context,a->bound);a->proposing=1;a->sent.cables=UINT32_MAX;}
+    if(a->sent.epochs==epochs && a->sent.cables==up && !memcmp(a->sent.wire,wire,up*sizeof *wire))return 0;
+    *say=(struct order_message){.kind=ORDER_PROPOSE,.seq=++a->seq,.epochs=epochs,.cables=up,.boundary={a->bound[0],a->bound[1]}};
+    memcpy(say->wire,wire,up*sizeof *wire);
+    a->sent=*say;
+    return ORDER_SAY;
+  }
+  if(!a->pending || a->heard.kind!=ORDER_PROPOSE)return 0;
+  /* accepted once every cable it names is up here */
+  for(uint32_t c=0;c<a->heard.cables;c++){
+    uint32_t k=0;
+    while(k<up && wire[k]!=a->heard.wire[c])k++;
+    if(k==up)return 0;
+  }
+  uint64_t bound[2];
+  order_agree_bound(x,frontier,context,bound);
+  const struct order_message proposal=a->heard;
+  a->pending=0;
+  result=order_agree_append(x,proposal.cables,proposal.wire,bound,proposal.boundary,up,wire,port,lanes);
+  if(result!=ORDER_EXTENDED)return result;
+  *say=(struct order_message){.kind=ORDER_ACCEPT,.seq=proposal.seq,.epochs=proposal.epochs,.cables=proposal.cables,
+    .boundary={bound[0],bound[1]},.echo={proposal.boundary[0],proposal.boundary[1]}};
+  memcpy(say->wire,proposal.wire,proposal.cables*sizeof *proposal.wire);
+  return ORDER_EXTENDED|ORDER_SAY;
+}
+
 #endif

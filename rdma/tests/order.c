@@ -139,7 +139,69 @@ static void check_done(int n,const struct made *p,uint64_t executions){
     if(p->sharing)assert(atomic_load(word(n,p->shared[d]))==(executions-1)*((t+1)/2)+(t-1)/2+1);
   }
 }
+/* The agreement of epochs (mesh-order.h order_agree_turn) between two ends whose cables come up at times of their own,
+   in orders of their own, the messages between them each delayed (in order, as a control socket's), and each end
+   posting (its frontier moving) below its bound: every seed's two ends append the same epochs (the same cables, each
+   end's first sends the other's first receives) and end on every cable */
+struct agree_end { struct hdr *m; struct mesh_node *x; struct order_agree a; uint64_t frontier[2]; uint64_t up_at[3];
+  struct order_message box[64]; uint32_t head,tail; uint64_t ready[64]; };
+static uint64_t agree_frontier(const struct mesh_node *x,int way,void *context){ (void)x; return ((struct agree_end *)context)->frontier[way]; }
+static void agree_test(void){
+  static const uint64_t wires[3]={0x30,0x10,0x20};
+  for(uint32_t seed=1;seed<=400;seed++){
+    struct agree_end e[2];
+    uint64_t random=seed*0x9e3779b97f4a7c15u;
+    for(int n=0;n<2;n++){
+      struct hdr geometry={0};
+      const uint64_t length=mesh_layout(&geometry,PG,1,64);
+      struct hdr *m=calloc(1,length);assert(m);
+      *m=geometry;m->version=MESH_LAYOUT;m->node=21+(uint32_t)n;m->magic=MESH_MAGIC;
+      e[n]=(struct agree_end){.m=m,.x=mesh_node_at(m,0)};
+      order_restart(m,e[n].x);atomic_store(&e[n].x->node,22-(uint32_t)n);
+      for(int c=0;c<3;c++){random^=random<<13;random^=random>>7;random^=random<<17;e[n].up_at[c]=random%300;}
+    }
+    for(uint64_t t=0;t<2000;t++)for(int n=0;n<2;n++){
+      struct agree_end *v=e+n,*peer=e+1-n;
+      uint64_t up[3];uint32_t port[3],lanes[3],k=0;
+      for(int c=0;c<3;c++)if(t>=v->up_at[c] && t>=peer->up_at[c]/2){up[k]=wires[c];port[k]=(uint32_t)c;lanes[k]=2;k++;}
+      /* sorted by identity, as order_cables sorts them */
+      for(uint32_t i=1;i<k;i++)for(uint32_t j=i;j>0 && up[j]<up[j-1];j--){
+        uint64_t w0=up[j];up[j]=up[j-1];up[j-1]=w0;uint32_t p0=port[j];port[j]=port[j-1];port[j-1]=p0;
+      }
+      while(v->head!=v->tail && v->ready[v->head%64]<=t){order_agree_heard(&v->a,v->x,&v->box[v->head%64]);v->head++;}
+      struct order_message say;
+      const int done=order_agree_turn(v->x,n==0,&v->a,k,up,port,lanes,agree_frontier,v,&say);
+      assert(!(done&ORDER_LOST));
+      if(done&ORDER_SAY){
+        random^=random<<13;random^=random>>7;random^=random<<17;
+        const uint64_t at=t+1+random%40,last=peer->tail>peer->head?peer->ready[(peer->tail-1)%64]:0;
+        peer->box[peer->tail%64]=say;peer->ready[peer->tail%64]=at>last?at:last;peer->tail++;
+      }
+      /* posting goes on below the bound */
+      for(int way=0;way<2;way++){
+        const uint64_t limit=atomic_load(&v->x->limit[way]),epochs=atomic_load(&v->x->epochs);
+        if(epochs && v->frontier[way]+1<limit && (t+(uint64_t)way)%3)v->frontier[way]++;
+      }
+    }
+    const uint32_t epochs=atomic_load(&e[0].x->epochs);
+    if(epochs!=atomic_load(&e[1].x->epochs) || !epochs || e[0].x->epoch[epochs-1].cables!=3){
+      fprintf(stderr,"order: seed %u: epochs %u and %u, the last over %u cables\n",seed,epochs,atomic_load(&e[1].x->epochs),
+              epochs?e[0].x->epoch[epochs-1].cables:0);
+      exit(1);
+    }
+    for(uint32_t k=0;k<epochs;k++){
+      const struct mesh_epoch *a=e[0].x->epoch+k,*b=e[1].x->epoch+k;
+      assert(a->cables==b->cables && a->first[0]==b->first[1] && a->first[1]==b->first[0]);
+      for(uint32_t c=0;c<a->cables;c++)assert(a->cable[c].wire==b->cable[c].wire);
+      /* nothing either end posted lies past an epoch's beginning but in the epochs before */
+      if(k)assert(a->first[0]>=e[0].x->epoch[k-1].first[0]);
+    }
+    for(int n=0;n<2;n++)free(e[n].m);
+  }
+  printf("order: epochs agreed over 400 orders of cables coming up and delayed messages: passed\n");
+}
 int main(void){
+  agree_test();
   wire_make(&w,CABLES,LANES,256);
   region_make(0,11,12);region_make(1,12,11);
   /* the first epoch over two cables, from piece 0 */
