@@ -59,7 +59,7 @@ static void load(const char *path){
   fclose(f);
 }
 
-struct piece { uint32_t source,page; double bytes; uint64_t need,got; int phase; };
+struct piece { uint32_t source,page; double bytes; uint64_t need,got; int phase; uint32_t route[MESH_SWITCH_NODES]; };
 struct event { double t; uint32_t node,piece,hops; uint64_t to,visited; uint8_t carried,lane[ENTRIES];uint32_t execution[ENTRIES];
                struct mesh_switch_line line[ENTRIES]; };
 static struct event *heap;static size_t events,room;
@@ -85,7 +85,10 @@ static struct event pop(void){
 
 static struct mesh_switch_fabric fabric;
 static const double unit=64;   /* ns, the lines' time unit */
-static int mode;   /* 0 fixed, 1 own, 2 mean, 3 sampled */
+static int mode;   /* 0 fixed, 1 own, 2 mean, 3 sampled, 4 the unicast fluid optimum's paths, 5 the multicast fluid optimum's trees */
+static struct mesh_switch_tree trees[4096];static uint32_t tree_first[65],ncommodities;static uint32_t csrc[64];static uint64_t cto[64];
+static double fluid,tree_fluid;
+static uint64_t all_compute(void);static struct mesh_switch_path paths[4096];static uint32_t path_first[65],commodity[MESH_SWITCH_NODES][MESH_SWITCH_NODES];
 static uint32_t execution;
 static double free_at[256],busy[256];
 static double *posted[256],*waited[256];static uint32_t sends[256],send_room[256];
@@ -98,7 +101,37 @@ static void send(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,
   double ahead[256];uint32_t lane[256];uint64_t subset[256];
   for(uint32_t l=0;l<links;l++)ahead[l]=mode && free_at[l]>t?free_at[l]-t:0;
   const uint64_t key=mesh_switch_mix(((uint64_t)execution<<32)^k);
-  const uint32_t used=mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,key,ahead,mode>=2?view[from]:NULL,unit,mode==3,lane,subset);
+  uint32_t used;
+  if(mode==4){   /* each destination's path, sampled at the source with one quantile a piece; every hop follows it */
+    if(!hops)for(uint32_t d=0;d<nodes;d++)if(to>>d&1 && d!=from){
+      const uint32_t j=commodity[from][d];
+      pieces[k].route[d]=path_first[j]+mesh_switch_pick(paths+path_first[j],path_first[j+1]-path_first[j],((key>>11)+0.5)/9007199254740992.0);
+    }
+    used=0;
+    for(uint32_t d=0;d<nodes;d++)if(to>>d&1 && d!=from){
+      const struct mesh_switch_path *q=paths+pieces[k].route[d];
+      uint32_t i=0;while(i<q->hops && link[q->lane[i]].from!=from)i++;
+      assert(i<q->hops);
+      uint32_t u=0;while(u<used && lane[u]!=q->lane[i])u++;
+      if(u==used){lane[used]=q->lane[i];subset[used]=0;used++;}
+      subset[u]|=UINT64_C(1)<<d;
+    }
+  }else if(mode==5){   /* the piece's tree, sampled at its source; every hop sends on to its children in the tree */
+    if(!hops){
+      uint32_t j=0;while(j<ncommodities && !(csrc[j]==from && cto[j]==pieces[k].need))j++;
+      assert(j<ncommodities);
+      double c=0,u=((key>>11)+0.5)/9007199254740992.0;uint32_t pick=tree_first[j+1]-1;
+      for(uint32_t q=tree_first[j];q<tree_first[j+1];q++){c+=trees[q].share;if(u<c){pick=q;break;}}
+      pieces[k].route[0]=pick;
+    }
+    const struct mesh_switch_tree *tr=trees+pieces[k].route[0];
+    used=0;
+    for(uint32_t v=0;v<nodes;v++)if(tr->parent[v]==from){
+      uint64_t below=0;   /* the destinations in v's subtree */
+      for(uint32_t d=0;d<nodes;d++)if(to>>d&1){uint32_t at=d;while(at!=v && tr->parent[at]!=UINT32_MAX)at=tr->parent[at];if(at==v)below|=UINT64_C(1)<<d;}
+      if(below){lane[used]=tr->lane[v];subset[used]=below;used++;}
+    }
+  }else used=mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,key,ahead,mode>=2?view[from]:NULL,unit,mode==3,lane,subset);
   assert(used!=UINT32_MAX && used>0);
   uint64_t covered=0;
   for(uint32_t u=0;u<used;u++){
@@ -137,13 +170,13 @@ static double execute(int kind,double S,double page){
   for(uint32_t c=0;c<ncompute;c++)for(uint32_t p=0;p<P;p++){
     const double b=p+1<P?page:S-page*(P-1);
     const uint32_t src=compute[c],owner=compute[p%ncompute];
-    if(kind==0)pieces[npieces++]=(struct piece){src,p,b,all&~(UINT64_C(1)<<src),0,0};
-    else if(src!=owner){pieces[npieces++]=(struct piece){src,p,b,UINT64_C(1)<<owner,0,1};left[p]++;}
+    if(kind==0)pieces[npieces++]=(struct piece){src,p,b,all&~(UINT64_C(1)<<src),0,0,{0}};
+    else if(src!=owner){pieces[npieces++]=(struct piece){src,p,b,UINT64_C(1)<<owner,0,1,{0}};left[p]++;}
   }
   const uint32_t first=npieces;
   if(kind==1)for(uint32_t p=0;p<P;p++){   /* the reduced pages, sent once their partials have landed */
     const uint32_t owner=compute[p%ncompute];
-    pieces[npieces++]=(struct piece){owner,p,p+1<P?page:S-page*(P-1),all&~(UINT64_C(1)<<owner),0,2};
+    pieces[npieces++]=(struct piece){owner,p,p+1<P?page:S-page*(P-1),all&~(UINT64_C(1)<<owner),0,2,{0}};
   }
   for(uint32_t k=0;k<first;k++)send(0,pieces[k].source,k,pieces[k].need,0,0);
   if(kind==1)for(uint32_t p=0;p<P;p++)if(!left[p])send(0,pieces[first+p].source,first+p,pieces[first+p].need,0,0);
@@ -176,9 +209,33 @@ static double execute(int kind,double S,double page){
 
 struct result { double T,mean,sd,bound,relayed_share,busy[256]; uint32_t hops,pieces; };
 static struct result run(int kind,double S,double page,int m){
+  if(m==4 || m==5){   /* the fluid optimum for this transaction's demands: all-gather S a pair, all-reduce 2 S / n a pair */
+    uint32_t src[64],dst[64],n=0;double demand[64];
+    for(uint32_t a=0;a<ncompute;a++)for(uint32_t b=0;b<ncompute;b++)if(a!=b){
+      src[n]=compute[a];dst[n]=compute[b];demand[n]=kind?2*S/ncompute:S;commodity[compute[a]][compute[b]]=n;n++;
+    }
+    assert(!mesh_switch_flow(&fabric,src,dst,demand,n,0.05,paths,sizeof paths/sizeof *paths,path_first));
+    double load[256]={0};fluid=0;
+    /* and the multicast optimum: all-gather a commodity a source to every other rank; all-reduce each partial to its
+       owner (a commodity a pair) and each owner's reduced pages to every other rank */
+    ncommodities=0;double tdemand[64];
+    for(uint32_t a=0;a<ncompute;a++){
+      if(!kind){csrc[ncommodities]=compute[a];cto[ncommodities]=all_compute()&~(UINT64_C(1)<<compute[a]);tdemand[ncommodities++]=S;continue;}
+      for(uint32_t b=0;b<ncompute;b++)if(a!=b){csrc[ncommodities]=compute[a];cto[ncommodities]=UINT64_C(1)<<compute[b];tdemand[ncommodities++]=S/ncompute;}
+      csrc[ncommodities]=compute[a];cto[ncommodities]=all_compute()&~(UINT64_C(1)<<compute[a]);tdemand[ncommodities++]=S/ncompute;
+    }
+    assert(!mesh_switch_trees(&fabric,csrc,cto,tdemand,ncommodities,0.05,trees,sizeof trees/sizeof *trees,tree_first));
+    double tload[256]={0};tree_fluid=0;
+    for(uint32_t j=0;j<ncommodities;j++)for(uint32_t q=tree_first[j];q<tree_first[j+1];q++)
+      for(uint32_t v=0;v<nodes;v++)if(trees[q].lane[v]!=UINT32_MAX)tload[trees[q].lane[v]]+=tdemand[j]*trees[q].share;
+    for(uint32_t l=0;l<links;l++)if(tload[l]/link[l].rate>tree_fluid)tree_fluid=tload[l]/link[l].rate;   /* the optimum's fluid makespan: its most loaded lane's load over the lane's rate */
+    for(uint32_t j=0;j<n;j++)for(uint32_t k=path_first[j];k<path_first[j+1];k++)
+      for(uint32_t h=0;h<paths[k].hops;h++)load[paths[k].lane[h]]+=demand[j]*paths[k].share;
+    for(uint32_t l=0;l<links;l++)if(load[l]/link[l].rate>fluid)fluid=load[l]/link[l].rate;
+  }
   mode=m;memset(own,0,sizeof own);memset(view,0,sizeof view);memset(seen,0,sizeof seen);memset(cursor,0,sizeof cursor);
   memset(gru,0,sizeof gru);execution=0;own_execution=0;
-  const int runs=m>=2?RUNS:1;
+  const int runs=m==2 || m==3?RUNS:1;
   double sum=0,sq=0,T=0;int n=0;
   for(int i=0;i<runs;i++){T=execute(kind,S,page);if(i>=runs/2 || runs==1){sum+=T;sq+=T*T;n++;}}
   struct result r={T,sum/n,0,0,forwarded?(double)relayed/forwarded:0,{0},maxhops,npieces};
@@ -197,19 +254,21 @@ static struct result run(int kind,double S,double page,int m){
   return r;
 }
 
+static uint64_t all_compute(void){uint64_t a=0;for(uint32_t c=0;c<ncompute;c++)a|=UINT64_C(1)<<compute[c];return a;}
 int main(int argc,char **argv){
   load(argc>1?argv[1]:"tests/fabric-20261119.txt");
   const double page=argc>2?atof(argv[2]):16384;
   assert(!mesh_switch_fabric_make(&fabric,nodes,link,links,page));
   mesh_switch_gru_weights_make(&weights,20261119);
   static const double rows[]={2,8,32,128,1024,4096};
-  printf("%-10s %9s %7s %10s %10s %20s %20s %10s %8s\n","","S bytes","pieces","fixed","own","mean, mean+-sd","sampled, mean+-sd","bound","relayed");
+  printf("%-10s %9s %7s %10s %10s %20s %20s %10s %10s %10s %8s\n","","S bytes","pieces","fixed","own","mean, mean+-sd","sampled, mean+-sd","optimum","fluid","bound","relayed");
   struct result last={0};
   for(int kind=0;kind<2;kind++)for(size_t i=0;i<sizeof rows/sizeof *rows;i++){
     const double S=rows[i]*1536*2;
-    const struct result f=run(kind,S,page,0),o=run(kind,S,page,1),d=run(kind,S,page,2),g=run(kind,S,page,3);
-    printf("%-10s %9.0f %7u %8.2fus %8.2fus %11.2f+-%6.2fus %11.2f+-%6.2fus %8.2fus %7.1f%%\n",kind?"all-reduce":"all-gather",S,g.pieces,
-           f.T/1e3,o.T/1e3,d.mean/1e3,d.sd/1e3,g.mean/1e3,g.sd/1e3,g.bound/1e3,100*g.relayed_share);
+    const struct result f=run(kind,S,page,0),o=run(kind,S,page,1),d=run(kind,S,page,2),g=run(kind,S,page,3),q=run(kind,S,page,4),t=run(kind,S,page,5);
+    printf("%-10s %9.0f  trees: sampled %8.2fus, fluid %8.2fus\n","",S,t.T/1e3,tree_fluid/1e3);
+    printf("%-10s %9.0f %7u %8.2fus %8.2fus %11.2f+-%6.2fus %11.2f+-%6.2fus %8.2fus %8.2fus %8.2fus %7.1f%%\n",kind?"all-reduce":"all-gather",S,g.pieces,
+           f.T/1e3,o.T/1e3,d.mean/1e3,d.sd/1e3,g.mean/1e3,g.sd/1e3,q.T/1e3,fluid/1e3,g.bound/1e3,100*g.relayed_share);
     if(kind==0)assert(g.T>=g.bound*(1-1e-9) && d.T>=d.bound*(1-1e-9));
     if(kind==0 && i+1==sizeof rows/sizeof *rows)last=g;
   }

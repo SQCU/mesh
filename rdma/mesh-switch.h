@@ -25,6 +25,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define MESH_SWITCH_NODES 64
 
@@ -158,6 +159,178 @@ static inline uint32_t mesh_switch_route(const struct mesh_switch_fabric *f,uint
     subset[k]|=UINT64_C(1)<<d;
   }
   return used;
+}
+
+/* The fluid optimum, as a distribution over paths. Commodity j moves demand[j] bytes from src[j] to dst[j]; the fabric's
+   rates are the capacities. Max-concurrent-flow by Garg and Koenemann's multiplicative weights: every lane has a length,
+   starting at delta / rate; each commodity in turn routes its demand along its shortest path under the lengths (in
+   pieces no larger than the path's narrowest rate), each lane on it lengthened by (1 + eps * flow / rate), until the
+   lengths' rate-weighted sum reaches 1. The flows are within 1 + O(eps) of the largest common fraction of every
+   demand the fabric can carry at once, so the makespan of carrying them is within 1 + O(eps) of the fluid optimum.
+   Each commodity's paths come out with their shares of its flow, summing to 1.
+
+   This is the distribution a piece's path is sampled from (mesh_switch_pick), not a route: no piece is committed to a
+   path ahead, and the bridge recomputes it whenever the fabric's rates change. Writes at most `room` paths, commodity
+   j's at first[j] .. first[j + 1] - 1. 0, ENOSPC (more paths than room), or EINVAL (a commodity unreachable). */
+#define MESH_SWITCH_PATH 16
+struct mesh_switch_path { uint32_t hops,lane[MESH_SWITCH_PATH]; double share; };
+
+static inline int mesh_switch_shortest(const struct mesh_switch_fabric *f,uint32_t s,uint32_t d,const double *length,struct mesh_switch_path *p){
+  double dist[MESH_SWITCH_NODES];uint32_t by[MESH_SWITCH_NODES];uint64_t done=0;
+  for(uint32_t v=0;v<f->nodes;v++){dist[v]=INFINITY;by[v]=UINT32_MAX;}
+  dist[s]=0;
+  for(;;){
+    uint32_t u=MESH_SWITCH_NODES;
+    for(uint32_t v=0;v<f->nodes;v++)if(!(done>>v&1) && isfinite(dist[v]) && (u==MESH_SWITCH_NODES || dist[v]<dist[u]))u=v;
+    if(u==MESH_SWITCH_NODES || u==d)break;
+    done|=UINT64_C(1)<<u;
+    for(uint32_t l=0;l<f->links;l++){
+      const struct mesh_switch_link *x=f->link+l;
+      if(x->from==u && dist[u]+length[l]<dist[x->to]){dist[x->to]=dist[u]+length[l];by[x->to]=l;}
+    }
+  }
+  if(!isfinite(dist[d]))return EINVAL;
+  uint32_t back[MESH_SWITCH_PATH],n=0;
+  for(uint32_t v=d;v!=s;v=f->link[by[v]].from){if(n==MESH_SWITCH_PATH)return EINVAL;back[n++]=by[v];}
+  p->hops=n;for(uint32_t i=0;i<n;i++)p->lane[i]=back[n-1-i];
+  return 0;
+}
+
+static inline int mesh_switch_flow(const struct mesh_switch_fabric *f,const uint32_t *src,const uint32_t *dst,const double *demand,
+                                   uint32_t commodities,double eps,struct mesh_switch_path *path,uint32_t room,uint32_t *first){
+  double length[256],flow_total[64]={0};
+  if(f->links>256 || commodities>=64)return EINVAL;
+  const double m=f->links,delta=(1+eps)*pow((1+eps)*m,-1/eps);
+  /* the demands scaled so that the fabric carries about one of their sets a phase (shares don't depend on the scale) */
+  double want=0,have=0,scaled[64];
+  for(uint32_t j=0;j<commodities;j++)want+=demand[j];
+  for(uint32_t l=0;l<f->links;l++)have+=f->link[l].rate;
+  if(!(want>0) || !(have>0))return EINVAL;
+  for(uint32_t j=0;j<commodities;j++)scaled[j]=demand[j]*have/want;
+  for(uint32_t l=0;l<f->links;l++)length[l]=delta/f->link[l].rate;
+  /* each commodity's distinct paths so far, and their flows */
+  static struct mesh_switch_path found[64][64];static double flow[64][64];uint32_t count[64]={0};
+  for(uint32_t j=0;j<commodities;j++)for(uint32_t k=0;k<64;k++)flow[j][k]=0;
+  for(double D=delta*m;D<1;){
+    for(uint32_t j=0;j<commodities && D<1;j++){
+      double left=scaled[j];
+      while(left>0 && D<1){
+        struct mesh_switch_path p;
+        if(mesh_switch_shortest(f,src[j],dst[j],length,&p))return EINVAL;
+        double narrow=INFINITY;for(uint32_t i=0;i<p.hops;i++)if(f->link[p.lane[i]].rate<narrow)narrow=f->link[p.lane[i]].rate;
+        const double g=left<narrow?left:narrow;
+        uint32_t k=0;
+        while(k<count[j] && !(found[j][k].hops==p.hops && !memcmp(found[j][k].lane,p.lane,p.hops*sizeof *p.lane)))k++;
+        if(k==count[j]){if(k==64)return ENOSPC;found[j][k]=p;count[j]++;}
+        flow[j][k]+=g;flow_total[j]+=g;left-=g;
+        for(uint32_t i=0;i<p.hops;i++){
+          const uint32_t l=p.lane[i];const double old=length[l];
+          length[l]*=1+eps*g/f->link[l].rate;D+=f->link[l].rate*(length[l]-old);
+        }
+      }
+    }
+  }
+  uint32_t n=0;
+  for(uint32_t j=0;j<commodities;j++){
+    if(!count[j])return EINVAL;
+    first[j]=n;
+    for(uint32_t k=0;k<count[j];k++){
+      if(n==room)return ENOSPC;
+      path[n]=found[j][k];path[n].share=flow_total[j]>0?flow[j][k]/flow_total[j]:0;n++;
+    }
+  }
+  first[commodities]=n;
+  return 0;
+}
+/* the path among paths[0 .. n - 1] whose share interval holds the quantile u, in [0, 1) */
+static inline uint32_t mesh_switch_pick(const struct mesh_switch_path *paths,uint32_t n,double u){
+  double c=0;
+  for(uint32_t k=0;k<n;k++){c+=paths[k].share;if(u<c)return k;}
+  return n-1;
+}
+
+/* The multicast fluid optimum, as a distribution over trees. Commodity j moves demand[j] bytes from src[j] to every
+   node of the set to[j], and any node on the way may copy (relays included). The same multiplicative weights as
+   mesh_switch_flow, its oracle the cheapest arborescence from src[j] reaching every node of to[j] under the lanes'
+   lengths. The oracle here is exact, by enumerating every node's parent, which bounds the fabric to
+   MESH_SWITCH_TREE_NODES nodes. A larger fabric needs an approximate Steiner oracle in its place. Commodity j's trees
+   are written at first[j] .. first[j + 1] - 1, each as its parents (UINT32_MAX for a node not in it, and the source)
+   and the lane into each node, with its share of the commodity's flow. 0, ENOSPC or EINVAL. */
+#define MESH_SWITCH_TREE_NODES 10
+struct mesh_switch_tree { uint32_t parent[MESH_SWITCH_TREE_NODES],lane[MESH_SWITCH_TREE_NODES]; double share; };
+
+static inline int mesh_switch_cheapest_tree(const struct mesh_switch_fabric *f,uint32_t s,uint64_t to,const double *length,
+                                            struct mesh_switch_tree *best){
+  const uint32_t n=f->nodes;
+  uint32_t choice[MESH_SWITCH_TREE_NODES]={0},options[MESH_SWITCH_TREE_NODES][MESH_SWITCH_TREE_NODES+1],count[MESH_SWITCH_TREE_NODES];
+  for(uint32_t v=0;v<n;v++){   /* each node's options: out of the tree (UINT32_MAX), or one of its inbound lanes */
+    count[v]=0;options[v][count[v]++]=UINT32_MAX;
+    if(v==s)continue;
+    for(uint32_t l=0;l<f->links;l++)if(f->link[l].to==v && count[v]<=MESH_SWITCH_TREE_NODES)options[v][count[v]++]=l;
+  }
+  double cheapest=INFINITY;
+  for(;;){
+    double cost=0;int ok=1;
+    for(uint32_t v=0;v<n && ok;v++){
+      const uint32_t l=options[v][choice[v]];
+      if(to>>v&1 && v!=s && l==UINT32_MAX)ok=0;
+      if(l!=UINT32_MAX)cost+=length[l];
+    }
+    for(uint32_t v=0;v<n && ok;v++){   /* every node in the tree reaches the source */
+      uint32_t at=v,steps=0;
+      while(at!=s && options[at][choice[at]]!=UINT32_MAX && steps<=n){at=f->link[options[at][choice[at]]].from;steps++;}
+      if(options[v][choice[v]]!=UINT32_MAX && at!=s)ok=0;
+    }
+    if(ok && cost<cheapest){
+      cheapest=cost;
+      for(uint32_t v=0;v<n;v++){const uint32_t l=options[v][choice[v]];best->lane[v]=l;best->parent[v]=l==UINT32_MAX?UINT32_MAX:f->link[l].from;}
+    }
+    uint32_t v=0;
+    while(v<n && ++choice[v]==count[v]){choice[v]=0;v++;}
+    if(v==n)break;
+  }
+  return isfinite(cheapest)?0:EINVAL;
+}
+
+static inline int mesh_switch_trees(const struct mesh_switch_fabric *f,const uint32_t *src,const uint64_t *to,const double *demand,
+                                    uint32_t commodities,double eps,struct mesh_switch_tree *tree,uint32_t room,uint32_t *first){
+  if(f->nodes>MESH_SWITCH_TREE_NODES || f->links>256 || commodities>=64)return EINVAL;
+  double length[256],total[64]={0},want=0,have=0,scaled[64];
+  const double m=f->links,delta=(1+eps)*pow((1+eps)*m,-1/eps);
+  for(uint32_t l=0;l<f->links;l++){length[l]=delta/f->link[l].rate;have+=f->link[l].rate;}
+  for(uint32_t j=0;j<commodities;j++)want+=demand[j];
+  if(!(want>0))return EINVAL;
+  for(uint32_t j=0;j<commodities;j++)scaled[j]=demand[j]*have/want;
+  static struct mesh_switch_tree found[64][64];static double flow[64][64];uint32_t count[64]={0};
+  for(uint32_t j=0;j<commodities;j++)for(uint32_t k=0;k<64;k++)flow[j][k]=0;
+  for(double D=delta*m;D<1;){
+    for(uint32_t j=0;j<commodities && D<1;j++){
+      double left=scaled[j];
+      while(left>0 && D<1){
+        struct mesh_switch_tree t;
+        if(mesh_switch_cheapest_tree(f,src[j],to[j],length,&t))return EINVAL;
+        double narrow=INFINITY;
+        for(uint32_t v=0;v<f->nodes;v++)if(t.lane[v]!=UINT32_MAX && f->link[t.lane[v]].rate<narrow)narrow=f->link[t.lane[v]].rate;
+        const double g=left<narrow?left:narrow;
+        uint32_t k=0;
+        while(k<count[j] && memcmp(found[j][k].lane,t.lane,f->nodes*sizeof *t.lane))k++;
+        if(k==count[j]){if(k==64)return ENOSPC;found[j][k]=t;count[j]++;}
+        flow[j][k]+=g;total[j]+=g;left-=g;
+        for(uint32_t v=0;v<f->nodes;v++)if(t.lane[v]!=UINT32_MAX){
+          const uint32_t l=t.lane[v];const double old=length[l];
+          length[l]*=1+eps*g/f->link[l].rate;D+=f->link[l].rate*(length[l]-old);
+        }
+      }
+    }
+  }
+  uint32_t n=0;
+  for(uint32_t j=0;j<commodities;j++){
+    if(!count[j])return EINVAL;
+    first[j]=n;
+    for(uint32_t k=0;k<count[j];k++){if(n==room)return ENOSPC;tree[n]=found[j][k];tree[n].share=flow[j][k]/total[j];n++;}
+  }
+  first[commodities]=n;
+  return 0;
 }
 
 /* One lane's predictor at its sender: a GRU over each execution's observed waits (as log(1 + wait / 1 us) a bin),
