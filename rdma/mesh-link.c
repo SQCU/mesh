@@ -214,7 +214,10 @@ static void link_receive(struct port *port,uint32_t served){
    (mesh-order.h order_unit_piece), which is a span of a transfer of an execution of a declared program
    (order_locate); it is posted while its step is issued and its gate holds (order_ready) and the lane has room, and
    the lane's next unit is then the next piece placed on it.  Nothing is searched for and nothing skipped: a lane waits
-   at its own next piece */
+   at its own next piece.  A pass posts at most ORDER_BURST units a lane each way, so a step whose receives all become
+   postable at once (a fused crossing's 70 frames of 48 pieces, at its start) is posted over passes in the pieces' order,
+   its first frames' landings and SENDs going between them rather than after a thousand receives */
+#define ORDER_BURST 8u
 static void order_pass(struct port *port){
   struct link *l=&port->link;
   struct mesh_node *x=link_order(l);
@@ -226,7 +229,7 @@ static void order_pass(struct port *port){
   const uint64_t piece=page_bytes();
   for(int way=0;way<2 && segments;way++)
     for(uint32_t j=0;j<lanes;j++)
-      for(;;){
+      for(uint32_t burst=0;burst<ORDER_BURST;burst++){
         const struct lane_state *state=l->lane+MESH_LANE_FIRST+j;
         uint64_t n;struct order_at at;
         if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,&l->hint[way][j],&n,&at))break;
