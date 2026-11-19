@@ -1,4 +1,5 @@
 # design/rubrics.md C9
+from bisect import bisect_left
 import collections.abc
 import ctypes as C
 import errno
@@ -975,15 +976,38 @@ def call_successors(families, bounds):
     return result
 
 
-def dependence_image(edges, target_members):
-    """Map each dependence endpoint through the source-to-target incidence."""
+class DependenceImage:
+    def __init__(self, edges, first, members):
+        self.edges, self.first, self.members = edges, first, members
+
+    def sources(self, source, sink, delay):
+        key = (source, sink, delay)
+        def triple(edge):
+            return edge.source, edge.sink, edge.delay
+        i = bisect_left(self.edges, key, key=triple)
+        span = range(self.first[i], self.first[i + 1]) if i < len(self.edges) and triple(self.edges[i]) == key else range(0)
+        return View(self, self.members, span, int)
+
+
+def dependence_image(edges, source_ids, target_members):
+    """Each projected edge refers to every original edge that produced it."""
     targets = collections.defaultdict(list)
     for target, members in enumerate(target_members):
         for source in members:
             targets[source].append(target)
-    pairs = {(a, b, edge.delay) for edge in edges
-             for a in targets[edge.source] for b in targets[edge.sink] if a != b or edge.delay}
-    return (Dependence * len(pairs))(*(Dependence(*edge) for edge in sorted(pairs)))
+    image = collections.defaultdict(list)
+    for edge, original in zip(edges, source_ids, strict=True):
+        for a in targets[edge.source]:
+            for b in targets[edge.sink]:
+                if a != b or edge.delay:
+                    image[a, b, edge.delay].append(original)
+    pairs = sorted(image)
+    members, first = [], [0]
+    for pair in pairs:
+        members.extend(image[pair])
+        first.append(len(members))
+    return DependenceImage((Dependence * len(pairs))(*(Dependence(*pair) for pair in pairs)),
+                           (C.c_size_t * len(first))(*first), (C.c_size_t * len(members))(*members))
 
 
 def call_submissions(successors, first, piece, physical_count):
