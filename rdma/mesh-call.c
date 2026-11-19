@@ -14,13 +14,17 @@ static struct mesh_stream *stream_held(struct hdr *m,uint32_t stream){
 }
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
-  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
+  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS;p++){
     const struct mesh_stream *x=mesh_stream_at(m,p);
     const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
     if(!node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
-    int seen=0;
-    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node;
-    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
+    uint32_t k=0;
+    while(k<count && reach[k].node!=node)k++;
+    if(k==count){
+      if(count==room)continue;
+      reach[count++]=(struct mesh_reach){.node=node};
+    }
+    reach[k].bandwidth+=atomic_load_explicit(&x->bandwidth,memory_order_relaxed);
   }
   return count;
 }

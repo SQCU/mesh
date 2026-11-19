@@ -572,8 +572,11 @@ char model[MESH_MODEL_BYTES];
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
   for(uint32_t p=0;p<port_count && count<room;p++)
-    if(ports[p].link.state==LINK_UP && plan_streams(ports[p].link.plan))
-      reach[count++]=(struct mesh_reach){.node=ports[p].peer,.bandwidth=ports[p].bandwidth};
+    if(ports[p].link.state==LINK_UP && plan_streams(ports[p].link.plan)){
+      const uint32_t lo=M->node<ports[p].peer?p:ports[p].peer_port;
+      const uint32_t hi=M->node<ports[p].peer?ports[p].peer_port:p;
+      reach[count++]=(struct mesh_reach){.node=ports[p].peer,.padding=1+lo*MESH_PORTS+hi,.bandwidth=ports[p].bandwidth};
+    }
   return count;
 }
 /* a port's link as the port table tells it; a change is a new record */

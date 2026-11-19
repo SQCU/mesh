@@ -7,6 +7,9 @@
 #include <signal.h>
 /* design/transport.md */
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; };
+/* Node identifiers and symmetric direct-hop capacities in bits/sec, row stride room, from one map snapshot. */
+int mesh_peer_topology(struct mesh_ctx *,uint32_t room,uint32_t *nodes,uint64_t *capacity,uint64_t *serial);
+
 /* design/transport.md: a process's client slot of this node's one region, taken vacant by one compare-exchange
    (mesh_slot_take, which the bridge's own leases take too) and stamped with the process's identity (its pid and
    start): the owner of its leases of the region and of the streams it holds, and a holder of the region the heartbeat

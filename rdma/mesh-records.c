@@ -113,7 +113,8 @@ static int record_links_same(const struct mesh_record *a,const struct mesh_recor
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
   for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
-    same=a->reach[k].node==b->reach[k].node && a->reach[k].bandwidth==b->reach[k].bandwidth;
+    same=a->reach[k].node==b->reach[k].node && a->reach[k].padding==b->reach[k].padding &&
+         a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
 }
 static void health_put(struct mesh_record *held,const struct mesh_record *record){

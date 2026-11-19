@@ -70,7 +70,7 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
 /* design/transport.md: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
    copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open); the read
    within its deadline, MESH_PLATFORM_NS from its start (design/data-model.md section 6) */
-static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
+static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out,uint64_t *serial){
   const struct mesh_deadline deadline=mesh_deadline("libmesh: the map's records read (mesh_records_read)",0);
   for(;;){
     uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
@@ -88,6 +88,7 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
     if(copy)memcpy(copy,(char *)m+at,count*sizeof *copy);
     if(mesh_map_whole(m,before)){
       if(!copy)return fits?-ENOMEM:-EINVAL;
+      if(serial)*serial=before;
       *out=copy;return (int)count;
     }
     free(copy);
@@ -129,6 +130,42 @@ struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; stru
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
+}
+static uint64_t peer_capacity(struct mesh_record *a,struct mesh_record *b){
+  uint64_t total=0;
+  for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++){
+    const struct mesh_reach x=a->reach[i];
+    if(x.node!=b->node)continue;
+    for(uint32_t j=0;j<b->reached && j<MESH_STREAMS;j++){
+      const struct mesh_reach y=b->reach[j];
+      if(y.node!=a->node)continue;
+      if(!x.padding || !y.padding){
+        uint64_t rate;
+        const uint32_t common=mesh_join(a,b,&rate);
+        return (uint64_t)common*rate;
+      }
+      if(x.padding!=y.padding)continue;
+      total+=x.bandwidth<y.bandwidth?x.bandwidth:y.bandwidth;
+      break;
+    }
+  }
+  return total;
+}
+int mesh_peer_topology(struct mesh_ctx *ctx,uint32_t room,uint32_t *nodes,uint64_t *capacity,uint64_t *serial){
+  if(!ctx || !ctx->M || !nodes || !capacity || !serial)return -EINVAL;
+  struct mesh_record *records=NULL;
+  const int count=mesh_records_read(ctx->M,ctx->len,&records,serial);
+  if(count<0)return count;
+  if((uint32_t)count>room){free(records);return -ENOSPC;}
+  qsort(records,(size_t)count,sizeof *records,mesh_node_order);
+  for(int i=0;i<count;i++){
+    nodes[i]=records[i].node;
+    capacity[(size_t)i*room+i]=0;
+    for(int j=i+1;j<count;j++)
+      capacity[(size_t)i*room+j]=capacity[(size_t)j*room+i]=peer_capacity(records+i,records+j);
+  }
+  free(records);
+  return count;
 }
 static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->bandwidth);free(w->mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
@@ -177,7 +214,7 @@ int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
-  int count=mesh_records_read(m,length,&r);
+  int count=mesh_records_read(m,length,&r,NULL);
   munmap(m,length);
   if(count<0)return count;
   int result=mesh_records_map(r,(uint32_t)count,members,n,node,map);
@@ -208,7 +245,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
       continue;
     }
     mesh_deadline_left(&deadline);
-    count=mesh_records_read(m,length,&r);
+    count=mesh_records_read(m,length,&r,NULL);
     if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
     free(r);r=NULL;
   }
