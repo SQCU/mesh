@@ -308,7 +308,7 @@ struct ncclComm {
   ncclMeshScheduleStats schedule;
   struct mesh_fabric fabric;
   uint32_t *endpoint;
-  struct mesh_paths *writes;
+  struct mesh_paths *writes, *tree_hops;
   double *write_release;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
@@ -435,6 +435,7 @@ static void comm_free(struct ncclComm *comm) {
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
   for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
   free(comm->writes);
+  free(comm->tree_hops);
   free(comm->write_release);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
@@ -814,6 +815,7 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
   }
   struct mesh_paths *to = comm->writes + source * comm->nranks + destination;
   paths_free(to); *to = (struct mesh_paths){P, first, cable, weights};
+  if (comm->tree_hops) comm->tree_hops[to - comm->writes] = *to;
   plan_free(comm, comm->plan); comm->plan = NULL;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
@@ -1102,6 +1104,12 @@ static int fabric_discover(struct ncclComm *comm, const struct report *reports) 
   int checked = mesh_fabric_check(&comm->fabric);
   if (!checked) checked = ranks_joined(map, NULL);
   if (!checked) checked = mesh_write_routes_default(&comm->fabric, &comm->writes);
+  if (!checked) {
+    const size_t pairs = (size_t)n * n;
+    comm->tree_hops = malloc(pairs * sizeof *comm->tree_hops);
+    if (!comm->tree_hops) return ENOMEM;
+    for (size_t p = 0; p < pairs; p++) comm->tree_hops[p] = mesh_tree_hop(comm->writes + p);
+  }
   return checked;
 }
 
@@ -2334,14 +2342,13 @@ static ncclResult_t write_steps(struct call *c) {
 }
 
 /* Every rank derives the complete transaction graph before selecting its own
-   physical steps. Ordinary collectives use exactly the same path table and
-   fragment allocator as explicit WRITEs, including paths through ranks that
-   neither send nor receive that logical transaction. */
-static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, const struct mesh_step *logical,
+   physical steps. The path operand carries the selected tree hops or the
+   configured routes for the logical writes. */
+static ncclResult_t bind_routed_steps(struct call *c, const struct mesh_paths *paths, const uint32_t *first, const struct mesh_step *logical,
                                        const uint32_t *initialized) {
   struct ncclComm *comm = c->comm;
   struct mesh_routed_program physical = {0};
-  const int status = mesh_routed_compile(&comm->fabric, comm->writes, first, logical, initialized, comm->page, &physical);
+  const int status = mesh_routed_compile(&comm->fabric, paths, first, logical, initialized, comm->page, &physical);
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
@@ -2368,7 +2375,7 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
   return result;
 }
 
-static ncclResult_t routed_steps(struct call *c, const struct mesh_program *program,
+static ncclResult_t routed_steps(struct call *c, const struct mesh_paths *paths, const struct mesh_program *program,
                                   struct mesh_operand operand, const uint64_t *cut) {
   const uint32_t N = (uint32_t)c->comm->nranks;
   uint32_t *first = calloc((size_t)N + 1, sizeof *first), *initialized = malloc(N * sizeof *initialized);
@@ -2378,7 +2385,7 @@ static ncclResult_t routed_steps(struct call *c, const struct mesh_program *prog
     initialized[r] = 1 + program->scratch;
     first[r + 1] = first[r] + mesh_program_steps_cut(program, r, operand, cut, c->comm->page, logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized);
+  if (!result) result = bind_routed_steps(c, paths, first, logical, initialized);
   free(first); free(initialized); free(logical);
   return result;
 }
@@ -2402,7 +2409,7 @@ static ncclResult_t counted_steps(struct call *c) {
     first[r + 1] = first[r] + mesh_counted_steps(N, r, segments, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], 0},
                                                 logical + first[r]);
   }
-  if (!result) result = bind_routed_steps(c, first, logical, initialized);
+  if (!result) result = bind_routed_steps(c, c->comm->writes, first, logical, initialized);
   free(first); free(initialized); free(segments); free(logical);
   return result;
 }
@@ -2550,7 +2557,7 @@ static ncclResult_t collective_steps(struct call *c, const struct entry *entry,
     if (status) result = fail(ncclInvalidArgument, "the declared %s reads an absent input or leaves a required result undefined: %s",
                               call_name(c), strerror(status));
   }
-  if (!result) result = routed_steps(c, program, operand, cut);
+  if (!result) result = routed_steps(c, entry->trees.count ? c->comm->tree_hops : c->comm->writes, program, operand, cut);
   program_free(&subset);
   return result;
 }
