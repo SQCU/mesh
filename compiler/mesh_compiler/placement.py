@@ -1095,7 +1095,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
-def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None) -> torch.fx.GraphModule:
+def partition(graph_module: torch.fx.GraphModule, placement) -> torch.fx.GraphModule:
     original = graph_module
     graph_module, copied = derived_graph(original)
     graph = graph_module.graph
@@ -1271,6 +1271,13 @@ def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None) -> to
             there.meta.update(processor=processor, constant=there.meta.pop("of", node.name))
             node.replace_all_uses_with(there, lambda user: user is not there and user.meta["processor"] == processor)
             copies[node, processor], copies[there] = there, node
+    graph_module.recompile()
+    return graph_module
+
+
+def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None) -> torch.fx.GraphModule:
+    graph_module = partition(graph_module, placement)
+    graph = graph_module.graph
     placed = [n for n in graph.nodes if n.op != "placeholder"]
     transfers, instances = {}, {}
     for node in placed:
