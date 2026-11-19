@@ -2235,7 +2235,7 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
       if(routing && (!isfinite(selected) || selected<0 || selected!=routing[(size_t)b*n+a] || (selected && !c))){
         status=EINVAL;goto done;
       }
-      if(selected){
+      if(selected && (program>>a&1) && (program>>b&1)){
         share_capacity[p->pairs]=selected;
         p->from[p->pairs]=a;p->to[p->pairs]=b;p->capacity[p->pairs]=(double)c;p->pairs++;
       }
