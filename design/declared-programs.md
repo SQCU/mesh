@@ -114,6 +114,9 @@ execution k / period.
   come to agree (their segments at a place differ and both ends' clients issued in them, or the peer's closed at fewer
   rounds than this end's clients began in it), the end restarts the order, and both ends' clients fail as values.
   The cost is a control message a declaration, before its first piece.
+- **Recovery.** A communicator made while an order toward a member's node is being made again (a node slot held, not
+  live: its cables coming up, its epochs agreed) waits for it, at most 30 s (`NCCL_MESH_ORDER_WAIT_NS`), and is made
+  once it is live, not refused with ENOLINK. A restart then loses the run it happened in, not the ones after it.
 
 ## 4. Who declares what (the precondition)
 
@@ -193,8 +196,8 @@ Re-read for this document: none. Each entry below is recalled, and says where a 
     pair served once in 64 turns, the two programs composed by rounds;
   - restarts (sim-wire `RESTARTS`: the bridges' parents run as order_turn runs them, cables coming up in turn and
     epochs agreed by ORDER over a message queue, segments by SEGMENT, every restart losing every cable, clients gone
-    retired): a client gone at one node as the other loses a cable, then a pair made at once (it runs or fails as
-    values at both ranks); a client gone at one node while its peer lives on, then a pair declared
+    retired): a client gone at one node as the other loses a cable, then a pair made at once (it waits for the order
+    and runs, cables joining mid-run); a client gone at one node while its peer lives on, then a pair declared
     meanwhile (it fails as values at both ranks, no deadline met), then one more (it runs); a declaration at a node
     whose bridge sees the other's restart 300 ms late, then one more. No pair may wait a deadline, and the wire's
     check must stand.

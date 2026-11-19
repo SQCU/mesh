@@ -1224,8 +1224,22 @@ static int gather(struct ncclComm *comm, int nranks, int rank, struct report *re
 }
 
 /* this rank's report of its bridge's node and the nodes it holds a live order toward (mesh-call.h mesh_nodes_reached) */
+/* the longest a communicator's making waits for an order toward a member's node to be live (its bridges recovering it
+   from a restart: the M5 Ultra pair took 7 s, 2026-11-19, cable lost to its epochs agreed again) */
+#define NCCL_MESH_ORDER_WAIT_NS (30ull * 1000000000ull)
 static void reach_read(struct attach *a, struct report *report) {
   report->node = a->context.M->node;
+  /* an order its bridges are making again (a restart: its cables coming up and its epochs agreed, seconds: a node slot
+     held, not live) is waited for, at most NCCL_MESH_ORDER_WAIT_NS: a communicator made while the order recovers is
+     made once it has, not refused (ENOLINK) and its run lost */
+  for (const uint64_t until = mesh_clock_ns() + NCCL_MESH_ORDER_WAIT_NS; mesh_clock_ns() < until; usleep(1000)) {
+    uint32_t recovering = 0;
+    for (uint32_t n = 0; n < MESH_NODES; n++) {
+      const struct mesh_node *x = mesh_node_at(a->context.M, n);
+      recovering += atomic_load_explicit(&x->node, memory_order_acquire) && !atomic_load_explicit(&x->live, memory_order_acquire);
+    }
+    if (!recovering) break;
+  }
   report->count = mesh_nodes_reached(a->context.M, report->reach, MESH_NODES);
 }
 
