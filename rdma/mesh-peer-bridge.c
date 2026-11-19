@@ -216,15 +216,30 @@ static int same_chain(const struct job *j,uint32_t row,uint32_t prior){
   return (prev->local_open || (!r->local_open && follows_gate(&r->logical,&prev->logical))) &&
     (!old->gate || (next->gate==old->gate && next->threshold>=old->threshold));
 }
+struct queue_load {unsigned held[2],chain[2];};
+static struct queue_load queue_load(const struct job *j,uint32_t row,uint32_t e){
+  const struct channel *c=j->channel+e;
+  struct queue_load load={0};
+  for(const struct reservation *h=c->pipe->reservations;h;h=h->next)if(h!=c->reservation){
+    unsigned mask=h->source|h->destination;load.held[0]+=mask&1;load.held[1]+=(mask>>1)&1;
+  }
+  for(unsigned lane=0;lane<2;lane++){
+    uint32_t prior=c->last[lane];
+    load.chain[lane]=!prior || j->plan.row[prior-1].primed?1:same_chain(j,row,prior-1)?0:2;
+  }
+  return load;
+}
 static size_t record_tickets(struct job *j,uint32_t row,struct assignment *out){
   struct peer_row *r=j->plan.row+row;size_t written=0;
   if(r->bytes<=MESH_FRAME){
-    uint32_t choice=0;long double finish=0;
+    uint32_t choice=0,held=0;long double finish=0;
     for(uint32_t e=0;e<j->plan.links;e++){
       uint32_t port=j->channel[e].pipe->stream/MESH_LINK_STREAMS;
       if(ledger[port].peer!=j->peer){ledger[port].peer=j->peer;ledger[port].bytes=0;}
+      struct queue_load load=queue_load(j,row,e);
+      unsigned wait=MIN(load.held[0]+(load.chain[0]==2),load.held[1]+(load.chain[1]==2));
       long double next=(ledger[port].bytes+r->bytes)/j->plan.cable[e].bandwidth;
-      if(!e || next<finish){choice=e;finish=next;}
+      if(!e || wait<held || (wait==held && next<finish)){choice=e;held=wait;finish=next;}
     }
     for(size_t i=r->first;i<r->end;i++)j->plan.piece[i].channel=choice;
   }
@@ -236,18 +251,13 @@ static size_t record_tickets(struct job *j,uint32_t row,struct assignment *out){
     uint32_t port=s->stream/MESH_LINK_STREAMS;
     if(ledger[port].peer!=j->peer){ledger[port].peer=j->peer;ledger[port].bytes=0;}
     ledger[port].bytes+=bytes;
-    unsigned blocked[2]={0};int chain[2];uint64_t backlog[2];
-    for(struct reservation *h=s->reservations;h;h=h->next)if(h!=c->reservation){
-      unsigned mask=h->source|h->destination;blocked[0]+=mask&1;blocked[1]+=(mask>>1)&1;
-    }
-    for(unsigned l=0;l<2;l++){
-      uint32_t previous=c->last[l];
-      chain[l]=!previous || j->plan.row[previous-1].primed?1:same_chain(j,row,previous-1)?0:2;
-      backlog[l]=s->assigned[l]-atomic_load_explicit(&x->posts[0].done[l],memory_order_acquire);
-    }
-    unsigned lane=blocked[0]!=blocked[1]?blocked[1]<blocked[0]:
-      chain[0]!=chain[1]?chain[1]<chain[0]:backlog[1]<backlog[0];
-    size_t count=last-first,split=(r->primed && !blocked[0] && !blocked[1] && chain[0]<2 && chain[1]<2)?(count+1)/2:count;
+    struct queue_load load=queue_load(j,row,e);
+    uint64_t backlog[2];
+    for(unsigned l=0;l<2;l++)backlog[l]=s->assigned[l]-atomic_load_explicit(&x->posts[0].done[l],memory_order_acquire);
+    unsigned lane=load.held[0]!=load.held[1]?load.held[1]<load.held[0]:
+      load.chain[0]!=load.chain[1]?load.chain[1]<load.chain[0]:backlog[1]<backlog[0];
+    size_t count=last-first,split=(r->primed && !load.held[0] && !load.held[1] &&
+      load.chain[0]<2 && load.chain[1]<2)?(count+1)/2:count;
     for(size_t at=0,n;at<count;at+=n,lane^=1){
       n=at?count-at:split;
       out[written++]=(struct assignment){row,e,lane,s->assigned[lane],first-r->first+at,n};
