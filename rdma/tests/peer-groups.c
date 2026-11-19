@@ -21,15 +21,16 @@ static int wait_word(const _Atomic uint64_t *word){
   }
 }
 
-static int sample(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver,int receive_gate){
-  const size_t bytes[]={1,receive_gate?16384:1,1};
-  struct mesh_section lease;int status=mesh_section_create(ctx,sizeof(struct storage)+bytes[1]+2,1,&lease);
+static int sample(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver,int receive_gate,size_t held_bytes){
+  const size_t bytes[]={held_bytes,receive_gate?16384:1,1};
+  struct mesh_section lease;int status=mesh_section_create(ctx,sizeof(struct storage)+bytes[0]+bytes[1]+4,1,&lease);
   if(status)return status;
   struct storage *s=mesh_section_address(ctx,lease,0);
   memset(s,0,sizeof *s);uint64_t base=(uint64_t)((char *)s-(char *)ctx->M);
   uint64_t handles[2]={0},start=0,elapsed=0;
   const unsigned char expected[]={0x9d,0xa7,0x31};
-  unsigned char *payload[]={s->payload[0],(unsigned char *)(s+1),s->payload[2]};
+  unsigned char *first=(unsigned char *)(s+1);
+  unsigned char *payload[]={first,first+bytes[0]+2,s->payload[2]};
   for(unsigned i=0;i<3;i++){
     int land=i==2?!receiver:receiver;
     payload[i][0]=0xab;memset(payload[i]+1,land?0:expected[i],bytes[i]);payload[i][bytes[i]+1]=0xcd;
@@ -46,8 +47,8 @@ static int sample(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver
   if(!status)status=mesh_peer_install(ctx,peer,group+1,base+offsetof(struct storage,second),2,handles+1);
   if(!status)status=mesh_peer_wait(ctx,handles[1],MESH_PLATFORM_NS);
   if(!status)status=wait_word(s->complete+1);
-  if(!status && ((receiver==receive_gate && atomic_load(s->complete)) || payload[1][1]!=expected[1] ||
-                 (receiver && receive_gate && payload[0][1]!=0)))status=EILSEQ;
+  if(!status && ((receiver==receive_gate && atomic_load(s->complete)) || payload[1][1]!=expected[1]))status=EILSEQ;
+  if(receiver && receive_gate)for(size_t i=1;!status && i<=held_bytes;i++)if(payload[0][i])status=EILSEQ;
   if(!status && receiver)atomic_store_explicit(&s->release_reply,1,memory_order_release);
   if(!status)status=wait_word(s->complete+2);
   if(!status && s->payload[2][1]!=expected[2])status=EILSEQ;
@@ -64,8 +65,8 @@ static int sample(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver
     int released=mesh_peer_release(ctx,handles[i]);if(!status)status=released;
   }
   int returned=mesh_lease_return(ctx,lease.first);if(!status)status=returned;
-  if(!status)printf("{\"role\":\"%s\",\"group\":%" PRIu64 ",\"second_completed_before_first\":true,\"guards\":true,\"held\":\"%s\",\"%s\":%" PRIu64 "}\n",
-                    receiver?"receive":"send",group,receive_gate?"destination":"source",
+  if(!status)printf("{\"role\":\"%s\",\"group\":%" PRIu64 ",\"second_completed_before_first\":true,\"guards\":true,\"held\":\"%s\",\"held_bytes\":%zu,\"%s\":%" PRIu64 "}\n",
+                    receiver?"receive":"send",group,receive_gate?"destination":"source",held_bytes,
                     receive_gate?"first_destination_landing_ns":"first_source_retire_ns",elapsed);
   return status;
 }
@@ -171,14 +172,15 @@ static int packet(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver
 
 int main(int argc,char **argv){
   if((argc!=4 && argc!=5) || (strcmp(argv[1],"send") && strcmp(argv[1],"receive")) ||
-     (argc==5 && strcmp(argv[4],"concurrent") && strcmp(argv[4],"sequential") && strcmp(argv[4],"blocked") && strcmp(argv[4],"packet") && strcmp(argv[4],"late-receive"))){
-    fprintf(stderr,"usage: %s send|receive PEER_NODE GROUP [concurrent|sequential|blocked|packet|late-receive]\n",argv[0]);return 2;
+     (argc==5 && strcmp(argv[4],"concurrent") && strcmp(argv[4],"sequential") && strcmp(argv[4],"blocked") && strcmp(argv[4],"packet") && strcmp(argv[4],"late-receive") && strcmp(argv[4],"late-receive-window"))){
+    fprintf(stderr,"usage: %s send|receive PEER_NODE GROUP [concurrent|sequential|blocked|packet|late-receive|late-receive-window]\n",argv[0]);return 2;
   }
   struct mesh_ctx ctx={.fd=-1};int status=mesh_attach(&ctx);
   uint32_t peer=(uint32_t)strtoul(argv[2],NULL,0);uint64_t group=strtoull(argv[3],NULL,0);
   if(!status)status=mesh_peer_capable(&ctx,peer);
   if(!status){int receive=!strcmp(argv[1],"receive");
-    if(argc==4 || !strcmp(argv[4],"late-receive"))status=sample(&ctx,peer,group,receive,argc==5);
+    if(argc==4 || !strcmp(argv[4],"late-receive"))status=sample(&ctx,peer,group,receive,argc==5,1);
+    else if(!strcmp(argv[4],"late-receive-window"))status=sample(&ctx,peer,group,receive,1,64u*1024*1024+37);
     else if(!strcmp(argv[4],"packet"))status=packet(&ctx,peer,group,receive);
     else if(!strcmp(argv[4],"blocked"))status=three_groups(&ctx,peer,group,receive);
     else status=separate_groups(&ctx,peer,group,receive,!strcmp(argv[4],"concurrent"));
