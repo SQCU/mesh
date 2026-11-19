@@ -73,7 +73,7 @@ execution k / period.
   wholly below it are raised in the pieces' order (`order_raise_through`). Beyond that prefix, up to the latest piece
   any queue pair has done, a transfer that is wholly done has its word raised if no earlier transfer not yet done names
   the same word (`order_raise_pass`). A word several transfers count on therefore rises only as their prefix, and a
-  transfer held by its gate holds back no other transfer's word. Measured: 36 ns a pass.
+  transfer held by its gate holds back no other transfer's word. Measured the same way: 36 ns a pass.
 - **Composition.** Several clients' programs toward one node (a different process each) share its rounds. Each round
   is `count_p` executions of each program, in key order. A program joins or leaves only at a round that every program
   of the segment has reached. Clients agree that round between themselves, ahead of time (section 4).
