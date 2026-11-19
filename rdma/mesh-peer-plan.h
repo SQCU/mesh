@@ -40,7 +40,7 @@ struct peer_row {
 };
 struct peer_plan {
   struct mesh_cable cable[MESH_STREAMS];uint32_t links,packet[MESH_STREAMS][2];
-  struct peer_row *row;uint32_t rows;
+  struct peer_row *row;uint32_t rows,*order;
   struct peer_piece *piece;size_t count,room;
 };
 static inline int peer_wire_sort(const void *a,const void *b){
@@ -85,14 +85,16 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
   qsort(a.row,a.head.records,sizeof *a.row,peer_record_order);
   qsort(b.row,b.head.records,sizeof *b.row,peer_record_order);
   struct mesh_fabric fabric={2,p->links,p->cable};
-  p->rows=a.head.records;p->row=calloc(p->rows,sizeof *p->row);
+  p->rows=a.head.records;p->row=calloc(p->rows,sizeof *p->row+sizeof *p->order);
   if(!p->row)return ENOMEM;
+  p->order=(uint32_t *)(p->row+p->rows);
   for(uint32_t k=0;k<p->rows;k++){
     struct peer_record u=a.row[k],v=b.row[k];
     if(peer_record_order(&u,&v) || (k && !peer_record_order(a.row+k-1,&u)) ||
        (u.source!=node && u.source!=peer) || u.bytes!=v.bytes || !u.units || !v.units ||
        u.first>a.head.units || u.units>a.head.units-u.first || v.first>b.head.units || v.units>b.head.units-v.first ||
        u.pad>=a.head.records)return EPROTO;
+    p->order[u.pad]=k;
     struct peer_row *r=p->row+k;
     r->logical=records[u.pad];r->first=p->count;r->bytes=u.bytes;
     struct mesh_transfer stripes[MESH_STREAMS]={0};
