@@ -691,6 +691,7 @@ static uint32_t plan_occurrence(const struct plan_arcs *x,size_t r,size_t k,uint
 }
 /* every occurrence of record a before every occurrence of record b */
 static int plan_before(const struct plan_arcs *x,size_t a,size_t na,size_t b,size_t nb){
+  if(x->function[a]==x->count && x->program->roots[x->index[a]].end==MESH_PROGRAM_RETURN)return 0;
   const struct mesh_graph_closure *c=x->program->analysis->closure;
   for(size_t i=0;i<na;i++)for(size_t k=0;k<nb;k++){
     uint32_t ca,cb;

@@ -19,6 +19,8 @@
    J. Wu, P. Wyckoff and D. K. Panda, IPDPS 2004; torch 2.14.0 c10/core/TensorImpl.h;
    ExecuTorch, exir/memory_planning.py, update_tensor_lifetime and _does_not_overlap; MPI 4.1 §3.7 */
 enum { MESH_INVARIANT, MESH_EXECUTION };
+/* The public caller reads this root after the final call of the program. */
+#define MESH_PROGRAM_RETURN UINT32_MAX
 /* design/disjoint-pages-change-request.md, D.3.3; design/plan-to-bridge-change-request.md R4;
    design/aot-compilation-change-request.md, appendix item 7; MTL4CommandEncoder.h:32 MTL4VisibilityOptionResourceAlias;
    ExecuTorch, exir/memory_planning.py, update_tensor_lifetime; MPI 4.1 §3.7 */
