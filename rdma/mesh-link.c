@@ -684,6 +684,13 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
     atomic_store_explicit(&x->bandwidth,bandwidth/MESH_LINK_STREAMS,memory_order_relaxed);
     atomic_store_explicit(&x->wire,l->wire[s],memory_order_relaxed);
+    uint32_t packet[2]={port->device.port.max_msg_sz,port->device.port.max_msg_sz};
+    for(uint32_t j=0;j<MESH_STREAM_LANES;j++){
+      uint32_t k=MESH_LANE_FIRST+2*s+j;
+      packet[0]=(uint32_t)MIN((uint64_t)packet[0],l->gate[k].capacity.n*MESH_FRAME);
+      packet[1]=(uint32_t)MIN((uint64_t)packet[1],l->lane[k].frame_capacity*MESH_FRAME);
+    }
+    for(uint32_t w=0;w<2;w++)atomic_store_explicit(&x->peer_packet[w],packet[w],memory_order_relaxed);
     atomic_thread_fence(memory_order_release);
     atomic_store_explicit(&x->live,1,memory_order_release);
   }

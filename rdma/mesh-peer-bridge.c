@@ -13,7 +13,7 @@ struct pipe_stream {
 };
 static struct mesh_ctx physical;
 static struct pipe_stream wires[MESH_STREAMS];
-struct channel {struct pipe_stream *pipe;uint64_t bytes[2];};
+struct channel {struct pipe_stream *pipe;uint64_t bytes[2],requests[2];};
 struct queue {size_t last,post,retire;};
 static struct {uint32_t peer;long double bytes;} ledger[MESH_PORTS];
 static pthread_mutex_t ledger_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -120,10 +120,16 @@ static int offer(struct job *j,struct mesh_peer_request req){
   }
   struct peer_offer h={n,req.count,units,0};int error=peer_layout_size(h,&j->local_bytes);
   if(error || j->local_bytes>64u*1024*1024-sizeof(struct message))return EOVERFLOW;
-  j->offer=malloc(j->local_bytes);if(!j->offer)return ENOMEM;
+  j->offer=calloc(1,j->local_bytes);if(!j->offer)return ENOMEM;
   memcpy(j->offer,&h,sizeof h);struct peer_layout l;
   if((error=peer_layout(j->offer,j->local_bytes,&l)))return error;
   memcpy(l.links,links,(size_t)n*sizeof *links);
+  for(uint32_t i=0;i<n;i++)for(uint32_t index=0;index<M->streams;index++){
+    struct mesh_stream *x=mesh_stream_at(M,index);
+    if(atomic_load(&x->wire)!=links[i].wire)continue;
+    for(unsigned w=0;w<2;w++)l.limit[i].bytes[w]=atomic_load(&x->peer_packet[w]);
+    break;
+  }
   units=0;
   for(uint32_t i=0;i<req.count;i++){
     struct mesh_peer_transfer r=j->records[i];
@@ -370,7 +376,7 @@ static int run(struct job *j){
         while(q->retire && q->retire!=q->post){
           struct peer_piece *piece=p->piece+q->retire-1;
           if(through<piece->prefix)break;
-          c->bytes[w]+=piece->span.bytes;q->retire=piece->next;
+          c->bytes[w]+=piece->span.bytes;c->requests[w]++;q->retire=piece->next;
           struct peer_row *r=p->row+piece->row;
           if(++r->retired==r->end-r->first){r->done=1;done++;publish(j,piece->row);}
         }
@@ -511,9 +517,11 @@ void peer_turn(void){
           for(uint32_t k=0;failure && k<j->plan.rows;k++)if(j->plan.row[k].logical.completed && !j->plan.row[k].done)
             completed(j->plan.row[k].logical.completed,UINT64_MAX);
           for(uint32_t e=0;e<j->holds;e++)
-            say("peer %u group %llu wire %llu sent %llu received %llu bytes\n",j->peer,
+            say("peer %u group %llu wire %llu sent %llu received %llu bytes; requests %llu sent %llu received; maximum %u/%u bytes\n",j->peer,
                 (unsigned long long)j->group,(unsigned long long)j->plan.cable[e].wire,
-                (unsigned long long)j->channel[e].bytes[0],(unsigned long long)j->channel[e].bytes[1]);
+                (unsigned long long)j->channel[e].bytes[0],(unsigned long long)j->channel[e].bytes[1],
+                (unsigned long long)j->channel[e].requests[0],(unsigned long long)j->channel[e].requests[1],
+                j->plan.packet[e][0],j->plan.packet[e][1]);
         }
         release(j);
       }

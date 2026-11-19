@@ -191,6 +191,7 @@ struct mesh_stream {
   _Atomic uint32_t live;
   uint64_t lists,rows;
   _Atomic uint64_t bandwidth,wire;
+  _Atomic uint32_t peer_packet[2];
   _Alignas(64) _Atomic uint64_t owner;
   _Atomic uint64_t sends,lands;
   struct mesh_cpu_pin metadata;

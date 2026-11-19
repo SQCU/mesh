@@ -8,14 +8,16 @@
 
 struct peer_offer { uint32_t endpoints,records,units,pad; };
 struct peer_record { uint64_t match,bytes,gate,threshold;uint32_t first,units,source,pad; };
+struct peer_limit {uint32_t bytes[2];};
 struct peer_layout {
   struct peer_offer head;
   struct mesh_endpoint *links;
+  struct peer_limit *limit;
   struct peer_record *row;
   struct mesh_dma_span *spans;
 };
 static inline int peer_layout_size(struct peer_offer h,size_t *size){
-  uint64_t n=sizeof h+(uint64_t)h.endpoints*sizeof(struct mesh_endpoint)+(uint64_t)h.records*sizeof(struct peer_record)+
+  uint64_t n=sizeof h+(uint64_t)h.endpoints*(sizeof(struct mesh_endpoint)+sizeof(struct peer_limit))+(uint64_t)h.records*sizeof(struct peer_record)+
     (uint64_t)h.units*sizeof(struct mesh_dma_span);
   if(h.endpoints>MESH_STREAMS || !h.records || n>UINT32_MAX)return EINVAL;
   *size=(size_t)n;return 0;
@@ -26,7 +28,7 @@ static inline int peer_layout(void *data,size_t bytes,struct peer_layout *l){
   size_t n=0;
   if(peer_layout_size(l->head,&n) || n!=bytes)return EPROTO;
   l->links=(void *)((char *)data+sizeof l->head);
-  l->row=(void *)(l->links+l->head.endpoints);
+  l->limit=(void *)(l->links+l->head.endpoints);l->row=(void *)(l->limit+l->head.endpoints);
   l->spans=(void *)(l->row+l->head.records);
   return 0;
 }
@@ -37,7 +39,7 @@ struct peer_row {
   size_t retired;uint32_t remote_open,local_open,primed,fast,done,published,prev,succ;
 };
 struct peer_plan {
-  struct mesh_cable cable[MESH_STREAMS]; uint32_t links;
+  struct mesh_cable cable[MESH_STREAMS];uint32_t links,packet[MESH_STREAMS][2];
   struct peer_row *row;uint32_t rows;
   struct peer_piece *piece;size_t count,room;
 };
@@ -60,13 +62,26 @@ static inline int peer_cut(struct peer_plan *p,uint32_t channel,uint64_t offset,
   return 0;
 }
 static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t peer,
-    struct peer_layout a,struct peer_layout b,const struct mesh_peer_transfer *records,uint64_t data_off,uint32_t packet){
-  if(!packet || a.head.records!=b.head.records)return EPROTO;
+    struct peer_layout a,struct peer_layout b,const struct mesh_peer_transfer *records,uint64_t data_off,uint32_t frame){
+  if(!frame || a.head.records!=b.head.records)return EPROTO;
   uint32_t rank=node>peer;
   struct peer_layout x=rank?b:a,y=rank?a:b;
   int status=mesh_peer_cables(0,rank?peer:node,x.links,x.head.endpoints,1,rank?node:peer,y.links,y.head.endpoints,p->cable,&p->links,0);
   if(status || !p->links)return status?status:ENOLINK;
   qsort(p->cable,p->links,sizeof *p->cable,peer_wire_sort);
+  uint32_t smallest[2]={frame,frame};
+  for(uint32_t e=0;e<p->links;e++){
+    uint32_t u=0,v=0;uint64_t wire=p->cable[e].wire;
+    while(u<a.head.endpoints && a.links[u].wire!=wire)u++;
+    while(v<b.head.endpoints && b.links[v].wire!=wire)v++;
+    if(u==a.head.endpoints || v==b.head.endpoints)return EPROTO;
+    for(unsigned w=0;w<2;w++){
+      uint32_t local=a.limit[u].bytes[w],remote=b.limit[v].bytes[1-w];
+      p->packet[e][w]=local<remote?local:remote;
+      if(!p->packet[e][w])return EPROTO;
+      if(p->packet[e][w]<smallest[w])smallest[w]=p->packet[e][w];
+    }
+  }
   qsort(a.row,a.head.records,sizeof *a.row,peer_record_order);
   qsort(b.row,b.head.records,sizeof *b.row,peer_record_order);
   struct mesh_fabric fabric={2,p->links,p->cable};
@@ -82,7 +97,7 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
     r->logical=records[u.pad];r->first=p->count;r->bytes=u.bytes;
     struct mesh_transfer stripes[MESH_STREAMS]={0};
     int n;
-    if(u.bytes<=packet){
+    if(u.bytes<=frame){
       stripes[0]=(struct mesh_transfer){.step.piece={1,1,u.bytes}};n=1;
     }else{
       struct mesh_step step={.op=MESH_STEP_SEND,.peer=1,.piece={1,1,u.bytes}};
@@ -99,7 +114,8 @@ static inline int peer_plan_compile(struct peer_plan *p,uint32_t node,uint32_t p
         struct mesh_dma_span as=a.spans[u.first+ai],bs=b.spans[v.first+bi];
         if(as.bytes<=ax || bs.bytes<=bx || as.offset>UINT64_MAX-ax || as.offset+ax<data_off)return EPROTO;
         uint64_t at=as.offset+ax,length=left;
-        uint64_t bounds[]={as.bytes-ax,bs.bytes-bx,packet,MESH_DMA_EXTENT-(at-data_off)%MESH_DMA_EXTENT,
+        uint32_t limit=u.bytes<=frame?smallest[r->logical.land]:p->packet[e][r->logical.land];
+        uint64_t bounds[]={as.bytes-ax,bs.bytes-bx,limit,MESH_DMA_EXTENT-(at-data_off)%MESH_DMA_EXTENT,
                            MESH_DMA_EXTENT-(bs.offset%MESH_DMA_EXTENT+bx%MESH_DMA_EXTENT)%MESH_DMA_EXTENT};
         for(size_t t=0;t<sizeof bounds/sizeof *bounds;t++)if(length>bounds[t])length=bounds[t];
         status=peer_cut(p,e,at,length);if(status)return status;
