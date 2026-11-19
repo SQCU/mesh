@@ -2291,9 +2291,8 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
     share=malloc((size_t)room*sizeof *share);
     if(!root || !up || !down || !demand || !p->parent || !share){status=ENOMEM;goto done;}
     for(uint32_t i=0;i<p->demands;i++){root[i]=p->demand[i].source;down[i]=(double)p->demand[i].bytes;}
-    double duration=0;
-    const uint32_t made=mesh_graph_flow_time(n,E,p->from,p->to,share_capacity,p->demands,root,up,down,plan_leaf,p->demand,
-                                        MESH_PLAN_EPS,rounds,room,demand,p->parent,share,&duration);
+    const uint32_t made=mesh_graph_flow_rates(n,E,p->from,p->to,share_capacity,p->demands,root,up,down,plan_leaf,p->demand,
+                                        MESH_PLAN_EPS,rounds,room,demand,p->parent,share,nodes->relay_ns?share:NULL);
     if(made==UINT32_MAX){status=ENOMEM;goto done;}
     p->made=made;
     p->tree=malloc(((size_t)made+1)*sizeof *p->tree);
@@ -2312,11 +2311,11 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
     for(uint32_t j=0;j<made;j++){
       const uint32_t tree=(uint32_t)p->tree[j],i=demand[tree];
       rate[j]=share[tree];
-      if(!nodes->relay_ns || !duration || !p->cuts[i]->instructions)continue;
+      if(!nodes->relay_ns || !p->cuts[i]->instructions)continue;
       const uint32_t hops=mesh_graph_tree_depth(n,root[i],p->parent+(size_t)tree*n);
       if(hops==UINT32_MAX){status=ENOMEM;goto done;}
       latency[j]=(double)(hops?hops-1:0)*nodes->relay_ns;
-      rate[j]*=(double)p->cuts[i]->instructions/(8e9*duration);
+      rate[j]*=(double)p->cuts[i]->instructions/8e9;
     }
     for(uint32_t i=0;i<p->demands;i++){
       struct mesh_plan_demand *d=p->demand+i;

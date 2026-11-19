@@ -184,11 +184,12 @@ uint32_t mesh_graph_flow(uint32_t vertices, uint32_t edges, const uint32_t *from
                          uint32_t count, const uint32_t *root, const double *up, const double *down,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
                          uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share);
-/* Duration is the maximum directed edge load divided by its capacity. */
-uint32_t mesh_graph_flow_time(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
+/* With rate supplied, include the minimum-hop tree in the packing. rate[k] is the fraction of demand k's
+   traffic carried per time unit at its share of the tightest directed edge, using the units of capacity. */
+uint32_t mesh_graph_flow_rates(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const double *capacity,
                          uint32_t count, const uint32_t *root, const double *up, const double *down,
                          int (*leaf)(const void *context, uint32_t d, uint32_t v), const void *context, double eps,
-                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *duration);
+                         uint32_t rounds, uint32_t room, uint32_t *demand, uint32_t *parent, double *share, double *rate);
 /* N. Garg and J. Könemann, FOCS 1998 */
 uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from, const uint32_t *to, const uint32_t *through,
                          const uint32_t *crossing, uint32_t hops, const double *capacity,
