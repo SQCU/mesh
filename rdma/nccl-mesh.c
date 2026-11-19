@@ -522,6 +522,15 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
       result = fail(ncclInvalidArgument, "the map's links make no shortest trees (mesh_trees_shortest)");
     trees = &packed;
   }
+  if (x->trees == ncclMeshTreesSplit) {
+    uint32_t *root = calloc((size_t)2 * n + 1, sizeof *root), *parent = calloc((size_t)2 * n * n + 1, sizeof *parent);
+    double *weight = calloc((size_t)2 * n + 1, sizeof *weight);
+    packed = (struct mesh_trees){n, 0, root, parent, weight};
+    if (!root || !parent || !weight) result = fail(ncclSystemError, "out of memory");
+    else if (!(packed.count = mesh_trees_split(&comm->map, root, parent, weight, NULL)))
+      result = fail(ncclInvalidArgument, "the map's links make no split trees (mesh_trees_split)");
+    trees = &packed;
+  }
   if (x->trees == ncclMeshTreesGiven) {
     if (mesh_trees_check(&comm->map, x->given)) result = fail(ncclInvalidArgument, "the form's given trees are not trees of the members' map (mesh_trees_check)");
     trees = x->given;
@@ -530,7 +539,8 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
     const uint32_t root = has_root(x->collective) ? (x->root < 0 ? r : (uint32_t)x->root) : 0;
     if (root >= n) continue;
     /* the single-phase all-reduce sums up each node's heaviest tree whatever its weight (mesh_compile) */
-    const int weighs = x->shares && x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesGiven && !(x->collective == MESH_ALLREDUCE && x->whole);
+    const int weighs = x->shares && x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesGiven && x->trees != ncclMeshTreesSplit &&
+                       !(x->collective == MESH_ALLREDUCE && x->whole);
     for (uint32_t q = has_root(x->collective) ? root : 0; !result && weighs && q < (has_root(x->collective) ? root + 1 : n); q++)
       if (!root_carried(trees, q))
         result = fail(ncclInvalidArgument, "the configured form of collective %d: every tree of root %u takes share 0", x->collective, q);
@@ -676,12 +686,13 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int c
     int shared = !x->shares || x->most;
     for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] >= 0 && isfinite(x->shares[k]);
     if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !shared ||
-        (x->trees != ncclMeshTreesOwn && x->trees != ncclMeshTreesPacked && x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesGiven) ||
+        (x->trees != ncclMeshTreesOwn && x->trees != ncclMeshTreesPacked && x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesGiven &&
+         x->trees != ncclMeshTreesSplit) ||
         (x->trees == ncclMeshTreesGiven && (!x->given || x->given->nodes != (uint32_t)comm->nranks || !x->given->count ||
                                             !x->given->root || !x->given->parent || !x->given->log_weight)) ||
         (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
       return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
-                  "(its own, packed with eps > 0 and most > 0, shortest, or given: the ranks' trees), shares of 0 or more (most of them a root) or none", f);
+                  "(its own, packed with eps > 0 and most > 0, shortest, given: the ranks' trees, or split), shares of 0 or more (most of them a root) or none", f);
   }
   ncclMeshForm *made = count ? forms_copy(forms, (uint32_t)count, (uint32_t)comm->nranks) : NULL;
   if (count && !made) return fail(ncclSystemError, "out of memory");
