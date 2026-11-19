@@ -2307,7 +2307,7 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
       p->demand[i].tree=(uint32_t)trees[i];
       p->demand[i].trees=(uint32_t)(trees[i+1]-trees[i]);
     }
-    /* design/data-model.md "The mesh", design/joint-compilation.md §3: load is bytes, capacity is bits/s.
+    /* design/data-model.md §5, design/joint-compilation.md §3: load is bytes, capacity is bits/s.
        Express relay startup in ns and the packed tree's rate in cut instructions/ns. */
     for(uint32_t j=0;j<made;j++){
       const uint32_t tree=(uint32_t)p->tree[j],i=demand[tree];
