@@ -228,7 +228,7 @@ int main(int argc,char **argv){
   for(uint32_t n=0;n<2;n++)records_make(n,cables);
   /* the one epoch both ends agree: every cable from piece 0, cables named by port c, identity c + 1 at both ends; with
      FRESH (an order just restarted, as the bridges re-form it: its first cable up alone, then every one), an epoch over
-     cable 0 from piece 0 and then one over every cable from ORDER_SLACK on, before any client */
+     cable 0 from piece 0 and then one over every cable from that same piece, before any client */
   restarts=getenv("RESTARTS") && *getenv("RESTARTS");
   if(getenv("STAGGER"))stagger=strtoull(getenv("STAGGER"),NULL,0);
   if(getenv("UP"))up_delay=strtoull(getenv("UP"),NULL,0);
@@ -240,7 +240,7 @@ int main(int argc,char **argv){
     w.told=1;
     for(uint32_t c=0;c<cables;c++){for(int n=0;n<2;n++)w.node[n].down[c]=1;up_at[c]=clock_ms()+c*stagger;}
   }
-  else if(getenv("FRESH") && *getenv("FRESH") && cables>1){wire_epoch(&w,1,0);wire_epoch(&w,cables,ORDER_SLACK);}
+  else if(getenv("FRESH") && *getenv("FRESH") && cables>1){wire_epoch(&w,1,0);wire_epoch(&w,cables,0);}
   else wire_epoch(&w,cables,0);
   printf("ready\n");fflush(stdout);
   for(uint64_t turn=0;!stopping;turn++){

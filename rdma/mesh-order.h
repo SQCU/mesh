@@ -13,8 +13,6 @@
    port_heard), and every declared span is one piece (mesh-call.c mesh_declare) */
 static inline uint64_t order_piece_bytes(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
 #define ORDER_NONE UINT64_MAX
-/* the pieces past every piece an end has posted at which it bounds its posting while an epoch is agreed */
-#define ORDER_SLACK UINT64_C(4096)
 
 static inline _Atomic uint64_t *order_word(void *m,uint64_t at){ return (_Atomic uint64_t *)((char *)m+at); }
 /* the word at region offset `at` raised to `value` where it is lower (release) */
@@ -496,17 +494,17 @@ static inline void order_agree_heard(struct order_agree *a,const struct mesh_nod
   if(heard->kind==ORDER_PROPOSE && (!a->pending || a->heard.kind!=ORDER_PROPOSE || heard->seq>=a->heard.seq)){a->heard=*heard;a->pending=1;}
   else if(heard->kind==ORDER_ACCEPT){a->heard=*heard;a->pending=1;}
 }
-/* this end's bound each way: `frontier` past every piece it posted (mesh-link.c order_frontier), the bound stored first
-   and the frontier read again after it (a lane counts a unit before it reads the bound: mesh-link.c lane_post) */
+/* Freeze posting at the current epoch's start, then read the lanes' posted counts. lane_post publishes its
+   increment before it checks the limit. Gaps below the resulting frontier may fill during agreement. */
 typedef uint64_t (*order_frontier_fn)(const struct mesh_node *x,int way,void *context);
 static inline void order_agree_bound(struct mesh_node *x,order_frontier_fn frontier,void *context,uint64_t bound[2]){
   const uint32_t epochs=atomic_load_explicit(&x->epochs,memory_order_acquire);
   for(int way=0;way<2;way++){
-    /* the first epoch begins at piece 0: before it no piece has an epoch to be placed by */
-    const uint64_t b=epochs?frontier(x,way,context)+ORDER_SLACK:0;
-    atomic_store_explicit(&x->limit[way],b,memory_order_seq_cst);
-    const uint64_t again=epochs?frontier(x,way,context):0;
-    bound[way]=again>b?again:b;
+    const uint64_t first=epochs?x->epoch[epochs-1].first[way]:0;
+    atomic_store_explicit(&x->limit[way],first,memory_order_seq_cst);
+    const uint64_t posted=epochs?frontier(x,way,context):0;
+    bound[way]=posted>first?posted:first;
+    atomic_store_explicit(&x->limit[way],bound[way],memory_order_seq_cst);
   }
 }
 /* the epoch named by `wire` (`cables` of them) appended from this end's bound `mine` and the peer's `theirs` (each its

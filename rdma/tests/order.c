@@ -201,6 +201,18 @@ static void agree_test(void){
   printf("order: epochs agreed over 400 orders of cables coming up and delayed messages: passed\n");
 }
 int main(void){
+  struct agree_end idle={0};
+  idle.x=calloc(1,sizeof *idle.x);assert(idle.x);
+  uint64_t bounds[2],first[2]={0,0},wire=7;uint32_t port=0,lanes=2;
+  assert(!order_extend(idle.x,first,1,&port,&lanes,&wire));
+  order_agree_bound(idle.x,agree_frontier,&idle,bounds);
+  assert(bounds[0]==0 && bounds[1]==0);
+  first[0]=80;first[1]=30;
+  assert(!order_extend(idle.x,first,1,&port,&lanes,&wire));
+  idle.frontier[0]=90;idle.frontier[1]=25;
+  order_agree_bound(idle.x,agree_frontier,&idle,bounds);
+  assert(bounds[0]==90 && bounds[1]==30);
+  free(idle.x);
   agree_test();
   wire_make(&w,CABLES,LANES,256);
   region_make(0,11,12);region_make(1,12,11);

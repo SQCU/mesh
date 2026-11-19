@@ -93,9 +93,11 @@ execution k / period.
   of the segment has reached. Clients agree that round between themselves, ahead of time (section 4).
 - **Cable epochs.** A cable coming up mid-run is the one hardware fact that needs the two bridges to agree on a
   boundary (mesh-order.h `order_agree_turn`). The end of the lower node number proposes the cables it holds up whenever
-  they are not its latest epoch's, with its bound each way (it posts nothing at or past it meanwhile, `limit`, stored
-  before the counts are read again). The other end takes the latest proposal of the epoch it is at and accepts it once
-  every cable it names is up there: it bounds its own posting, appends the epoch from the later of the two bounds each
+  they are not its latest epoch's, with its bound each way. It sets `limit` to the current epoch's first piece before reading the lane posting
+  counts, then opens the range through the highest piece already posted. Both ends' bounds thus protect work in
+  flight. When cables join before either end posts, both ends stripe from piece zero over the agreed cables. The other
+  end takes the latest proposal and accepts it once every cable it names is up there. It bounds its own posting,
+  appends the epoch from the later of the two bounds each
   way, and answers ACCEPT with its bound and the proposer's echoed. The proposer appends what the ACCEPT names. An end
   appends only a proposal its peer accepted, and the peer accepts one proposal an epoch, so both append the same
   epochs whenever cables come up. (The earlier symmetric exchange let one end append an epoch over one cable while the
