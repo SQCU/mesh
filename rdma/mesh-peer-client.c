@@ -31,7 +31,7 @@ int mesh_peer_install(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,uint64_t
   uint64_t transfers[2]={0},pieces[2]={0};
   for(uint32_t i=0;i<count;i++){
     const struct mesh_peer_transfer *r=record+i;
-    if(r->land>1 || r->reserved || !r->units || !mesh_region_holds(m,r->spans,r->units*sizeof(struct mesh_dma_span),8))return EINVAL;
+    if(r->land>1 || !r->units || !mesh_region_holds(m,r->spans,r->units*sizeof(struct mesh_dma_span),8))return EINVAL;
     transfers[r->land]++;pieces[r->land]+=record_pieces(m,r,piece);
   }
   struct installation *made=calloc(1,sizeof *made);
@@ -56,7 +56,7 @@ int mesh_peer_install(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,uint64_t
       const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+r->spans);
       struct mesh_crossing *t=table[r->land]+filled[r->land]++;
       *t=(struct mesh_crossing){.spans=(uint64_t)((char *)span-(char *)m),.first=first[r->land],.flags=MESH_GATE_WHOLE,
-        .gate=r->ready,.gate_base=r->threshold,.done=r->completed,.done_value=r->value};
+        .gate=r->ready,.gate_base=r->threshold,.gates=r->gates,.done=r->completed,.done_value=r->value};
       for(uint64_t k=0;k<r->units;k++)
         for(uint64_t from=0;from<spans[k].bytes;from+=piece){
           const uint64_t rest=spans[k].bytes-from;

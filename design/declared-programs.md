@@ -39,6 +39,10 @@ Each transfer in a table has:
 - The step of the period it belongs to.
 - A gate: SEND span s goes once its word reaches `gate_base + s + 1 + e·gate_step` (with `MESH_GATE_WHOLE`, `gate_base
   + e·gate_step` for every span). A receive goes once its word reaches `gate_base + e·gate_step`.
+- A transfer with `gates` terms addresses an array of `(word, threshold)` pairs at `gate`. Each term supplies its own
+  base threshold. The same execution and span increments apply to each term. The posting lane reads these operands
+  directly from their lease and posts once all have reached their thresholds. A failed prerequisite marks the
+  transfer's completion word lost and holds its payload.
 - A done word, raised to `done_value + e·done_step` once every byte of execution e has crossed.
 
 The peer's client declares the same program with its directions swapped, at the same point of its own code. Nothing

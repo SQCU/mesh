@@ -61,7 +61,11 @@ int main(int argc,char **argv){
         for(uint64_t i=0;t && i<d->program.transfers[way] && i<show;i++){
           printf("      #%llu step %u first %llu units %llu gate %llu+%llu/execution done %llu+%llu/execution",u(i),t[i].step,u(t[i].first),
                  u(t[i].units),u(t[i].gate_base),u(t[i].gate_step),u(t[i].done_value),u(t[i].done_step));
-          word(m,"gate",t[i].gate);word(m,"done",t[i].done);
+          if(t[i].gates && mesh_region_holds(m,t[i].gate,t[i].gates*sizeof(struct mesh_gate_term),8)){
+            const struct mesh_gate_term *g=(const void *)((const char *)m+t[i].gate);
+            for(uint32_t k=0;k<t[i].gates;k++){word(m,"gate",g[k].word);printf(">=%llu",u(g[k].threshold));}
+          }else word(m,"gate",t[i].gate);
+          word(m,"done",t[i].done);
           putchar('\n');
         }
       }
