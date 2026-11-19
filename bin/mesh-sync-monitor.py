@@ -363,7 +363,7 @@ def main(argv):
     record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
               'kind': 'synchronization-monitor', 'signature': os.path.abspath(path), 'sha256': compiled['digest'],
               'node': node, 'coverage': coverage, 'destructive': not observe}
-    if before:
+    if before and not observe:
         record.update(result='fail', reasons=before)
         with open(REVIEWS, 'a') as reviews:
             reviews.write(json.dumps(record) + '\n')
@@ -399,6 +399,7 @@ def main(argv):
                   (re.match(r'mesh-sync-monitor: raise (\d+) (\d+) (\d+) (\d+) (\d+)$', line)
                    for line in watcher.communicate()[0].splitlines()) if m]
     threads, signals, failures = trace_log(''.join(text), operations, orders)
+    failures[:0] = before
     if status:
         failures.append('dtrace exited %d' % status)
     observed = observed_operations(processors, operations, which, orders, threads, signals, failures)
