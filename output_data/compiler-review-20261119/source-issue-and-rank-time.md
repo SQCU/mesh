@@ -29,3 +29,13 @@ Each selected schedule records the ranks touched by each instruction. Placement 
 In the capacity graph for two independent ranks at limit one, the two same-rank work pairs were reachable in the current block. Neither cross-rank pair was reachable. The reverse same-rank pair was reachable one block later. At limit two, the second same-rank call could issue in the current block. In a rank-0, rank-1, rank-0 sequence, the first and third calls on rank 0 remained ordered and the middle rank-1 call remained independent. The saved and reopened numerical example retained masks `[0, 2, 2, 0]` for its formal, two rank-1 operations, and return.
 
 Before the compiler selects transfer cuts, the source analysis uses the outer FX call edges for cross-call data and effect dependencies. After selection, storage uses the instruction endpoints of the whole-program access and effect relation. Source admission uses rank ports in both graphs. Source analysis has no relay instructions until routing selects the path. Older saved formats omit per-instruction rank masks and can still execute the programs they contain.
+
+## A: Local resource numbers serialized independent devices
+
+Two ranks could both receive resource number zero for a numerical operation. The body scheduler assigned the same processor to these operations. It also assigned zero-duration event records to the first directed link. Both choices introduced resource-order edges between instructions that use different hardware. The capacity calculation then repeated each body's local resource order for every occurrence.
+
+## B: The selected processor or directed link supplies the resource order
+
+The body producer names a numerical resource by rank, backend and the weighting function's resource number. Each routed instruction names its directed link. A formal, return or zero-duration event has no resource cycle. The capacity calculation reads the selected program's resource cycles across all call occurrences, including the return edge to the next block. R5 uses the same resource identities to price contention. [Required resource identity](../../design/plan-to-bridge-change-request.md#r5-one-solve-orders-computation-and-transfers) · [Native producer](../../rdma/mesh-collective.c) · [Capacity composition](../../rdma/mesh_graph.py)
+
+We compiled `return a.sin(), b.cos()` with independent inputs, on ranks zero and one, and supplied weight four and resource number zero for both operations. The two numerical vertices used separate resources in the body and in the program. Direct searches of the selected capacity graph reached neither operation from the other within a block. Both operations belonged to a resource cycle that advanced one block.
