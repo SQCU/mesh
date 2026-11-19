@@ -1,39 +1,52 @@
-# Node-addressed crossings (proposal, 2026-11-18)
+# Node-addressed transactions (2026-11-18)
 
-## What is measured today
+## The misgiving
 
-A fused crossing hands the caller one binding record per *cable stream* (`ncclMeshFused` publish/land records), and the
-region keeps `ready` / `sent` / `landed` unit counts per `mesh_stream` (mesh.h), one stream per cable per holder. The
-caller's kernels loop over cables, and each cable's counts are cumulative over its whole list.
+The region exposes the bridge's wires to its clients. `struct mesh_stream` (mesh.h) is one cable's ordered lane pair;
+a client *takes* it by compare-and-swap on its `owner` word (mesh-call.c `mesh_stream_held`: EBUSY when another holds
+it), learns its `wire` identity, and presents its sends and landings on that cable's lists, synchronised by that
+cable's cumulative `ready` / `sent` / `landed` counts. Everything above follows from that one choice:
 
-Two consequences measured on the m5ult2–m5ult1 pair (gemma-4-e2b-pareto, meshmlx):
-- every crossing pays per-cable bookkeeping in the caller's kernels;
-- cumulative per-stream counts force a single global release order across everything a communicator sends: releasing
-  frame k+1 declares frame k ready. Independent work (microbatches) cannot release independently.
+- the exclusivity that belongs to the process driving a wire (one owner of a device's lanes, so no contradictory
+  submissions reach the driver) is re-exported to every client as a lock on a wire;
+- clients address cables, so a crossing is "per channel" in the library, in its fused records and in the caller's
+  kernels (one release and one await per cable);
+- a cable's counts are cumulative over one holder's list, so releasing frame k+1 declares frame k ready: one global
+  release order per communicator, and a second communicator toward the same node is refused (EBUSY);
+- striping, cable count and lane order leak into every client and every measurement made through them.
 
-A third, physical fact found while checking: every v135 Studio port reports a queue-pair budget of 2
-("queue pairs for the link: this port's 2"), so `link_plan` gives each cable one stream (one lane pair); the Mini
-(macOS 26.5) reports 10. Whether the Studios' 2 is macOS 27's `max_qp` or queue pairs held in the driver is not yet
-determined (a reboot distinguishes them). With one ordered lane pair per cable, sends on a cable land in post order,
-so independent orders on one cable need separate streams, which the budget does not allow.
+The wires are the bridge's alone. A client should name a node and some bytes, and never see a wire.
 
-## The API
+## Node-addressed transactions
 
-The caller addresses peers, never wires:
+A transaction is: destination node, source pages, a conversation (the communicator's identity, equal at both ends)
+and a sequence number in it. The client submits it to its own queue toward that node; it holds nothing.
 
-    publish(frame j, peer q)   one store: plan p's ready word for q  := j + 1
-    await(frame j, peer q)     one load-spin: plan p's landed word for q >= j + 1
+- **Submission.** One queue per (client, peer node) in the region, written by that client only: entries
+  `{conversation, sequence, source page, bytes}`, a `ready` count the client advances (one store per transaction or per
+  frame), nothing else. No owner word, no wire identity, no per-cable list.
+- **Scheduling.** The bridge, the wires' one owner, takes ready entries from every client's queue toward a node and
+  sends them on whichever of that node's cables is free. That is its job and nobody else's.
+- **Landing.** Each cable's receives are always posted on bridge-owned free pages of the region, so a unit may arrive
+  in any order from any conversation without a matching post. Every unit is self-describing: its conversation,
+  sequence and byte count travel with it, and the receiving bridge records it in the conversation's landing index
+  (sequence → page) and advances that conversation's `landed` count.
+- **Consumption.** The consumer reads landed bytes in place, through the landing index: `await(conversation, seq)` is
+  one spin on one word, and the data is read where the NIC put it (no copy, as the fused kernels already do). The
+  page goes back to the bridge's free pool when the consumer's count passes it.
 
-- One `ready` and one `landed` word per (plan, peer) in the region, at offsets the fused issue returns.
-- The bridge stripes a frame's bytes over the peer's cables. Each cable's child reads the node-level `ready` word in
-  place of its stream's own (a `ready_at` region offset in `mesh_stream`), so entry e on cable c is ready once
-  `ready ≥ frame(e) + 1`.
-- Each cable's child adds the frames it has fully landed to the node-level `landed` word (an atomic add in the
-  shared region; the children are separate processes), so `landed` counts frames complete on every cable.
-- Per-plan words make plans independent wherever the lanes allow it (more than one stream per cable). On one stream
-  per cable they share its order, and the bridge, not the caller, keeps that order.
+## What disappears
 
-## What it removes from the caller
+Client-held streams and the EBUSY between communicators; per-cable records, loops and counters in the library and
+the caller's kernels; the global release order (conversations are independent; order exists only within one); any
+client knowledge of cable count, lanes or striping. Microbatches, communicators and processes toward the same node
+proceed independently, and the bridge alone decides how bytes cross the wires.
 
-The per-cable loops and records, the global release-order constraint at the API, and any knowledge of cable count
-or striping. Kernels touch one word per peer per frame.
+## Work
+
+1. mesh.h: the per-(client, peer) submission queue and the per-conversation landing index and counts; remove the
+   client-visible `owner` / `wire` / per-cable lists from the client contract.
+2. mesh-link.c (each cable's child): take ready entries from the node's queues, send self-describing units; keep its
+   receives posted on the free pool; record landings in the conversation's index.
+3. nccl-mesh / meshmlx: a crossing becomes `publish(conversation, seq)` and `await(conversation, seq)`, one word each.
+4. Re-measure everything measured through the per-cable contract (host path, GPU path, fused crossings, TP decode).
