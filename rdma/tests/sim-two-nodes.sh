@@ -5,7 +5,8 @@
 # the run-ahead test (tests/sim-runahead.c) and the peer service's test (tests/peer-groups.c) against rdma/.build (make -C
 # rdma all first).  It runs the simulator with CABLES cables of LANES queue pairs (default 3 and 2, the M5 Ultra pair),
 # then every peer-groups mode between its two nodes, then a two-rank communicator and COMMS (default 2) at once in one
-# program, then a two-rank communicator's program on the Metal path (tests/sim-metal.m, with this build's kernels beside
+# program, the same through the NumPy bindings (tests/sim-mpi.py, with PYTHON's cffi: mesh_c_build.py bound to rdma/.build),
+# then a two-rank communicator's program on the Metal path (tests/sim-metal.m, with this build's kernels beside
 # the library: made here, none installed); then, over a simulator whose queue pair LAG (default 1) is served once in 64 turns, PROGRAMS (default 2)
 # process pairs each running its own one-step program of CALLS (default 12000) Broadcasts ahead of its receiver, the
 # programs sharing the two nodes by rounds.  Every client is bounded by WAIT seconds.  Exit 0 only if every run passed.
@@ -23,6 +24,9 @@ done
 cc -fobjc-arc -O2 -Wall -Wextra -Werror -o "$here/.build/tests/sim-metal" "$here/tests/sim-metal.m" -L"$here/.build" -lnccl-mesh \
   -Wl,-rpath,"$here/.build" -framework Metal -framework Foundation || exit 1
 make -s -C "$here" .build/libnccl-mesh.metallib .build/libnccl-mesh.binarchive || exit 1
+python=${PYTHON:-$HOME/.venv-mesh-uv/bin/python}
+mkdir -p "$out/py"
+"$python" -I "$here/mesh_c_build.py" "$out/py" "$here/.build" > /dev/null 2>&1 || { echo "sim-two-nodes: $python cannot build _mesh_c (cffi)"; exit 1; }
 kernels=$(cat "$here/.build/libnccl-mesh.sha256")
 for f in metallib binarchive; do cp "$here/.build/libnccl-mesh.$f" "$here/.build/libnccl-mesh.$kernels.$f" || exit 1; done
 bounded() { perl -e "alarm $wait; exec @ARGV" "$@"; }
@@ -58,6 +62,14 @@ for n in 1 "$comms"; do
   grep -v '"checked":true' "$out/rank0" "$out/rank1"
   [ $first = 0 ] && [ $second = 0 ] || failed=1
 done
+port=$((port + 8))
+PYTHONPATH="$out/py" MESH_REGION=/mesh-sim-11 NCCL_COMM_ID="::1:$port" bounded "$python" "$here/tests/sim-mpi.py" 0 > "$out/mpi0" 2>&1 &
+rank0=$!
+PYTHONPATH="$out/py" MESH_REGION=/mesh-sim-12 NCCL_COMM_ID="::1:$port" bounded "$python" "$here/tests/sim-mpi.py" 1 > "$out/mpi1" 2>&1
+second=$?
+wait $rank0; first=$?
+echo "mesh_mpi: rank 0 $first rank 1 $second"; tail -3 "$out/mpi0" "$out/mpi1"
+[ $first = 0 ] && [ $second = 0 ] || failed=1
 port=$((port + 8))
 MESH_REGION=/mesh-sim-11 NCCL_COMM_ID="::1:$port" bounded "$here/.build/tests/sim-metal" 0 > "$out/metal0" 2>&1 &
 rank0=$!

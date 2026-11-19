@@ -188,6 +188,16 @@ static inline int order_next(const struct hdr *m,const struct mesh_node *x,uint3
   return *n!=ORDER_NONE && *n<atomic_load_explicit(&x->limit[d],memory_order_acquire) && order_locate(m,x,segments,d,*n,hint,at) &&
          order_ready(m,x,at,d);
 }
+/* queue pair q of epoch e as its cable and lane (order_qp's inverse): 1, else 0 where the epoch has no queue pair q */
+static inline int order_qp_cable(const struct mesh_epoch *e,uint32_t q,uint32_t *cable,uint32_t *lane){
+  for(uint32_t l=0;;l++){
+    uint32_t round=0;
+    for(uint32_t c=0;c<e->cables && c<MESH_PORTS;c++)
+      if(e->cable[c].lanes>l){if(q==round){*cable=c;*lane=l;return 1;}round++;}
+    if(!round)return 0;
+    q-=round;
+  }
+}
 /* whether piece n of direction d is done: the queue pair it is on (its epoch's: the latest whose first[d] is at most
    n) holding more units done (`done`, in the last epoch's cable and lane order) than its unit's index there */
 static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int d,uint64_t n,const uint64_t *done){
@@ -196,27 +206,22 @@ static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int
   uint32_t e=epochs;
   while(e>1 && x->epoch[e-1].first[d]>n)e--;
   const struct mesh_epoch *at=x->epoch+e-1;
-  if(n<at->first[d])return 0;
   const uint64_t Q=order_qps(at);
-  if(!Q)return 0;
-  const uint32_t q=(uint32_t)((n-at->first[d])%Q);
-  uint32_t port=0,lane=0;
-  for(uint32_t c=0;c<at->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<at->cable[c].lanes;l++)
-    if(order_qp(at,c,l)==q){port=at->cable[c].port;lane=l;}
-  uint64_t u=(n-at->first[d]-q)/Q;
+  uint32_t c,lane;
+  if(n<at->first[d] || !Q || !order_qp_cable(at,(uint32_t)((n-at->first[d])%Q),&c,&lane))return 0;
+  const uint32_t port=at->cable[c].port;
+  /* its unit: those before it in this epoch, then every unit of it in the epochs before */
+  uint64_t u=(n-at->first[d])/Q;
   for(uint32_t k=0;k+1<e;k++){
     const struct mesh_epoch *before=x->epoch+k;
-    const uint32_t c=order_cable(before,port),b=c==UINT32_MAX?UINT32_MAX:order_qp(before,c,lane);
-    if(b==UINT32_MAX)continue;
+    const uint32_t b=order_cable(before,port),q=b==UINT32_MAX?UINT32_MAX:order_qp(before,b,lane);
+    if(q==UINT32_MAX)continue;
     const uint64_t B=order_qps(before),first=before->first[d],next=x->epoch[k+1].first[d];
-    u+=next>first+b?(next-first-b+B-1)/B:0;
+    u+=next>first+q?(next-first-q+B-1)/B:0;
   }
   const struct mesh_epoch *last=x->epoch+epochs-1;
-  uint32_t k=0;
-  for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++){
-    if(last->cable[c].port==port)return lane<last->cable[c].lanes && done[k+lane]>u;
-    k+=last->cable[c].lanes;
-  }
+  for(uint32_t k=0,i=0;i<last->cables && i<MESH_PORTS;k+=last->cable[i++].lanes)
+    if(last->cable[i].port==port)return lane<last->cable[i].lanes && done[k+lane]>u;
   return 0;
 }
 /* The done words of direction d raised, by one process of the generation only (the port of its first cable): those of
@@ -240,12 +245,17 @@ static inline void order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t e
     const uint64_t reached=order_raise_through(m,x,segments,d,raised,through,hint);
     if(reached>raised)atomic_store_explicit(&x->raised[d],raised=reached,memory_order_release);
   }
+  /* past the latest piece any queue pair has done, no transfer is whole: the look ahead ends there */
+  uint64_t latest=0;
+  for(uint32_t c=0,k=0;c<final->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<final->cable[c].lanes;l++,k++)
+    if(done[k]){const uint64_t p=order_unit_piece(x,epochs,d,final->cable[c].port,l,done[k]-1);if(p!=ORDER_NONE && p+1>latest)latest=p+1;}
   uint64_t held[ORDER_AHEAD],n=raised,look=*hint;
   uint32_t holding=0;
-  for(uint32_t k=0;k<ORDER_AHEAD;k++){
+  for(uint32_t k=0;k<ORDER_AHEAD && n<latest;k++){
     struct order_at at;
     if(!order_locate(m,x,segments,d,n,&look,&at))break;
     const uint64_t last=n-at.span+at.t->units-1;
+    if(last>=latest)break;
     /* each queue pair's pieces are done in their order, so a transfer is done where the last piece of it on each queue
        pair is: its last Q pieces in the last epoch, and every piece of it before that epoch */
     const uint64_t Q=order_qps(final),boundary=final->first[d];

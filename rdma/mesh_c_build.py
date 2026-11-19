@@ -55,16 +55,19 @@ def declarations(text):
     return re.sub(r'(enum\s*\w*\s*\{)([^}]*)(\})', enum, text, flags=re.S)
 
 
-def build():
+def build(into=RDMA, libraries=RDMA):
+    """The module built into `into`, bound to the libraries in `libraries` (both rdma/ by default: the installed ones;
+    tests/sim-two-nodes.sh builds one bound to rdma/.build's, into a directory of its own)."""
     ffi = cffi.FFI()
     for header in HEADERS:
         with open(os.path.join(RDMA, header)) as file:
             ffi.cdef(declarations(file.read()))
-    ffi.set_source('_mesh_c', ''.join(f'#include "{h}"\n' for h in HEADERS), include_dirs=[RDMA], library_dirs=[RDMA],
-                   libraries=['nccl-mesh', 'mesh'], extra_link_args=[f'-Wl,-rpath,{RDMA}'])
-    return ffi.compile(tmpdir=RDMA, verbose=False)
+    ffi.set_source('_mesh_c', ''.join(f'#include "{h}"\n' for h in HEADERS), include_dirs=[RDMA], library_dirs=[libraries],
+                   libraries=['nccl-mesh', 'mesh'], extra_link_args=[f'-Wl,-rpath,{libraries}'])
+    return ffi.compile(tmpdir=into, verbose=False)
 
 
 if __name__ == '__main__':
-    print(build())
+    # usage: mesh_c_build.py [INTO LIBRARIES]
+    print(build(*sys.argv[1:3]))
     sys.exit(0)

@@ -5,6 +5,19 @@ by its import (rdma/NCCL.md "NumPy"):
     comm = Comm()
     comm.Allreduce(local, total, op=SUM)
 
+Every crossing call runs a declared program (design/declared-programs.md, nccl.h ncclMeshDeclareBegin): the calls made
+inside `with declare():` (on any communicators, with their buffers) are captured as the steps of this process's
+program, nothing moving; every later call runs the next step, in order, and is that step (the same collective, counts,
+types, root and arrays) or fails.  Every rank declares its own calls of the same steps at the same point:
+
+    with declare():
+        comm.Allreduce(local, total, op=SUM)
+    for _ in range(steps):
+        comm.Allreduce(local, total, op=SUM)
+
+A loop that changes size or buffers declares again where it changes.  Barrier and allreduce use arrays the
+communicator keeps (one a dtype), so they are declarable steps like any other.
+
 Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
 communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
 links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
@@ -49,6 +62,26 @@ try:
                   np.dtype(ml_dtypes.float8_e5m2): lib.ncclFloat8e5m2})
 except ImportError:
     pass
+
+
+class _Declaration:
+    """`with declare():` (ncclMeshDeclareBegin on entry, ncclMeshDeclareEnd on exit)."""
+
+    def __enter__(self):
+        check(lib.ncclMeshDeclareBegin())
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        ended = lib.ncclMeshDeclareEnd()
+        if kind is None:
+            check(ended)
+        return False
+
+
+def declare():
+    """The process's program declared by the calls of a `with` block (the module's docstring; nccl.h
+    ncclMeshDeclareBegin): its steps are captured, nothing moves, and the calls after it run them in order."""
+    return _Declaration()
 
 
 def empty(shape, dtype=np.float64):
@@ -234,6 +267,8 @@ class Comm:
         base = self if cells == self.size else self.Split(0 if self.rank < cells else UNDEFINED, self.rank)
         return Cartcomm(base, list(dims), list(periods) if periods is not None else [True] * len(dims)) if base is not None else None
 
+    declare = staticmethod(declare)
+
     def Get_rank(self):
         return self.rank
 
@@ -335,7 +370,11 @@ class Comm:
 
     def Reduce(self, sendbuf, recvbuf, op=SUM, root=0):
         send = recvbuf if sendbuf is IN_PLACE else sendbuf
-        target = recvbuf if recvbuf is not None else empty(send.shape, send.dtype)
+        if recvbuf is None:
+            targets = self.__dict__.setdefault('_targets', {})
+            key = (send.shape, np.dtype(send.dtype))
+            targets.setdefault(key, empty(send.shape, send.dtype))
+        target = recvbuf if recvbuf is not None else self._targets[(send.shape, np.dtype(send.dtype))]
         check(lib.ncclReduce(at(send), at(target), send.size, TYPES[send.dtype], op, root, self.comm, ffi.NULL))
 
     def Bcast(self, buf, root=0):
@@ -390,13 +429,22 @@ class Comm:
         t, k = kind(dtype)
         check(lib.ncclScatter(at(sendbuf if self.rank == root else None), at(target), count * k, t, root, self.comm, ffi.NULL))
 
+    def _box(self, dtype):
+        """The one-element array of `dtype` this communicator keeps for Barrier and allreduce (a declared step names its
+        buffers: design/declared-programs.md)."""
+        boxes = self.__dict__.setdefault('_boxes', {})
+        dtype = np.dtype(dtype)
+        if dtype not in boxes:
+            boxes[dtype] = empty(1, dtype)
+        return boxes[dtype]
+
     def Barrier(self):
-        box = empty(1, np.int32)
+        box = self._box(np.int32)
         box[0] = 0
         self.Allreduce(IN_PLACE, box)
 
     def allreduce(self, value, op=SUM):
-        box = empty(1, value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
+        box = self._box(value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
         box[0] = value
         self.Allreduce(IN_PLACE, box, op)
         return box[0].item()
