@@ -109,7 +109,7 @@ class Dependence(C.Structure):
 
 # mesh-collective.h struct mesh_task
 class Task(C.Structure):
-    _fields_ = [('length', D), ('resource', U), ('padding', U)]
+    _fields_ = [('length', D), ('resource', U), ('node_plus_one', U)]
 
 
 class Function(C.Structure):
@@ -163,6 +163,12 @@ class PlanScheduleResult(C.Structure):
 class PlanFunction(C.Structure):
     _fields_ = [('value', C.POINTER(PlanValue)), ('completion', C.POINTER(D)),
                 ('order', C.POINTER(U)), ('actors', C.POINTER(PlanActors)), ('schedule', C.POINTER(PlanScheduleResult))]
+
+
+class SourceOccurrences(C.Structure):
+    _fields_ = [('count', U), ('first', C.POINTER(Z)), ('piece', C.POINTER(U)), ('nodes', C.POINTER(Q)),
+                ('group', C.POINTER(mesh_graph.Grouping)), ('later', C.POINTER(U)), ('lag', C.POINTER(Q)),
+                ('submissions', C.POINTER(mesh_graph.ChainResult))]
 
 
 class PlanAnalysis(C.Structure):
@@ -427,7 +433,9 @@ PlanAnalysis._fields_ = [
     ('bound_host', C.POINTER(D)), ('bound_work', C.POINTER(D)),
     ('bound_edge', C.POINTER(mesh_graph.Dependence)), ('bound_function', C.POINTER(U)),
     ('carried', C.POINTER(C.c_ubyte)),
-    ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p)]
+    ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p),
+    ('occurrence', SourceOccurrences), ('later', C.POINTER(U)), ('lag', C.POINTER(Q)),
+    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence))]
 
 
 class PlanSync(C.Structure):
@@ -459,7 +467,7 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('event_first', C.POINTER(Z)), ('event_member', C.POINTER(U)),
                 ('task_edge', C.POINTER(Z)), ('access_edge', C.POINTER(Z)), ('ordering', C.c_void_p),
                 ('order', C.POINTER(U)), ('resource_cycle', C.POINTER(mesh_graph.Dependence)),
-                ('resource_edges', Z), ('access_queries', Z), ('access_query', C.POINTER(PlanAccessQuery))]
+                ('resource_edges', Z), ('access_queries', Z), ('access_query', C.POINTER(PlanAccessQuery)), ('rank_time', C.POINTER(D))]
 
 
 class PlanGraphResult(C.Structure):
@@ -643,6 +651,10 @@ if hasattr(LIB, 'mesh_plan_program_analyze_startup'):
     LIB.mesh_plan_program_analyze_startup.restype = C.c_int
     LIB.mesh_plan_program_analyze_startup.argtypes = [*LIB.mesh_plan_program_analyze_chains.argtypes[:-1],
                                                     C.POINTER(D), C.POINTER(C.POINTER(PlanAnalysis))]
+if hasattr(LIB, 'mesh_plan_program_analyze_occurrences'):
+    LIB.mesh_plan_program_analyze_occurrences.restype = C.c_int
+    LIB.mesh_plan_program_analyze_occurrences.argtypes = [
+        *LIB.mesh_plan_program_analyze_startup.argtypes[:-1], C.POINTER(SourceOccurrences), C.POINTER(C.POINTER(PlanAnalysis))]
 # mesh-collective.h mesh_strided_extents (design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3): a view's maximal
 # contiguous byte ranges, the owning module's traversal.  What must stay: the header's declaration
 EXTENT = C.CFUNCTYPE(None, C.c_void_p, Q, Q)

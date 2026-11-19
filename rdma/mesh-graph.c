@@ -641,6 +641,38 @@ int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *hea
   return result;
 }
 
+/* CLRS §24.2. The selected resource predecessors and original dependencies form the fixed instruction DAG. */
+int mesh_graph_resource_spans(const struct mesh_graph_relation *relation,const uint32_t *order,size_t cycles,
+                              const struct mesh_graph_dependence *cycle,const double *weight,const uint64_t *nodes,
+                              uint32_t ranks,double *span) {
+  const struct mesh_graph_relation_data *d=mesh_graph_relation_data(relation);
+  if(ranks>64)return EINVAL;
+  size_t room;
+  if(__builtin_add_overflow(d->edges,cycles,&room) || room>=SIZE_MAX/sizeof(double))return ENOMEM;
+  uint32_t *from=malloc((room+1)*sizeof *from),*to=malloc((room+1)*sizeof *to);
+  double *length=malloc((d->vertices+1ULL)*sizeof *length),*cost=malloc((room+1)*sizeof *cost);
+  int status=from && to && length && cost?0:ENOMEM;
+  size_t edges=d->edges;
+  struct mesh_graph_relation *selected=NULL;
+  for(size_t e=0;!status && e<edges;e++){from[e]=d->edge[e].from;to[e]=d->edge[e].to;}
+  for(size_t e=0;!status && e<cycles;e++)if(!cycle[e].delay){from[edges]=cycle[e].from;to[edges++]=cycle[e].to;}
+  if(!status)status=mesh_graph_relation_edges(d->vertices,edges,from,to,&selected);
+  free(from);free(to);
+  const struct mesh_graph_relation_data *dag=selected?mesh_graph_relation_data(selected):NULL;
+  for(uint32_t v=0;!status && v<ranks;v++){
+    for(size_t e=0;e<dag->edges;e++){
+      uint32_t x=dag->edge[e].from;
+      cost[e]=(nodes[x]>>v&1)?weight[x]:0;
+    }
+    status=mesh_graph_longest(selected,1,order,1,cost,length);
+    span[v]=0;
+    for(uint32_t x=0;!status && x<dag->vertices;x++)if(nodes[x]>>v&1)
+      span[v]=fmax(span[v],length[x]+weight[x]);
+  }
+  mesh_graph_relation_free(selected);free(length);free(cost);
+  return status;
+}
+
 void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
                      size_t *first, size_t *order) {
   for (uint32_t v = 0; v <= keys; v++) first[v] = 0;
@@ -674,6 +706,22 @@ int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, 
   }
   if (status) mesh_graph_group_free(g); else *out = g;
   return status;
+}
+int mesh_graph_call_successors(uint32_t families,uint32_t occurrences,const uint32_t *family,const uint64_t *bound,
+                               struct mesh_graph_grouping **group,uint32_t *later,uint64_t *lag) {
+  int status=mesh_graph_group(families,occurrences,mesh_graph_row_head,family,group);
+  if(status)return status;
+  const struct mesh_graph_grouping *g=*group;
+  for(uint32_t f=0;f<families;f++){
+    size_t first=g->first[f],count=g->first[f+1]-first;
+    if(!bound[f] || bound[f]>=UINT32_MAX){mesh_graph_group_free(*group);*group=NULL;return EINVAL;}
+    for(size_t i=0;i<count;i++){
+      uint64_t next=i+bound[f];
+      later[g->order[first+i]]=(uint32_t)g->order[first+next%count];
+      lag[g->order[first+i]]=next/count;
+    }
+  }
+  return 0;
 }
 uint32_t mesh_graph_tree_parent(const void *context, size_t v) {
   const struct mesh_graph_tree *tree = context;
@@ -722,6 +770,46 @@ int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_
   return 0;
 }
 
+int mesh_graph_call_submissions(const struct mesh_graph_grouping *group,const uint32_t *later,const uint64_t *lag,
+                                const size_t *first,const uint32_t *piece,uint32_t physical,
+                                struct mesh_graph_chain_result **out) {
+  *out=NULL;
+  if(!first && group->items!=physical)return EINVAL;
+  if(first && (first[0] || (first[group->items] && !piece)))return EINVAL;
+  for(size_t j=0;first && j<group->items;j++){
+    if(first[j+1]<first[j])return EINVAL;
+    for(size_t k=first[j];k<first[j+1];k++)if(piece[k]>=physical)return EINVAL;
+  }
+  struct mesh_graph_chain_result *r=calloc(1,sizeof *r);
+  if(!r)return ENOMEM;
+  r->vertices=physical;
+  size_t capacity=0;
+  for(uint32_t f=0;f<group->keys;f++)for(size_t j=group->first[f];j<group->first[f+1];j++){
+    size_t source=group->order[j],target=later[source];
+    size_t begin=first?first[source]:source,end=first?first[source+1]:source+1;
+    if(begin==end)continue;
+    uint64_t distance=lag[source];
+    while(first && first[target]==first[target+1]){
+      size_t next=group->first[f]+group->ordinal[target]+1;
+      if(next==group->first[f+1]){next=group->first[f];distance++;}
+      target=group->order[next];
+    }
+    size_t start=first?first[target]:target,stop=first?first[target+1]:target+1;
+    size_t pairs,needed;
+    if(__builtin_mul_overflow(end-begin,stop-start,&pairs) || __builtin_add_overflow(r->edges,pairs,&needed) ||
+       needed>SIZE_MAX/sizeof *r->edge){mesh_graph_chain_result_free(r);return ENOMEM;}
+    if(needed>capacity){
+      capacity=needed<=SIZE_MAX/(2*sizeof *r->edge)?2*needed:needed;
+      struct mesh_graph_dependence *more=realloc(r->edge,capacity*sizeof *more);
+      if(!more){mesh_graph_chain_result_free(r);return ENOMEM;}
+      r->edge=more;
+    }
+    for(size_t a=begin;a<end;a++)for(size_t b=start;b<stop;b++)
+      r->edge[r->edges++]=(struct mesh_graph_dependence){piece?piece[a]:(uint32_t)a,piece?piece[b]:(uint32_t)b,distance};
+  }
+  *out=r;
+  return 0;
+}
 int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out) {
   *out = NULL;
   for (uint32_t v = 0; chain && v < vertices; v++) if (chain[v] > v || chain[chain[v]] != chain[v]) return EINVAL;

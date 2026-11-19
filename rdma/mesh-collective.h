@@ -58,7 +58,7 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    design/algorithm-sources.md#the-plans-results-for-native-preparation */
 /* design/torch-source-lowering-change-request.md item 3, "The algorithm for the order";
    design/aot-compilation-change-request.md A6; design/plan-to-bridge-change-request.md R3 and R5 */
-struct mesh_task { double length; uint32_t resource,padding; };
+struct mesh_task { double length; uint32_t resource,node_plus_one; };
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; const struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding; const double *host,*work; const struct mesh_graph_dependence *edge;
@@ -91,10 +91,10 @@ struct mesh_graph_signature;
 struct mesh_graph_dependence;
 struct mesh_graph_access;
 enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_SUBMIT, MESH_PLANNED_OUTSTANDING,
-       MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART };
+       MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART, MESH_PLANNED_WINDOW };
 /* struct mesh_planned order[q]'s domain by cause[q].kind, in every result (mesh_plan, mesh_plan_local, loaded):
    MESH_PLANNED_PART call `pair`'s part vertices from 0 (its function's edges); MESH_ORDER_FLOW, MESH_ORDER_CONFLICT
-   and MESH_PLANNED_CHAIN call ordinals; MESH_PLANNED_PROGRAM, _SUBMIT, _OUTSTANDING and _TRANSFER the signature's
+   and MESH_PLANNED_CHAIN call ordinals; MESH_PLANNED_PROGRAM, _SUBMIT, _OUTSTANDING _TRANSFER and _WINDOW the signature's
    tasks */
 struct mesh_planned_cause { uint32_t kind,pair; };
 struct mesh_planned_call { uint64_t lead; uint32_t function,ordinal,every,parts,waits,padding; };
@@ -373,6 +373,16 @@ struct mesh_plan_flow {
   struct mesh_plan_slot *slot;
 };
 
+struct mesh_source_occurrences {
+  uint32_t count;
+  const size_t *first;
+  const uint32_t *piece;
+  const uint64_t *nodes;
+  struct mesh_graph_grouping *group;
+  uint32_t *later;
+  uint64_t *lag;
+  struct mesh_graph_chain_result *submissions;
+};
 struct mesh_plan_analysis {
   size_t references;
   const struct mesh_plan_geometry *geometry;
@@ -401,6 +411,11 @@ struct mesh_plan_analysis {
   unsigned char *carried;
   const struct mesh_nodes *nodes;
   void *owned,*environment;
+  struct mesh_source_occurrences occurrence;
+  uint32_t *later;
+  uint64_t *lag;
+  size_t nsubmissions;
+  struct mesh_graph_dependence *submissions;
 };
 
 void mesh_plan_analysis_retain(struct mesh_plan_analysis *);
@@ -433,6 +448,12 @@ int mesh_plan_program_analyze_startup(const struct mesh_nodes *,const struct mes
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,const double *,struct mesh_graph_chain_result *,const double *,
   struct mesh_plan_analysis **);
+int mesh_plan_program_analyze_occurrences(const struct mesh_nodes *,const struct mesh_plan_geometry *,uint64_t,
+  struct mesh_graph_buffer_result *,const uint32_t *,const struct mesh_function *,uint32_t,
+  const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
+  const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
+  const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,const double *,struct mesh_graph_chain_result *,const double *,
+  const struct mesh_source_occurrences *,struct mesh_plan_analysis **);
 int mesh_plan_local_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_local *);
 struct plan_sync { uint32_t node,function,entry,every; int64_t base; };
 struct plan_entry { const struct mesh_plan_entry *source; uint32_t place; };
@@ -463,6 +484,7 @@ struct plan_schedule_result {
   struct mesh_graph_dependence *resource_cycle;
   size_t resource_edges,access_queries;
   struct plan_access_query *access_query;
+  double *rank_time;
 };
 /* design/flow-order-and-lowering-memorandum.md: access.key is a declared transfer, vertex a Function task;
    write selects the original from view's producer, read the to view's consumer. Supplied roles are complete,

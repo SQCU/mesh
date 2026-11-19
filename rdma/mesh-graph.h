@@ -109,6 +109,10 @@ int mesh_graph_closure_load(const void *bytes, size_t length, struct mesh_graph_
 struct mesh_graph_relation;
 int mesh_graph_longest(const struct mesh_graph_relation *relation, int incoming, const uint32_t *order, ptrdiff_t step,
                        const double *weight, double *length);
+struct mesh_graph_dependence;
+int mesh_graph_resource_spans(const struct mesh_graph_relation *,const uint32_t *order,size_t edges,
+                              const struct mesh_graph_dependence *cycle,const double *weight,const uint64_t *nodes,
+                              uint32_t ranks,double *span);
 /* F. Harary, Graph Theory, 1969 (sources and sinks); L. Lamport, CACM 21(7), 1978; M. Lam, PLDI 1988, §2.3;
    design/disjoint-pages-change-request.md C3.3 and C3.5: over a retained relation's edges e not excluded[e] (its
    mesh_graph_relation_synchronization mask) with class_of[from] == class_of[to], source[v] is 0 where such an edge enters
@@ -157,6 +161,8 @@ struct mesh_graph_grouping {
 int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, size_t), const void *context,
                       struct mesh_graph_grouping **out);
 void mesh_graph_group_free(struct mesh_graph_grouping *);
+int mesh_graph_call_successors(uint32_t families,uint32_t occurrences,const uint32_t *family,const uint64_t *bound,
+                               struct mesh_graph_grouping **group,uint32_t *later,uint64_t *lag);
 struct mesh_graph_tree {
   uint32_t vertices, root;
   const uint32_t *parent;
@@ -664,6 +670,8 @@ struct mesh_graph_chain_result {
 };
 int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_t resources,
                                const uint32_t *resource, int singletons, struct mesh_graph_dependence *edge, size_t *edges);
+int mesh_graph_call_submissions(const struct mesh_graph_grouping *,const uint32_t *,const uint64_t *,
+                                const size_t *,const uint32_t *,uint32_t,struct mesh_graph_chain_result **);
 int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out);
 void mesh_graph_chain_result_free(struct mesh_graph_chain_result *);
 /* design/planner-composition.md: original byte touches and value/relay operands; derived complete cover sets. */

@@ -224,6 +224,13 @@ class Graph:
         owned = self.search(self.vertices, incoming=incoming)
         return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count - 1, -1, -1))
 
+    def heap_order(self, priority):
+        count = self.data.vertices
+        weights = (C.c_double * count)(*(priority(node) for node in self.vertices))
+        place, order = (C.c_uint32 * count)(), (C.c_uint32 * count)()
+        _check(LIB.mesh_graph_relation_heap_permutation(self.relation.pointer, weights, place, order))
+        return View((self, place, order), order, range(count), self.vertices.__getitem__)
+
     def convex(self, members):
         indices = (C.c_uint32 * len(members))(*(self.at[node] for node in members))
         result = C.c_int()
@@ -511,6 +518,7 @@ LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C
                                    C.POINTER(C.POINTER(Closed))]
 LIB.mesh_graph_longest.restype = C.c_int
 LIB.mesh_graph_longest.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.c_double), C.POINTER(C.c_double)]
+LIB.mesh_graph_relation_heap_permutation.argtypes = [C.c_void_p, C.POINTER(C.c_double), _U, _U]
 LIB.mesh_graph_boundaries.restype = C.c_int
 LIB.mesh_graph_boundaries.argtypes = [C.c_void_p, _U, C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte)]
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
@@ -822,7 +830,7 @@ def chain_pairs(graph, chains):
     return Owned(pairs, LIB.mesh_graph_chain_result_free, graph, chains)
 
 
-def program_buffer_queries(calls, graph, chains, bodies, outer_queries=()):
+def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submissions=None):
     """Substitute each occurrence's timed graph into the call graph for mesh_graph_buffer_queries."""
     if graph.data.vertices != len(calls):
         raise ValueError("each call occurrence must name one graph vertex")
@@ -849,6 +857,9 @@ def program_buffer_queries(calls, graph, chains, bodies, outer_queries=()):
         edges.append((2 * edge.source + 1, 2 * edge.sink, edge.delay))
     for edge in chain.contents.edge[:chain.contents.edges]:
         edges.append((2 * edge.source + 1, 2 * edge.sink, edge.delay))
+    if submissions:
+        edges.extend((2 * e.source + 1, 2 * e.sink, e.delay)
+                     for e in submissions.contents.edge[:submissions.contents.edges])
     for edge, function in outer_queries:
         if not 0 <= edge < graph.data.edges or not 0 <= function < len(bodies):
             raise ValueError("outer capacity query must name a call edge and function")
@@ -861,6 +872,32 @@ def program_buffer_queries(calls, graph, chains, bodies, outer_queries=()):
         (C.c_size_t * len(queries))(*queries))
     return result, (C.c_uint32 * len(functions))(*functions)
 
+
+
+if hasattr(LIB, 'mesh_graph_call_successors'):
+    LIB.mesh_graph_call_successors.argtypes = [C.c_uint32, C.c_uint32, _U, C.POINTER(C.c_uint64),
+        C.POINTER(C.POINTER(Grouping)), _U, C.POINTER(C.c_uint64)]
+    LIB.mesh_graph_call_submissions.argtypes = [C.POINTER(Grouping), _U, C.POINTER(C.c_uint64), _Z, _U,
+        C.c_uint32, C.POINTER(C.POINTER(ChainResult))]
+
+
+def call_successors(families, bounds):
+    family = families if isinstance(families, C.Array) and families._type_ is C.c_uint32 else _array(C.c_uint32, families)[0]
+    bound = bounds if isinstance(bounds, C.Array) and bounds._type_ is C.c_uint64 else _array(C.c_uint64, bounds)[0]
+    later = (C.c_uint32 * len(families))()
+    lag = (C.c_uint64 * len(families))()
+    group = C.POINTER(Grouping)()
+    _check(LIB.mesh_graph_call_successors(len(bounds), len(families), family, bound, C.byref(group), later, lag))
+    result = Owned(group, LIB.mesh_graph_group_free, families, (family, bound))
+    result.group, result.later, result.lag = group, later, lag
+    return result
+
+
+def call_submissions(successors, first, piece, physical_count):
+    made = C.POINTER(ChainResult)()
+    _check(LIB.mesh_graph_call_submissions(successors.group, successors.later, successors.lag,
+           first, piece, physical_count, C.byref(made)))
+    return Owned(made, LIB.mesh_graph_chain_result_free, successors, (first, piece))
 
 
 def event_lags(bounds, first, member, queries, edges=None):
