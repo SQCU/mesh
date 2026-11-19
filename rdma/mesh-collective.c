@@ -1127,7 +1127,11 @@ static int plan_rank_times(struct plan_schedule_result *s){
   if(!s->rank_time)return ENOMEM;
   return mesh_graph_resource_spans(s->ordering,s->order,s->resource_edges,s->resource_cycle,s->w,s->instruction_nodes,n,s->rank_time);
 }
-int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mesh_function *function,
+static uint64_t plan_virtual_resource(const struct mesh_plan_flow *flow,const struct mesh_function *function){
+  return flow->n+2ULL*flow->pairs+(flow->n+1ULL)*function->resources;
+}
+
+int mesh_plan_schedule_graph(struct mesh_plan_flow_geometry *geometry,const struct mesh_function *function,
                        size_t accesses,const struct mesh_graph_view *access,const size_t *event_first,
                        const uint32_t *event_member,struct plan_schedule_result **out){
   *out=NULL;
@@ -1135,7 +1139,7 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   const struct mesh_weight *weight=flow->weights;
   const struct mesh_dependence *dependence=flow->dependence;
   const uint32_t n=flow->n,demands=flow->demands,count=flow->transfers,dependences=flow->dependences,placed=function->tasks;
-  const uint64_t virtual_resource=n+2ULL*flow->pairs+(n+1ULL)*function->resources;
+  const uint64_t virtual_resource=plan_virtual_resource(flow,function);
   if(virtual_resource>=UINT32_MAX)return ENOMEM;
   if(function->count!=count || (accesses && (!access || !placed)))return EINVAL;
   if(event_first){
@@ -1362,24 +1366,47 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
       const uint32_t pair=link[r]/2;
       nodes[tasks+communication[r]]=(UINT64_C(1)<<flow->from[pair])|(UINT64_C(1)<<flow->to[pair]);
     }
-    /* design/plan-to-bridge-change-request.md R5 */
-    status=mesh_graph_completion_times((uint32_t)instructions,w,resource,(uint32_t)virtual_resource+1,
-                                       (size_t)dependencies,before,after,completion);
-    /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2; C.-Y. Chen,
-       arXiv 2205.02474, 2022, (1a) */
-    if(!status && !(kept->completed=calloc((size_t)count+1,sizeof *kept->completed)))status=ENOMEM;
-    for(uint32_t i=0;!status && i<count;i++)for(uint32_t q=0;q<consumer[i].count;q++)
-      if(completion[consumer[i].first+q]>kept->completed[i])kept->completed[i]=completion[consumer[i].first+q];
-    if(!status){
-      for(uint64_t j=0;j<instructions;j++)priority[j]=-completion[j];
-      status=mesh_graph_relation_edges((uint32_t)instructions,(size_t)dependencies,before,after,&kept->ordering);
-      if(!status)status=mesh_graph_relation_heap_permutation(kept->ordering,priority,place,kept->order);
-      if(!status)status=mesh_graph_resource_cycles_except((uint32_t)instructions,kept->order,(uint32_t)virtual_resource+1,
-        resource,1,(uint32_t)virtual_resource,kept->resource_cycle,&kept->resource_edges);
-    }
+    status=mesh_graph_relation_edges((uint32_t)instructions,(size_t)dependencies,before,after,&kept->ordering);
   }
-  if(!status)status=plan_rank_times(kept);
   if(status)mesh_plan_schedule_free(kept);else *out=kept;
+  return status;
+}
+
+/* design/plan-to-bridge-change-request.md R5: a body's restriction of the program order. */
+int mesh_plan_schedule_project(struct plan_schedule_result *s,const double *completion,const uint32_t *position,uint32_t base){
+  if(!s || !completion || s->completed || s->owned)return EINVAL;
+  completion+=base;
+  if(position)position+=base;
+  const struct mesh_plan_flow *flow=s->geometry->source;
+  const uint32_t virtual_resource=(uint32_t)plan_virtual_resource(flow,s->function);
+  s->completed=calloc((size_t)flow->transfers+1,sizeof *s->completed);
+  if(!s->completed)return ENOMEM;
+  for(uint32_t v=0;v<s->instructions;v++){
+    s->completion[v]=completion[v];
+    s->priority[v]=position?-(double)position[v]:-completion[v];
+  }
+  for(uint32_t t=0;t<flow->transfers;t++)for(uint32_t q=0;q<s->consumer[t].count;q++){
+    const double at=completion[s->consumer[t].first+q];
+    if(at>s->completed[t])s->completed[t]=at;
+  }
+  int status=mesh_graph_relation_heap_permutation(s->ordering,s->priority,s->place,s->order);
+  if(!status)status=mesh_graph_resource_cycles_except(s->instructions,s->order,virtual_resource+1,s->resource,
+                                                      1,virtual_resource,s->resource_cycle,&s->resource_edges);
+  if(!status)status=plan_rank_times(s);
+  return status;
+}
+
+int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mesh_function *function,
+                       size_t accesses,const struct mesh_graph_view *access,const size_t *event_first,
+                       const uint32_t *event_member,struct plan_schedule_result **out){
+  int status=mesh_plan_schedule_graph(geometry,function,accesses,access,event_first,event_member,out);
+  if(status)return status;
+  struct plan_schedule_result *s=*out;
+  const uint32_t resources=(uint32_t)plan_virtual_resource(geometry->source,function)+1;
+  status=mesh_graph_completion_times(s->instructions,s->w,s->resource,resources,s->dependencies,
+                                     s->before,s->after,s->completion);
+  if(!status)status=mesh_plan_schedule_project(s,s->completion,NULL,0);
+  if(status){mesh_plan_schedule_free(s);*out=NULL;}
   return status;
 }
 

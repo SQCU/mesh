@@ -661,6 +661,10 @@ for name, result, arguments in (
     function.restype, function.argtypes = result, arguments
 
 LIB.mesh_plan_program_analyze_routed.restype = C.c_int
+LIB.mesh_plan_schedule_graph.argtypes = LIB.mesh_plan_schedule.argtypes
+LIB.mesh_plan_schedule_graph.restype = C.c_int
+LIB.mesh_plan_schedule_project.argtypes = [C.POINTER(PlanScheduleResult), C.POINTER(D), C.POINTER(U), U]
+LIB.mesh_plan_schedule_project.restype = C.c_int
 LIB.mesh_plan_program_analyze_routed.argtypes = [*LIB.mesh_plan_program_analyze.argtypes[:-1],
                                                 C.POINTER(D), C.POINTER(C.POINTER(PlanAnalysis))]
 LIB.mesh_plan_program_analyze_chains.restype = C.c_int

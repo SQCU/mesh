@@ -494,6 +494,9 @@ struct plan_schedule_result {
    consumed, source-read completion memberships in Function task IDs, joined with zero-time vertices. */
 int mesh_plan_schedule(struct mesh_plan_flow_geometry *,const struct mesh_function *,size_t,
                        const struct mesh_graph_view *,const size_t *,const uint32_t *,struct plan_schedule_result **);
+int mesh_plan_schedule_graph(struct mesh_plan_flow_geometry *,const struct mesh_function *,size_t,
+                             const struct mesh_graph_view *,const size_t *,const uint32_t *,struct plan_schedule_result **);
+int mesh_plan_schedule_project(struct plan_schedule_result *,const double *,const uint32_t *,uint32_t);
 void mesh_plan_schedule_retain(struct plan_schedule_result *);
 void mesh_plan_schedule_free(struct plan_schedule_result *);
 struct mesh_plan_storage_function {
