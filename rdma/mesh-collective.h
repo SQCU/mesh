@@ -596,6 +596,7 @@ void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3 */
+int mesh_wait_send_count(const _Atomic uint64_t *counter,uint64_t target);
 int mesh_host_wait(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction);
 int mesh_host_wait_fields(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution,
                           size_t words,const uint64_t *mask);

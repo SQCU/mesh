@@ -3,6 +3,7 @@
 #include <float.h>
 #include <math.h>
 #include <os/os_sync_wait_on_address.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,47 +73,71 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
 
 /* libfabric man/fi_cntr.3.md, fi_cntr_wait, fi_cntr_readerr; libfabric man/fi_endpoint.3.md, fi_cancel;
    rdma-core libibverbs/man/ibv_post_send.3, NOTES */
-uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
-  struct hdr *m=context->M;
-  const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
-  const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
-  const uint64_t copies=state->copies;
-  _Atomic uint64_t *counter=(_Atomic uint64_t *)((char *)m+entry->completion+16*(execution%copies));
+enum { MESH_HOST_POLL_NS = 32000 };
+
+static uint64_t send_status(const _Atomic uint64_t *counter,uint64_t target,uint64_t *progress){
   const uint64_t count=atomic_load_explicit(counter,memory_order_acquire),
                  error=atomic_load_explicit(counter+1,memory_order_acquire);
-  if(count+error<(execution/copies+1)*entry->sends)return 0;
-  return error?UINT64_MAX:1;
+  *progress=count+error;
+  return *progress<target?0:error?UINT64_MAX:1;
+}
+
+static _Atomic uint64_t *send_counter(struct hdr *m,const struct mesh_publication *entry,uint64_t copy){
+  return (_Atomic uint64_t *)((char *)m+entry->completion+16*copy);
+}
+
+uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+  struct hdr *m=context->M;
+  const struct mesh_state *state=mesh_state_at(m,plan);
+  const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
+  uint64_t progress;
+  return send_status(send_counter(m,entry,execution%state->copies),(execution/state->copies+1)*entry->sends,&progress);
+}
+
+int mesh_wait_send_count(const _Atomic uint64_t *counter,uint64_t target){
+  uint64_t previous=0, since=0;
+  for(;;){
+    uint64_t progress;
+    const uint64_t done=send_status(counter,target,&progress);
+    if(done)return done==UINT64_MAX?ECANCELED:0;
+    const uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if(!since || progress!=previous){since=now;previous=progress;}
+    if(now-since>=MESH_PLATFORM_NS)return ETIMEDOUT;
+    if(now-since>=MESH_HOST_POLL_NS)sched_yield();
+  }
 }
 
 /* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3, steps 3 and 6;
    libfabric man/fi_cntr.3.md, fi_cntr_wait; mesh-call.h mesh_transfers_start, 2026-11-06 */
-static int host_wait(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,
-                     uint32_t direction,size_t words,const uint64_t *mask){
+int mesh_host_wait_fields(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,
+                          size_t words,const uint64_t *mask){
   struct hdr *m=context->M;
-  const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
+  const struct mesh_state *state=mesh_state_at(m,plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
-  const uint64_t copy=execution%state->copies;
   if(mask && words!=((size_t)entry->pages+63)/64)return EINVAL;
-  if(direction==MESH_SEND && !entry->sends)return 0;
-  _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+(direction==MESH_SEND?entry->completion+16*copy:entry->count+8*copy));
-  for(int expired=0;;){
+  _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+entry->count+8*(execution%state->copies));
+  uint64_t previous=0,since=0;
+  for(;;){
     const uint64_t seen=atomic_load_explicit(word,memory_order_acquire);
-    const uint64_t done=direction==MESH_SEND?mesh_host_sent(context,plan,transfer,execution):
-                                             host_arrived(context,plan,transfer,execution,mask);
+    const uint64_t done=host_arrived(context,plan,transfer,execution,mask);
     if(done)return done==UINT64_MAX?ECANCELED:0;
-    if(expired)return ETIMEDOUT;
-    expired=os_sync_wait_on_address_with_timeout(word,seen,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                                                 OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PLATFORM_NS)<0 && errno==ETIMEDOUT &&
-            atomic_load_explicit(word,memory_order_acquire)==seen;
+    const uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if(!since || seen!=previous){since=now;previous=seen;}
+    const uint64_t elapsed=now-since;
+    if(elapsed>=MESH_PLATFORM_NS)return ETIMEDOUT;
+    if(elapsed>=MESH_HOST_POLL_NS)
+      os_sync_wait_on_address_with_timeout(word,seen,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                                           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PLATFORM_NS-elapsed);
   }
 }
 
 int mesh_host_wait(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction){
-  return host_wait(context,plan,transfer,execution,direction,0,NULL);
-}
-int mesh_host_wait_fields(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,
-                          size_t words,const uint64_t *mask){
-  return host_wait(context,plan,transfer,execution,MESH_RECEIVE,words,mask);
+  if(direction!=MESH_SEND)return mesh_host_wait_fields(context,plan,transfer,execution,0,NULL);
+  struct hdr *m=context->M;
+  const struct mesh_state *state=mesh_state_at(m,plan);
+  const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
+  if(!entry->sends)return 0;
+  return mesh_wait_send_count(send_counter(m,entry,execution%state->copies),(execution/state->copies+1)*entry->sends);
 }
 
 struct plan_loaded;
