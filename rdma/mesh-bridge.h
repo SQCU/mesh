@@ -144,6 +144,7 @@ void peer_service_adopt(void);
 void peer_message(uint32_t,uint64_t,uint32_t,const void *,uint32_t);
 void peer_event(int);
 void peer_turn(void);
+uint64_t peer_due(uint64_t);
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }

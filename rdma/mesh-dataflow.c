@@ -472,7 +472,7 @@ static void mesh_reclaim(struct hdr *m){
    read sequentially consistent after the caller's give or retirement */
 /* Actual registered-memory overlap, independent of the row/alias that named
    a DMA. A racing pin snapshot conservatively keeps storage for a later reap. */
-static int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
+int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
     const struct mesh_stream *x=mesh_stream_at(m,s);
     int live=-1;

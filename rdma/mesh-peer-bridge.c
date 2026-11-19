@@ -21,7 +21,7 @@ struct job {
   struct job *next;
   uint32_t peer;uint64_t group,owner,expires;
   int fd,pinned,prepared,accepted,started,sent,reported,remote_admitted; _Atomic int closed;
-  uint64_t lease_first,lease_end;
+  uint64_t lease_first,lease_end,drain_deadline;
   _Atomic int failed,finished,admitted,mail;
   void *offer,*remote;size_t local_bytes,remote_bytes;
   struct mesh_peer_transfer *records;
@@ -469,7 +469,9 @@ static void release(struct job *j){
       struct pipe_stream *s=j->channel[e].pipe;
       pthread_mutex_lock(&ledger_lock);if(s->fast==j)s->fast=NULL;pthread_mutex_unlock(&ledger_lock);
       for(unsigned w=0;w<2;w++)for(unsigned l=0;l<2;l++)if(j->queues[e][w][l].retire)atomic_store(&s->failure,1);
-      if((!--s->users || atomic_load(&s->failure)) && mesh_stream_held(&physical,s->stream,s->wire))mesh_stream_give(&physical,s->stream);
+      struct mesh_stream *x=mesh_stream_at(M,s->stream);
+      if((!--s->users || atomic_load(&s->failure)) && atomic_load(&x->wire)==s->wire)
+        mesh_stream_give(&physical,s->stream);
     }
     if(j->table.count)mesh_lease_return(&j->context,j->table.first);
     mesh_retire(M,j->context.client);j->context.M=NULL;
@@ -479,12 +481,34 @@ static int held(struct job *j){
   for(uint32_t e=0;e<j->holds;e++){
     struct pipe_stream *s=j->channel[e].pipe;
     if(atomic_load(&s->failure) && s->users)return 1;
-    uint64_t owner=atomic_load(&mesh_stream_at(M,s->stream)->owner);
-    if(owner==(physical.client|MESH_STREAM_GIVEN))return 1;
+    struct mesh_stream *x=mesh_stream_at(M,s->stream);
+    uint64_t owner=atomic_load(&x->owner);
+    if(owner==(physical.client|MESH_STREAM_GIVEN) &&
+       (!atomic_load(&j->failed) || mesh_holds((pid_t)atomic_load(&x->child),x->child_start)))return 1;
   }
   return 0;
 }
+static int dma_pending(struct job *j){
+  for(uint32_t e=0;e<j->holds;e++){
+    struct mesh_stream *stream=mesh_stream_at(M,j->channel[e].pipe->stream);
+    if(atomic_load(&stream->wire)!=j->plan.cable[e].wire)continue;
+    for(unsigned w=0;w<2;w++)for(unsigned l=0;l<2;l++){
+      struct queue *q=&j->queues[e][w][l];uint64_t posted=atomic_load(&stream->posts[w].posted[l]);
+      uint64_t done=atomic_load(&stream->posts[w].done[l]);
+      for(size_t i=q->retire;i && i!=q->post;){
+        struct peer_piece *p=j->plan.piece+i-1;
+        if(p->prefix>posted)break;
+        if(p->prefix>done && mesh_interval_pinned(M,p->span))return 1;
+        i=p->next;
+      }
+    }
+  }
+  return 0;
+}
+static uint64_t retry_at;
+uint64_t peer_due(uint64_t normal){return retry_at && retry_at<normal?retry_at:normal;}
 void peer_turn(void){
+  retry_at=0;
   struct job **at=&jobs;
   while(*at){
     struct job *j=*at;
@@ -500,6 +524,7 @@ void peer_turn(void){
       else{pthread_detach(thread);j->started=1;}
     }
     int failure=atomic_load(&j->failed);
+    if(failure && !j->drain_deadline)j->drain_deadline=mesh_clock_ns()+MESH_PLATFORM_NS;
     if(atomic_load(&j->admitted) && !j->reported){
       j->reported=1;int error=peer_send(j,ADMITTED,NULL,0);if(error)stop_job(j,error);
     }
@@ -525,8 +550,18 @@ void peer_turn(void){
         }
         release(j);
       }
-      if((j->closed || j->fd<0) && held(j))wake();
-      else if(j->closed || j->fd<0){
+      if(j->closed || j->fd<0){
+        int waiting=held(j) || (failure && dma_pending(j));
+        if(waiting){
+          if(!failure){wake();at=&j->next;continue;}
+          uint64_t here=mesh_clock_ns();
+          if(here<j->drain_deadline){
+            uint64_t retry=MIN(here+UINT64_C(1000000),j->drain_deadline);
+            if(!retry_at || retry<retry_at)retry_at=retry;
+            at=&j->next;continue;
+          }
+          failure=ETIMEDOUT;
+        }
         if(j->fd>=0){respond(j->fd,failure);close(j->fd);}
         if(j->pinned){
           int another=0;for(struct job *i=jobs;i;i=i->next)another|=i!=j && i->pinned && i->owner==j->owner;

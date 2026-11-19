@@ -14,5 +14,7 @@ int mesh_peer_capable(struct mesh_ctx *,uint32_t peer);
 int mesh_peer_install(struct mesh_ctx *,uint32_t peer,uint64_t group,uint64_t records,
                       uint32_t count,uint64_t *installation);
 int mesh_peer_wait(struct mesh_ctx *,uint64_t installation,uint64_t timeout_ns);
+/* ETIMEDOUT means a posted request still pins its old byte range. Returning
+   that lease (or detaching) leaves reclamation to the bridge's DMA fence. */
 int mesh_peer_release(struct mesh_ctx *,uint64_t installation);
 #endif

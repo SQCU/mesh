@@ -2063,7 +2063,7 @@ int main(int argc,char **argv){
     peer_turn();
     clients_turn(alive);
     struct kevent64_s ready[16];
-    const uint64_t due=turn_due(liveness),at=clock_ns(),rest=due>at?due-at:0;
+    const uint64_t due=peer_due(turn_due(liveness)),at=clock_ns(),rest=due>at?due-at:0;
     struct timespec tick={(time_t)(rest/1000000000u),(long)(rest%1000000000u)};
     int count=kevent64(events,NULL,0,ready,16,0,&tick);
     now=clock_ns();
