@@ -74,9 +74,8 @@ execution k / period.
   the done words of every transfer wholly below it are raised in the pieces' order (`order_raise_through`); that prefix
   is `raised`. Past it, each done word has a cursor of its own (`struct order_raiser`) and rises through its own
   transfers that are wholly done, passing over other words' transfers. A word several transfers count on therefore
-  rises only as their prefix, and a transfer not yet done holds back its own word alone: one micro-batch's frames never
-  wait for another's. (The earlier look-ahead of 64 transfers did couple them: with two micro-batches' frames
-  alternating, one 32 frames ahead of the other stopped, and its GPU spun on a word nothing raised.) A program declares
+  rises only as their prefix, and a transfer not yet done holds back its own word alone: one communicator's words never
+  wait for another's transfers (the earlier look-ahead of 64 transfers coupled them). A program declares
   at most 16 done words a direction (`ORDER_PROGRAM_WORDS`). Raisers need no agreement: every done count only rises,
   each word is raised to the greatest value any raiser computes, and `raised` moves only up.
 - **Gates that are the issue.** A transfer flagged `MESH_GATE_ISSUES` is posted once its gate holds, its step's issued
@@ -107,16 +106,6 @@ execution k / period.
   (libnccl-mesh: `ncclMeshDeclareBegin`, the calls, `ncclMeshDeclareEnd`). Call k is step k mod period, and a call
   that is not its step fails as a value. A program changes shape only by an explicit, symmetric declaration at the
   same point at both ends. Nothing detects a shape and nothing negotiates one.
-- **Steps alongside one another.** Independent work the code runs side by side (one micro-batch's fused crossing
-  beside another's, each on a stream of its own) is declared so: `ncclMeshDeclareAlongside` between two groups of a
-  declaration puts the next group in the run of the one before it. Toward each node the table is then ordered by run,
-  then repeat (a fused crossing's frame, nccl.h `ncclMeshFused` repeats; 0 for a group of one), then step, then capture
-  order (nccl-mesh.c `recs_order`): frame j of every group of the run precedes frame j + 1 of any. That order is
-  computed from the declarations alone, alike at both ends. The client's obligation is to produce the data in that
-  order: tp_fused (gemma-4-e2b-pareto) builds each micro-batch's step and then encodes it frame by frame across them.
-  Built one after another instead, MLX's throttle on command buffers in flight held micro-batch 1's encoding until
-  micro-batch 0's step had nearly run, so the two never overlapped whatever the wire's order, and with frames
-  interleaved on the wire that wait is a deadlock.
 - **Counted calls.** An AlltoAllV captured by a declaration gathers its ranks' counts over the bootstrap there
   (`prepare_counted`), once for the program's life: a declaration is a point of configuration every rank reaches alike.
 - **Separate processes toward one node** compose by rounds. Each one's count is part of its declaration, and the round
@@ -183,7 +172,7 @@ Re-read for this document: none. Each entry below is recalled, and says where a 
   - libnccl-mesh communicators (1 and 2 in one program) at 6 KB, 98 KB and 1.5 MB, every value checked;
   - the same through mesh_mpi (tests/sim-mpi.py);
   - a Metal-path program (tests/sim-metal.m);
-  - a one-way WRITE plan, an AlltoAllV of uneven counts and two communicators declared alongside (tests/sim-programs.c);
+  - a one-way WRITE plan and an AlltoAllV of uneven counts (tests/sim-programs.c);
   - two process pairs, each running its own one-step program of 12,000 Broadcasts ahead of its receiver over a queue
     pair served once in 64 turns, the two programs composed by rounds.
 - **Python.** The native extraction tests (`test_native_byte_plans`, `test_indexed_write`, `test_diagnostics`) take

@@ -6,7 +6,7 @@
 # rdma all first).  It runs the simulator with CABLES cables of LANES queue pairs (default 3 and 2, the M5 Ultra pair),
 # then every peer-groups mode between its two nodes, then a two-rank communicator and COMMS (default 2) at once in one
 # program, the same through the NumPy bindings (tests/sim-mpi.py, with PYTHON's cffi: mesh_c_build.py bound to rdma/.build),
-# then a one-way WRITE plan, an AlltoAllV of uneven counts and two communicators declared alongside (tests/sim-programs.c),
+# then a one-way WRITE plan and an AlltoAllV of uneven counts declared (tests/sim-programs.c),
 # then a two-rank communicator's program on the Metal path (tests/sim-metal.m, with this build's kernels beside
 # the library: made here, none installed); then, over a simulator whose queue pair LAG (default 1) is served once in 64 turns, PROGRAMS (default 2)
 # process pairs each running its own one-step program of CALLS (default 12000) Broadcasts ahead of its receiver, the
@@ -69,7 +69,7 @@ rank0=$!
 MESH_REGION=/mesh-sim-12 NCCL_COMM_ID="::1:$port" bounded "$here/.build/tests/sim-programs" 1 > "$out/programs1" 2>&1
 second=$?
 wait $rank0; first=$?
-echo "a WRITE plan, an AlltoAllV and two communicators alongside, declared: rank 0 $first rank 1 $second"; cat "$out/programs0" "$out/programs1"
+echo "a WRITE plan and an AlltoAllV, declared: rank 0 $first rank 1 $second"; cat "$out/programs0" "$out/programs1"
 [ $first = 0 ] && [ $second = 0 ] || failed=1
 port=$((port + 8))
 PYTHONPATH="$out/py" MESH_REGION=/mesh-sim-11 NCCL_COMM_ID="::1:$port" bounded "$python" "$here/tests/sim-mpi.py" 0 > "$out/mpi0" 2>&1 &

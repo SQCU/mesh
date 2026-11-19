@@ -59,9 +59,14 @@
    of them failed (mesh_step_counts), calling it from every thread alike; its result is true, kept as mesh_step_enter's.  mesh_step_write: element k of the operand a publication sends, stored system-coherent (a plain store
    reaches the NIC only once its command buffer has ended, and the bridge sends as soon as `ready` passes: 2,041,216 of
    4,194,304 plain-stored words read stale on the M5, none stored so, metal-microbench docs/measurement.md, 2026-09-29);
-   the caller's kernel stores every element it publishes through it, once.  mesh_step_release: a publication, the
+   the caller's kernel stores every element it publishes through it, once, and every thread that stored one fences
+   them at system scope before its threadgroup's barrier or its arrival count (a barrier orders a threadgroup's stores
+   at device scope only; the NIC reads at system scope.  With only thread 0 fencing, meshmlx's fused all-sum read wrong
+   values on the M5 pair with one command buffer a step, MLX_MAX_OPS_PER_BUFFER 2000; this ordering is its candidate
+   cause, a command buffer's end otherwise flushing the stores).  mesh_step_release: a publication, the
    operand already written through mesh_step_write by the caller's kernel (its last threadgroup to arrive calls it,
-   after every other threadgroup's stores): a device barrier, then thread 0's one system-scope fence (mesh.metal
+   after every other threadgroup's stores): each thread's system-scope fence (its own stores), a device barrier, then
+   thread 0's one system-scope fence (mesh.metal
    mesh_publish: every store of the operand visible before the count the bridge acts on) and its one store of the
    holding's `ready` (p.scalar + j x p.stride at p.aux).  mesh_step_read: element k of a landing buffer the
    NIC wrote, loaded system-coherent (mesh.metal mesh_payload; half4 where it names no type: float16 fourths), so the
@@ -100,6 +105,7 @@ static NSString *const STEPS =
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); return true; }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i, uint j = 0) { "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar + ulong(j) * p.stride); }\n"
   "template <typename T> static inline void mesh_step_write(device uchar *operand, ulong k, T value) { "

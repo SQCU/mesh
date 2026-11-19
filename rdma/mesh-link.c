@@ -264,9 +264,10 @@ static void port_tell(_Atomic uint64_t *word,uint64_t value){
   os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_NONE);
 }
 /* design/transport.md section 14: one pass of a port's progress thread: the lanes the link serves (`served` read once a
-   pass: none posts on a lane its link no longer serves): its receive completions and the order's done words through them
-   (link_receive, order_done: a landing reaches its word first), its part of its order (order_pass: posting), then its
-   SEND completions and the done words through them (link_send, order_done), the pass counted (`passes`).  It tells the port's epoch it began at (a conclusion around a stuck call moves it:
+   pass: none posts on a lane its link no longer serves): its receive completions (link_receive), its part of its order
+   (order_pass: posting, the receives the completions made room for among it), the order's done words through the
+   completions (order_done), then its SEND completions and the done words through them (link_send, order_done), the
+   pass counted (`passes`).  It tells the port's epoch it began at (a conclusion around a stuck call moves it:
    ports_stalled) */
 static void port_pass(struct port *port,uint64_t *told){
   const uint64_t epoch=atomic_load(&port->epoch);
@@ -274,7 +275,7 @@ static void port_pass(struct port *port,uint64_t *told){
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   const int ordered=(served>>MESH_LANE_FIRST)!=0;
   if(served)link_receive(port,served);
-  if(ordered){order_done(port);order_pass(port);}
+  if(ordered){order_pass(port);order_done(port);}
   if(served)link_send(port,served);
   if(ordered)order_done(port);
   struct mesh_lanes *counted=lanes_of(port,0);
