@@ -302,12 +302,10 @@ int mesh_transfers_start(struct mesh_ctx *context,uint64_t plan,uint64_t executi
         if(risen!=seen){seen=risen;until=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PLATFORM_NS;}
       }
     }
-  }
-  if(served<executions){
     queue[k%state->submit_room]=(struct mesh_submission){.end=executions,.clock=++context->clock};
     atomic_store_explicit(&state->submissions,k+1,memory_order_release);
+    mesh_notify(&m->plans);
   }
-  mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
   return mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state))?ESTALE:0;
 }
@@ -320,7 +318,7 @@ void mesh_host_started(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,
   (void)transfer;
   while(seen<execution+1 && !atomic_compare_exchange_weak_explicit(&state->executions,&seen,execution+1,
                                                                    memory_order_release,memory_order_relaxed));
-  mesh_notify(&m->plans);
+  if(seen<execution+1 && state->entries)mesh_notify(&m->plans);
   atomic_thread_fence(memory_order_seq_cst);
   if(!mesh_view_compare(mesh_view_installed(m,memory_order_relaxed),mesh_plan_view(state)))return;
   struct mesh_sync *edge=mesh_syncs(m,state);
