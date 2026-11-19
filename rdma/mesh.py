@@ -241,6 +241,24 @@ class PlanStorage(C.Structure):
                 ('function', C.POINTER(PlanStorageFunction)), ('mapped', C.c_void_p)]
 
 
+class ScheduleResource(C.Structure):
+    _fields_ = [(name, U) for name in ('kind', 'a', 'b', 'name', 'bytes')]
+
+
+class ProgramCompletion(C.Structure):
+    _fields_ = [(name, U) for name in ('calls', 'vertices', 'resources', 'names')] + [
+        ('crossings', Z), ('issues', Z)] + [(name, C.POINTER(U)) for name in ('base', 'resource', 'order', 'place')] + [
+        ('length', C.POINTER(D)), ('completion', C.POINTER(D)), ('key', C.POINTER(ScheduleResource)),
+        ('name', C.POINTER(C.c_char)), ('cross', C.POINTER(mesh_graph.Dependence)),
+        ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p)]
+
+    def position(self, call, instruction):
+        return self.place[self.base[call] + instruction]
+
+    def time(self, call, instruction):
+        return self.completion[self.base[call] + instruction]
+
+
 class PlanCompilation(C.Structure):
     _fields_ = [('references', Z), ('result', Local), ('step', C.POINTER(PlanStep)),
                 ('placement', C.POINTER(PlanPlacement)), ('root_item', C.POINTER(U)),
@@ -248,7 +266,7 @@ class PlanCompilation(C.Structure):
                 ('place', C.POINTER(U)), ('rows_by', C.POINTER(Z)), ('listed', C.POINTER(Z)),
                 ('places', Q), ('state', C.POINTER(C.c_void_p)), ('state_bytes', C.POINTER(Q)),
                 ('owned', C.c_void_p), ('storage', C.POINTER(PlanStorage)), ('workspaces', Z),
-                ('workspace', C.POINTER(PlanWorkspace))]
+                ('workspace', C.POINTER(PlanWorkspace)), ('completion', ProgramCompletion)]
 
 
 class PlanBinding(C.Structure):
@@ -467,7 +485,8 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('event_first', C.POINTER(Z)), ('event_member', C.POINTER(U)),
                 ('task_edge', C.POINTER(Z)), ('access_edge', C.POINTER(Z)), ('ordering', C.c_void_p),
                 ('order', C.POINTER(U)), ('resource_cycle', C.POINTER(mesh_graph.Dependence)),
-                ('resource_edges', Z), ('access_queries', Z), ('access_query', C.POINTER(PlanAccessQuery)), ('rank_time', C.POINTER(D))]
+                ('resource_edges', Z), ('access_queries', Z), ('access_query', C.POINTER(PlanAccessQuery)), ('rank_time', C.POINTER(D)),
+                ('instruction_nodes', C.POINTER(Q))]
 
 
 class PlanGraphResult(C.Structure):

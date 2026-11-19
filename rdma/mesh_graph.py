@@ -830,43 +830,98 @@ def chain_pairs(graph, chains):
     return Owned(pairs, LIB.mesh_graph_chain_result_free, graph, chains)
 
 
-def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submissions=None):
+def program_issue_order(calls, bodies, base, next_vertex, submissions, chain):
+    """IG-5 and A10. A rank submits in order and completes its own part of a call."""
+    parts, ranks = [], {}
+    for nodes in bodies:
+        local = {}
+        for i, mask in enumerate(nodes):
+            while mask:
+                rank = mask & -mask
+                local.setdefault(rank, []).append(i)
+                ranks[rank] = None
+                mask -= rank
+        parts.append(local)
+    issue, start, end, edges = {}, {}, {}, []
+    for rank in ranks:
+        for j, f in enumerate(calls):
+            issue[j, rank] = next_vertex
+            next_vertex += 1
+            if rank in parts[f]:
+                start[j, rank], end[j, rank] = next_vertex, next_vertex + 1
+                next_vertex += 2
+                edges.append((issue[j, rank], start[j, rank], 0))
+                for i in parts[f][rank]:
+                    edges.append((start[j, rank], base[j] + i, 0))
+                    edges.append((base[j] + i, end[j, rank], 0))
+        for j in range(len(calls)):
+            following = (j + 1) % len(calls)
+            edges.append((issue[j, rank], issue[following, rank], int(following == 0)))
+    for a, b, distance in submissions:
+        for rank in parts[calls[a]]:
+            edges.append((end[a, rank], issue[b, rank], distance))
+    for a, b, distance in chain:
+        for rank in parts[calls[a]].keys() & parts[calls[b]].keys():
+            edges.append((end[a, rank], start[b, rank], distance))
+    return next_vertex, edges
+
+
+def program_buffer_queries(calls, graph, chains, bodies, outer_queries=(), submissions=None, completion=None):
     """Substitute each occurrence's timed graph into the call graph for mesh_graph_buffer_queries."""
+    from bisect import bisect_right
+
     if graph.data.vertices != len(calls):
         raise ValueError("each call occurrence must name one graph vertex")
     pairs = chain_pairs(graph, chains)
-    chain = pairs.made
-    # Two zero-duration vertices denote entry and completion of each call occurrence.
-    times = [0.] * (2 * len(calls))
-    edges, queries, functions = [], [], []
+    base, times, edges, queries, functions = [], [], [], [], []
     for occurrence, function in enumerate(calls):
         body = bodies[function].made.contents
-        base, first = len(times), len(edges)
+        base.append(len(times))
+        here, first = base[-1], len(edges)
         times.extend(body.time[:body.vertices])
-        edges.extend((base + a, base + b, d) for a, b, d in zip(
+        edges.extend((here + a, here + b, d) for a, b, d in zip(
             getattr(body, "from")[:body.edges], body.to[:body.edges], body.delay[:body.edges]))
         queries.extend(first + q for q in body.query[:body.queries])
         functions.extend([function] * body.queries)
-        entry, end = 2 * occurrence, 2 * occurrence + 1
-        edges.extend((entry, v, 0) for v in range(base, len(times)))
-        edges.extend((v, end, 0) for v in range(base, len(times)))
-        if not body.vertices:
-            edges.append((entry, end, 0))
-    first = len(edges)
-    for edge in graph.data.edge[:graph.data.edges]:
-        edges.append((2 * edge.source + 1, 2 * edge.sink, edge.delay))
-    for edge in chain.contents.edge[:chain.contents.edges]:
-        edges.append((2 * edge.source + 1, 2 * edge.sink, edge.delay))
-    if submissions:
-        edges.extend((2 * e.source + 1, 2 * e.sink, e.delay)
-                     for e in submissions.contents.edge[:submissions.contents.edges])
-    for edge, function in outer_queries:
-        if not 0 <= edge < graph.data.edges or not 0 <= function < len(bodies):
-            raise ValueError("outer capacity query must name a call edge and function")
-        queries.append(first + edge)
-        functions.append(function)
+
+    def dependences(pointer):
+        if pointer:
+            for e in pointer.contents.edge[:pointer.contents.edges]:
+                yield e.source, e.sink, e.delay
+
+    vertices, admission = completion.issue_order if completion is not None else program_issue_order(
+        calls, [body.instruction_nodes for body in bodies], base, len(times), dependences(submissions),
+        dependences(pairs.made))
+    times.extend([0.] * (vertices - len(times)))
+    edges.extend(admission)
+    query_function = dict(outer_queries)
+    if completion is not None:
+        owners = {(e.source, e.sink): query_function[i] for i, e in enumerate(graph.data.edge[:graph.data.edges])
+                  if i in query_function}
+        for a, b in completion.intercall:
+            j = bisect_right(completion.base, a) - 1
+            k = bisect_right(completion.base, b) - 1
+            if (j, k) in owners:
+                queries.append(len(edges))
+                functions.append(owners[j, k])
+            edges.append((a, b, 0))
+    elif graph.data.edges:
+        # Outer flow and conflict edges precede selected transfer and access instructions.
+        ports = len(times)
+        times.extend([0.] * (2 * len(calls)))
+        for j, function in enumerate(calls):
+            entry, end = ports + 2 * j, ports + 2 * j + 1
+            for i in range(bodies[function].made.contents.vertices):
+                edges.extend(((entry, base[j] + i, 0), (base[j] + i, end, 0)))
+            if not bodies[function].made.contents.vertices:
+                edges.append((entry, end, 0))
+        for i, edge in enumerate(graph.data.edge[:graph.data.edges]):
+            if i in query_function:
+                queries.append(len(edges))
+                functions.append(query_function[i])
+            edges.append((ports + 2 * edge.source + 1, ports + 2 * edge.sink, edge.delay))
     source, sink, delay = zip(*edges) if edges else ((), (), ())
-    result = buffer_queries((calls, graph, pairs, bodies, outer_queries), len(times),
+    result = buffer_queries((calls, graph, pairs, bodies, completion), len(times),
         (C.c_double * len(times))(*times), len(edges), (C.c_uint32 * len(edges))(*source),
         (C.c_uint32 * len(edges))(*sink), (C.c_uint64 * len(edges))(*delay), len(queries),
         (C.c_size_t * len(queries))(*queries))

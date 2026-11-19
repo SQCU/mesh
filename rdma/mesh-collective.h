@@ -486,6 +486,7 @@ struct plan_schedule_result {
   size_t resource_edges,access_queries;
   struct plan_access_query *access_query;
   double *rank_time;
+  uint64_t *instruction_nodes;
 };
 /* design/flow-order-and-lowering-memorandum.md: access.key is a declared transfer, vertex a Function task;
    write selects the original from view's producer, read the to view's consumer. Supplied roles are complete,
@@ -555,6 +556,19 @@ struct plan_step {
   const struct mesh_plan_storage_function *storage;
 };
 struct plan_placement;
+/* design/plan-to-bridge-change-request.md R3–R5. base[call] indexes original instructions.
+   Local issue events follow base[calls]. order and place are inverse permutations of all vertices. */
+struct mesh_schedule_resource { uint32_t kind, a, b, name, bytes; };
+struct mesh_program_completion {
+  uint32_t calls, vertices, resources, names;
+  size_t crossings, issues;
+  uint32_t *base, *resource, *order, *place;
+  double *length, *completion;
+  struct mesh_schedule_resource *key;
+  char *name;
+  struct mesh_graph_dependence *cross, *issue;
+  struct mesh_graph_relation *relation;
+};
 struct mesh_plan_compilation {
   size_t references;
   struct mesh_local result;
@@ -569,6 +583,7 @@ struct mesh_plan_compilation {
   struct mesh_plan_storage *storage;
   size_t workspaces;
   struct mesh_plan_workspace *workspace;
+  struct mesh_program_completion completion;
 };
 int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
 uint32_t mesh_plan_state_page(const struct mesh_plan_compilation *,uint32_t function);
