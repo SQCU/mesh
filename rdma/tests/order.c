@@ -357,7 +357,7 @@ int main(void){
   }
   run(4000000,1);
   for(int n=0;n<2;n++){check_done(n,pa+n,E1+1+ROUNDS);check_done(n,pb+n,2*ROUNDS);}
-  for(int n=0;n<2;n++)for(int d=0;d<2;d++)assert(w.node[n].done[d][0][1]==w.node[n].posted[d][0][1]);
+  for(int n=0;n<2;n++)for(int d=0;d<2;d++)assert(atomic_load(wire_done(w.node+n,d,0,1))==w.node[n].posted[d][0][1]);
   printf("order: %llu transfers run ahead over two programs sharing the node, a cable joining, one queue pair lagging: "
          "%llu pieces, %llu bytes matched\n",(unsigned long long)transfers,(unsigned long long)w.matched,(unsigned long long)w.bytes);
 

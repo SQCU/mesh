@@ -243,7 +243,7 @@ static void order_pass(struct port *port){
       for(uint32_t burst=0;burst<ORDER_BURST;burst++){
         const struct lane_state *state=l->lane+MESH_LANE_FIRST+j;
         struct order_post *post=&l->post[way][j];
-        if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,post))break;
+        if(!order_next(M,x,epochs,segments,way,port->index,j,way?state->posted:state->sent,post,&l->raiser[way].progress))break;
         const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)M+post->at.t->spans))[post->at.span];
         const int dud=!mesh_dma_span_valid(M,bytes) || bytes.bytes>piece;
         if(!lane_post(port,way,j,dud?(struct mesh_dma_span){0,bytes.bytes<=piece && bytes.bytes?bytes.bytes:piece}:bytes,dud,post))break;
@@ -262,12 +262,7 @@ static void order_done(struct port *port,int way){
   const uint32_t epochs=atomic_load_explicit(&x->epochs,memory_order_acquire);
   if(!epochs)return;
   const uint64_t segments=atomic_load_explicit(&x->segments,memory_order_acquire);
-  const struct mesh_epoch *last=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
-  uint64_t done[MESH_PORTS*MESH_LINK_LANES];uint32_t k=0;
-  for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++)
-    for(uint32_t lane=0;lane<last->cable[c].lanes && k<sizeof done/sizeof *done;lane++,k++)
-      done[k]=atomic_load_explicit(&mesh_lanes_at(M,last->cable[c].port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1],memory_order_acquire);
-  if(order_raise_pass(M,x,epochs,segments,way,done,&l->raiser[way])){
+  if(order_raise_pass(M,x,epochs,segments,way,&l->raiser[way])){
     atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&M->control);
   }
 }

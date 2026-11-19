@@ -66,7 +66,7 @@ static void cable_make(uint32_t c){
   for(int n=0;n<2;n++){
     struct wire_node *v=w.node+n;
     v->down[c]=0;v->generation[c]=atomic_load(&v->x->generation);
-    for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++){v->posted[way][c][j]=0;v->done[way][c][j]=0;v->post[way][c][j]=(struct order_post){0};}
+    for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++){v->posted[way][c][j]=0;atomic_store(wire_done(v,way,c,j),0);v->post[way][c][j]=(struct order_post){0};}
     for(int way=0;way<2;way++)order_raiser_clear(&v->raiser[c][way]);
   }
   fprintf(stderr,"sim-wire: turn %llu: cable %u up (identity %llu)\n",(unsigned long long)turn_now,c,(unsigned long long)identity[c]);
@@ -172,7 +172,7 @@ static void dump(void){
       fprintf(stderr,"  segment %llu digest %llx\n",(unsigned long long)s,(unsigned long long)order_segment_digest(w.node[n].m,x,s,w.node[n].m->node<w.node[1-n].m->node));
     for(uint32_t c=0;c<w.cables;c++)for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++)
       fprintf(stderr,"  cable %u %s lane %u: posted %llu done %llu\n",c,way?"receive":"send",j,(unsigned long long)w.node[n].posted[way][c][j],
-              (unsigned long long)w.node[n].done[way][c][j]);
+              (unsigned long long)atomic_load(wire_done(w.node+n,way,c,j)));
   }
 }
 static void node_make(uint32_t n,uint32_t node,uint32_t peer,uint64_t mib){

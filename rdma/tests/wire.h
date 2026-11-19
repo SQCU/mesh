@@ -17,7 +17,7 @@ struct wire_piece { struct mesh_dma_span span; uint64_t key,execution,transfer,s
 struct wire_fifo { struct wire_piece *sends,*receives; uint64_t sent_head,sent_tail,received_head,received_tail; };
 struct wire_node {
   struct hdr *m; struct mesh_node *x;
-  uint64_t posted[2][WIRE_CABLES][WIRE_LANES],done[2][WIRE_CABLES][WIRE_LANES];
+  uint64_t posted[2][WIRE_CABLES][WIRE_LANES];
   struct order_post post[2][WIRE_CABLES][WIRE_LANES];
   struct order_raiser raiser[WIRE_CABLES][2];
   /* with `served` (tests/sim-wire.c RESTARTS: the bridges' cables lost and made again), each cable as its port's child
@@ -57,7 +57,7 @@ static inline void wire_post(struct wire *w,uint32_t n,uint32_t c,uint32_t j){
       const uint64_t head=way?f->received_head:f->sent_head;
       if(*tail-head==w->room)break;
       struct order_post *post=&v->post[way][c][j];
-      if(!order_next(v->m,v->x,epochs,segments,way,c,j,v->posted[way][c][j],post))break;
+      if(!order_next(v->m,v->x,epochs,segments,way,c,j,v->posted[way][c][j],post,&v->raiser[c][way].progress))break;
       const struct order_at *at=&post->at;
       const struct mesh_dma_span span=((const struct mesh_dma_span *)((const char *)v->m+at->t->spans))[at->span];
       if(!mesh_dma_span_valid(v->m,span) || span.bytes>order_piece_bytes(v->m)){
@@ -68,6 +68,9 @@ static inline void wire_post(struct wire *w,uint32_t n,uint32_t c,uint32_t j){
       (*tail)++;v->posted[way][c][j]++;
     }
   }
+}
+static inline _Atomic uint64_t *wire_done(struct wire_node *v,int way,uint32_t port,uint32_t lane){
+  return &mesh_lanes_at(v->m,port*MESH_LINK_STREAMS+lane/2)->posts[way].done[lane&1];
 }
 /* the wire's matches on node d's cable c queue pair j toward node 1-d: each SEND at its head fills the receive at its
    head, the two ends' pieces the same piece of the same transfer and of equal length */
@@ -89,7 +92,8 @@ static inline void wire_match(struct wire *w,uint32_t d,uint32_t c,uint32_t j,ui
     memcpy((char *)w->node[1-d].m+r.span.offset,(const char *)w->node[d].m+s.span.offset,s.span.bytes);
     atomic_thread_fence(memory_order_release);
     f->sent_head++;f->received_head++;w->matched++;w->bytes+=s.span.bytes;
-    w->node[d].done[0][c][j]++;w->node[1-d].done[1][c][j]++;
+    atomic_fetch_add_explicit(wire_done(w->node+d,0,c,j),1,memory_order_release);
+    atomic_fetch_add_explicit(wire_done(w->node+1-d,1,c,j),1,memory_order_release);
   }
 }
 /* node n's done words raised through what its queue pairs have done, by each of its cables' raisers in turn, each with
@@ -100,13 +104,9 @@ static inline void wire_raise(struct wire *w,uint32_t n){
   if(!epochs)return;
   const uint64_t segments=atomic_load_explicit(&v->x->segments,memory_order_acquire);
   const struct mesh_epoch *last=v->x->epoch+epochs-1;
-  for(int way=0;way<2;way++){
-    uint64_t done[WIRE_CABLES*WIRE_LANES];uint32_t k=0;
-    for(uint32_t c=0;c<last->cables;c++)for(uint32_t j=0;j<last->cable[c].lanes;j++)done[k++]=v->done[way][last->cable[c].port][j];
-    for(uint32_t c=0;c<last->cables;c++)if(wire_serves(v,last->cable[c].port)){
-      if(order_raise_pass(v->m,v->x,epochs,segments,way,done,&v->raiser[last->cable[c].port][way]))abort();
-    }
-  }
+  for(int way=0;way<2;way++)
+    for(uint32_t c=0;c<last->cables;c++)if(wire_serves(v,last->cable[c].port))
+      if(order_raise_pass(v->m,v->x,epochs,segments,way,&v->raiser[last->cable[c].port][way]))abort();
 }
 /* both nodes' epoch over cables [0, cables), from the later of the two ends' bounds each way (mesh-link.c order_turn:
    each end bounds its posting past its frontier, the two bounds exchanged, the epoch begins at the later), the bound

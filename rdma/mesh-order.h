@@ -68,23 +68,6 @@ static inline uint64_t order_unit_piece(const struct mesh_node *x,uint32_t epoch
   }
   return ORDER_NONE;
 }
-/* the first piece of direction d not yet complete, every queue pair of the last epoch holding `done(q)` units done:
-   the least over its queue pairs of the piece of each one's first unit not done (each queue pair's pieces rise, so every
-   piece below that least one is done on its own queue pair).  `done` names the counts as the region holds them: a
-   lane's records (mesh.h struct mesh_lanes) by port and lane */
-static inline uint64_t order_done_through(const struct mesh_node *x,uint32_t epochs,int d,const uint64_t *done_count){
-  if(!epochs)return 0;
-  if(epochs>MESH_EPOCHS)epochs=MESH_EPOCHS;
-  const struct mesh_epoch *last=x->epoch+epochs-1;
-  uint64_t least=ORDER_NONE;
-  for(uint32_t c=0,k=0;c<last->cables && c<MESH_PORTS;c++)
-    for(uint32_t l=0;l<last->cable[c].lanes;l++,k++){
-      const uint64_t n=order_unit_piece(x,epochs,d,last->cable[c].port,l,done_count[k]);
-      if(n<least)least=n;
-    }
-  return least;
-}
-
 /* the piece past every piece of direction d posted on the last epoch's queue pairs, each holding `posted(q)` units
    posted (in the epoch's cable and lane order): the bound a new epoch begins at or after (mesh-link.c order_turn) */
 static inline uint64_t order_posted_through(const struct mesh_node *x,uint32_t epochs,int d,const uint64_t *posted){
@@ -202,21 +185,37 @@ static inline int order_gate_shut(const struct hdr *m,const struct mesh_node *x,
   }
   return 0;
 }
+/* Each queue's units form an arithmetic progression within an epoch. Its projection is made when the epoch
+   changes. A port acquires the shared counters at their original addresses and updates only queues that moved. */
+struct order_completed_lane {
+  const _Atomic uint64_t *counter;
+  uint64_t done,first_unit,next;
+  uint32_t port,lane;
+};
+struct order_progress {
+  struct order_completed_lane queue[2*MESH_STREAMS];
+  uint64_t generation,segments,through,latest;
+  uint32_t epochs,count;
+};
 /* ---- The bridge's two steps (mesh-link.c order_pass; tests/sim-wire.c runs the same) -----------------------------
    A lane continues to poll the same unit while a step, gate, epoch limit or hardware credit is pending. Its piece
    and declaration are fixed until the epoch count, segment count or lane unit changes. Keep the original table
    view and the required issued step. A new generation opens with empty cursors. */
 struct order_post {
   uint64_t unit,piece,segments,hint,step;
-  uint32_t epochs;
+  uint32_t epochs,queue;
   struct order_at at;
 };
 static inline int order_next(struct hdr *m,const struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,uint32_t port,
-                             uint32_t lane,uint64_t u,struct order_post *post){
-  if(!epochs || !segments)return 0;
+                             uint32_t lane,uint64_t u,struct order_post *post,const struct order_progress *progress){
+  if(!epochs || epochs>MESH_EPOCHS || !segments)return 0;
   if(post->epochs!=epochs || post->unit!=u){
+    const struct mesh_epoch *last=x->epoch+epochs-1;
+    if(post->epochs!=epochs)post->queue=order_qp(last,order_cable(last,port),lane);
     post->epochs=epochs;post->unit=u;post->segments=0;
-    post->piece=order_unit_piece(x,epochs,d,port,lane,u);
+    if(progress->epochs==epochs && post->queue<progress->count && u>=progress->queue[post->queue].first_unit)
+      post->piece=last->first[d]+post->queue+(u-progress->queue[post->queue].first_unit)*progress->count;
+    else post->piece=order_unit_piece(x,epochs,d,port,lane,u);
   }
   if(post->piece>=atomic_load_explicit(&x->limit[d],memory_order_acquire))return 0;
   if(post->segments!=segments){
@@ -249,36 +248,65 @@ static inline int order_qp_cable(const struct mesh_epoch *e,uint32_t q,uint32_t 
     q-=round;
   }
 }
-/* whether piece n of direction d is done: the queue pair it is on (its epoch's: the latest whose first[d] is at most
-   n) holding more units done (`done`, in the last epoch's cable and lane order) than its unit's index there */
-static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int d,uint64_t n,const uint64_t *done){
-  if(!epochs)return 0;
-  if(epochs>MESH_EPOCHS)epochs=MESH_EPOCHS;
-  uint32_t e=epochs;
-  while(e>1 && x->epoch[e-1].first[d]>n)e--;
-  const struct mesh_epoch *at=x->epoch+e-1;
-  const uint64_t Q=order_qps(at);
-  uint32_t c,lane;
-  if(n<at->first[d] || !Q || !order_qp_cable(at,(uint32_t)((n-at->first[d])%Q),&c,&lane))return 0;
-  const uint32_t port=at->cable[c].port;
-  /* its unit: those before it in this epoch, then every unit of it in the epochs before */
-  uint64_t u=(n-at->first[d])/Q;
-  for(uint32_t k=0;k+1<e;k++){
-    const struct mesh_epoch *before=x->epoch+k;
-    const uint32_t b=order_cable(before,port),q=b==UINT32_MAX?UINT32_MAX:order_qp(before,b,lane);
-    if(q==UINT32_MAX)continue;
-    const uint64_t B=order_qps(before),first=before->first[d],next=x->epoch[k+1].first[d];
-    u+=next>first+q?(next-first-q+B-1)/B:0;
-  }
+static inline void order_project(struct hdr *m,const struct mesh_node *x,uint32_t epochs,int d,uint64_t generation,
+                                 struct order_progress *p){
   const struct mesh_epoch *last=x->epoch+epochs-1;
-  for(uint32_t k=0,i=0;i<last->cables && i<MESH_PORTS;k+=last->cable[i++].lanes)
-    if(last->cable[i].port==port)return lane<last->cable[i].lanes && done[k+lane]>u;
-  return 0;
+  p->generation=generation;p->epochs=epochs;p->count=order_qps(last);p->through=ORDER_NONE;p->latest=0;
+  if(p->count>2*MESH_STREAMS){p->count=0;return;}
+  for(uint32_t c=0;c<last->cables && c<MESH_PORTS;c++){
+    const uint32_t port=last->cable[c].port;
+    if(port>=MESH_PORTS || last->cable[c].lanes>2*MESH_LINK_STREAMS){p->count=0;return;}
+    for(uint32_t lane=0;lane<last->cable[c].lanes;lane++){
+      const uint32_t q=order_qp(last,c,lane);
+      struct order_completed_lane *a=p->queue+q;
+      a->counter=&mesh_lanes_at(m,port*MESH_LINK_STREAMS+lane/2)->posts[d].done[lane&1];
+      a->port=port;a->lane=lane;a->done=ORDER_NONE;a->first_unit=0;
+      for(uint32_t e=0;e+1<epochs;e++){
+        const struct mesh_epoch *before=x->epoch+e;
+        const uint32_t b=order_cable(before,port),r=order_qp(before,b,lane);
+        if(r==UINT32_MAX)continue;
+        const uint64_t first=before->first[d]+r,stop=x->epoch[e+1].first[d],stride=order_qps(before);
+        if(stop>first)a->first_unit+=1+(stop-1-first)/stride;
+      }
+    }
+  }
+}
+static inline int order_progress_read(const struct mesh_node *x,int d,struct order_progress *p,int changed){
+  const uint64_t boundary=x->epoch[p->epochs-1].first[d];
+  int prefix_moved=changed;
+  for(uint32_t q=0;q<p->count;q++){
+    struct order_completed_lane *a=p->queue+q;
+    const uint64_t done=atomic_load_explicit(a->counter,memory_order_acquire);
+    if(done==a->done)continue;
+    changed=1;prefix_moved|=a->next==p->through;a->done=done;
+    a->next=done>=a->first_unit?boundary+q+(done-a->first_unit)*p->count:
+      order_unit_piece(x,p->epochs,d,a->port,a->lane,done);
+    if(done){
+      const uint64_t last=done>a->first_unit?a->next-p->count:order_unit_piece(x,p->epochs,d,a->port,a->lane,done-1);
+      if(last!=ORDER_NONE && last+1>p->latest)p->latest=last+1;
+    }
+  }
+  if(prefix_moved){
+    p->through=ORDER_NONE;
+    for(uint32_t q=0;q<p->count;q++)if(p->queue[q].next<p->through)p->through=p->queue[q].next;
+  }
+  return changed;
+}
+static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int d,uint64_t n,const struct order_progress *p){
+  const struct mesh_epoch *last=x->epoch+epochs-1;
+  if(n>=last->first[d])return n<p->queue[(n-last->first[d])%p->count].next;
+  uint32_t e=epochs-1,c,lane;
+  while(e && n<x->epoch[e-1].first[d])e--;
+  if(!e)return 0;
+  const struct mesh_epoch *old=x->epoch+e-1;
+  const uint32_t stride=order_qps(old);
+  if(!stride || !order_qp_cable(old,(uint32_t)((n-old->first[d])%stride),&c,&lane))return 0;
+  const uint32_t q=order_qp(last,order_cable(last,old->cable[c].port),lane);
+  return q!=UINT32_MAX && n<p->queue[q].next;
 }
 /* The done words of direction d raised, by every process that serves the order (each port's child, on every pass in
    which some queue pair's done count moved; tests/wire.h's one step), whichever sees a completion first: those of
-   every transfer wholly below the pieces every queue pair of the last epoch has done (`done`, a count each in the
-   epoch's cable and lane order: order_done_through), in the pieces' order, with the piece below which all are raised
+   every transfer wholly below the pieces every queue pair of the last epoch has done (the least next piece in order_progress), in the pieces' order, with the piece below which all are raised
    published (`raised`); and, word by word, each word's own transfers past that prefix that are wholly done, in their
    order (a cursor a word, struct order_raiser: a word several transfers count on rises only as their prefix, and a
    transfer not yet done holds back its own word alone, never another's: one micro-batch's transfers never wait on
@@ -290,7 +318,8 @@ static inline int order_piece_done(const struct mesh_node *x,uint32_t epochs,int
 #define ORDER_SCAN 256u
 struct order_cursor { uint64_t word,at,hint; };
 struct order_raiser {
-  uint64_t seen,hint,segments,generation;
+  uint64_t hint,segments,generation;
+  struct order_progress progress;
   size_t words,capacity;
   struct order_cursor *cursor;
   int pending;
@@ -352,31 +381,27 @@ static inline int order_words(const struct hdr *m,const struct mesh_node *x,uint
   r->segments=segments;r->generation=generation;
   return 0;
 }
-static inline int order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,const uint64_t *done,
-                                    struct order_raiser *r){
-  /* nothing to raise where no queue pair has done more since the last pass and no segment was declared */
+static inline int order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,struct order_raiser *r){
   const uint64_t generation=atomic_load_explicit(&x->generation,memory_order_acquire);
-  uint64_t sum=segments+(generation<<40);
-  const struct mesh_epoch *final=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
-  for(uint32_t c=0,k=0;c<final->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<final->cable[c].lanes;l++,k++)sum+=done[k]*(k+1);
-  if(sum==r->seen && !r->pending)return 0;
-  r->seen=sum;r->pending=0;
+  struct order_progress *p=&r->progress;
+  const int rebuild=p->epochs!=epochs || p->generation!=generation;
+  if(!epochs || epochs>MESH_EPOCHS)return 0;
+  if(rebuild)order_project(m,x,epochs,d,generation,p);
+  if(!p->count || (!order_progress_read(x,d,p,rebuild) && segments==p->segments && !r->pending))return 0;
+  p->segments=segments;r->pending=0;
   uint64_t raised=atomic_load_explicit(&x->raised[d],memory_order_acquire);
-  const uint64_t through=order_done_through(x,epochs,d,done);
+  const uint64_t through=p->through;
   if(through>raised){
     const uint64_t reached=order_raise_through(m,x,segments,d,raised,through,&r->hint);
     if(reached>raised)order_raised_to(&x->raised[d],raised=reached);
   }
-  /* past the latest piece any queue pair has done, no transfer is whole: each cursor stops there */
-  uint64_t latest=0;
-  for(uint32_t c=0,k=0;c<final->cables && c<MESH_PORTS;c++)for(uint32_t l=0;l<final->cable[c].lanes;l++,k++)
-    if(done[k]){const uint64_t p=order_unit_piece(x,epochs,d,final->cable[c].port,l,done[k]-1);if(p!=ORDER_NONE && p+1>latest)latest=p+1;}
+  const uint64_t latest=p->latest;
   if(latest<=raised)return 0;
   if(segments!=r->segments || generation!=r->generation){
     const int error=order_words(m,x,segments,generation,d,raised,r);
     if(error){r->pending=1;return error;}
   }
-  const uint64_t Q=order_qps(final),boundary=final->first[d];
+  const uint64_t Q=p->count,boundary=x->epoch[epochs-1].first[d];
   for(size_t w=0;w<r->capacity;w++){
     struct order_cursor *c=r->cursor+w;
     if(!c->word)continue;
@@ -393,8 +418,8 @@ static inline int order_raise_pass(struct hdr *m,struct mesh_node *x,uint32_t ep
         /* each queue pair's pieces are done in their order, so a transfer is done where the last piece of it on each
            queue pair is: its last Q pieces in the last epoch, and every piece of it before that epoch */
         int whole=1;
-        for(uint64_t p=last+1;whole && p>n && p>boundary && last+1-p<Q;p--)whole=order_piece_done(x,epochs,d,p-1,done);
-        for(uint64_t p=n;whole && p<boundary && p<=last;p++)whole=order_piece_done(x,epochs,d,p,done);
+        for(uint64_t p=last+1;whole && p>n && p>boundary && last+1-p<Q;p--)whole=order_piece_done(x,epochs,d,p-1,&r->progress);
+        for(uint64_t p=n;whole && p<boundary && p<=last;p++)whole=order_piece_done(x,epochs,d,p,&r->progress);
         if(!whole)break;
         order_raise(m,c->word,at.t->done_value+at.execution*at.t->done_step);
       }
