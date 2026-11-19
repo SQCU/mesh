@@ -141,6 +141,7 @@ clean:
 check: all
 	mkdir -p .build/tests
 	cc -O2 $(WARN) -o .build/tests/order tests/order.c -L.build -lmesh -Wl,-rpath,$(CURDIR)/.build && .build/tests/order
+	cc -std=c11 -O2 $(WARN) -I . -o .build/tests/scatter tests/scatter.c mesh-collective.c mesh-fabric.c mesh-routed.c -lm && .build/tests/scatter
 	tests/sim-two-nodes.sh
 .PHONY: check
 

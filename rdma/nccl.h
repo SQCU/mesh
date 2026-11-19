@@ -944,7 +944,14 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId com
    packing's flows); an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
    reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part one entry a
    hop, a relay sending each page on as it lands (mesh-plan.h mesh_compile). */
-typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1, ncclMeshTreesShortest = 2 } ncclMeshTrees;
+typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1, ncclMeshTreesShortest = 2, ncclMeshTreesScheduled = 3 } ncclMeshTrees;
+/* ncclMeshTreesScheduled: no trees.  Each call of the form (an all-gather or a broadcast) is the scatter its geometry
+   declares (mesh-plan.h mesh_scatter_schedule: every contributor's segment, or the root's operand, to every recipient
+   but itself, the communicator's roles), scheduled where the call is compiled (a declared program's capture, or the
+   call itself), from the communicator's map (every cable between two ranks a link, a relay-only rank's among them) and
+   its measured rates (ncclMeshCommLinkRates; without them a cable's bandwidth as the bridges' records give it, no
+   latency): the piece and the schedule of least completion over every link both ways, every rank a store and forward
+   relay; the schedule's sends the program's moves, a piece a part, in their start order. */
 typedef struct {
   int collective;
   int root;
@@ -976,6 +983,20 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int c
    in neither is relay-only: it supplies and receives nothing, and the trees may route through it, its moves COPY and
    SEND alone where a fused crossing lowers.  Every rank passes the same roles at the same point between its groups. */
 ncclResult_t ncclMeshCommMembers(ncclComm_t comm, const uint64_t* contributors, const uint64_t* recipients);
+/* The measured rates of the communicator's links, its configuration operand as its forms are: `count` directed pairs of
+   ranks, each its pair's channel one way (its cables together): bytes a second with the reverse idle (`alone`) and busy
+   (`duplex`), the ns from a piece's last byte to its landing (`latency`) and the ns a piece occupies the channel
+   beyond its bytes (`piece`), as a probe measured them (the model repository's tests/link_probe.py over relay_cost).  A
+   pair's cables share its rates evenly.  Every rank passes the same rates at the same point between its groups; a pair
+   none names takes its cables' bandwidth from the map.  The scheduled form (ncclMeshTreesScheduled) reads them. */
+typedef struct { int from, to; double alone, duplex, latency, piece; } ncclMeshLinkRate;
+ncclResult_t ncclMeshCommLinkRates(ncclComm_t comm, const ncclMeshLinkRate* rates, int count);
+/* The communicator's last scheduled call (ncclMeshTreesScheduled): its solve's ns, its schedule's completion and its
+   lower bound (ns, the model's), its piece bytes and its sends; ncclInvalidUsage where none was scheduled. */
+typedef struct { uint64_t solve_ns, piece, sends, via_relays; double makespan_ns, bound_ns; } ncclMeshScheduleStats;
+ncclResult_t ncclMeshCommSchedule(ncclComm_t comm, ncclMeshScheduleStats* stats);
+/* the node (bridge number) of each of the communicator's ranks, nodes[rank] (room nranks) */
+ncclResult_t ncclMeshCommNodes(ncclComm_t comm, uint32_t* nodes, int room);
 /* design/whole-function.md#interface */
 struct mesh_fabric;
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);

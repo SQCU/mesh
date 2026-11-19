@@ -344,6 +344,31 @@ struct mesh_node_health { uint32_t node; uint64_t region,memory; char model[MESH
    written), or -errno where the bridge is unreachable. */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
 
+/* The scatter: the general page transfer every collective's movement is an instance of.  Each group's `bytes` at
+   offset `first` of its source node's operand go to every node of `to` (a bit a node, at most 64 nodes): an all-gather
+   a group a contributor, its segment to every other recipient; a broadcast one group, the root's operand; a counted
+   exchange a group a pair.  Pieces of a group cross the map's directed links; any node may hold a piece it received
+   and send it on (store and forward a piece), so a piece bound for several destinations is one multicast.  A link is
+   one cable one way: `from` and `to` its nodes, `alone` and `duplex` its rate in bytes a ns one way with its reverse
+   idle and busy, `latency` the ns from a piece's last byte sent to its landing, `piece` the ns of occupancy a piece adds
+   (the post); a pair's parallel cables are parallel links.
+   mesh_scatter_schedule chooses the piece (`page` x 2^k bytes, k 0..6, a group smaller than a piece one piece) and the
+   schedule of minimum completion: each piece in turn (every group's k-th piece, then the k+1-th), each of its
+   destinations, farthest first, given its earliest landing over every link and every node holding it, the links'
+   pieces taken in the order they are scheduled (a link carries one piece at a time, as a channel's entries go in their
+   order), a piece's time on a link its bytes at the link's rate (duplex where its reverse is busy at its start) plus
+   `piece`, its landing `latency` after.  Exact integer-free arithmetic of IEEE doubles, no contraction, so every node
+   that gives the same operands computes the same schedule.  Writes *sends (malloc'd, the caller frees; its order the
+   sends' starts) and *count, *piece_bytes, *makespan (ns from every source's first byte to the last landing) and *bound
+   (a lower bound on any schedule's completion: each destination's bytes over its in-links' summed rate after the
+   nearest source's latency, and each source's bytes over its out-links'); 0, EINVAL, ENOMEM.  `link` 0..links-1. */
+struct mesh_scatter_link { uint32_t from,to; double alone,duplex,latency,piece; };
+struct mesh_scatter_group { uint32_t source; uint64_t first,bytes,to; };
+struct mesh_scatter_send { uint32_t link,group; uint64_t first,bytes; double start,end,arrive; };
+int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
+                          uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,uint32_t *count,uint64_t *piece_bytes,
+                          double *makespan,double *bound);
+
 #ifdef __cplusplus
 }
 #endif

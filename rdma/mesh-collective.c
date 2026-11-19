@@ -1055,3 +1055,138 @@ uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,i
   }
   return at;
 }
+
+/* -- the scatter (mesh-plan.h mesh_scatter_schedule) ------------------------------------------------------------- */
+
+/* a link's time for `bytes` starting at `start`: duplex where a reverse link is busy then */
+static double mesh_scatter_span(const struct mesh_scatter_link *link,uint32_t links,const double *free_at,uint32_t l,double start,uint64_t bytes){
+  int busy=0;
+  for(uint32_t r=0;r<links && !busy;r++)busy=link[r].from==link[l].to && link[r].to==link[l].from && free_at[r]>start;
+  const double rate=busy?link[l].duplex:link[l].alone;
+  return (double)bytes/rate+link[l].piece;
+}
+struct mesh_scatter_run { struct mesh_scatter_send *send; uint32_t count,room; double makespan; };
+static int mesh_scatter_put(struct mesh_scatter_run *run,struct mesh_scatter_send s){
+  if(run->count==run->room){
+    const uint32_t room=run->room?2*run->room:256;
+    struct mesh_scatter_send *grown=realloc(run->send,(size_t)room*sizeof *grown);
+    if(!grown)return ENOMEM;
+    run->send=grown;run->room=room;
+  }
+  run->send[run->count++]=s;
+  return 0;
+}
+/* one piece size's schedule (mesh_scatter_schedule's greedy), into run */
+static int mesh_scatter_at(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
+                           uint32_t groups,uint64_t q,struct mesh_scatter_run *run){
+  uint64_t most=0,total=0;
+  uint64_t *pieces=malloc(((size_t)groups+1)*sizeof *pieces),*at=malloc(((size_t)groups+1)*sizeof *at);
+  if(!pieces || !at){free(pieces);free(at);return ENOMEM;}
+  for(uint32_t g=0;g<groups;g++){
+    pieces[g]=group[g].bytes?(group[g].bytes+q-1)/q:0;
+    at[g]=total;total+=pieces[g];
+    if(pieces[g]>most)most=pieces[g];
+  }
+  double *hold=malloc(((size_t)total*nodes+1)*sizeof *hold),*free_at=calloc((size_t)links+1,sizeof *free_at),*dist=malloc(((size_t)nodes+1)*sizeof *dist);
+  uint32_t *via=malloc(((size_t)nodes+1)*sizeof *via),*path=malloc(((size_t)nodes+1)*sizeof *path);
+  unsigned char *done=malloc((size_t)nodes+1);
+  int error=hold && free_at && dist && via && path && done?0:ENOMEM;
+  for(size_t k=0;!error && k<(size_t)total*nodes;k++)hold[k]=INFINITY;
+  run->makespan=0;
+  for(uint64_t k=0;!error && k<most;k++)for(uint32_t g=0;!error && g<groups;g++){
+    if(k>=pieces[g])continue;
+    double *h=hold+(at[g]+k)*nodes;
+    const uint64_t first=group[g].first+k*q,bytes=k+1<pieces[g]?q:group[g].bytes-k*q;
+    h[group[g].source]=0;
+    for(;;){
+      /* every node's earliest holding of the piece over the links as they stand (Dijkstra: a link's start the later
+         of its tail's holding and its last piece's end, so a later start never lands earlier) */
+      for(uint32_t v=0;v<nodes;v++){dist[v]=h[v];via[v]=UINT32_MAX;done[v]=0;}
+      for(;;){
+        uint32_t u=nodes;
+        for(uint32_t v=0;v<nodes;v++)if(!done[v] && dist[v]<INFINITY && (u==nodes || dist[v]<dist[u]))u=v;
+        if(u==nodes)break;
+        done[u]=1;
+        for(uint32_t l=0;l<links;l++){
+          if(link[l].from!=u || done[link[l].to])continue;
+          const double start=dist[u]>free_at[l]?dist[u]:free_at[l];
+          const double arrive=start+mesh_scatter_span(link,links,free_at,l,start,bytes)+link[l].latency;
+          if(arrive<dist[link[l].to]){dist[link[l].to]=arrive;via[link[l].to]=l;}
+        }
+      }
+      /* the destination still without it whose earliest landing is the latest (farthest first) */
+      uint32_t d=nodes;
+      for(uint32_t v=0;v<nodes;v++){
+        if(v>=64 || !(group[g].to>>v&1) || h[v]<INFINITY)continue;
+        if(d==nodes || dist[v]>dist[d])d=v;
+      }
+      if(d==nodes)break;
+      if(!(dist[d]<INFINITY)){error=EINVAL;break;}
+      uint32_t hops=0;
+      for(uint32_t v=d;via[v]!=UINT32_MAX;v=link[via[v]].from)path[hops++]=via[v];
+      for(uint32_t i=hops;i-->0 && !error;){
+        const uint32_t l=path[i],u=link[l].from;
+        const double start=h[u]>free_at[l]?h[u]:free_at[l];
+        const double end=start+mesh_scatter_span(link,links,free_at,l,start,bytes);
+        free_at[l]=end;h[link[l].to]=end+link[l].latency;
+        if(h[link[l].to]>run->makespan)run->makespan=h[link[l].to];
+        error=mesh_scatter_put(run,(struct mesh_scatter_send){l,g,first,bytes,start,end,h[link[l].to]});
+      }
+    }
+  }
+  free(pieces);free(at);free(hold);free(free_at);free(dist);free(via);free(path);free(done);
+  return error;
+}
+static int mesh_scatter_order(const void *a,const void *b){
+  const struct mesh_scatter_send *x=a,*y=b;
+  if(x->start!=y->start)return x->start<y->start?-1:1;
+  if(x->link!=y->link)return x->link<y->link?-1:1;
+  return (x->first>y->first)-(x->first<y->first);
+}
+int mesh_scatter_schedule(uint32_t nodes,const struct mesh_scatter_link *link,uint32_t links,const struct mesh_scatter_group *group,
+                          uint32_t groups,uint64_t page,struct mesh_scatter_send **sends,uint32_t *count,uint64_t *piece_bytes,
+                          double *makespan,double *bound){
+  if(!nodes || nodes>64 || (links && !link) || (groups && !group) || !page || !sends || !count)return EINVAL;
+  for(uint32_t l=0;l<links;l++)
+    if(link[l].from>=nodes || link[l].to>=nodes || link[l].from==link[l].to || !(link[l].alone>0) || !(link[l].duplex>0) ||
+       !(link[l].latency>=0) || !(link[l].piece>=0))return EINVAL;
+  for(uint32_t g=0;g<groups;g++)if(group[g].source>=nodes)return EINVAL;
+  uint64_t largest=0;
+  for(uint32_t g=0;g<groups;g++)if(group[g].bytes>largest)largest=group[g].bytes;
+  struct mesh_scatter_run best={0};
+  uint64_t chosen=page;
+  best.makespan=INFINITY;
+  for(uint32_t k=0;k<=6;k++){
+    const uint64_t q=page<<k;
+    if(k && (page<<(k-1))>=largest)break;   /* the piece before already held the largest group whole */
+    struct mesh_scatter_run run={0};
+    const int error=mesh_scatter_at(nodes,link,links,group,groups,q,&run);
+    if(error){free(run.send);free(best.send);return error;}
+    if(run.makespan<best.makespan){free(best.send);best=run;chosen=q;}
+    else free(run.send);
+  }
+  qsort(best.send,best.count,sizeof *best.send,mesh_scatter_order);
+  /* the bound: every destination's bytes over its in-links' summed rate after its nearest in-link's latency; every
+     source's over its out-links' */
+  double lower=0;
+  for(uint32_t v=0;v<nodes;v++){
+    double in=0,out=0,nearest_in=INFINITY,nearest_out=INFINITY;
+    uint64_t receive=0,send=0;
+    for(uint32_t l=0;l<links;l++){
+      const double hop=link[l].latency+link[l].piece;
+      if(link[l].to==v){in+=link[l].alone;if(hop<nearest_in)nearest_in=hop;}
+      if(link[l].from==v){out+=link[l].alone;if(hop<nearest_out)nearest_out=hop;}
+    }
+    for(uint32_t g=0;g<groups;g++){
+      if(group[g].source!=v && v<64 && group[g].to>>v&1)receive+=group[g].bytes;
+      if(group[g].source==v && group[g].to & ~(1ull<<v))send+=group[g].bytes;
+    }
+    if(receive && in>0 && nearest_in+(double)receive/in>lower)lower=nearest_in+(double)receive/in;
+    if(send && out>0 && nearest_out+(double)send/out>lower)lower=nearest_out+(double)send/out;
+  }
+  *sends=best.send;*count=best.count;
+  if(piece_bytes)*piece_bytes=chosen;
+  if(makespan)*makespan=best.makespan;
+  if(bound)*bound=lower;
+  return 0;
+}

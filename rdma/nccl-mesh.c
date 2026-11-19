@@ -238,7 +238,7 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
    call: ncclScalarDevice), or the partials merge's row of `unit` elements */
 struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t unit; const void *at; };
 /* a compiled collective the communicator runs for the calls it fits (ncclMeshProgram), its own copy */
-struct entry { uint64_t below; struct mesh_program program; struct mesh_trees trees; int whole; };
+struct entry { uint64_t below; struct mesh_program program; struct mesh_trees trees; int whole, scheduled; };
 
 /* a channel's entry, as the library lays it: a SEND's or a landing's span table (`spans`, `units` of them, region
    offsets), its gate word (0: the channel's `ready`) and base (mesh.h struct mesh_crossing).  A channel's view: its
@@ -302,6 +302,10 @@ struct ncclComm {
   struct mesh_link_map map;
   /* the operand roles every collective on it takes (ncclMeshCommMembers; NULL every rank) */
   uint64_t *contributors, *recipients;
+  /* its links' measured rates (ncclMeshCommLinkRates) and its last scheduled call's stats (ncclMeshCommSchedule) */
+  ncclMeshLinkRate *rates;
+  int nrates, scheduled;
+  ncclMeshScheduleStats schedule;
   struct mesh_fabric fabric;
   uint32_t *endpoint;
   struct mesh_paths *writes;
@@ -435,7 +439,7 @@ static void comm_free(struct ncclComm *comm) {
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
   pthread_mutex_destroy(&comm->prepare);
-  free(comm->members); free(comm->forms); free(comm->contributors); free(comm->recipients);
+  free(comm->members); free(comm->forms); free(comm->contributors); free(comm->recipients); free(comm->rates);
   free(comm);
 }
 
@@ -491,6 +495,16 @@ static int root_carried(const struct mesh_trees *trees, uint32_t r) {
    of whose trees takes share 0 has no tree to carry its segment: the form fails there as a value */
 static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees *along, const ncclMeshForm *x) {
   const uint32_t n = (uint32_t)comm->nranks;
+  if (x->trees == ncclMeshTreesScheduled) {
+    /* no program ahead: each call's scatter is scheduled where it is compiled (collective_steps, scheduled_program) */
+    for (uint32_t r = 0; r < (x->collective == MESH_BROADCAST && x->root < 0 ? n : 1); r++) {
+      struct entry *e = comm->entries + comm->programs++;
+      *e = (struct entry){.below = x->below, .scheduled = 1};
+      e->program = (struct mesh_program){.what = (uint32_t)x->collective, .root = x->collective == MESH_BROADCAST ? (x->root < 0 ? r : (uint32_t)x->root) : 0,
+                                         .nodes = n};
+    }
+    return ncclSuccess;
+  }
   struct mesh_trees packed = {n, 0, NULL, NULL, NULL}, weighed = {n, 0, NULL, NULL, NULL};
   const struct mesh_trees *trees = along;
   ncclResult_t result = ncclSuccess;
@@ -620,6 +634,7 @@ static ncclResult_t comm_compile(struct ncclComm *comm) {
   ncclResult_t result = comm_routes(comm);
   for (uint32_t e = 0; !result && e < comm->programs; e++) {
     const struct mesh_program *x = &comm->entries[e].program;
+    if (comm->entries[e].scheduled) continue;   /* its program made at each call (scheduled_program) */
     for (uint32_t r = 0; !result && r < x->nodes; r++)
       for (uint32_t m = x->first[r]; !result && m < x->first[r + 1]; m++)
         if (x->move[m].peer >= (uint32_t)comm->nranks || x->move[m].peer == r)
@@ -658,7 +673,8 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int c
     int shared = !x->shares || x->most;
     for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] >= 0 && isfinite(x->shares[k]);
     if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !shared ||
-        (x->trees != ncclMeshTreesOwn && x->trees != ncclMeshTreesPacked && x->trees != ncclMeshTreesShortest) ||
+        (x->trees != ncclMeshTreesOwn && x->trees != ncclMeshTreesPacked && x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesScheduled) ||
+        (x->trees == ncclMeshTreesScheduled && x->collective != MESH_ALLGATHER && x->collective != MESH_BROADCAST) ||
         (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
       return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
                   "(its own, packed with eps > 0 and most > 0, or shortest), shares of 0 or more (most of them a root) or none", f);
@@ -698,6 +714,37 @@ ncclResult_t ncclMeshCommMembers(ncclComm_t comm, const uint64_t *contributors, 
   free(comm->contributors); free(comm->recipients);
   comm->contributors = c; comm->recipients = r;
   pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
+
+/* nccl.h ncclMeshCommLinkRates: the rates checked and copied, read by every scheduled call compiled after (its next
+   group's) */
+ncclResult_t ncclMeshCommLinkRates(ncclComm_t comm, const ncclMeshLinkRate *rates, int count) {
+  if (!comm || count < 0 || (count && !rates)) return fail(ncclInvalidArgument, "ncclMeshCommLinkRates's arguments");
+  for (int r = 0; r < count; r++)
+    if (rates[r].from < 0 || rates[r].to < 0 || rates[r].from >= comm->nranks || rates[r].to >= comm->nranks || rates[r].from == rates[r].to ||
+        !(rates[r].alone > 0) || !(rates[r].duplex > 0) || !(rates[r].latency >= 0) || !(rates[r].piece >= 0))
+      return fail(ncclInvalidArgument, "link rate %d: two distinct ranks, rates above 0, latency and piece 0 or more", r);
+  ncclMeshLinkRate *made = count ? malloc((size_t)count * sizeof *made) : NULL;
+  if (count && !made) return fail(ncclSystemError, "out of memory");
+  if (count) memcpy(made, rates, (size_t)count * sizeof *made);
+  pthread_mutex_lock(&group_lock);
+  free(comm->rates); comm->rates = made; comm->nrates = count;
+  routes_free(comm, 0);
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
+ncclResult_t ncclMeshCommSchedule(ncclComm_t comm, ncclMeshScheduleStats *stats) {
+  if (!comm || !stats) return fail(ncclInvalidArgument, "ncclMeshCommSchedule's arguments");
+  pthread_mutex_lock(&group_lock);
+  const int had = comm->scheduled;
+  if (had) *stats = comm->schedule;
+  pthread_mutex_unlock(&group_lock);
+  return had ? ncclSuccess : fail(ncclInvalidUsage, "communicator %s scheduled no call", comm->name);
+}
+ncclResult_t ncclMeshCommNodes(ncclComm_t comm, uint32_t *nodes, int room) {
+  if (!comm || !nodes || room < comm->nranks) return fail(ncclInvalidArgument, "ncclMeshCommNodes's arguments");
+  memcpy(nodes, comm->members, (size_t)comm->nranks * sizeof *nodes);
   return ncclSuccess;
 }
 
@@ -2346,12 +2393,158 @@ static ncclResult_t counted_steps(struct call *c) {
 /* Reuse the selected form's exact tree weights and phase structure. A caller's
    explicit program already specifies its contribution graph and is lowered
    unchanged; generated forms are specialized to the declared operand roles. */
+/* a scheduled form's call (nccl.h ncclMeshTreesScheduled): its scatter (an all-gather's every contributor's segment, a
+   broadcast's root's operand, to every recipient but its source) scheduled over the communicator's map's links between
+   ranks, each cable a link each way at its pair's measured rates shared by its cables (ncclMeshCommLinkRates), else its
+   bandwidth as the records give it (mesh-plan.h mesh_scatter_schedule); the schedule made the call's program: a piece a
+   part of its segment (weighed by its bytes, so the cut gives it its bytes), a send a SEND at its link's tail and a COPY
+   into the operand at its head, its round its place in the sends' start order */
+static int scheduled_part_order(const void *a, const void *b) {
+  const uint64_t *x = a, *y = b;
+  return x[0] != y[0] ? (x[0] < y[0] ? -1 : 1) : (x[1] > y[1]) - (x[1] < y[1]);
+}
+struct scheduled_move { uint32_t rank, round, receive; struct mesh_move move; };
+static int scheduled_move_order(const void *a, const void *b) {
+  const struct scheduled_move *x = a, *y = b;
+  if (x->rank != y->rank) return x->rank < y->rank ? -1 : 1;
+  if (x->round != y->round) return x->round < y->round ? -1 : 1;
+  return (x->receive > y->receive) - (x->receive < y->receive);
+}
+static ncclResult_t scheduled_program(struct call *c, const struct entry *entry, struct mesh_operand operand, const uint64_t *cut,
+                                      struct mesh_program *made) {
+  struct ncclComm *comm = c->comm;
+  const uint32_t n = (uint32_t)comm->nranks, what = entry->program.what;
+  if (n > 64) return fail(ncclInvalidUsage, "the scheduled form takes at most 64 ranks");
+  const struct mesh_link_map *map = &comm->map;
+  struct mesh_scatter_link *link = calloc(2 * (size_t)map->links + 1, sizeof *link);
+  struct mesh_scatter_group *group = calloc((size_t)n + 1, sizeof *group);
+  if (!link || !group) { free(link); free(group); return fail(ncclSystemError, "out of memory"); }
+  uint32_t links = 0, groups = 0;
+  for (uint32_t l = 0; l < map->links; l++) {
+    const uint32_t a = map->link[l][0], b = map->link[l][1];
+    if (a >= n || b >= n) continue;   /* a relay node no rank holds: no one forwards there (mesh_link_map_ranks) */
+    uint32_t parallel = 0;
+    for (uint32_t k = 0; k < map->links; k++)
+      parallel += (map->link[k][0] == a && map->link[k][1] == b) || (map->link[k][0] == b && map->link[k][1] == a);
+    for (int w = 0; w < 2; w++) {
+      const uint32_t from = w ? b : a, to = w ? a : b;
+      struct mesh_scatter_link x = {from, to, (double)map->bandwidth[l] / 8e9, (double)map->bandwidth[l] / 8e9, 0, 0};
+      for (int r = 0; r < comm->nrates; r++)
+        if ((uint32_t)comm->rates[r].from == from && (uint32_t)comm->rates[r].to == to)
+          x = (struct mesh_scatter_link){from, to, comm->rates[r].alone / 1e9 / parallel, comm->rates[r].duplex / 1e9 / parallel,
+                                         comm->rates[r].latency, comm->rates[r].piece};
+      link[links++] = x;
+    }
+  }
+  const size_t z = operand.element_bytes;
+  const uint64_t *recipients = c->recipients;
+  uint64_t to_all = 0;
+  for (uint32_t r = 0; r < n; r++) if (!recipients || (recipients[r / 64] >> (r % 64) & 1)) to_all |= 1ull << r;
+  if (what == MESH_ALLGATHER) {
+    uint64_t at = 0;
+    for (uint32_t r = 0; r < n; r++) {
+      const uint64_t length = cut ? cut[r] : operand.elements / n + (r < operand.elements % n);
+      if (length) group[groups++] = (struct mesh_scatter_group){r, at * z, length * z, to_all & ~(1ull << r)};
+      at += length;
+    }
+  } else if (what == MESH_BROADCAST) {
+    group[groups++] = (struct mesh_scatter_group){entry->program.root, 0, operand.elements * z, to_all & ~(1ull << entry->program.root)};
+  } else {
+    free(link); free(group);
+    return fail(ncclInvalidUsage, "the scheduled form takes the all-gather and the broadcast");
+  }
+  struct mesh_scatter_send *send = NULL;
+  uint32_t count = 0;
+  uint64_t piece = 0;
+  double makespan = 0, bound = 0;
+  const uint64_t t0 = mesh_clock_ns();
+  const int status = mesh_scatter_schedule(n, link, links, group, groups, comm->page, &send, &count, &piece, &makespan, &bound);
+  const uint64_t solve = mesh_clock_ns() - t0;
+  if (status) { free(link); free(group); return fail(status == ENOMEM ? ncclSystemError : ncclInvalidUsage, "the scatter's schedule: %s", strerror(status)); }
+  /* the parts: every piece a send names, in each segment's order (an all-gather's segment its source rank's; a
+     broadcast's one), each weighed by its bytes */
+  uint64_t (*part)[3] = calloc((size_t)count + 1, sizeof *part);
+  uint32_t parts = 0;
+  for (uint32_t k = 0; part && k < count; k++) {
+    const uint64_t seg = what == MESH_ALLGATHER ? group[send[k].group].source : 0;
+    uint32_t p = 0;
+    while (p < parts && !(part[p][0] == seg && part[p][1] == send[k].first)) p++;
+    if (p == parts) { part[parts][0] = seg; part[parts][1] = send[k].first; part[parts][2] = send[k].bytes; parts++; }
+  }
+  uint32_t *segment = calloc((size_t)parts + 1, sizeof *segment), *first = calloc((size_t)n + 1, sizeof *first);
+  double *weight = calloc((size_t)parts + 1, sizeof *weight);
+  struct scheduled_move *ordered = calloc(2 * (size_t)count + 1, sizeof *ordered);
+  struct mesh_move *move = calloc(2 * (size_t)count + 1, sizeof *move);
+  ncclResult_t result = ncclSuccess;
+  uint64_t relayed = 0;
+  uint32_t moves = 0;
+  if (!part || !segment || !first || !weight || !ordered || !move) result = fail(ncclSystemError, "out of memory");
+  if (!result) {
+    qsort(part, parts, sizeof *part, scheduled_part_order);
+    for (uint32_t p = 0; p < parts; p++) { segment[p] = (uint32_t)part[p][0]; weight[p] = log((double)part[p][2]); }
+    /* each send's part, and the first round a node sends the piece on (its holding read from there) */
+    uint32_t *part_of = calloc((size_t)count + 1, sizeof *part_of), *onward = calloc((size_t)count + 1, sizeof *onward);
+    uint32_t (*open)[5] = calloc((size_t)n * n + 1, sizeof *open);   /* a pair's open run: its group + 1, first part, parts, least onward round, last round */
+    if (!part_of || !onward || !open) result = fail(ncclSystemError, "out of memory");
+    for (uint32_t k = 0; !result && k < count; k++) {
+      const uint64_t seg = what == MESH_ALLGATHER ? group[send[k].group].source : 0;
+      uint32_t p = 0;
+      while (!(part[p][0] == seg && part[p][1] == send[k].first)) p++;
+      part_of[k] = p; onward[k] = UINT32_MAX;
+      const uint32_t head = link[send[k].link].to;
+      for (uint32_t j = k + 1; j < count && onward[k] == UINT32_MAX; j++)
+        if (send[j].group == send[k].group && send[j].first == send[k].first && link[send[j].link].from == head) onward[k] = j;
+    }
+    /* the sends made moves, a pair's consecutive pieces of one group one move where no piece of it is sent on from the
+       head before the move's last piece crosses: the move's round its last piece's, so its COPY precedes every onward
+       SEND of its pieces, and a pair's moves keep the order of its sends */
+    for (uint32_t k = 0; !result && k < count; k++) {
+      const uint32_t from = link[send[k].link].from, to = link[send[k].link].to;
+      uint32_t *o = open[from * n + to];
+      if (o[0] && o[0] == send[k].group + 1 && o[1] + o[2] == part_of[k] && o[3] > k) {
+        o[2]++; o[4] = k; if (onward[k] < o[3]) o[3] = onward[k];
+      } else {
+        if (o[0]) {
+          ordered[moves++] = (struct scheduled_move){from, o[4], 0, {MESH_STEP_SEND, to, o[4], 0, o[1], o[2]}};
+          ordered[moves++] = (struct scheduled_move){to, o[4], 1, {MESH_STEP_COPY, from, o[4], 0, o[1], o[2]}};
+        }
+        o[0] = send[k].group + 1; o[1] = part_of[k]; o[2] = 1; o[3] = onward[k]; o[4] = k;
+      }
+      relayed += from != group[send[k].group].source;
+    }
+    for (uint32_t pr = 0; !result && pr < n * n; pr++) {
+      const uint32_t *o = open[pr];
+      if (!o[0]) continue;
+      ordered[moves++] = (struct scheduled_move){pr / n, o[4], 0, {MESH_STEP_SEND, pr % n, o[4], 0, o[1], o[2]}};
+      ordered[moves++] = (struct scheduled_move){pr % n, o[4], 1, {MESH_STEP_COPY, pr / n, o[4], 0, o[1], o[2]}};
+    }
+    free(part_of); free(onward); free(open);
+  }
+  if (!result) {
+    qsort(ordered, moves, sizeof *ordered, scheduled_move_order);
+    for (uint32_t r = 0, k = 0; r <= n; r++) {
+      while (k < moves && ordered[k].rank < r) k++;
+      first[r] = k;
+    }
+    for (uint32_t k = 0; k < moves; k++) move[k] = ordered[k].move;
+    *made = (struct mesh_program){what, entry->program.root, n, parts, 0, what == MESH_ALLGATHER ? n : 0, segment, weight, first, move};
+    comm->scheduled = 1;
+    comm->schedule = (ncclMeshScheduleStats){solve, piece, count, relayed, makespan, bound};
+    segment = NULL; weight = NULL; first = NULL; move = NULL;
+  }
+  free(part); free(segment); free(first); free(weight); free(ordered); free(move); free(send); free(group); free(link);
+  return result;
+}
+
 static ncclResult_t collective_steps(struct call *c, const struct entry *entry,
                                       struct mesh_operand operand, const uint64_t *cut) {
   struct mesh_program subset = {0};
   const struct mesh_program *program = &entry->program;
   ncclResult_t result = ncclSuccess;
-  if ((c->contributors || c->recipients) && entry->trees.count) {
+  if (entry->scheduled) {
+    result = scheduled_program(c, entry, operand, cut, &subset);
+    if (!result) program = &subset;
+  } else if ((c->contributors || c->recipients) && entry->trees.count) {
     uint32_t parts, moves;
     mesh_compile_room(&entry->trees, &parts, &moves);
     uint32_t *segment = calloc((size_t)parts + 1, sizeof *segment);
