@@ -523,6 +523,8 @@ LIB.mesh_graph_relation_heap_permutation.argtypes = [C.c_void_p, C.POINTER(C.c_d
 LIB.mesh_graph_relation_edges.argtypes = [C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_void_p)]
 LIB.mesh_graph_completion_times.argtypes = [C.c_uint32, C.POINTER(C.c_double), _U, C.c_uint32,
                                            C.c_size_t, _U, _U, C.POINTER(C.c_double)]
+LIB.mesh_graph_completion_arrivals.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double), _U,
+                                              C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_double)]
 LIB.mesh_graph_boundaries.restype = C.c_int
 LIB.mesh_graph_boundaries.argtypes = [C.c_void_p, _U, C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte)]
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
@@ -819,12 +821,14 @@ def _array(kind, items):
     return (kind * max(len(items), 1))(*items), len(items)
 
 
-def completion_order(length, resource, resources, edges):
+def completion_order(length, resource, resources, edges, latency=None):
     """R5. Solve completion times and order the vertices of the same dependence relation."""
     count = len(length)
+    if len(resource) != count or (latency is not None and len(latency) != count):
+        raise ValueError("each scheduled instruction needs one resource, service length and supplied latency")
     before, after = (_array(C.c_uint32, (e[k] for e in edges))[0] for k in range(2))
     times, made = (C.c_double * count)(), C.c_void_p()
-    _check(LIB.mesh_graph_completion_times(count, length, resource, resources, len(edges), before, after, times))
+    _check(LIB.mesh_graph_completion_arrivals(count, length, latency, resource, resources, len(edges), before, after, times))
     _check(LIB.mesh_graph_relation_edges(count, len(edges), before, after, C.byref(made)))
     graph = Graph(range(count), Relation(made.value))
     order = graph.heap_order(lambda i: -times[i])

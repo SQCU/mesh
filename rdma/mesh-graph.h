@@ -113,6 +113,9 @@ struct mesh_graph_dependence;
 int mesh_graph_resource_spans(const struct mesh_graph_relation *,const uint32_t *order,size_t edges,
                               const struct mesh_graph_dependence *cycle,const double *weight,const uint64_t *nodes,
                               uint32_t ranks,double *span);
+int mesh_graph_arrival_spans(const struct mesh_graph_relation *,const uint32_t *order,size_t edges,
+                              const struct mesh_graph_dependence *cycle,const double *weight,const double *latency,const uint64_t *nodes,
+                              uint32_t ranks,double *span);
 /* F. Harary, Graph Theory, 1969 (sources and sinks); L. Lamport, CACM 21(7), 1978; M. Lam, PLDI 1988, §2.3;
    design/disjoint-pages-change-request.md C3.3 and C3.5: over a retained relation's edges e not excluded[e] (its
    mesh_graph_relation_synchronization mask) with class_of[from] == class_of[to], source[v] is 0 where such an edge enters
@@ -308,6 +311,8 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
                          const uint64_t *need, uint64_t *color, uint64_t *colors);
 /* design/joint-compilation.md §3, row 8 */
 int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
+                                size_t edges, const uint32_t *from, const uint32_t *to, double *completion);
+int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const double *latency, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion);
 /* design/unequal-shards-change-request.md items 6 and 14; S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3): the
    shares B_j of `ranks` ranks that minimise, summed over `stages` stages, comm[i] times the largest B_j plus the largest

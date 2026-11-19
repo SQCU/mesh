@@ -310,6 +310,7 @@ struct mesh_plan_links {
   uint32_t pairs,from[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1],to[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
   uint32_t arc[MESH_NODES_MOST][MESH_NODES_MOST];
   double capacity[MESH_NODES_MOST*(MESH_NODES_MOST-1)],rate[MESH_NODES_MOST*(MESH_NODES_MOST-1)];
+  double startup_ns[MESH_NODES_MOST*(MESH_NODES_MOST-1)],reference_bps;
 };
 struct mesh_plan_packing {
   uint32_t nodes,demands,trees,*root,*demand,*parent;
@@ -499,6 +500,7 @@ struct plan_schedule_result {
   struct plan_access_query *access_query;
   double *rank_time;
   uint64_t *instruction_nodes;
+  double *latency;
 };
 /* design/flow-order-and-lowering-memorandum.md: access.key is a declared transfer, vertex a Function task;
    write selects the original from view's producer, read the to view's consumer. Supplied roles are complete,

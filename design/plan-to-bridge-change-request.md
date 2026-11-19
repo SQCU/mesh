@@ -54,7 +54,18 @@ For each resource's instruction subset `S`, the row is
 (Hall et al., equation (5)). The second objective holds `C_max` at the first solve's optimum. The completion-time
 solution supplies ordering priorities. Emission realizes that order by dependencies and actual data availability.
 
-`mesh_graph_completion_times` produces completion priorities. `mesh_graph_heap_order` consumes them with the
+For a routed cut of `b` logical bytes on an adjacency with available rate `R` bits/s and directed startup `alpha` ns,
+let `Q` be the compile quantum in bytes, `P` the caller’s full-quantum weight and `R_ref` the greatest advertised
+capacity of a participating adjacency. The serialization length is `d = P * (b/Q) * (R_ref/R)`. The additional time
+to receive is `L = P * (R_ref/(8e9*Q)) * alpha` in the same objective units. At `P = 8e9*Q/R_ref` those units are ns.
+A shared multicast hop takes the largest weight supplied for its coincident transfers. Numerical tasks have zero
+additional latency. [AOT A3](aot-compilation-change-request.md#a3-costs-supply-task-and-transfer-weights)
+
+The LP uses service-finish variables `F_j` for its resource rows, `F_j >= F_i + L_i + d_j` for precedence, and
+`C_max >= F_j + L_j`. Its reported completion priority is arrival `C_j = F_j + L_j`. Since the latencies are inputs,
+minimizing the sum of service finishes also minimizes the sum of arrivals. In the selected resource order the next
+independent use can begin at service finish. A dependent relay or consumer can start at arrival.
+`mesh_graph_completion_arrivals` accepts the service and latency vectors. `mesh_graph_completion_times` supplies zero latency. `mesh_graph_heap_order` consumes them with the
 dependence graph and returns a global topological order, with instruction identity resolving equal priorities
 (MSCCLang §5.2). Each target and directed peer adjacency takes its subsequence. The retained result contains the input relation,
 completion times, order, copy mappings and source identities for downstream consumers (composition item 6).

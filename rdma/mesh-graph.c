@@ -645,6 +645,11 @@ int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *hea
 int mesh_graph_resource_spans(const struct mesh_graph_relation *relation,const uint32_t *order,size_t cycles,
                               const struct mesh_graph_dependence *cycle,const double *weight,const uint64_t *nodes,
                               uint32_t ranks,double *span) {
+  return mesh_graph_arrival_spans(relation,order,cycles,cycle,weight,NULL,nodes,ranks,span);
+}
+int mesh_graph_arrival_spans(const struct mesh_graph_relation *relation,const uint32_t *order,size_t cycles,
+                              const struct mesh_graph_dependence *cycle,const double *weight,const double *latency,const uint64_t *nodes,
+                              uint32_t ranks,double *span) {
   const struct mesh_graph_relation_data *d=mesh_graph_relation_data(relation);
   if(ranks>64)return EINVAL;
   size_t room;
@@ -662,12 +667,13 @@ int mesh_graph_resource_spans(const struct mesh_graph_relation *relation,const u
   for(uint32_t v=0;!status && v<ranks;v++){
     for(size_t e=0;e<dag->edges;e++){
       uint32_t x=dag->edge[e].from;
-      cost[e]=(nodes[x]>>v&1)?weight[x]:0;
+      const size_t supplied=dag->member[dag->first[e]];
+      cost[e]=(nodes[x]>>v&1)?weight[x]+(latency && supplied<d->edges?latency[x]:0):0;
     }
     status=mesh_graph_longest(selected,1,order,1,cost,length);
     span[v]=0;
     for(uint32_t x=0;!status && x<dag->vertices;x++)if(nodes[x]>>v&1)
-      span[v]=fmax(span[v],length[x]+weight[x]);
+      span[v]=fmax(span[v],length[x]+weight[x]+(latency?latency[x]:0));
   }
   mesh_graph_relation_free(selected);free(length);free(cost);
   return status;
@@ -2644,8 +2650,13 @@ static int completion_edge_before(const void *a, const void *b) {
    Comput. 10(1), 2018; H. Isermann, OR Spektrum 4, 1982; HiGHS 1.15.1, highs_c_api.h and HighsOptions.h */
 int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion) {
+  return mesh_graph_completion_arrivals(vertices,length,NULL,resource,resources,edges,from,to,completion);
+}
+int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const double *latency, const uint32_t *resource, uint32_t resources,
+                                size_t edges, const uint32_t *from, const uint32_t *to, double *completion) {
   for (uint32_t j = 0; j < vertices; j++)
-    if (!(length[j] >= 0 && length[j] <= DBL_MAX) || resource[j] >= resources) return EINVAL;
+    if (!(length[j] >= 0 && length[j] <= DBL_MAX) || resource[j] >= resources ||
+        (latency && !(latency[j] >= 0 && latency[j] <= DBL_MAX-length[j]))) return EINVAL;
   for (size_t e = 0; e < edges; e++)
     if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
   if (!vertices) return 0;
@@ -2685,7 +2696,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
   if (!result) {
     HighsInt nonzeros = 0;
     for (uint32_t j = 0; j < vertices; j++) {
-      start[total] = nonzeros; lower[total] = 0; upper[total] = infinity; total++;
+      start[total] = nonzeros; lower[total] = latency ? latency[j] : 0; upper[total] = infinity; total++;
       index[nonzeros] = (HighsInt)vertices; value[nonzeros++] = 1;
       index[nonzeros] = (HighsInt)j; value[nonzeros++] = -1;
     }
@@ -2694,7 +2705,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
     for (size_t e = 0; e < edges; e++) {
       if (e && pair[e] == pair[e - 1]) continue;
       const uint32_t i = (uint32_t)(pair[e] >> 32), j = (uint32_t)pair[e];
-      start[total] = nonzeros; lower[total] = length[j]; upper[total] = infinity; total++;
+      start[total] = nonzeros; lower[total] = length[j]+(latency ? latency[i] : 0); upper[total] = infinity; total++;
       index[nonzeros] = (HighsInt)j; value[nonzeros++] = 1;
       index[nonzeros] = (HighsInt)i; value[nonzeros++] = -1;
     }
@@ -2754,7 +2765,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
     if (Highs_addRows(highs, cuts, lower, upper, nonzeros, start, index, value) == kHighsStatusError) { result = EDOM; break; }
     total += cuts;
   }
-  if (!result) for (uint32_t j = 0; j < vertices; j++) completion[j] = column[j];
+  if (!result) for (uint32_t j = 0; j < vertices; j++) completion[j] = column[j]+(latency ? latency[j] : 0);
   if (highs) Highs_destroy(highs);
   free(pair); free(first); free(member); free(key); free(lower); free(upper); free(value); free(column); free(dual);
   free(row_value); free(row_dual); free(start); free(index);

@@ -419,7 +419,8 @@ class PlanLinks(C.Structure):
     _fields_ = [('pairs', U), ('from', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
                 ('to', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
                 ('arc', (U * NODES_MOST) * NODES_MOST), ('capacity', D * (NODES_MOST * (NODES_MOST - 1))),
-                ('rate', D * (NODES_MOST * (NODES_MOST - 1)))]
+                ('rate', D * (NODES_MOST * (NODES_MOST - 1))),
+                ('startup_ns', D * (NODES_MOST * (NODES_MOST - 1))), ('reference_bps', D)]
 
 
 class PlanPacking(C.Structure):
@@ -506,7 +507,7 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('task_edge', C.POINTER(Z)), ('access_edge', C.POINTER(Z)), ('ordering', C.c_void_p),
                 ('order', C.POINTER(U)), ('resource_cycle', C.POINTER(mesh_graph.Dependence)),
                 ('resource_edges', Z), ('access_queries', Z), ('access_query', C.POINTER(PlanAccessQuery)), ('rank_time', C.POINTER(D)),
-                ('instruction_nodes', C.POINTER(Q))]
+                ('instruction_nodes', C.POINTER(Q)), ('latency', C.POINTER(D))]
 
 
 class PlanGraphResult(C.Structure):
