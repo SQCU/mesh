@@ -250,7 +250,8 @@ class ProgramCompletion(C.Structure):
         ('crossings', Z), ('issues', Z)] + [(name, C.POINTER(U)) for name in ('base', 'resource', 'order', 'place')] + [
         ('length', C.POINTER(D)), ('completion', C.POINTER(D)), ('key', C.POINTER(ScheduleResource)),
         ('name', C.POINTER(C.c_char)), ('cross', C.POINTER(mesh_graph.Dependence)),
-        ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p)]
+        ('issue', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p), ('cycles', Z),
+        ('cycle', C.POINTER(mesh_graph.Dependence))]
 
     def position(self, call, instruction):
         return self.place[self.base[call] + instruction]

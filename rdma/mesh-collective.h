@@ -571,6 +571,8 @@ struct mesh_program_completion {
   char *name;
   struct mesh_graph_dependence *cross, *issue;
   struct mesh_graph_relation *relation;
+  size_t cycles;
+  struct mesh_graph_dependence *cycle;
 };
 struct mesh_plan_compilation {
   size_t references;

@@ -5281,7 +5281,8 @@ struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range r
 #define PLAN_SAVED_COMPILATION_OLD UINT64_C(0x324d4f435048534d)
 #define PLAN_SAVED_COMPILATION UINT64_C(0x334d4f435048534d)
 #define PLAN_SAVED_WORKSPACES UINT64_C(0x344d4f435048534d)
-#define PLAN_SAVED_COMPLETION UINT64_C(0x354d4f435048534d)
+#define PLAN_SAVED_COMPLETION_V1 UINT64_C(0x354d4f435048534d)
+#define PLAN_SAVED_COMPLETION UINT64_C(0x364d4f435048534d)
 #define PLAN_STEP_ARRAYS(X) \
   X(item,p->flow->givens) X(sync,(uint64_t)p->waits+p->tells) X(wait_row,(uint64_t)p->flow->calls+1)
 #define PLAN_COMPILATION_ARRAYS(X) \
@@ -5299,9 +5300,13 @@ static void program_completion_put(struct plan_archive *out,const struct mesh_pr
   PROGRAM_COMPLETION_ARRAYS(PUT)
 #undef PUT
   plan_relation_put(out,s->relation);
+  if(s->cycle){
+    plan_archive_put(out,&s->cycles,sizeof s->cycles);
+    plan_archive_put(out,s->cycle,s->cycles*sizeof *s->cycle);
+  }
 }
 static int program_completion_get(struct plan_archive *in,struct mesh_graph_context *graph,struct plan_bytes *owner,
-                                  struct mesh_plan_compilation *c){
+                                  struct mesh_plan_compilation *c,int cycles){
   struct mesh_program_completion *s=&c->completion;
   plan_archive_align(in);
   plan_archive_bytes(in,s,offsetof(struct mesh_program_completion,base));
@@ -5322,12 +5327,19 @@ static int program_completion_get(struct plan_archive *in,struct mesh_graph_cont
   for(size_t i=0;i<s->issues;i++)if(s->issue[i].from>=s->vertices || s->issue[i].to>=s->vertices)return EINVAL;
   int rc=plan_relation_get(in,graph,owner,&s->relation);
   if(!rc && mesh_graph_relation_data(s->relation)->vertices!=s->vertices)return EINVAL;
+  if(!rc && cycles){
+    const size_t *n=plan_archive_view(in,1,sizeof *n);
+    if(!n)return in->status;
+    s->cycles=*n;s->cycle=(void *)(uintptr_t)plan_archive_view(in,*n,sizeof *s->cycle);
+    if(in->status)return in->status;
+    for(size_t i=0;i<*n;i++)if(s->cycle[i].from>=s->vertices || s->cycle[i].to>=s->vertices)return EINVAL;
+  }
   return rc;
 }
 #undef PROGRAM_COMPLETION_ARRAYS
 static int plan_compilation_put(struct plan_archive *out,const struct mesh_plan_compilation *c){
   const struct mesh_planned *planned=&c->result.planned;
-  struct plan_saved_compilation head={.magic=c->completion.relation?PLAN_SAVED_COMPLETION:c->workspaces?PLAN_SAVED_WORKSPACES:PLAN_SAVED_COMPILATION,.places=c->places,.rows=planned->rows,
+  struct plan_saved_compilation head={.magic=c->completion.cycle?PLAN_SAVED_COMPLETION:c->completion.relation?PLAN_SAVED_COMPLETION_V1:c->workspaces?PLAN_SAVED_WORKSPACES:PLAN_SAVED_COMPILATION,.places=c->places,.rows=planned->rows,
     .arena={planned->arena[0],planned->arena[1]},.used={planned->used[0],planned->used[1]}};
   size_t size=0;
   int status=mesh_graph_archive(planned->signature,NULL,0,&size);
@@ -5385,7 +5397,7 @@ int mesh_plan_compilation_load(struct mesh_graph_context *graph,const void *byte
   if((uintptr_t)bytes%8)return EINVAL;
   struct plan_archive in={.bytes=(void *)bytes,.size=length,.read=1};
   const struct plan_saved_compilation *head=plan_archive_view(&in,1,sizeof *head);
-  if(!head || (head->magic!=PLAN_SAVED_COMPLETION && head->magic!=PLAN_SAVED_WORKSPACES && head->magic!=PLAN_SAVED_COMPILATION && head->magic!=PLAN_SAVED_COMPILATION_OLD) ||
+  if(!head || (head->magic!=PLAN_SAVED_COMPLETION && head->magic!=PLAN_SAVED_COMPLETION_V1 && head->magic!=PLAN_SAVED_WORKSPACES && head->magic!=PLAN_SAVED_COMPILATION && head->magic!=PLAN_SAVED_COMPILATION_OLD) ||
      head->bytes!=length)return EINVAL;
   struct mesh_plan_compilation *c=calloc(1,sizeof *c);
   if(!c)return ENOMEM;
@@ -5440,7 +5452,7 @@ int mesh_plan_compilation_load(struct mesh_graph_context *graph,const void *byte
     c->state[f]=(void *)(uintptr_t)plan_archive_view(&in,c->state_bytes[f],1);
     if(!in.status && !plan_state_valid(c->state[f],c->state_bytes[f],p->flow->transfers))status=EINVAL;
   }
-  if(!status && (head->magic==PLAN_SAVED_WORKSPACES || head->magic==PLAN_SAVED_COMPLETION)){
+  if(!status && (head->magic==PLAN_SAVED_WORKSPACES || head->magic==PLAN_SAVED_COMPLETION_V1 || head->magic==PLAN_SAVED_COMPLETION)){
     const size_t *n=plan_archive_view(&in,1,sizeof *n);
     if(n){
       c->workspaces=*n;c->workspace=(void *)(uintptr_t)plan_archive_view(&in,*n,sizeof *c->workspace);
@@ -5452,7 +5464,8 @@ int mesh_plan_compilation_load(struct mesh_graph_context *graph,const void *byte
       }
     }
   }
-  if(!status && head->magic==PLAN_SAVED_COMPLETION)status=program_completion_get(&in,graph,loaded->bytes,c);
+  if(!status && (head->magic==PLAN_SAVED_COMPLETION || head->magic==PLAN_SAVED_COMPLETION_V1))
+    status=program_completion_get(&in,graph,loaded->bytes,c,head->magic==PLAN_SAVED_COMPLETION);
   if(!status)status=in.status;
   if(!status && in.at!=in.size)status=EINVAL;
   if(!status){loaded->bytes->release=release;loaded->bytes->owner=owner;}
