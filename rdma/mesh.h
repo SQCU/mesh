@@ -135,7 +135,8 @@ static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){
    or allocation-row boundaries. A stable sequence identifies its ring slot;
    a reader racing reuse conservatively retains the allocation. All pin fields
    precede posted and the final holding check (mesh-link.c unit_told). */
-struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
+struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2],failed_span[2]; };
+_Static_assert(sizeof(struct mesh_posts)==64 && offsetof(struct mesh_posts,done)==16,"mesh_posts ABI");
 #define MESH_LANE_UNITS 4096u
 _Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
 struct mesh_dma_pin { _Atomic uint64_t sequence,offset,bytes; };

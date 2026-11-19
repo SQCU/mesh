@@ -183,6 +183,7 @@ static int hold(uint64_t wire,struct pipe_stream **out){
   struct mesh_stream *x=mesh_stream_at(M,index);
   for(unsigned w=0;w<2;w++)for(unsigned lane=0;lane<2;lane++){
     uint64_t position=atomic_load(&x->posts[w].posted[lane]);
+    atomic_store(&x->posts[w].failed_span[lane],0);
     atomic_store(&x->peer_presented[w][lane],position);
     if(!w)s->assigned[lane]=position;
   }
@@ -391,8 +392,8 @@ static int run(struct job *j){
         }
         if(!q->retire || q->retire==q->post)continue;
         uint64_t through=atomic_load_explicit(&x->posts[w].done[lane],memory_order_acquire);
-        struct peer_row *next=p->row+p->piece[q->retire-1].row;
-        if(next->logical.ready && row_ready(next->logical)<0){error=EIO;break;}
+        uint64_t failed=atomic_load_explicit(&x->posts[w].failed_span[lane],memory_order_acquire);
+        if(failed>=spans && failed-spans<p->count*sizeof(struct mesh_dma_span)){error=EIO;break;}
         while(q->retire && q->retire!=q->post){
           struct peer_piece *piece=p->piece+q->retire-1;
           if(through<piece->prefix)break;

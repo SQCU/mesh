@@ -313,7 +313,11 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served,unsigned wa
     if(entry->word){
       if(peer){
         uint64_t word=(uint64_t)((const char *)entry->word-(const char *)M);
-        if(mesh_peer_ready(M,word,entry->base.n,gates)<=0)break;
+        int ready=mesh_peer_ready(M,word,entry->base.n,gates);
+        if(ready<=0){
+          if(ready<0)atomic_store_explicit(&x->posts[way].failed_span[lane],peer_cell->spans,memory_order_release);
+          break;
+        }
       }else{
         uint64_t ready=mesh_units_load(entry->word).n;
         if(way?ready<entry->base.n:ready<=entry->base.n+unit)break;
