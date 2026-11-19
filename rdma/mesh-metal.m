@@ -58,14 +58,13 @@ int mesh_metal_transport_create(struct mesh_ctx *context,const struct mesh_plan_
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7: a received range's words */
-static void receive_words(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,uint32_t transfer,
+void mesh_metal_input_words(struct hdr *base,const struct mesh_state *words,uint32_t transfer,int64_t displacement,
   struct mesh_metal_input *input){
-  const struct mesh_state *words=mesh_state_at(context->M,plan);
-  const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
-  const uint64_t at=transport->offset;
-  *input=(struct mesh_metal_input){.phases=entry->phases-at,.group=mesh_group_bytes(entry->pages),.count=entry->count-at,
+  const struct mesh_publication *entry=mesh_transfer_at(base,words,transfer);
+  *input=(struct mesh_metal_input){.phases=entry->phases+displacement,.group=mesh_group_bytes(entry->pages),
+    .count=entry->count+displacement,
     .pages=entry->pages,.copies=words->copies,
-    .time=((const double *)(const void *)((const char *)context->M+words->times))[transfer]};
+    .time=((const double *)(const void *)((const char *)base+words->times))[transfer]};
 }
 
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; mesh-collective.h struct mesh_planned_transfer:
@@ -248,8 +247,18 @@ int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transpor
   const struct mesh_planned *planned=&binding->compilation->result.planned;
   if(range->owner>=planned->calls || range->partitions!=section.stride)return EINVAL;
   const uint64_t plan=binding->plan[planned->call[range->owner].function];
-  receive_words(context,transport,plan,range->transfer,&range->input);
+  mesh_metal_input_words(context->M,mesh_state_at(context->M,plan),range->transfer,-(int64_t)transport->offset,&range->input);
   return mesh_metal_range_fields(planned,range,field,room);
+}
+void mesh_metal_release_words(struct hdr *base,const struct mesh_state *state,int64_t displacement,
+  struct mesh_metal_release *release,struct mesh_metal_origin *slots,uint64_t *legacy){
+  const struct mesh_publication *entry=mesh_transfer_at(base,state,release->transfer);
+  release->supplied=entry->targets[0].word+displacement;
+  release->status=state->status+displacement;
+  const uint64_t word=entry->origin?entry->origin+displacement:0;
+  if(slots)*slots=entry->targets[0].stride?(struct mesh_metal_origin){word,state->copies,entry->targets[0].stride}:
+                                           (struct mesh_metal_origin){0};
+  if(legacy)*legacy=entry->targets[0].count>1 && (!entry->targets[0].stride || state->copies==1)?word:0;
 }
 static int prepare_release(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release,
@@ -258,13 +267,8 @@ static int prepare_release(struct mesh_ctx *context,struct mesh_metal_transport 
   if(call>=planned->calls)return EINVAL;
   const uint64_t plan=binding->plan[planned->call[call].function];
   const struct mesh_state *state=mesh_state_at(context->M,plan);
-  const struct mesh_publication *entry=mesh_transfer_at(context->M,state,release->transfer);
-  release->supplied=entry->targets[0].word-transport->offset;
-  const uint64_t word=entry->origin?entry->origin-transport->offset:0;
-  if(slots)*slots=entry->targets[0].stride?(struct mesh_metal_origin){word,state->copies,entry->targets[0].stride}:
-                                           (struct mesh_metal_origin){0};
-  if(legacy)*legacy=entry->targets[0].count>1 && (!entry->targets[0].stride || state->copies==1)?word:0;
-  return mesh_metal_status_prepare(context,transport,plan,&release->status);
+  mesh_metal_release_words(context->M,state,-(int64_t)transport->offset,release,slots,legacy);
+  return 0;
 }
 int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release){
@@ -278,21 +282,25 @@ int mesh_metal_origin_prepare(struct mesh_ctx *context,struct mesh_metal_transpo
   const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release,uint64_t *origin){
   return prepare_release(context,transport,binding,call,release,NULL,origin);
 }
+int mesh_metal_sending_rows(struct hdr *base,const struct mesh_state *words,const struct mesh_planned *planned,
+  uint32_t call,uint32_t transfer,uintptr_t address,struct mesh_metal_sending *sending){
+  struct mesh_planned_transfer rows;
+  const int status=planned_rows(planned,call,transfer,&rows);
+  if(status)return status;
+  const struct mesh_publication *entry=mesh_transfer_at(base,words,transfer);
+  *sending=(struct mesh_metal_sending){.sent={.counter=(void *)(address+entry->completion),.sends=entry->sends,
+                                              .copies=words->copies},.extent=planned->extent+rows.sending,
+                                       .extents=rows.end-rows.sending,.transfer=transfer};
+  return 0;
+}
 int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_plan_binding *binding,uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending){
   const struct mesh_planned *planned=&binding->compilation->result.planned;
   (void)transport;
   if(call>=planned->calls)return EINVAL;
-  struct mesh_planned_transfer rows;
-  const int status=planned_rows(planned,call,transfer,&rows);
-  if(status)return status;
   const uint64_t plan=binding->plan[planned->call[call].function];
-  const struct mesh_state *words=mesh_state_at(context->M,plan);
-  const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
-  *sending=(struct mesh_metal_sending){.sent={.counter=(char *)context->M+entry->completion,.sends=entry->sends,
-                                              .copies=words->copies},.extent=planned->extent+rows.sending,
-                                       .extents=rows.end-rows.sending,.transfer=transfer};
-  return 0;
+  return mesh_metal_sending_rows(context->M,mesh_state_at(context->M,plan),planned,call,transfer,
+                                 (uintptr_t)context->M,sending);
 }
 int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;

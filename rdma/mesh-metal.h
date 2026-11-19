@@ -8,6 +8,8 @@ extern "C" {
 /* rdma/mesh-section.h, TP-1: mesh-call.h's mesh.h does not compile as C++, so the context is declared, not included,
    and C++ compilers (metal_ir.h, metal_lower.mm) include this header */
 struct mesh_ctx;
+struct hdr;
+struct mesh_state;
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1, C3.2, C3.4, C3.6 and C3.7 */
 /* design/aot-compilation-change-request.md, appendix item 6 */
 /* design/compilation-composition-change-request.md item 6 (a delivered range read by another function's capture): the
@@ -123,6 +125,12 @@ int mesh_metal_origin_prepare(struct mesh_ctx *,struct mesh_metal_transport *,co
    sent.sends 0: none */
 struct mesh_metal_sending { struct mesh_metal_sent sent; const struct mesh_graph_access *extent; size_t extents;
                             uint32_t transfer,padding; };
+void mesh_metal_input_words(struct hdr *,const struct mesh_state *,uint32_t transfer,int64_t displacement,
+                            struct mesh_metal_input *);
+void mesh_metal_release_words(struct hdr *,const struct mesh_state *,int64_t displacement,struct mesh_metal_release *,
+                              struct mesh_metal_origin *,uint64_t *legacy);
+int mesh_metal_sending_rows(struct hdr *,const struct mesh_state *,const struct mesh_planned *,uint32_t call,
+                            uint32_t transfer,uintptr_t address,struct mesh_metal_sending *);
 /* ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
 int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                                uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending);

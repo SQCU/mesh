@@ -28,7 +28,7 @@ from mesh_index import INDEX_LT, INDEX_LE, INDEX_GT, INDEX_GE, INDEX_EQ, INDEX_N
 INPUT, CONSTANT, TEMPORARY, OUTPUT, STATE = range(5)
 BODY, COMBINE, FINALIZE = range(3)
 NONE = 0xFFFFFFFF
-METAL_IR_DATA, METAL_IR_TRANSPORT, METAL_IR_STEP = range(3)
+METAL_IR_DATA, METAL_IR_TRANSPORT, METAL_IR_STEP, METAL_IR_RANGES, METAL_IR_LITERAL = range(5)
 # metal_ir.h METAL_IR_GESDD .. METAL_IR_GELSY (struct metal_ir_lapack_call `routine`; metal-microbench 9404b7b2 GELS 5
 # and GELSY 6) and METAL_IR_CHECK_LU .. METAL_IR_CHECK_NATIVE (metal_ir_check `code`)
 LAPACK_GESDD, LAPACK_HEEVD, LAPACK_GEEV, LAPACK_GELSD, LAPACK_GELSS, LAPACK_GELS, LAPACK_GELSY = range(7)
@@ -679,12 +679,12 @@ def _recorder():
                 ('MetalBufferBorrow', P, [P, P, Q, RELEASE, P]),
                 ('MetalRecorderPrepare', P, [P, P, text, room]),
                 ('MetalRecorderReplay', C.c_int, [P, P, C.POINTER(Replay), text, room]),
-                ('MetalRecorderPlan', C.c_int, [P, P, text, room]),
                 ('MetalRecorderState', C.c_int, [P, P, P, Q, text, room]),
                 ('MetalReplayDestroy', None, [C.POINTER(Replay)]),
                 ('MetalRecorderActors', C.c_int, [P, machine, machine, C.POINTER(_Actors)]),
                 ('MetalRecorderActorsFree', None, [C.POINTER(_Actors)]),
                 ('MetalRecorderProgram', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), text, room]),
+                ('MetalRecorderProgramScheduled', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), P, text, room]),
                 ('MetalProgramSave', C.c_int, [P, C.POINTER(Span), U, C.POINTER(P), C.POINTER(C.c_size_t), text,
                                                room]),
                 ('MetalProgramLoad', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), P, text, room]),
@@ -721,6 +721,11 @@ def _transport():
         for name, result, arguments in (
                 ('mesh_metal_transport_create', C.c_int, [mesh.CONTEXT, binding, C.c_void_p, transport]),
                 ('mesh_metal_transport_destroy', None, [transport]),
+                ('mesh_metal_input_words', None, [C.c_void_p, C.c_void_p, mesh.U, C.c_int64, C.POINTER(Remote)]),
+                ('mesh_metal_release_words', None, [C.c_void_p, C.c_void_p, C.c_int64, C.POINTER(Release),
+                                                    C.POINTER(Origin), C.POINTER(mesh.Q)]),
+                ('mesh_metal_sending_rows', C.c_int, [C.c_void_p, C.c_void_p, C.POINTER(mesh.Planned), mesh.U,
+                                                       mesh.U, mesh.Q, C.POINTER(Sending)]),
                 ('mesh_metal_range_declare', C.c_int, [mesh.CONTEXT, C.POINTER(mesh.U), mesh.U, mesh.U, mesh.U, mesh.U,
                                                        mesh.Q, mesh.Q, C.POINTER(Range)]),
                 ('mesh_metal_range_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.Section,
