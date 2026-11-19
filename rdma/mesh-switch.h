@@ -249,6 +249,79 @@ static inline int mesh_switch_trees(const struct mesh_switch_fabric *f,const uin
   return 0;
 }
 
+/* A learned hop-level policy over the whole state a node has when it sends a piece on. For each destination still to
+   be served through this node, each candidate first lane l (to a node the piece hasn't visited, on a path to the
+   destination) has features:
+   0 its arrival under the lines' predicted waits, past the best lane's, over the best lane's time to go;
+   1 the same unloaded (latency and send time only);
+   2 the same under waits drawn from the lines (the Thompson draw);
+   3 this node's posted backlog on l, in the piece's send times on it (as log(1 + that));
+   4 the multicast optimum's preference: the log share of the piece's commodity's optimum trees that send the
+     destination through l from this node (`prefer`, NULL as none), as 1 + log(share + 1e-3) / log(1e3), so a softmax
+     on it alone samples in proportion to the optimum;
+   5 whether this piece already takes l for an earlier destination (one SEND carries both);
+   6 .. 11 each of 0 .. 5 times the transaction's size, log(1 + bytes / page) / 8.
+   The policy's logits are w . phi, a softmax over the candidates, and the choice is the candidate whose interval holds
+   a swizzled quantile of the piece's name, the node and the destination. Where `score` is given, the gradient of the
+   choice's log-probability (phi of the chosen less the policy's mean phi) is added to it, for a learner. */
+#define MESH_SWITCH_FEATURES 12
+struct mesh_switch_policy { double w[MESH_SWITCH_FEATURES]; };
+
+static inline uint32_t mesh_switch_route_policy(const struct mesh_switch_fabric *f,uint32_t self,double now,uint64_t to,uint64_t visited,
+                                                double bytes,double total,uint64_t key,const double *ahead,
+                                                const struct mesh_switch_line *view,double unit,const float *prefer,
+                                                const struct mesh_switch_policy *policy,double *score,uint32_t *lane,uint64_t *subset){
+  static const double zero[256]={0};
+  double z[256],mean[256][MESH_SWITCH_NODES],idle[256][MESH_SWITCH_NODES],drawn[256][MESH_SWITCH_NODES],when[MESH_SWITCH_NODES];
+  (void)when;
+  for(uint32_t l=0;l<f->links && l<256;l++)z[l]=mesh_switch_draw(mesh_switch_mix(key^((uint64_t)self<<40)^((uint64_t)l<<52)));
+  visited|=UINT64_C(1)<<self;
+  const double size=log1p(total/f->page)/8;
+  for(uint32_t l=0;l<f->links;l++){
+    const struct mesh_switch_link *x=f->link+l;
+    for(uint32_t v=0;v<f->nodes;v++)mean[l][v]=idle[l][v]=drawn[l][v]=INFINITY;
+    if(x->from!=self || visited>>x->to&1)continue;
+    const double send=bytes/x->rate,t0=now+ahead[l]+send+x->latency,u0=now+send+x->latency;
+    mesh_switch_search(f,x->to,t0,visited,bytes,view,unit,zero,mean[l]);
+    mesh_switch_search(f,x->to,u0,visited,bytes,NULL,unit,zero,idle[l]);
+    mesh_switch_search(f,x->to,t0,visited,bytes,view,unit,z,drawn[l]);
+  }
+  uint32_t used=0;
+  for(uint32_t d=0;d<f->nodes;d++){
+    if(!(to>>d&1) || visited>>d&1)continue;
+    double bm=INFINITY,bi=INFINITY,bd=INFINITY;
+    for(uint32_t l=0;l<f->links;l++){if(mean[l][d]<bm)bm=mean[l][d];if(idle[l][d]<bi)bi=idle[l][d];if(drawn[l][d]<bd)bd=drawn[l][d];}
+    if(!isfinite(bm))return UINT32_MAX;
+    uint32_t cand[256],n=0;double phi[256][MESH_SWITCH_FEATURES],logit[256],most=-INFINITY;
+    for(uint32_t l=0;l<f->links;l++){
+      if(!isfinite(mean[l][d]))continue;
+      double *p=phi[n];
+      p[0]=(mean[l][d]-bm)/(bm-now+1000);p[1]=(idle[l][d]-bi)/(bi-now+1000);p[2]=(drawn[l][d]-bd)/(bd-now+1000);
+      p[3]=log1p(ahead[l]/(bytes/f->link[l].rate));p[4]=prefer?1+log(prefer[(size_t)d*f->links+l]+1e-3)/log(1e3):0;
+      p[5]=0;for(uint32_t k=0;k<used;k++)if(lane[k]==l)p[5]=1;
+      for(uint32_t i=0;i<6;i++)p[6+i]=p[i]*size;
+      logit[n]=0;for(uint32_t i=0;i<MESH_SWITCH_FEATURES;i++)logit[n]+=policy->w[i]*p[i];
+      if(logit[n]>most)most=logit[n];
+      cand[n++]=l;
+    }
+    double pi[256],sum=0;
+    for(uint32_t c=0;c<n;c++){pi[c]=exp(logit[c]-most);sum+=pi[c];}
+    const uint64_t r=mesh_switch_mix(key^((uint64_t)self<<40)^((uint64_t)d<<48)^0x5bd1e995ULL);
+    const double u=((r>>11)+0.5)/9007199254740992.0;
+    uint32_t pick=n-1;double c=0;
+    for(uint32_t k=0;k<n;k++){pi[k]/=sum;c+=pi[k];if(u<c){pick=k;break;}}
+    if(score)for(uint32_t i=0;i<MESH_SWITCH_FEATURES;i++){
+      double e=0;for(uint32_t k=0;k<n;k++)e+=pi[k]*phi[k][i];
+      score[i]+=phi[pick][i]-e;
+    }
+    const uint32_t l=cand[pick];
+    uint32_t k=0;while(k<used && lane[k]!=l)k++;
+    if(k==used){lane[used]=l;subset[used]=0;used++;}
+    subset[k]|=UINT64_C(1)<<d;
+  }
+  return used;
+}
+
 /* One lane's predictor at its sender: a GRU over each execution's observed waits (as log(1 + wait / 1 us) a bin),
    hidden 64, its weights fixed and seeded; an expansion of its state to 192 rectified features; and a linear readout
    of them, learned online by normalised LMS, that predicts the next execution's waits as a residual on this one's.
