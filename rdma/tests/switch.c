@@ -18,11 +18,13 @@
    - trees: each piece's tree sampled from the multicast fluid optimum (mesh_switch_trees) with its swizzled quantile;
    - policy (with --descent): each piece chooses, at its source, one whole tree among candidates (the optimum's
      trees, the unloaded shortest-path tree, and the shortest-path tree under the lines' predicted delays at that
-     moment) by sampling a softmax of the optimum's log shares plus learned adjustments (mesh_switch_choose_tree),
-     never an argmax; every hop forwards to its children in it. Its weights move by online Jacobian descent over the triplet's two latency goals, the mean and the spread of
-     T / floor, averaged over every transaction and size.
+     moment) by sampling a softmax of a plain network's logits over one concatenated input vector a candidate
+     (mesh_switch_choose_tree), never an argmax; every hop forwards to its children in it. The network starts
+     random; its parameters move by online Jacobian descent over the triplet's two latency goals, the mean and the
+     spread of T / floor, averaged over every transaction and size (gradients by evolution strategies, applied by
+     Adam).
 
-   The sampled, trees and descent rows are the mean and spread of the completion over 20 executions after any
+   The sampled, trees and policy rows are the mean and spread of the completion over 20 executions after any
    learning. The floor is the larger of two bounds: the all-gather's cut bound (the most bytes a compute node needs
    over its inbound rate, or must emit over its outbound rate), and the slowest source-destination pair's shortest
    delay for one piece (latency and the piece's time on one cable, each hop; a piece is at most a page).
@@ -104,7 +106,7 @@ static struct event pop(void){
 static struct mesh_switch_fabric fabric;
 static const double unit=64;   /* ns, the lines' time unit */
 enum { FIXED, SAMPLED, TREES, POLICY };
-static struct mesh_switch_tree_policy policy;static double current_S;
+static struct mesh_switch_net policy;static double current_S;
 static int mode;
 static uint32_t execution;
 static double free_at[256][CABLES],busy[256];
@@ -317,13 +319,12 @@ struct world {
   memcpy(tree_first,(w)->tree_first,sizeof tree_first);ncommodities=(w)->ncommodities;memcpy(csrc,(w)->csrc,sizeof csrc);memcpy(cto,(w)->cto,sizeof cto);\
   memcpy(tdemand,(w)->tdemand,sizeof tdemand);tree_fluid=(w)->tree_fluid;}while(0)
 
-/* The policy, trained by online Jacobian descent over the two latency goals of the triplet, each averaged over every
+/* The policy, trained by online Jacobian descent over the triplet's two latency goals, each averaged over every
    (transaction, size): the mean of T / floor (completion against its roofline) and its spread, over K sampled
-   executions each. Each relative to its value at the start. Their gradients in the policy's weights come from
-   simultaneous perturbation (SPSA: the weights at +c and -c along a random sign vector, each side on the same draws,
-   averaged over M independent sign vectors, since with one every goal's estimate is a multiple of the same vector).
-   The step is a (Spall's schedule) times the min-norm point of the two gradients' hull (MGDA for two, closed form).
-   After each step every (transaction, size) runs once more at the new weights, so its lines follow the policy. */
+   executions. Each goal's gradient in the network's parameters by antithetic evolution strategies: M Gaussian
+   perturbations a step, each at +sigma and -sigma on the same draws, the goal's difference times the perturbation.
+   The two gradients are combined at the min-norm point of their hull (MGDA for two, closed form), and applied by Adam.
+   After each step every (transaction, size) runs once more at the new parameters, so its lines follow the policy. */
 struct goals { double mean,spread; };
 static struct goals evaluate(const double *rows,int sizes,double page,int K,struct world **slot,const double *floor,int keep){
   struct goals g={0,0};
@@ -337,33 +338,43 @@ static struct goals evaluate(const double *rows,int sizes,double page,int K,stru
   return g;
 }
 static void train(const double *rows,int sizes,double page,int iterations,struct world **slot,const double *floor){
-  enum { K=3, M=8, F=MESH_SWITCH_TREE_FEATURES };
-  const struct goals start=evaluate(rows,sizes,page,K,slot,floor,1);
+  enum { K=2, M=8 };
+  const size_t P=MESH_NET_PARAMS;
+  const double sigma=0.05,rate=0.01,beta1=0.9,beta2=0.999;
+  float *theta=(float *)&policy;
+  static float base[MESH_NET_PARAMS],eps[8][MESH_NET_PARAMS];
+  static double m1[MESH_NET_PARAMS],m2[MESH_NET_PARAMS],g1[MESH_NET_PARAMS],g2[MESH_NET_PARAMS];
   for(int k=0;k<iterations;k++){
-    const double a=10.0/pow(k+1,0.602),c=1.0/pow(k+1,0.101);
-    const struct mesh_switch_tree_policy base=policy;
-    double g1[F]={0},g2[F]={0},g11=0,g22=0,g12=0;
+    memcpy(base,theta,sizeof base);
+    double plus[8][2],minus[8][2];
     for(int m=0;m<M;m++){
-      double delta[F];
-      uint64_t r=mesh_switch_mix(0x51a5ULL+(uint64_t)k*M+(uint64_t)m);
-      for(int f=0;f<F;f++){r=mesh_switch_mix(r);delta[f]=r&1?1:-1;}
-      for(int f=0;f<F;f++)policy.w[f]=base.w[f]+c*delta[f];
-      const struct goals plus=evaluate(rows,sizes,page,K,slot,floor,0);
-      for(int f=0;f<F;f++)policy.w[f]=base.w[f]-c*delta[f];
-      const struct goals minus=evaluate(rows,sizes,page,K,slot,floor,0);
-      for(int f=0;f<F;f++){
-        g1[f]+=(plus.mean-minus.mean)/start.mean/(2*c)*delta[f]/M;
-        g2[f]+=(plus.spread-minus.spread)/fmax(start.spread,1e-9)/(2*c)*delta[f]/M;
-      }
+      uint64_t r=mesh_switch_mix(0xe5ULL+(uint64_t)k*M+(uint64_t)m);
+      for(size_t i=0;i<P;i++){r=mesh_switch_mix(r);eps[m][i]=(float)mesh_switch_draw(r);}
+      for(size_t i=0;i<P;i++)theta[i]=base[i]+(float)sigma*eps[m][i];
+      const struct goals a=evaluate(rows,sizes,page,K,slot,floor,0);
+      for(size_t i=0;i<P;i++)theta[i]=base[i]-(float)sigma*eps[m][i];
+      const struct goals b=evaluate(rows,sizes,page,K,slot,floor,0);
+      plus[m][0]=a.mean;plus[m][1]=a.spread;minus[m][0]=b.mean;minus[m][1]=b.spread;
     }
-    policy=base;
-    for(int f=0;f<F;f++){g11+=g1[f]*g1[f];g22+=g2[f]*g2[f];g12+=g1[f]*g2[f];}
+    memcpy(theta,base,sizeof base);
+    double g11=0,g22=0,g12=0;
+    for(size_t i=0;i<P;i++){
+      g1[i]=g2[i]=0;
+      for(int m=0;m<M;m++){g1[i]+=(plus[m][0]-minus[m][0])/(2*sigma*M)*eps[m][i];g2[i]+=(plus[m][1]-minus[m][1])/(2*sigma*M)*eps[m][i];}
+      g11+=g1[i]*g1[i];g22+=g2[i]*g2[i];g12+=g1[i]*g2[i];
+    }
     const double den=g11-2*g12+g22;
     double lambda=den>0?(g22-g12)/den:0.5;
     if(lambda<0)lambda=0;
     if(lambda>1)lambda=1;
-    for(int f=0;f<F;f++)policy.w[f]-=a*(lambda*g1[f]+(1-lambda)*g2[f]);
+    for(size_t i=0;i<P;i++){   /* Adam on the combined direction */
+      const double d=lambda*g1[i]+(1-lambda)*g2[i];
+      m1[i]=beta1*m1[i]+(1-beta1)*d;m2[i]=beta2*m2[i]+(1-beta2)*d*d;
+      const double mh=m1[i]/(1-pow(beta1,k+1)),vh=m2[i]/(1-pow(beta2,k+1));
+      theta[i]-=(float)(rate*mh/(sqrt(vh)+1e-8));
+    }
     evaluate(rows,sizes,page,1,slot,floor,1);   /* the lines follow the policy */
+    if(k%25==0)fprintf(stderr,"iteration %d: mean %.3f spread %.3f (T / floor)\n",k,(plus[0][0]+minus[0][0])/2,(plus[0][1]+minus[0][1])/2);
   }
 }
 
@@ -379,7 +390,7 @@ int main(int argc,char **argv){
   struct stats policy_row[2*SIZES]={{0,0}};
   if(descent){   /* the policy: each (transaction, size) warmed up, then trained on the two goals over all of them */
     struct world *slot[2*SIZES];double floor[2*SIZES];
-    memset(&policy,0,sizeof policy);policy.w[0]=-10;   /* it starts as the optimum: the other candidates at e^-10 */
+    mesh_switch_net_init(&policy,20261119);   /* a random start, as any network's */
     for(int c=0;c<2*SIZES;c++){
       const int kind=c/SIZES;const double S=rows[c%SIZES]*1536*2;
       slot[c]=calloc(1,sizeof *slot[c]);assert(slot[c]);
@@ -389,7 +400,7 @@ int main(int argc,char **argv){
     }
     train(rows,SIZES,page,iterations,slot,floor);
     for(int c=0;c<2*SIZES;c++){LOAD(slot[c]);mode=POLICY;policy_row[c]=measure(c/SIZES,rows[c%SIZES]*1536*2,page,MEASURE);free(slot[c]);}
-    printf("policy weights:");for(int f=0;f<MESH_SWITCH_TREE_FEATURES;f++)printf(" %.2f",policy.w[f]);printf("\n");
+    printf("policy: %zu parameters\n",MESH_NET_PARAMS);
   }
   printf("%-10s %9s %9s %18s %18s %20s %9s %9s\n","","S bytes","fixed","sampled","trees","policy","fluid","floor");
   for(int kind=0;kind<2;kind++)for(size_t i=0;i<sizeof rows/sizeof *rows;i++){

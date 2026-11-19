@@ -300,42 +300,64 @@ static inline int mesh_switch_spt(const struct mesh_switch_fabric *f,uint32_t sr
   return 0;
 }
 
-/* A learned policy over trees: a piece chooses, at its source, one of n candidate trees, and every hop forwards it on
-   to its children in that tree. The choice is a sample, never an argmax: the logits are the multicast optimum's log
-   share for each of its trees, plus w . phi, and the choice is the candidate whose softmax interval holds the
-   swizzled quantile of the piece's name. With w = 0 it samples the optimum exactly. No feature ranks a candidate
-   against the best one, so no weight can make the policy greedy. Each candidate's features:
-   0 1 for a candidate outside the optimum (a shortest-path tree), so its weight is that kind's log weight;
-   1 its unloaded depth (latency and send time to its deepest destination) over the shallowest candidate's, less 1;
-   2 its SENDs over the fewest any candidate makes, less 1;
-   3 .. 5 each of 0 .. 2 times the transaction's size, log(1 + bytes / page) / 8. */
-#define MESH_SWITCH_TREE_FEATURES 6
-struct mesh_switch_tree_policy { double w[MESH_SWITCH_TREE_FEATURES]; };
+/* A learned policy over trees, as a plain network. A piece chooses, at its source, one of n candidate trees, and every
+   hop forwards it on to its children in that tree. Each candidate's input is one concatenated vector of what the node
+   knows, with nothing chosen for it:
+   - which lanes the tree uses (one per lane);
+   - each lane's predicted wait now in this node's lines, and this node's posted backlog on each of its own lanes
+     (log(1 + us), one per lane each);
+   - the tree's share in the multicast optimum, and whether it is in it;
+   - the transaction's size, the piece's and the time now (log(1 + bytes / page), log(1 + bytes / page),
+     log(1 + us));
+   - the tree's unloaded completion and its completion under the lines' predicted waits, from now (log(1 + us));
+   - its SENDs.
+   One tanh hidden layer, then a logit; a softmax over the candidates, sampled with the swizzled quantile of the
+   piece's name (never an argmax). The weights are the learner's (mesh_switch_net_init: Gaussian, scaled by fan-in). */
+#define MESH_NET_LANES 32
+#define MESH_NET_IN (3*MESH_NET_LANES+8)
+#define MESH_NET_H 16
+struct mesh_switch_net { float w1[MESH_NET_H][MESH_NET_IN],b1[MESH_NET_H],w2[MESH_NET_H],b2; };
+#define MESH_NET_PARAMS (sizeof(struct mesh_switch_net)/sizeof(float))
+
+static inline void mesh_switch_net_init(struct mesh_switch_net *net,uint64_t seed){
+  for(uint32_t h=0;h<MESH_NET_H;h++){
+    for(uint32_t i=0;i<MESH_NET_IN;i++){seed=mesh_switch_mix(seed);net->w1[h][i]=(float)(mesh_switch_draw(seed)/sqrt(MESH_NET_IN));}
+    net->b1[h]=0;seed=mesh_switch_mix(seed);net->w2[h]=(float)(mesh_switch_draw(seed)/sqrt(MESH_NET_H));
+  }
+  net->b2=0;
+}
 
 static inline uint32_t mesh_switch_choose_tree(const struct mesh_switch_fabric *f,uint32_t src,double now,uint64_t to,double bytes,
                                                double total,uint64_t key,const double *ahead,const struct mesh_switch_line *view,
                                                double unit,const struct mesh_switch_tree *cand,uint32_t n,
-                                               const struct mesh_switch_tree_policy *policy){
-  (void)view;(void)unit;
-  double idle[64],shallow=INFINITY,logit[64],most=-INFINITY;uint32_t sends[64],fewest=UINT32_MAX;
-  static const double none[256]={0};
-  (void)ahead;
+                                               const struct mesh_switch_net *net){
   if(n>64)n=64;
-  for(uint32_t c=0;c<n;c++){
-    mesh_switch_tree_completion(f,cand+c,src,to,now,bytes,none,NULL,1,idle+c,sends+c);
-    if(idle[c]<shallow)shallow=idle[c];
-    if(sends[c]<fewest)fewest=sends[c];
+  /* the context every candidate shares, through the first layer once */
+  float context[MESH_NET_H];
+  for(uint32_t h=0;h<MESH_NET_H;h++){
+    double a=net->b1[h];
+    for(uint32_t l=0;l<f->links && l<MESH_NET_LANES;l++){
+      a+=net->w1[h][MESH_NET_LANES+l]*log1p(mesh_switch_wait(view?view+l:NULL,unit,now,0)/1000);
+      a+=net->w1[h][2*MESH_NET_LANES+l]*(f->link[l].from==src?log1p(ahead[l]/1000):0);
+    }
+    a+=net->w1[h][3*MESH_NET_LANES+2]*log1p(total/f->page)+net->w1[h][3*MESH_NET_LANES+3]*log1p(bytes/f->page)
+      +net->w1[h][3*MESH_NET_LANES+4]*log1p(now/1000);
+    context[h]=(float)a;
   }
-  const double size=log1p(total/f->page)/8;
+  double logit[64],most=-INFINITY;
   for(uint32_t c=0;c<n;c++){
-    double phi[MESH_SWITCH_TREE_FEATURES];
-    phi[0]=cand[c].share>0?0:1;
-    phi[1]=shallow>now?(idle[c]-now)/(shallow-now)-1:0;
-    phi[2]=fewest?(double)sends[c]/fewest-1:0;
-    for(uint32_t i=0;i<3;i++)phi[3+i]=phi[i]*size;
-    logit[c]=cand[c].share>0?log(cand[c].share):0;
-    for(uint32_t i=0;i<MESH_SWITCH_TREE_FEATURES;i++)logit[c]+=policy->w[i]*phi[i];
-    if(logit[c]>most)most=logit[c];
+    double idle;uint32_t sends;
+    const double done=mesh_switch_tree_completion(f,cand+c,src,to,now,bytes,ahead,view,unit,&idle,&sends);
+    double out=net->b2;
+    for(uint32_t h=0;h<MESH_NET_H;h++){
+      double a=context[h];
+      for(uint32_t v=0;v<f->nodes;v++)if(cand[c].lane[v]!=UINT32_MAX && cand[c].lane[v]<MESH_NET_LANES)a+=net->w1[h][cand[c].lane[v]];
+      a+=net->w1[h][3*MESH_NET_LANES]*cand[c].share+net->w1[h][3*MESH_NET_LANES+1]*(cand[c].share>0)
+        +net->w1[h][3*MESH_NET_LANES+5]*log1p((idle-now)/1000)+net->w1[h][3*MESH_NET_LANES+6]*log1p((done-now)/1000)
+        +net->w1[h][3*MESH_NET_LANES+7]*sends;
+      out+=net->w2[h]*tanh(a);
+    }
+    logit[c]=out;if(out>most)most=out;
   }
   double sum=0;for(uint32_t c=0;c<n;c++){logit[c]=exp(logit[c]-most);sum+=logit[c];}
   const double u=((mesh_switch_mix(key^0x7f4a7c15ULL)>>11)+0.5)/9007199254740992.0;
