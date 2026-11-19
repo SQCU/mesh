@@ -3243,6 +3243,24 @@ static void channel_log(struct ncclComm *comm, const struct channel *ch, int lis
    gated as gate_of says (word 0: at its issue); a SEND's done word the channel's `sent`, a landing's its `landed`, each
    raised to `end` (its last unit's count).  `visit` takes each, with its message and channel */
 typedef int (*entry_visit)(void *context, struct ncclComm *comm, uint32_t h, int list, struct mesh_entry entry, uint64_t end);
+/* The segment's wire digest includes each crossing's units at both ends. Preserve matching
+   boundaries at each relay ingress publication; a subrange uses the original span table. */
+static int visit_crossings(struct ncclComm *comm, uint32_t h, int list, const struct message *m,
+                           struct mesh_entry entry, entry_visit visit, void *context) {
+  const struct steps *s = m->c->bound;
+  const uint64_t grain = s->scatter && s->scatter->forwarded[s->steps[m->step].round] ?
+    s->scatter->piece / comm->page : m->pages.n;
+  const uint64_t end = m->end.n-m->pages.n;
+  for (uint64_t first = 0; first < m->pages.n;) {
+    entry.units = m->pages.n-first < grain ? m->pages.n-first : grain;
+    first += entry.units;
+    const int status = visit(context, comm, h, list, entry, end+first);
+    if (status) return status;
+    entry.spans += entry.units * sizeof(struct mesh_dma_span);
+    if (!list) entry.base += entry.units;
+  }
+  return 0;
+}
 static int group_entries(struct ncclComm *comm, const struct schedule *plans, entry_visit visit, void *context) {
   const struct hdr *mapped = comm->attach->context.M;
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -3269,20 +3287,12 @@ static int group_entries(struct ncclComm *comm, const struct schedule *plans, en
           before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
         entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
       }
-      status = visit(context, comm, h, 0, entry, pages_to_word(m->end));
+      status = visit_crossings(comm, h, 0, m, entry, visit, context);
     }
     for (size_t k = 0; !status && k < p->ins; k++) {
       const struct message *m = p->in + k;
-      const struct steps *s = m->c->bound;
-      const uint64_t units = m->pages.n;
-      const uint64_t grain = s->scatter && s->scatter->forwarded[s->steps[m->step].round] ?
-        s->scatter->piece / comm->page : units;
-      for (uint64_t first = 0; !status && first < units;) {
-        const uint64_t count = units-first < grain ? units-first : grain;
-        const struct mesh_entry entry = {m->table + first * sizeof(struct mesh_dma_span), count, p->word, p->base};
-        first += count;
-        status = visit(context, comm, h, 1, entry, m->end.n-units+first);
-      }
+      const struct mesh_entry entry = {m->table, m->pages.n, p->word, p->base};
+      status = visit_crossings(comm, h, 1, m, entry, visit, context);
     }
     if (status) return status;
   }
