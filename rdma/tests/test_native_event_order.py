@@ -24,7 +24,8 @@ struct metal_result metal_spin(struct metal_program *p,const struct metal_wait *
 static int revoked(struct ncclComm *c){(void)c;return 0;}
 static ncclResult_t revoked_fail(struct ncclComm *c){(void)c;return ncclRemoteError;}
 static ncclResult_t held_fail(const struct ncclComm *c,const struct channel *ch){(void)c;(void)ch;return ncclRemoteError;}
-static int mesh_stream_held(struct mesh_ctx *c,uint32_t s,uint64_t wire){(void)c;(void)s;(void)wire;return 1;}
+struct attach;
+static int hold_live(const struct attach *a,uint32_t s,uint64_t wire){(void)a;(void)s;(void)wire;return 1;}
 static int ktype(const struct call *c){(void)c;return ncclInt64;}
 static int kop(const struct call *c){(void)c;return ncclSum;}
 static size_t kcount(const struct call *c,size_t bytes){(void)c;return bytes/8;}

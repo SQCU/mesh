@@ -1022,17 +1022,20 @@ ncclResult_t ncclMeshWritePlanDestroy(ncclMeshWritePlan_t plan);
    function execution should prepare once and use Execute or fused bindings. */
 ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
                           int source, int destination, ncclComm_t comm, cudaStream_t stream);
-struct ncclMeshCableSample { uint64_t wire,ready,sent,landed; uint32_t cable,peer; };
-ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample* samples, int room, int* count);
+/* each channel of comm (one a peer, design/node-addressed-transfers.md): its link of the communicator's fabric
+   (`channel`, ncclMeshCommFabric's index: a node pair, never a cable), its peer rank, the pair's identity (`pair`: the
+   lesser node << 32 | the greater) and its bytes ready, sent and landed */
+struct ncclMeshPeerSample { uint64_t pair,ready,sent,landed; uint32_t channel,peer; };
+ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshPeerSample* samples, int room, int* count);
 /* design/whole-function.md#measurements: observed eligibility-to-completion windows,
    with transition-time bounds. This observer does not publish, wait on or change transport words. */
 typedef struct ncclMeshTrace *ncclMeshTrace_t;
 struct ncclMeshWindow {
   /* first/last count DMA units; bytes is their exact payload sum, not allocation
      pages or rounded hardware credits. SpanLengths supplies their lengths. */
-  uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes,cable_peak_queue_bytes;
+  uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,pair,first,last,peak_queue_bytes,channel_peak_queue_bytes;
   double queue_byte_seconds;
-  uint32_t cable,peer,direction,relay; /* direction: 0 send, 1 receive; relay: send reads landed prefix */
+  uint32_t channel,peer,direction,relay; /* channel: the fabric's link (a node pair); direction: 0 send, 1 receive; relay: send reads landed prefix */
 };
 struct ncclMeshTraceStats { uint64_t polls,max_gap_ns; uint32_t incomplete; };
 uint64_t ncclMeshTraceClock(void);

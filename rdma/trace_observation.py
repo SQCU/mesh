@@ -29,9 +29,13 @@ class SpanTrace:
             raise ValueError(f'{stats.incomplete} physical trace windows did not complete')
         rows, at = [], 0
         for window in windows[0:count[0]]:
+            # 'cable' is the window's link of the communicator's fabric (a node pair; the bridge alone
+            # chooses cables: design/node-addressed-transfers.md) and 'wire' that pair's identity
             row = {key: int(getattr(window, key)) for key in (
-                'start_lo_ns', 'start_hi_ns', 'end_lo_ns', 'end_hi_ns', 'bytes', 'wire', 'first', 'last',
-                'peak_queue_bytes', 'cable_peak_queue_bytes', 'cable', 'peer', 'direction', 'relay')}
+                'start_lo_ns', 'start_hi_ns', 'end_lo_ns', 'end_hi_ns', 'bytes', 'first', 'last',
+                'peak_queue_bytes', 'peer', 'direction', 'relay')}
+            row.update(wire=int(window.pair), cable=int(window.channel),
+                       cable_peak_queue_bytes=int(window.channel_peak_queue_bytes))
             end = at + row['last'] - row['first']
             if end > length_count[0]:
                 raise ValueError('trace windows exceed exact span-length storage')

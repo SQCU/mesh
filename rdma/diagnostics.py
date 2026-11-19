@@ -9,7 +9,7 @@ def _library():
 
 
 def quiet(arguments=None):
-    """Measure one explicitly selected physical wire; no application fallback."""
+    """Measure the idle/wake latency of the order toward a node; the bridge chooses cables."""
     arguments = list(sys.argv[1:] if arguments is None else arguments)
     values = [ctypes.create_string_buffer(value.encode()) for value in ['quiet', *arguments]]
     argv = (ctypes.c_char_p * len(values))(*(ctypes.cast(value, ctypes.c_char_p) for value in values))
@@ -33,7 +33,7 @@ def retire(arguments=None):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ('quiet', 'retire'):
-        raise SystemExit('diagnostics quiet list PEER | quiet run ROLE WIRE ROUNDS GAPS | retire [ROUNDS]')
+        raise SystemExit('diagnostics quiet list | quiet run ROLE NODE ROUNDS GAPS | retire [ROUNDS]')
     raise SystemExit({'quiet': quiet, 'retire': retire}[sys.argv[1]](sys.argv[2:]))
 
 

@@ -112,8 +112,8 @@ class TraceCaptureTests(unittest.TestCase):
         import cffi
         ffi = cffi.FFI()
         ffi.cdef('''typedef void *ncclMeshTrace_t;
-            struct ncclMeshWindow { unsigned long long start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,
-                peak_queue_bytes,cable_peak_queue_bytes; double queue_byte_seconds; unsigned cable,peer,direction,relay; };
+            struct ncclMeshWindow { unsigned long long start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,pair,first,last,
+                peak_queue_bytes,channel_peak_queue_bytes; double queue_byte_seconds; unsigned channel,peer,direction,relay; };
             struct ncclMeshTraceStats { unsigned long long polls,max_gap_ns; unsigned incomplete; };''')
         calls = []
         def start(comm, room, handle):

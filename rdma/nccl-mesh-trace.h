@@ -27,11 +27,11 @@ static void trace_read(struct ncclMeshTrace *trace) {
     for (uint32_t direction = 0; direction < 2 && !trace->status; direction++) {
     const uint32_t slot = 2 * h + direction;
     const uint64_t count = atomic_load_explicit(channel->view.presented[direction], memory_order_acquire);
-    if (count - trace->cursor[slot] > MESH_STREAM_ENTRIES) { trace->status = EOVERFLOW; break; }
+    if (count - trace->cursor[slot] > CHANNEL_LOG) { trace->status = EOVERFLOW; break; }
     while (trace->cursor[slot] < count) {
       if (trace->count == trace->room) { trace->status = ENOSPC; break; }
       struct traced_entry *record = trace->entries + trace->count++;
-      record->entry = channel->view.list[direction][trace->cursor[slot] % MESH_STREAM_ENTRIES];
+      record->entry = channel->view.list[direction][trace->cursor[slot] % CHANNEL_LOG];
       record->channel = h;
       record->previous_ns = trace->previous_ns;
       const uint64_t units = record->entry.units;
@@ -44,8 +44,8 @@ static void trace_read(struct ncclMeshTrace *trace) {
          table may have retired before this observer's first sample. */
       trace->status = mesh_byte_account_prefix(channel->payload + direction, trace->units[slot], units, record->payload_prefix);
       if (trace->status) break;
-      record->window = (struct ncclMeshWindow){.cable = channel->cable, .peer = (uint32_t)channel->peer, .direction = direction,
-        .wire = *channel->wire, .first = trace->units[slot], .last = trace->units[slot] + units,
+      record->window = (struct ncclMeshWindow){.channel = channel->cable, .peer = (uint32_t)channel->peer, .direction = direction,
+        .pair = comm->fabric.cable[channel->cable].wire, .first = trace->units[slot], .last = trace->units[slot] + units,
         .bytes = record->payload_prefix[units], .relay = !direction && record->entry.word != 0};
       trace->units[slot] += units;
       trace->cursor[slot]++;
@@ -119,7 +119,7 @@ static void *trace_run(void *argument) {
 uint64_t ncclMeshTraceClock(void) { return mesh_clock_ns(); }
 
 ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out) {
-  if (!comm || !out || room <= 0 || (unsigned)room > MESH_STREAM_ENTRIES)
+  if (!comm || !out || room <= 0 || (unsigned)room > CHANNEL_LOG)
     return fail(ncclInvalidArgument, "trace capacity must be within the stream entry ring");
   struct ncclMeshTrace *trace = calloc(1, sizeof *trace);
   if (!trace) return fail(ncclSystemError, "out of memory");
@@ -191,7 +191,7 @@ ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out
   *stats = (struct ncclMeshTraceStats){.polls = trace->polls, .max_gap_ns = trace->max_gap_ns};
   for (int k = 0; k < trace->count; k++) {
     out[k] = trace->entries[k].window;
-    out[k].cable_peak_queue_bytes = trace->peak[trace->entries[k].channel];
+    out[k].channel_peak_queue_bytes = trace->peak[trace->entries[k].channel];
     stats->incomplete += !out[k].end_hi_ns;
     free(trace->entries[k].payload_prefix);
   }

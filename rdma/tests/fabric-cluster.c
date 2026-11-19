@@ -110,12 +110,12 @@ int main(int argc,char **argv){
     }
   }
   clock_gettime(CLOCK_MONOTONIC,&end);
-  struct ncclMeshCableSample samples[64];int n;
+  struct ncclMeshPeerSample samples[64];int n;
   checked(ncclMeshCommSample(comm,samples,64,&n));
   const double seconds=end.tv_sec-start.tv_sec+(end.tv_nsec-start.tv_nsec)*1e-9;
   printf("{\"rank\":%d,\"elements\":%zu,\"iterations\":%d,\"seconds\":%.9f,\"verified\":true,\"edges\":[",rank,count,iterations,seconds);
-  for(int e=0;e<n;e++)printf("%s{\"cable\":%u,\"wire\":\"%016llx\",\"sent\":%llu,\"landed\":%llu}",e?",":"",samples[e].cable,
-    (unsigned long long)samples[e].wire,(unsigned long long)samples[e].sent,(unsigned long long)samples[e].landed);
+  for(int e=0;e<n;e++)printf("%s{\"link\":%u,\"pair\":\"%016llx\",\"sent\":%llu,\"landed\":%llu}",e?",":"",samples[e].channel,
+    (unsigned long long)samples[e].pair,(unsigned long long)samples[e].sent,(unsigned long long)samples[e].landed);
   puts("]}");fflush(stdout);
   writes(comm,fabric,rank,count,input);
   checked(ncclCommDestroy(comm));

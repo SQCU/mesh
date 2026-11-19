@@ -172,10 +172,11 @@ class QueueSample:
         count = self.ffi.new('int *')
         self.check(self.lib.ncclMeshCommSample(comm, self.ffi.NULL, 0, count))
         self.count = count[0]
-        self.rows = self.ffi.new('struct ncclMeshCableSample[]', max(self.count, 1))
+        self.rows = self.ffi.new('struct ncclMeshPeerSample[]', max(self.count, 1))
         self.n = count
 
     def read(self):
         self.check(self.lib.ncclMeshCommSample(self.comm, self.rows, self.count, self.n))
-        return [{'cable': int(s.cable), 'peer': int(s.peer), 'wire': int(s.wire),
+        # 'cable': the channel's link of the communicator's fabric (a node pair), 'wire' its identity
+        return [{'cable': int(s.channel), 'peer': int(s.peer), 'wire': int(s.pair),
                  'ready': int(s.ready), 'sent': int(s.sent), 'landed': int(s.landed)} for s in self.rows[0:self.count]]

@@ -15,73 +15,64 @@ MOCKS = r'''
 #include <stdlib.h>
 #include <string.h>
 static struct mesh_ctx context;
-static struct mesh_entry entries[2];
-static int presentations, reject_land, detached;
+static struct mesh_crossing appended[2][8];
+static int appends[2], reject_land, detached, full;
 static _Atomic int returns;
 static uint32_t returned[32];
 static struct mesh_section data={.first=10,.pages=1,.bytes=4096,.count=4,.stride=2};
-static struct mesh_section table={.first=50,.pages=1,.bytes=6*sizeof(struct mesh_dma_span),.count=1,.stride=1};
+static struct mesh_section table={.first=50,.pages=1,.bytes=4096,.count=1,.stride=1};
 void *mesh_section_address(struct mesh_ctx *c,struct mesh_section s,uint32_t slot){
   return (char *)c->M+c->M->data_off+(s.first==table.first?(1u<<20):(2u<<20)+slot*4096);
 }
-int mesh_stream_present(struct mesh_ctx *c,uint32_t stream,int land,struct mesh_entry e){
-  assert(stream==0 && mesh_entry_valid(c->M,e));
-  presentations++;
-  if(land && reject_land)return EINVAL;
-  entries[land]=e;
+/* the node's order: every transfer valid, each way's appended in order; one ring momentarily full once */
+int mesh_order_append(struct mesh_ctx *c,const struct mesh_order *o,int way,const struct mesh_crossing *t){
+  assert(o->node==9 && mesh_crossing_valid(c->M,t) && appends[way]<8);
+  if(full){full--;return EAGAIN;}
+  if(way && reject_land)return EINVAL;
+  appended[way][appends[way]++]=*t;
   return 0;
-}
-void mesh_stream_give(struct mesh_ctx *c,uint32_t stream){
-  assert(stream==0);mesh_stream_at(c->M,stream)->owner=c->client|MESH_STREAM_GIVEN;
 }
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   (void)c;returned[atomic_fetch_add(&returns,1)]=row;return 0;
 }
 int mesh_detach(struct mesh_ctx *c){(void)c;detached++;return 0;}
+struct probe { _Atomic uint64_t ready,sent,landed,padding; struct mesh_dma_span span[]; };
 '''
 CASES = r'''
 static void fixture(void){
   free(context.M);memset(&context,0,sizeof context);
   context.M=calloc(1,8u<<20);assert(context.M);
-  context.M->length=8u<<20;context.M->data_off=4096;
-  context.M->block=1;context.M->pgsz=4096;context.M->stream_off=512;context.M->streams=1;
-  context.client=37;mesh_stream_at(context.M,0)->owner=context.client;
-  presentations=reject_land=detached=0;returns=0;memset(entries,0,sizeof entries);
-}
-static void *quiesce(void *ignored){
-  (void)ignored;
-  while(mesh_stream_at(context.M,0)->owner!=(context.client|MESH_STREAM_GIVEN)){}
-  /* The client has given its holding; returning the metadata now would race a
-     bridge CPU reader. release_probe must still retain every allocation. */
-  assert(returns==0);
-  mesh_stream_at(context.M,0)->owner=MESH_STREAM_GIVEN;
-  return NULL;
+  context.M->length=8u<<20;context.M->data_off=4096;context.M->rows=2048;
+  context.M->block=1;context.M->pgsz=4096;
+  context.client=37;
+  appends[0]=appends[1]=reject_land=detached=full=0;returns=0;memset(appended,0,sizeof appended);
 }
 int main(void){
-  fixture();assert(!present(&context,0,3,data,table));assert(presentations==2);
-  struct mesh_dma_span *spans=mesh_section_address(&context,table,0);
-  const uint64_t source=(char *)mesh_section_address(&context,data,0)-(char *)context.M;
-  assert(entries[0].units==3 && entries[1].units==3 && !entries[0].word && !entries[1].word);
-  assert(entries[0].spans==(uint64_t)((char *)spans-(char *)context.M));
-  assert(entries[1].spans==entries[0].spans+3*sizeof *spans);
-  assert(entries[0].spans!=table.first && entries[0].spans!=data.first);
-  for(int k=0;k<3;k++){
-    assert(spans[k].offset==source && spans[k].bytes==4096);
-    assert(spans[3+k].offset==source+(uint64_t)(k+1)*4096 && spans[3+k].bytes==4096);
+  const struct mesh_order order={.node=9};
+  fixture();full=1;
+  struct probe *p=mesh_section_address(&context,table,0);
+  assert(!present(&context,&order,3,data,p));assert(appends[0]==3 && appends[1]==3);
+  const uint64_t source=(char *)mesh_section_address(&context,data,0)-(char *)context.M,base=(char *)p-(char *)context.M;
+  for(uint32_t k=0;k<3;k++){
+    const struct mesh_crossing *send=&appended[0][k],*land=&appended[1][k];
+    const struct mesh_dma_span *s=(const struct mesh_dma_span *)((char *)context.M+send->spans);
+    const struct mesh_dma_span *r=(const struct mesh_dma_span *)((char *)context.M+land->spans);
+    /* round k: one block each way, the SEND gated on ready reaching k+1, done words raised to k+1 in order */
+    assert(send->units==1 && land->units==1 && s->offset==source && s->bytes==4096);
+    assert(r->offset==source+(uint64_t)(k+1)*4096 && r->bytes==4096);
+    assert(send->gate==base+offsetof(struct probe,ready) && send->base==k && !land->gate);
+    assert(send->done==base+offsetof(struct probe,sent) && land->done==base+offsetof(struct probe,landed));
+    assert(send->value==k+1 && land->value==k+1);
   }
-  release_probe(&context,0,1,data,table);
+  release_probe(&context,data,table);
   assert(returns==5 && detached==1 && returned[0]==50);
   for(int k=0;k<4;k++)assert(returned[k+1]==10+(uint32_t)k*2);
 
-  fixture();reject_land=1;
-  assert(present(&context,0,3,data,table)==EINVAL && presentations==1);
-  pthread_t thread;assert(!pthread_create(&thread,NULL,quiesce,NULL));
-  release_probe(&context,0,0,data,table);
-  pthread_join(thread,NULL);assert(returns==5 && detached==1);
-
-  fixture();release_probe(&context,MESH_ABSENT,0,data,table);
+  fixture();reject_land=1;p=mesh_section_address(&context,table,0);
+  assert(present(&context,&order,3,data,p)==EINVAL && !appends[0]);
+  release_probe(&context,data,table);
   assert(returns==5 && detached==1);
-  free(context.M);puts("diagnostic exact descriptors and CPU-reader retirement PASS");return 0;
+  free(context.M);puts("diagnostic transfers and retirement PASS");return 0;
 }
 '''
 

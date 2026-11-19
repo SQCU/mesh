@@ -17,7 +17,7 @@ static void mesh_reclaim(struct hdr *);
    of this layout, or one expired,
    else the errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
-  int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
+  int file=shm_open(mesh_name(),writable?O_RDWR:O_RDONLY,0);
   if(file<0)return errno;
   struct stat info;
   if(fstat(file,&info)){int error=errno;close(file);return error;}
@@ -38,8 +38,8 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
-  struct mesh_reach all[MESH_STREAMS];
-  const uint32_t count=mesh_nodes_reached(m,all,MESH_STREAMS);
+  struct mesh_reach all[MESH_NODES];
+  const uint32_t count=mesh_nodes_reached(m,all,MESH_NODES);
   for(uint32_t k=0;out && k<count && k<capacity;k++)out[k]=all[k];
   if(node)*node=m->node;
   munmap(m,length);return (int)count;
@@ -286,8 +286,7 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
 
 /* design/algorithm-sources.md#programtensor */
 /* design/transport.md: a client's slot given up (by its detach, or by the bridge where its process is
-   gone): its rows closed for the bridge to release (the streams it held are let go on the bridge's turn:
-   mesh-link.c streams_let_go) */
+   gone): its rows closed for the bridge to release once none of its transfers is outstanding (mesh_pinned) */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
   if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
@@ -308,7 +307,7 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
-    if(atomic_load(&slot->peer_owner) || !atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
+    if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->start=mesh_started(getpid());
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     /* design/transport.md section 2: the bridge woken (as mesh_retire wakes it), so it watches this process's exit
@@ -474,19 +473,8 @@ static void mesh_reclaim(struct hdr *m){
    a DMA. A racing pin snapshot conservatively keeps storage for a later reap. */
 int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
-    const struct mesh_stream *x=mesh_stream_at(m,s);
+    const struct mesh_lanes *x=mesh_lanes_at(m,s);
     int live=-1;
-    const struct mesh_cpu_pin *cpu=&x->metadata;
-    const uint64_t before=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
-    const struct mesh_dma_span table={atomic_load_explicit(&cpu->offset,memory_order_seq_cst),
-                                     atomic_load_explicit(&cpu->bytes,memory_order_seq_cst)};
-    const uint64_t word=atomic_load_explicit(&cpu->word,memory_order_seq_cst);
-    const int racing=(before&1) || before!=atomic_load_explicit(&cpu->sequence,memory_order_seq_cst);
-    if(racing || table.bytes || word){
-      const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);
-      if(live && (racing || mesh_span_overlaps(allocation,table) ||
-                  (word && mesh_span_overlaps(allocation,(struct mesh_dma_span){word,8}))))return 1;
-    }
     for(int way=0;x->rows && way<2;way++)
       for(int lane=0;lane<2;lane++){
         const uint64_t done=atomic_load(&x->posts[way].done[lane]),posted=atomic_load(&x->posts[way].posted[lane]);
@@ -494,8 +482,9 @@ int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
         if(live<=0)continue;
         if(posted-done>MESH_LANE_UNITS)return 1;
         for(uint64_t u=done;u<posted;u++){
+          struct mesh_dma_pin *at=mesh_unit_pin(m,x->rows,way,lane,u);
           struct mesh_dma_span pin;
-          if(!mesh_pin_load(mesh_unit_pin(m,x->rows,way,lane,u),u,&pin)){
+          if(!mesh_pin_load(at,u,&pin)){
             if(atomic_load(&x->posts[way].done[lane])>u)continue;
             return 1;
           }
@@ -505,9 +494,23 @@ int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
   }
   return 0;
 }
+/* design/node-addressed-transfers.md: whether client `owner` has a transfer in some order not yet retired (the bridge
+   reads its table, gates and words, and posts its bytes, until it retires) */
+int mesh_owner_outstanding(struct hdr *m,uint64_t owner){
+  for(uint32_t n=0;owner && n<MESH_NODES;n++){
+    struct mesh_node *x=mesh_node_at(m,n);
+    if(!atomic_load(&x->node) || !x->ring)continue;
+    for(int way=0;way<2;way++){
+      const uint64_t tail=atomic_load(&x->tail[way])+1;
+      for(uint64_t i=atomic_load(&x->retired[way]);i<tail && i-atomic_load(&x->retired[way])<MESH_RING;i++)
+        if(atomic_load(&mesh_ring(m,x,way,i)->owner)==owner)return 1;
+    }
+  }
+  return 0;
+}
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
   uint64_t owner=atomic_load(&mesh_buffers(m)[first].owner);
-  if(owner && atomic_load(&mesh_client_at(m,owner)->peer_owner)==owner)return 1;
+  if(mesh_owner_outstanding(m,owner))return 1;
   /* Lease backing, not a table's logical row IDs, is what reclaim frees.
      Coalescing physical runs scans each allocation row once in the usual
      contiguous case; scatter allocations retain each intersected run. */

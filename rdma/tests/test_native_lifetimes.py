@@ -40,31 +40,29 @@ MOCKS = r'''
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#define MESH_STREAMS 8
+#define NCCL_MESH_HOLDS 8
+#define MESH_STREAMS NCCL_MESH_HOLDS
 typedef int ncclResult_t;
 enum { ncclSuccess, ncclInvalidArgument };
-#define MESH_STREAM_GIVEN (UINT64_C(1)<<63)
-struct mesh_stream { _Atomic uint64_t owner; };
-struct hdr { struct mesh_stream streams[MESH_STREAMS]; };
+struct hdr { int unused; };
 struct mesh_ctx { struct hdr *M; };
-static struct mesh_stream *mesh_stream_at(struct hdr *m,uint32_t stream) { return m->streams+stream; }
-struct mesh_stream_view { _Atomic uint64_t *sent,*landed; };
+struct mesh_order { uint32_t slot, node, generation, padding; };
+struct mesh_entry { uint64_t spans, units, word, base; };
+struct channel_view { struct mesh_entry *list[2]; _Atomic uint64_t *presented[2], *ready, *sent, *landed; };
 struct lease { void *address; uint32_t row; size_t bytes; void *buffer; struct mesh_lease_retire reads; int returned; };
-struct hold { uint32_t node, stream, users, padding; struct mesh_stream_view view; uint64_t wire, generation; };
-struct attach { struct mesh_ctx context; struct lease *leases; size_t count; struct hold holds[MESH_STREAMS]; struct attach *next; };
-struct ncclComm { int binding; uint32_t held; struct attach *attach; };
+struct hold { uint32_t node, users; struct mesh_order order; struct channel_view view; uint64_t wire, generation, presented[2]; };
+struct attach { struct mesh_ctx context; struct lease *leases; size_t count; struct hold holds[NCCL_MESH_HOLDS]; struct attach *next; };
+struct fabric { uint32_t nodes, cables; };
+struct ncclComm { int binding; uint32_t held; struct attach *attach; uint32_t *endpoint; struct fabric fabric; };
 static struct attach *attaches;
 static pthread_mutex_t attach_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t completed[MESH_STREAMS], landed[MESH_STREAMS];
 static struct hdr region;
 static uint64_t wire[MESH_STREAMS];
-static int owned[MESH_STREAMS], returned, released, given, pending, pinned;
-static int mesh_stream_held(struct mesh_ctx *c, uint32_t stream, uint64_t expected) {
-  (void)c;
-  return owned[stream] && wire[stream] == expected;
-}
-static void mesh_stream_give(struct mesh_ctx *c, uint32_t stream) {
-  owned[stream] = 0; c->M->streams[stream].owner = 37 | MESH_STREAM_GIVEN; given++;
+static int owned[MESH_STREAMS], returned, released, pending, pinned;
+/* the order a hold opened still live (its generation the order's) */
+static int hold_live(const struct attach *a, uint32_t k, uint64_t expected) {
+  return k < NCCL_MESH_HOLDS && a->holds[k].users && owned[k] && wire[k] == expected && a->holds[k].wire == expected;
 }
 static int mesh_lease_return(struct mesh_ctx *c, uint32_t row) {
   (void)c; (void)row; returned++; if (pending) pinned++; return 0;
@@ -90,18 +88,20 @@ static void fixture(void) {
   attachment.leases[0] = (struct lease){.address=payload[0], .row=1, .bytes=64, .buffer=payload[0]};
   attaches = &attachment;
   memset(owned, 0, sizeof owned);
-  returned = released = given = pending = pinned = 0;
+  returned = released = pending = pinned = 0;
   for (uint32_t i = 0; i < MESH_STREAMS; i++) { completed[i] = landed[i] = 0; wire[i] = 100 + i; }
-  owned[0] = 1; region.streams[0].owner = 37;
-  attachment.holds[0] = (struct hold){.stream=0, .users=1, .wire=100, .generation=10, .view={.sent=&completed[0], .landed=&landed[0]}};
+  owned[0] = 1;
+  attachment.holds[0] = (struct hold){.users=1, .wire=100, .generation=10, .view={.sent=&completed[0], .landed=&landed[0]}};
   assert(!mesh_lease_retire_mark(&attachment.leases[0].reads, 0, 100, 10, 1000));
 }
+/* the communicator on hold 0 ends: the hold vacant, nothing of the bridge's to give back */
 static void give(void) {
-  struct ncclComm comm = {.binding=1, .held=1, .attach=&attachment};
+  uint32_t endpoint[1] = {0};
+  struct ncclComm comm = {.binding=1, .held=1, .attach=&attachment, .endpoint=endpoint, .fabric={2, 1}};
   pthread_mutex_lock(&attach_lock);
   comm_let_go(&comm);
   pthread_mutex_unlock(&attach_lock);
-  assert(!comm.binding && !comm.held);
+  assert(!comm.binding && !comm.held && !attachment.holds[0].users && endpoint[0] == UINT32_MAX);
 }
 int main(void) {
   int reusable = -1;
@@ -125,7 +125,7 @@ int main(void) {
   assert(ncclMemFree(payload[0]) == ncclSuccess);
   assert(!returned);
   give();
-  assert(given == 1 && !attachment.count && returned == 1 && pinned == 1);
+  assert(!attachment.count && returned == 1 && pinned == 1);
 
   fixture();
   give();
@@ -134,7 +134,7 @@ int main(void) {
   /* Reacquiring the same physical wire with a larger new prefix proves nothing. */
   owned[0] = 1;
   completed[0] = 9000;
-  attachment.holds[0] = (struct hold){.stream=0, .users=1, .wire=100, .generation=11, .view={.sent=&completed[0], .landed=&landed[0]}};
+  attachment.holds[0] = (struct hold){.users=1, .wire=100, .generation=11, .view={.sent=&completed[0], .landed=&landed[0]}};
   assert(ncclMeshMemReusable(payload[0], &reusable) == ncclSuccess && !reusable);
   assert(attachment.leases[0].reads.deps[0].invalid);
 
@@ -162,7 +162,7 @@ int main(void) {
   /* All physical channels remain obligations, including parallel cables. */
   fixture();
   owned[1] = 1;
-  attachment.holds[1] = (struct hold){.stream=1, .users=1, .wire=101, .generation=20, .view={.sent=&completed[1], .landed=&landed[1]}};
+  attachment.holds[1] = (struct hold){.users=1, .wire=101, .generation=20, .view={.sent=&completed[1], .landed=&landed[1]}};
   assert(!mesh_lease_retire_mark(&attachment.leases[0].reads, 1, 101, 20, 2000));
   completed[0] = 1000;
   completed[1] = 1999;
@@ -184,21 +184,14 @@ int main(void) {
   landed[0] = 7; leases_reap(&attachment);
   assert(!attachment.count && returned == 1 && released == 1);
 
-  /* Payload pins do not cover a progress thread's CPU table reads. Local give
-     prevents future posts, but metadata cannot detach until the bridge's owner
-     transition proves that reader quiescent. No remote receipt is involved. */
-  for (int complete_owner = 0; complete_owner < 2; complete_owner++) {
-    fixture();
-    mesh_lease_retire_destroy(&attachment.leases[0].reads);
-    assert(!mesh_lease_retire_mark_use(&attachment.leases[0].reads, 0, 100, 10, 7, MESH_LEASE_LAND, 1));
-    assert(ncclMemFree(payload[0]) == ncclSuccess && !returned);
-    give();
-    assert(!returned && attachment.count == 1);
-    assert(region.streams[0].owner == (37 | MESH_STREAM_GIVEN));
-    region.streams[0].owner = complete_owner ? MESH_STREAM_GIVEN : 0;
-    leases_reap(&attachment);
-    assert(returned == 1 && released == 1 && !attachment.count);
-  }
+  /* Table reads: the bridge reads a table until it retires the transfer, and holds a returned lease of a client
+     with a transfer not retired (mesh-dataflow.c mesh_pinned), so the hold's end is the library's whole proof. */
+  fixture();
+  mesh_lease_retire_destroy(&attachment.leases[0].reads);
+  assert(!mesh_lease_retire_mark_use(&attachment.leases[0].reads, 0, 100, 10, 7, MESH_LEASE_LAND, 1));
+  assert(ncclMemFree(payload[0]) == ncclSuccess && !returned);
+  give();
+  assert(returned == 1 && released == 1 && !attachment.count);
 
   /* A lost incoming prefix does not contaminate an already proved SEND, but
      it is not a completed LAND and cannot revive from a later numeric value. */
@@ -209,8 +202,7 @@ int main(void) {
   assert(attachment.leases[0].reads.deps[0].done && attachment.leases[0].reads.deps[1].invalid);
   landed[0] = 9000;
   assert(ncclMemFree(payload[0]) == ncclSuccess && !returned);
-  give(); assert(!returned);
-  region.streams[0].owner = 0; leases_reap(&attachment);
+  give();
   assert(returned == 1 && !attachment.count);
 
   /* Metadata registration is itself retained even when the bridge is already
@@ -218,7 +210,7 @@ int main(void) {
   fixture();
   assert(!mesh_lease_retire_begin(&attachment.leases[0].reads));
   assert(ncclMemFree(payload[0]) == ncclSuccess && !returned);
-  give(); region.streams[0].owner = 0; leases_reap(&attachment);
+  give(); leases_reap(&attachment);
   assert(!returned && attachment.count == 1);
   assert(!mesh_lease_retire_end(&attachment.leases[0].reads));
   leases_reap(&attachment); assert(returned == 1 && !attachment.count);

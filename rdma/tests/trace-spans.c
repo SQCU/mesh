@@ -9,17 +9,20 @@
 #include "nccl.h"
 #include "mesh-byte-account.h"
 
+struct mesh_entry { uint64_t spans, units, word, base; };
+#define CHANNEL_LOG MESH_RING
+struct channel_view { struct mesh_entry *list[2]; _Atomic uint64_t *presented[2], *ready, *sent, *landed; };
 struct channel {
   uint32_t cable;
   int peer;
   uint64_t *wire;
-  struct mesh_stream_view view;
+  struct channel_view view;
   struct mesh_units out, in;
   struct mesh_byte_account payload[2];
   unsigned trace_readers;
 };
 struct attach { struct mesh_ctx context; };
-struct ncclComm { uint32_t count; struct channel *channels; struct attach *attach; };
+struct ncclComm { uint32_t count; struct channel *channels; struct attach *attach; struct mesh_fabric fabric; };
 static ncclResult_t fail(ncclResult_t result, const char *format, ...) { (void)format; return result; }
 static pthread_mutex_t group_lock = PTHREAD_MUTEX_INITIALIZER;
 static void channel_account_prune(struct channel *c) {
@@ -47,7 +50,8 @@ int main(void) {
     .view = {.list = {lists, lists + 1}, .presented = {presented, presented + 1},
              .ready = &ready, .sent = &sent, .landed = &landed}};
   struct attach attach = {.context = {.M = region}};
-  struct ncclComm comm = {.count = 1, .channels = &channel, .attach = &attach};
+  const struct mesh_cable link = {.wire = 17, .bandwidth = 1, .node = {0, 1}};
+  struct ncclComm comm = {.count = 1, .channels = &channel, .attach = &attach, .fabric = {2, 1, &link}};
   for (int direction = 0; direction < 2; direction++)
     assert(!mesh_byte_account_append(channel.payload + direction, 0, &spans[0].bytes, 3, sizeof *spans));
   /* First observation may be after the original table has been reclaimed. */
@@ -100,7 +104,7 @@ int main(void) {
   assert(ncclMeshTraceStop(trace, windows, 4, &entries, &stats) == ncclSuccess);
   assert(entries == 2 && !stats.incomplete);
   assert(windows[0].bytes == 4115 && windows[1].bytes == 4115);
-  assert(windows[0].cable_peak_queue_bytes == 4114);
+  assert(windows[0].channel_peak_queue_bytes == 4114 && windows[0].pair == 17);
   assert(channel.trace_readers == 1 && atomic_load(&channel.payload[0].head));
   assert(ncclMeshTraceStop(another, windows, 4, &entries, &stats) == ncclSuccess);
   assert(!channel.trace_readers && !atomic_load(&channel.payload[0].head) && !atomic_load(&channel.payload[1].head));

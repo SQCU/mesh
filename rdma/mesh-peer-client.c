@@ -1,70 +1,57 @@
-#include "mesh-peer-private.h"
+#include "mesh-peer.h"
+#include <stdlib.h>
 #include <string.h>
-#include <limits.h>
-#include <sys/param.h>
 
-static int peer_request(struct mesh_ctx *ctx,struct mesh_peer_request request,int *socket_out){
-  if(!ctx || !ctx->M || !ctx->client)return EINVAL;
-  int fd=socket(AF_UNIX,SOCK_STREAM,0);
-  if(fd<0)return errno;
-  uint64_t pid=atomic_load(&ctx->M->bridge_pid);
-  struct sockaddr_un address=mesh_peer_address(pid);
-  int error=connect(fd,(struct sockaddr *)&address,sizeof address)?errno:0;
-  if(error==ENOENT || error==ECONNREFUSED)error=ENOTSUP;
-  pid_t remote=0;socklen_t size=sizeof remote;
-  if(!error && (getsockopt(fd,SOL_LOCAL,LOCAL_PEERPID,&remote,&size) || (uint64_t)remote!=pid))error=EPROTO;
-  int one=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one);
-  request.owner=ctx->client;
-  const char *data=(const char *)&request;
-  for(size_t off=0;!error && off<sizeof request;){
-    ssize_t n=send(fd,data+off,sizeof request-off,0);
-    if(n>0)off+=(size_t)n;else if(n==0 || errno!=EINTR)error=n==0?EPIPE:errno;
-  }
-  if(error){close(fd);return error;}
-  *socket_out=fd;return 0;
+/* design/node-addressed-transfers.md: the peer service over the node's order, all of it the client's: no message to
+   any bridge, no installation agreed.  An installation is the order it was appended to and a lease of the records'
+   gates (each a mesh_gate the order reads) */
+struct installation { struct mesh_order order; struct mesh_section gates; };
+
+int mesh_peer_capable(struct mesh_ctx *ctx,uint32_t peer){
+  struct mesh_order order;
+  return mesh_order_open(ctx,peer,&order);
+}
+static int match_order(const void *a,const void *b){
+  const struct mesh_peer_transfer *x=*(const struct mesh_peer_transfer *const *)a,*y=*(const struct mesh_peer_transfer *const *)b;
+  return (x->match>y->match)-(x->match<y->match);
 }
 int mesh_peer_install(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,uint64_t records,uint32_t count,uint64_t *installation){
+  (void)group;
   if(!count || !installation || !peer || !ctx || !ctx->M || records<ctx->M->data_off || records%8 ||
      records>ctx->M->length || count>(ctx->M->length-records)/sizeof(struct mesh_peer_transfer))return EINVAL;
-  int fd=0,error=peer_request(ctx,(struct mesh_peer_request){.op=MESH_PEER_INSTALL,.group=group,.records=records,
-    .peer=peer,.count=count},&fd);
-  if(!error)*installation=(uint64_t)fd+1;
-  return error;
+  struct installation *made=calloc(1,sizeof *made);
+  const struct mesh_peer_transfer **sorted=calloc(count,sizeof *sorted);
+  int error=!made || !sorted?ENOMEM:mesh_order_open(ctx,peer,&made->order);
+  const struct mesh_peer_transfer *record=(const struct mesh_peer_transfer *)((const char *)ctx->M+records);
+  for(uint32_t i=0;i<count;i++)if(!error && record[i].land>1)error=EINVAL;
+  if(!error)error=mesh_section_create(ctx,count*sizeof(struct mesh_gate),1,&made->gates);
+  if(!error){
+    for(uint32_t i=0;i<count;i++)sorted[i]=record+i;
+    qsort(sorted,count,sizeof *sorted,match_order);
+    struct mesh_gate *gates=mesh_section_address(ctx,made->gates,0);
+    const uint64_t at=(uint64_t)((char *)gates-(char *)ctx->M);
+    for(uint32_t i=0;i<count && !error;i++){
+      const struct mesh_peer_transfer *r=sorted[i];
+      struct mesh_crossing t={.spans=r->spans,.units=r->units,.done=r->completed,.value=r->value};
+      if(r->reserved){t.gate=r->ready;t.gates=r->reserved;}
+      else if(r->ready){gates[i]=(struct mesh_gate){r->ready,r->threshold};t.gate=at+i*sizeof *gates;t.gates=1;}
+      while((error=mesh_order_append(ctx,&made->order,(int)r->land,&t))==EAGAIN){}
+    }
+  }
+  free(sorted);
+  if(error){if(made && made->gates.count)mesh_lease_return(ctx,made->gates.first);free(made);return error;}
+  *installation=(uint64_t)(uintptr_t)made;
+  return 0;
 }
 int mesh_peer_wait(struct mesh_ctx *ctx,uint64_t installation,uint64_t timeout_ns){
-  if(!ctx || !ctx->M || !installation || installation>(uint64_t)INT_MAX+1)return EINVAL;
-  int fd=(int)(installation-1),status=0;
-  struct mesh_deadline bounded=mesh_deadline("peer installation",timeout_ns);
-  uint64_t limit=bounded.at;
-  for(;;){
-    ssize_t size=recv(fd,&status,sizeof status,MSG_PEEK|MSG_DONTWAIT);
-    if(size==sizeof status)return status;
-    if(!size)return EPIPE;
-    if(size<0 && errno!=EAGAIN && errno!=EINTR)return errno;
-    uint64_t now=mesh_clock_ns();
-    if(now>=limit)return ETIMEDOUT;
-    struct pollfd ready={.fd=fd,.events=POLLIN};
-    if(poll(&ready,1,(int)MIN((limit-now)/1000000+1,INT_MAX))<0 && errno!=EINTR)return errno;
-  }
-}
-int mesh_peer_capable(struct mesh_ctx *ctx,uint32_t peer){
-  int fd=0,status=peer_request(ctx,(struct mesh_peer_request){.op=MESH_PEER_QUERY,.peer=peer},&fd);
-  if(status)return status;
-  status=mesh_peer_wait(ctx,(uint64_t)fd+1,MESH_PLATFORM_NS);close(fd);return status;
+  (void)timeout_ns;
+  const struct installation *i=(const struct installation *)(uintptr_t)installation;
+  return !i?EINVAL:mesh_order_live(ctx,&i->order)?0:ENOLINK;
 }
 int mesh_peer_release(struct mesh_ctx *ctx,uint64_t installation){
-  if(!ctx || !ctx->M || !installation || installation>(uint64_t)INT_MAX+1)return EINVAL;
-  int fd=(int)(installation-1);
-  shutdown(fd,SHUT_WR);
-  int status=0,result=0;size_t have=0,replies=0;
-  for(;;){
-    ssize_t n=recv(fd,(char *)&status+have,sizeof status-have,0);
-    if(!n)break;
-    if(n<0){if(errno==EINTR)continue;result=errno;break;}
-    have+=(size_t)n;
-    if(have==sizeof status){replies++;if(status)result=status;status=0;have=0;}
-  }
-  if((have || replies<2) && !result)result=EPIPE;
-  if(close(fd) && !result)result=errno;
-  return result;
+  struct installation *i=(struct installation *)(uintptr_t)installation;
+  if(!ctx || !i)return EINVAL;
+  const int error=mesh_lease_return(ctx,i->gates.first);
+  free(i);
+  return error;
 }

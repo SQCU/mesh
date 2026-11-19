@@ -7,6 +7,7 @@
 #include "mesh-verbs.h"
 #include "mesh-call.h"
 #include "mesh-observe.h"
+#include "mesh-order.h"
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -34,9 +35,9 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
    (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lanes 0 and 1, on which nothing is posted, and from
-   MESH_LANE_FIRST pairs, stream s on pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  Unit p of a stream's sequence
-   is on lane p mod MESH_STREAM_LANES (lane_page), posted in equal order at each endpoint
-   with equal exact byte lengths from their immutable compiled span tables; a lane's units land in the order its SENDs were posted */
+   MESH_LANE_FIRST pairs (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1, the lane records of pair s).  Every lane of the
+   plan from MESH_LANE_FIRST is a queue pair of the order toward the link's peer (mesh-order.h order_place: the
+   cable's queue pair j is lane MESH_LANE_FIRST + j); a lane's units land in the order its SENDs were posted */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_FIRST 2u
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
@@ -108,43 +109,17 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    outstanding requests independently to MESH_LANE_UNITS. Receive WR IDs carry
    the cumulative frame prefix retired by each completion. */
 struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; };
-/* A taken entry keeps its immutable resolved span table. `unit` is its first
-   unit over this holding; every dependency/completion prefix counts units. */
-struct taken { const struct mesh_dma_span *spans; struct mesh_units units,base,unit; const _Atomic uint64_t *word; uint32_t whole; };
-/* Unit p goes on lane p mod MESH_STREAM_LANES as unit p/lanes there.
-   Only the contiguous completed prefix across both lanes becomes available. */
-#define MESH_STREAM_LANES 2u
-_Static_assert(MESH_STREAM_LANES>=1 && MESH_STREAM_LANES<=2*MESH_STREAM_PAIRS,"a stream's lanes, of its pair");
-static inline uint64_t lane_page(uint32_t j,uint64_t u){ return MESH_STREAM_LANES*u+j; }
-static inline uint64_t lanes_through(const uint64_t *u){
-  uint64_t g=lane_page(0,u[0]);
-  for(uint32_t j=1;j<MESH_STREAM_LANES;j++)g=MIN(g,lane_page(j,u[j]));
-  return g;
-}
-/* A taken-entry ring; units/base/count refer to transport units. `base` is
-   the pairing-wide prefix before this holding. Tables stay immutable through
-   final unit completion; taking an entry releases only its list slot. */
-struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_units units,base,count;uint64_t origin[2]; };
-/* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
-   served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
-   completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served
-   on it again in the pairing (`HOLD_GONE`) */
-enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
    sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
-enum { HELLO=1, FAREWELL, RECORD, LINK, PEER_MESSAGE };
-enum { PEER_EXTENTS=16,PEER_FIXED=32 };
-void peer_service_open(void);
-void peer_service_close(void);
-void peer_service_adopt(void);
-void peer_message(uint32_t,uint64_t,uint32_t,const void *,uint32_t);
-void peer_event(int);
-void peer_turn(void);
-uint64_t peer_due(uint64_t);
+enum { HELLO=1, FAREWELL, RECORD, LINK, ORDER };
+/* design/node-addressed-transfers.md: an ORDER, a bridge's proposal of its order toward the peer's next epoch, sent
+   only as the cables between the two nodes change: the epochs its order has, the cables it holds up toward the peer
+   (`wire`, sorted: each cable's identity, alike at both ends), and the pieces it posted each way before it froze */
+struct order_message { uint32_t epochs,cables; uint64_t frontier[2]; uint64_t wire[MESH_PORTS]; };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
@@ -188,11 +163,12 @@ struct link {
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at;
-  uint64_t held[MESH_LINK_STREAMS];
-  uint32_t hold[MESH_LINK_STREAMS];
-  struct walk sending[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
-  struct walk landing[MESH_LINK_STREAMS];
+  /* the child's: the order it serves (its node slot, MESH_ABSENT none), each lane's walker each way (mesh-order.h),
+     and each lane's slots of the pieces it posted, by unit, for their completions */
+  uint32_t order;
+  struct order_walker walker[2][MESH_LINK_LANES];
+  uint64_t *slots[2][MESH_LINK_LANES];
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
@@ -318,8 +294,8 @@ void sysctl_text(const char *name,char *out,size_t room);
 void health_init(void);
 void wake(void);
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes);
-void streams_cancel(const struct port *port);
-void streams_let_go(void);
+void lanes_cancel(const struct port *port);
+void orders_busy(uint64_t *busy);
 void record_changed(void);
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room);
 void record_retell(void);

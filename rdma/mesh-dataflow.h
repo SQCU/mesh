@@ -51,6 +51,7 @@ uint32_t mesh_arena_free(struct hdr *);
    retired client's rows take once the bridge releases them; 0, EINVAL where the client holds no lease headed there */
 int mesh_lease_return(struct mesh_ctx *,uint32_t row);
 int mesh_interval_pinned(struct hdr *,struct mesh_dma_span);
+int mesh_owner_outstanding(struct hdr *,uint64_t owner);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 uint32_t mesh_retired_release(struct hdr *);

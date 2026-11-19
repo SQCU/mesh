@@ -40,10 +40,15 @@ struct schedule { struct message *out,*in; size_t outs,ins; uint64_t first[2],wo
 struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule *plans,*write_plans; };
 struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; int active; };
 struct mesh_ctx { struct hdr *M; };
-struct mesh_stream_view { _Atomic uint64_t *landed,*ready,*sent; };
+struct mesh_entry { uint64_t spans,units,word,base; };
+static int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
+  const struct mesh_crossing t={.spans=e.spans,.units=e.units,.gate=e.word,.base=e.base};
+  return e.base<UINT64_MAX-e.units && mesh_crossing_valid(m,&t);
+}
+struct channel_view { _Atomic uint64_t *landed,*ready,*sent; };
 struct hold { uint64_t wire,generation; };
 struct attach { struct mesh_ctx context; struct hold holds[2]; };
-struct channel { uint32_t stream,node,cable; struct mesh_stream_view view; void *buffer; size_t sent;
+struct channel { uint32_t stream,node,cable; struct channel_view view; void *buffer; size_t sent;
   uint64_t published,consumed,waited; const uint64_t *wire; struct mesh_byte_account payload[2]; unsigned trace_readers; };
 struct ncclComm { struct attach *attach; uint64_t page; uint32_t count; struct plan *plan; const char *name;
   struct channel channels[2]; uint32_t endpoint[2]; int rank; void *violation; };
@@ -86,12 +91,13 @@ static int all_writes(const struct call *l,size_t n){(void)l;(void)n;return 1;}
 static ncclResult_t order_writes(const struct ncclComm *c,const struct call *l,size_t n,struct schedule *s){
   (void)c;(void)l;(void)n;(void)s;return ncclSuccess;
 }
-static int room_for(const struct channel *c,int direction,uint64_t n){(void)c;(void)direction;(void)n;return 1;}
+static int room_for(const struct ncclComm *comm,const struct channel *c,int direction,uint64_t n){(void)comm;(void)c;(void)direction;(void)n;return 1;}
 static ncclResult_t room_wait(struct ncclComm *c,const struct channel *ch,int direction,uint64_t n){
   (void)c;(void)ch;(void)direction;(void)n;assert(!"unexpected wait");return ncclInternalError;
 }
-static int mesh_stream_present(struct mesh_ctx *c,uint32_t stream,int land,struct mesh_entry e){
-  assert(stream<2 && observed_count[stream][land]<8 && mesh_entry_valid(c->M,e));
+static int channel_present(struct ncclComm *comm,const struct channel *ch,int land,struct mesh_entry e,uint64_t end){
+  const uint32_t stream=ch->stream;
+  assert(stream<2 && observed_count[stream][land]<8 && mesh_entry_valid(comm->attach->context.M,e) && end>=e.units);
   observed[stream][land][observed_count[stream][land]++]=e;return 0;
 }
 '''

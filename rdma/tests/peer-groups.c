@@ -145,12 +145,13 @@ static int packet(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver
   struct storage *s=mesh_section_address(ctx,lease,0);uint64_t off=(char *)s-(char *)ctx->M;
   unsigned char *data=(void *)(s+1);memset(s,0,sizeof *s);memset(data,0xbd,bytes+4*gap);
   const uint64_t lengths[]={bytes/3+1,bytes/3+9,bytes-2*(bytes/3)-10};
-  uint32_t n=receiver?3:1;uint64_t cursor=0,handle=0;
+  /* both programs declare the same cuts (design/node-addressed-transfers.md: one SEND fills one receive of the same
+     length): the sender's one contiguous source cut where the receiver's three scattered destinations begin */
+  uint32_t n=3;uint64_t cursor=0,handle=0;
+  if(!receiver)for(uint64_t i=0;i<bytes;i++)data[gap+i]=(unsigned char)(i+13*(i>>8));
   for(uint32_t k=0;k<n;k++){
-    uint64_t length=receiver?lengths[k]:bytes;
-    s->spans[k]=(struct mesh_dma_span){off+sizeof *s+cursor+(k+1)*gap,length};
-    if(!receiver)for(uint64_t i=0;i<length;i++)data[gap+i]=(unsigned char)(i+13*(i>>8));
-    cursor+=length;
+    s->spans[k]=(struct mesh_dma_span){receiver?off+sizeof *s+cursor+(k+1)*gap:off+sizeof *s+gap+cursor,lengths[k]};
+    cursor+=lengths[k];
   }
   s->first=(struct mesh_peer_transfer){1,off+offsetof(struct storage,spans),n,0,0,
     off+offsetof(struct storage,complete),1,(uint32_t)receiver,0};
@@ -160,7 +161,7 @@ static int packet(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,int receiver
   cursor=0;
   for(uint32_t k=0;!status && k<n;k++){
     unsigned char *part=(unsigned char *)ctx->M+s->spans[k].offset;
-    for(uint64_t i=0;i<gap;i++)if(part[(ptrdiff_t)i-(ptrdiff_t)gap]!=0xbd || part[s->spans[k].bytes+i]!=0xbd){status=EILSEQ;break;}
+    for(uint64_t i=0;receiver && i<gap;i++)if(part[(ptrdiff_t)i-(ptrdiff_t)gap]!=0xbd || part[s->spans[k].bytes+i]!=0xbd){status=EILSEQ;break;}
     for(uint64_t i=0;!status && i<s->spans[k].bytes;i++)if(part[i]!=(unsigned char)((cursor+i)+13*((cursor+i)>>8)))status=EILSEQ;
     cursor+=s->spans[k].bytes;
   }

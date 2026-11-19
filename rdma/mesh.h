@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <os/os_sync_wait_on_address.h>
@@ -11,42 +12,35 @@
 /* design/transport.md */
 #define MESH_MAGIC 0x4d455348u
 #define MESH_NAME "/mesh0"
+/* the region's name: MESH_NAME, or $MESH_REGION where set (the two-node simulator's regions, tests/sim-wire.c) */
+static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"); return name && *name?name:MESH_NAME; }
 #define MESH_PORT "18519"
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* 129: a link's streams toward its peer node (struct mesh_stream), each held by one client at a time by its owner word
-   (as rows are), so as many communicators as a link has streams use a node pair at once, the client naming the node
-   alone (design/transport.md section 14; the versions before it, this file's history).  The wire's contract between
-   bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units, a SEND filling a receive of a whole unit.  It
-   changes only where that contract does (the operator, 2026-10-21: "commits which do not change an interface 'contract'
-   in any way are not interface-version changes regardless of their hashes").  132: every unit on a stream's lanes is
-   a whole page, sent from and landing in the page its row names.  133: a stream's lanes carry its holders' entries'
-   pages and nothing else (no keepalive, no spare, no dud of the bridge's own), page p of the stream's sequence over
-   its pairing on its lane p mod 2, posted in that order (design/transport.md section 14).  134: a holding ends with
-   nothing outstanding on its stream's lanes, or the stream is never live again in the pairing (a link none of whose
-   streams is live is lost and pairs again from 0); no communicator presents filler. 135: each lane unit is an exact
-   compiler-declared byte extent; matching SEND/receive lengths and order are fixed by the shared plan. */
-#define MESH_VERSION 135u
+/* The wire's contract between bridges (the versions before it, this file's history; the operator, 2026-10-21: "commits
+   which do not change an interface 'contract' in any way are not interface-version changes regardless of their
+   hashes").  136 (design/node-addressed-transfers.md): no client names a cable, a stream or a lane; every client's
+   transfers toward a node are one shared order per direction, each piece of it on the cable and queue pair a pure
+   function of that order gives (mesh-order.h), and the bridges exchange ORDER only as the cables between them change.
+   A bridge of another version is not paired with (port_heard) */
+#define MESH_VERSION 136u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
-   154 replaces row-range transport entries and row pins with immutable byte spans and interval pins. */
-#define MESH_LAYOUT 154u
+   155 replaces the clients' streams with node orders (struct mesh_node) */
+#define MESH_LAYOUT 155u
 #define MESH_ABSENT UINT32_MAX
-/* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
-   slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
-   (`bridge_off`, mesh-observe.h) */
+/* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes it
+   holds an order toward (struct mesh_node) and its client slots; and the bytes of the bridge's own pages, which it
+   publishes for its own observation tools and no client reads (`bridge_off`, mesh-observe.h) */
 #define MESH_STREAMS 32
+#define MESH_LINK_STREAMS 4u
+#define MESH_PORTS (MESH_STREAMS/MESH_LINK_STREAMS)
+#define MESH_NODES 8u
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
-/* design/transport.md section 14: the entries each of a stream's two lists holds; an owner word leaves bit 63 clear
-   (its generation is 25 bits, mesh-dataflow.c mesh_slot_take), and a stream's owner word has it set once its holder
-   gave it (MESH_STREAM_GIVEN) */
-#define MESH_STREAM_ENTRIES 4096u
-#define MESH_STREAM_GIVEN (UINT64_C(1)<<63)
 _Static_assert(38+25<=63,"an owner word");
-_Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)),"a ring a power of two");
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
@@ -91,24 +85,10 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* Wire 135 / layout 154: an immutable table of resolved byte extents. Offsets
-   are relative to the region base; each span is one exact SEND/receive payload.
-   A span never crosses a registration extent. Full-page data uses this same
-   representation. The compiler jointly partitions both endpoints into equal
-   payload lengths in equal unit order; the bridge never pads or copies data. */
+/* An exact byte extent of the region (offset from its base, bytes); one never crosses a registration extent */
 #define MESH_DMA_EXTENT (UINT64_C(1)<<30)
 struct mesh_dma_span { uint64_t offset,bytes; };
-struct mesh_entry { uint64_t spans,units,word,base; };
-/* One progress-thread CPU read scope, independently of outstanding DMA. The
-   sequence never resets with a holding; odd or changed snapshots retain storage.
-   A zero byte count/word is quiescent. Fits previously unused stream padding. */
-struct mesh_cpu_pin { _Atomic uint64_t sequence,offset,bytes,word; };
 _Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");
-_Static_assert(sizeof(struct mesh_entry)==32,"mesh_entry ABI");
-/* A SEND's unit i is available at word >= base+i+1 (word 0: stream ready).
-   A receive's optional word permits its first write at word >= base. The
-   immutable span table and its backing allocations outlive every future unit
-   and every posted DMA. `taken` does not release this table. */
 struct mesh_units { uint64_t n; };
 static inline struct mesh_units mesh_units_add(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n+b.n}; }
 static inline struct mesh_units mesh_units_sub(struct mesh_units a,struct mesh_units b){ return (struct mesh_units){a.n-b.n}; }
@@ -116,25 +96,89 @@ static inline int mesh_units_lt(struct mesh_units a,struct mesh_units b){ return
 static inline struct mesh_units mesh_units_load(const _Atomic uint64_t *word){ return (struct mesh_units){atomic_load_explicit(word,memory_order_acquire)}; }
 static inline void mesh_units_store(_Atomic uint64_t *word,struct mesh_units p){ atomic_store_explicit(word,p.n,memory_order_release); }
 #define MESH_UNITS_LOST ((struct mesh_units){UINT64_MAX})
-/* Allocation-page counts and page-table row IDs, separate from transport units.
-   Native arithmetic may still use page quantities; each realized transport
-   prefix counts exact span units, not allocation pages or byte lengths. */
+/* Allocation-page counts and page-table row IDs, separate from transport units */
 struct mesh_pages { uint64_t n; };
 struct mesh_row { uint64_t r; };
 static inline struct mesh_pages mesh_pages_add(struct mesh_pages a,struct mesh_pages b){ return (struct mesh_pages){a.n+b.n}; }
 static inline struct mesh_pages mesh_pages_sub(struct mesh_pages a,struct mesh_pages b){ return (struct mesh_pages){a.n-b.n}; }
 static inline struct mesh_pages mesh_pages_min(struct mesh_pages a,struct mesh_pages b){ return a.n<b.n?a:b; }
 static inline int mesh_pages_lt(struct mesh_pages a,struct mesh_pages b){ return a.n<b.n; }
-/* the row of page `i` of a range of rows from `row` */
 static inline struct mesh_row mesh_row_after(struct mesh_row row,struct mesh_pages i){ return (struct mesh_row){row.r+i.n}; }
 static inline struct mesh_pages mesh_pages_load(const _Atomic uint64_t *word){ return (struct mesh_pages){atomic_load_explicit(word,memory_order_acquire)}; }
 static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){ atomic_store_explicit(word,p.n,memory_order_release); }
-/* a holding's `sent` and `landed` once its link is lost */
 #define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
-/* Each posted unit retains its actual arena interval, independent of aliases
-   or allocation-row boundaries. A stable sequence identifies its ring slot;
-   a reader racing reuse conservatively retains the allocation. All pin fields
-   precede posted and the final holding check (mesh-link.c unit_told). */
+static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
+  return a.bytes && b.bytes && (a.offset<=b.offset?b.offset-a.offset<a.bytes:a.offset-b.offset<b.bytes);
+}
+
+/* ---- Node-addressed transfers (design/node-addressed-transfers.md) ----------------------------------------------
+   A client names a node and bytes.  It appends a transfer to the region's order toward that node, one ring a
+   direction (0: what this node sends, 1: what it receives), shared by every client.  The order of each ring is the
+   order its transfers were appended in; the transfers of the other node's ring of the other direction are, by the
+   clients' shared program, the same transfers in the same order with spans of the same lengths.  The bridge cuts
+   every span into pieces (mesh-order.h), and places piece n of a direction's order, of the k-th transfer, on the cable
+   and queue pair the order's epoch maps (n, k) to; both ends compute it alike, so no transfer is ever announced,
+   granted or claimed.
+
+   A transfer: `units` spans at region offset `spans` (mesh_dma_span, each in the region's arena, none crossing a 1 GiB
+   extent).  Its gate: a SEND of span s goes once the word at `gate` reaches base+s+1, a receive is posted once it
+   reaches `base` (gate 0: at once); `gates` > 0 names instead `gates` mesh_gate {word, threshold} at `gate`, each of
+   which must hold for any of it.  Once every byte of it has crossed, the word at `done` (0: none) is raised to `value`;
+   transfers naming the same done word raise it in their order, so a count kept over several stays a prefix.  A lost
+   transfer (a cable toward the node lost, the order restarted) raises it to UINT64_MAX.  `generation` is the order's
+   (struct mesh_node) the client opened it in: a transfer of another is not in the order, and is lost at once */
+struct mesh_gate { uint64_t word,threshold; };
+struct mesh_crossing {
+  uint64_t spans,units,gate,base,done,value;
+  uint32_t gates,generation;
+  uint64_t reserved;
+};
+_Static_assert(sizeof(struct mesh_crossing)==64,"mesh_crossing ABI");
+/* A ring slot: `sequence` 2i while it is free for the order's transfer i, 2i+1 once that transfer is in it; `owner` the
+   client that took it (by compare-and-swap from 0); the bridge's `pieces` (its piece count + 1, 0 until counted),
+   `completed` (pieces done) and `state` (0 until its done word was raised).  A slot is free again once the bridge
+   retires its transfer (struct mesh_node `retired`) */
+#define MESH_RING 4096u
+_Static_assert(!(MESH_RING&(MESH_RING-1)),"a ring a power of two");
+struct mesh_slot {
+  _Alignas(64) _Atomic uint64_t sequence;
+  _Atomic uint64_t owner,pieces,completed,state;
+  uint64_t padding[3];
+  struct mesh_crossing t;
+};
+_Static_assert(sizeof(struct mesh_slot)==128,"mesh_slot ABI");
+/* An epoch of a direction's order: from piece first[way] on, piece n of the k-th transfer is on cable
+   (n - first) mod cables, queue pair k mod lanes of that cable's (mesh-order.h order_place).  Cables are named by the
+   bridge's port and sorted by their identity, alike at both ends */
+struct mesh_epoch { uint64_t first[2]; uint32_t cables,padding; struct { uint32_t port,lanes; uint64_t wire; } cable[MESH_PORTS]; };
+#define MESH_EPOCHS 16u
+/* The order toward node `node` (0: the slot unused): `live` while it has an epoch (clients open it only then),
+   `generation` (a restart of the order: every transfer of an earlier one lost), the bandwidth of its cables, its
+   rings (`ring`: a region offset, MESH_RING slots each way), each way's slots taken (`tail`, the clients') and retired
+   (`retired`, the parent's, with the anchor: the transfers and pieces of the order before `retired`, under
+   `anchored` odd while written, by whichever of the bridge's processes holds `retiring`), the parent's `freeze` (odd while it agrees the next epoch with the peer: no piece
+   is posted meanwhile) and the epochs of the generation */
+struct mesh_node {
+  _Alignas(64) _Atomic uint32_t node;
+  _Atomic uint32_t live;
+  _Atomic uint64_t generation,bandwidth;
+  uint64_t ring;
+  _Atomic uint64_t freeze;
+  _Atomic uint32_t epochs,retiring;
+  _Alignas(64) _Atomic uint64_t tail[2];
+  _Alignas(64) _Atomic uint64_t retired[2];
+  _Atomic uint64_t anchored,anchor[2][2];
+  struct mesh_epoch epoch[MESH_EPOCHS];
+};
+static inline struct mesh_slot *mesh_ring(void *m,const struct mesh_node *x,int way,uint64_t i){
+  return (struct mesh_slot *)((char *)m+x->ring)+(uint64_t)way*MESH_RING+i%MESH_RING;
+}
+
+/* The bridge's lanes (never a client's): a port's lane pair s, its peer and identity while live, each lane's units
+   posted and completed each way and their interval pins (`rows`, a region offset), and the port child that posts them
+   (`child`, `child_start`): a unit's buffer is the hardware's until it completes or that process is gone
+   (mesh-dataflow.c mesh_interval_pinned).  On a port's first record, `ack` the order's freeze its child has stopped
+   for and `frontier` the pieces it had posted each way */
 struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2],failed_span[2]; };
 _Static_assert(sizeof(struct mesh_posts)==64 && offsetof(struct mesh_posts,done)==16,"mesh_posts ABI");
 #define MESH_LANE_UNITS 4096u
@@ -143,9 +187,6 @@ struct mesh_dma_pin { _Atomic uint64_t sequence,offset,bytes; };
 static inline struct mesh_dma_pin *mesh_unit_pin(void *m,uint64_t pins,int way,int lane,uint64_t u){
   return (struct mesh_dma_pin *)((char *)m+pins)+((uint64_t)(2*way+lane)*MESH_LANE_UNITS+u%MESH_LANE_UNITS);
 }
-/* Sequential consistency also makes the multiword snapshot sound during ring
-   reuse: observing a new field places the final sequence read after its writer's
-   odd sequence. No allocator may accept a mixture from two slot generations. */
 static inline void mesh_pin_store(struct mesh_dma_pin *pin,uint64_t unit,struct mesh_dma_span span){
   atomic_store_explicit(&pin->sequence,2*unit+1,memory_order_seq_cst);
   atomic_store_explicit(&pin->offset,span.offset,memory_order_seq_cst);
@@ -159,54 +200,17 @@ static inline int mesh_pin_load(const struct mesh_dma_pin *pin,uint64_t unit,str
   *span=(struct mesh_dma_span){atomic_load_explicit(&pin->offset,memory_order_seq_cst),atomic_load_explicit(&pin->bytes,memory_order_seq_cst)};
   return atomic_load_explicit(&pin->sequence,memory_order_seq_cst)==sequence;
 }
-static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span b){
-  return a.bytes && b.bytes && (a.offset<=b.offset?b.offset-a.offset<a.bytes:a.offset-b.offset<b.bytes);
-}
-/* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
-   link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
-   until it is live): the bridge's.  `owner`: 0 while the stream is free; a holder takes it from 0 to its own; its
-   holder gives it by setting MESH_STREAM_GIVEN in it, and the bridge does so for a holder gone; the bridge then ends the
-   holding at once (nothing more of it posted), makes the holding's words new (every count 0) and stores 0 where nothing
-   of it is outstanding (design/transport.md section 14, "A holding's end").  `posts`,
-   the bridge's: each of the stream's two lanes' units over its pairing, each way, posted and completed, counted from 0
-   as the port's child makes the link's queue pairs, and `rows` (a region offset, historical field name) their rings of physical byte intervals, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
-   posts them, written as it opens the stream: a unit's buffer is the hardware's until it completes or the queue pair
-   holding it is gone with that process (verbs), so the units outstanding count only while it lives
-   (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' declared byte spans, and a holding ends with nothing of it
-   outstanding or the stream never live again in the pairing, so on a live stream both ends'
-   counts are equal whenever no holder holds it.  No communicator reads them; a client reads every stream's, and their
-   rows and child, as it returns a lease (mesh-dataflow.c mesh_lease_return, mesh_pinned: a row a unit outstanding
-   names stays held), and the bridge tells each unit before it posts it so that read sees it (mesh-link.c unit_told).
-   A holding that ended with units
-   outstanding leaves its owner word MESH_STREAM_GIVEN alone (naming no client, so none takes it) and the stream not
-   live for the rest of its pairing.  The holder presents its
-   entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
-   then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
-   bridge's, per list) is past it.  Three unit counts over the holding, each in its list's order and all of it before:
-   `ready`, the holder's, of the send list produced; `sent`, the bridge's, of the send list whose SENDs have completed;
-   `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  Its `wire` is
-   one cable's stream's identity, made from its first lane's two queue pair numbers and the two ends' GIDs (mesh-link.c
-   stream_wire), and clients read it (mesh-call.h mesh_streams_free, mesh_stream_held) */
-struct mesh_stream {
+struct mesh_lanes {
   _Alignas(64) _Atomic uint32_t peer;
   _Atomic uint32_t live;
-  uint64_t lists,rows;
+  uint64_t rows;
   _Atomic uint64_t bandwidth,wire;
-  _Atomic uint32_t peer_packet[2];
-  _Alignas(64) _Atomic uint64_t owner;
-  _Atomic uint64_t sends,lands;
-  struct mesh_cpu_pin metadata;
-  _Alignas(64) _Atomic uint64_t ready;
-  _Atomic uint64_t peer_presented[2][2],peer_mode;
-  _Alignas(64) _Atomic uint64_t sent;
-  _Atomic uint64_t landed,taken[2];
-  _Atomic uint32_t child;
+  _Atomic uint64_t ack,frontier[2];
+  _Atomic uint32_t child,padding;
   uint64_t child_start;
   struct mesh_posts posts[2];
 };
-_Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");
-_Static_assert(offsetof(struct mesh_stream,metadata)==88 && offsetof(struct mesh_stream,ready)==128,
-               "CPU metadata pin consumes padding without moving stream ABI fields");
+_Static_assert(sizeof(struct mesh_lanes)==256,"mesh_lanes");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
@@ -221,14 +225,15 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
    at these offsets (design/transport.md section 2) */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
-  uint64_t start; _Atomic uint64_t peer_owner,peer_stream; uint64_t peer_words,peer_count,peer_client,padding;
+  uint64_t start,padding[6];
 };
-/* design/transport.md; `busy`: the streams held (0 between calls) and since when none has been (`idle_since`, the
-   wall clock in ns; 0 while any is) */
+/* design/transport.md; `busy`: the transfers outstanding toward any node (0 between calls) and since when none has
+   been (`idle_since`, the wall clock in ns; 0 while any is); `node_off`, the orders toward nodes (struct mesh_node) */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,streams,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,bridge_off,stream_off,client_off,data_off,length,boot;
   _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
+  uint64_t node_off;
 };
 /* the header within its own first page at any page size (mesh_layout) */
 _Static_assert(sizeof(struct hdr)<=4096,"struct hdr");
@@ -254,8 +259,10 @@ static inline int mesh_map_whole(struct hdr *m,uint64_t before){
 }
 /* design/transport.md: an owner word is its generation, slot and process: (generation << 38) | (slot << 32) | pid */
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
-/* design/transport.md section 14: the stream of the node's link `p` */
-static inline struct mesh_stream *mesh_stream_at(struct hdr *m,uint32_t p){return (struct mesh_stream *)((char *)m+m->stream_off)+p;}
+/* the bridge's lane records of port p's lane pair s: record p MESH_LINK_STREAMS + s */
+static inline struct mesh_lanes *mesh_lanes_at(struct hdr *m,uint32_t p){return (struct mesh_lanes *)((char *)m+m->stream_off)+p;}
+/* the order toward node slot n (struct mesh_node) */
+static inline struct mesh_node *mesh_node_at(struct hdr *m,uint32_t n){return (struct mesh_node *)((char *)m+m->node_off)+n;}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 /* whether `pages` pages from `row` lie in the page table: as many rows from it */
@@ -268,23 +275,25 @@ static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_At
 /* design/transport.md */
 /* the arena occupancy bitmap is indexed by arena page and sized by arena pages: it is not a row plane */
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
-/* Config-time validation; no rounding, copying, or interpretation of row IDs.
-   An entry's immutable table itself must reside in the region's arena. */
+/* whether a span lies in the region's arena, of at most UINT32_MAX bytes, crossing no registration extent */
 static inline int mesh_dma_span_valid(const struct hdr *m,struct mesh_dma_span span){
   const uint64_t arena=(uint64_t)mesh_arena_pages(m)*m->pgsz;
   if(!span.bytes || span.bytes>UINT32_MAX || span.offset<m->data_off)return 0;
   const uint64_t at=span.offset-m->data_off;
   return at<arena && span.bytes<=arena-at && span.bytes<=MESH_DMA_EXTENT-at%MESH_DMA_EXTENT;
 }
-static inline int mesh_entry_table_valid(const struct hdr *m,struct mesh_entry e){
-  return e.units && e.spans>=m->data_off && e.spans<=m->length && !(e.spans%_Alignof(struct mesh_dma_span)) &&
-    e.units<=(m->length-e.spans)/sizeof(struct mesh_dma_span) && e.base<UINT64_MAX-e.units &&
-    (!e.word || (!(e.word%_Alignof(_Atomic uint64_t)) && e.word<=m->length-sizeof(uint64_t)));
+/* whether the region holds `bytes` at offset `at`, aligned to `align` */
+static inline int mesh_region_holds(const struct hdr *m,uint64_t at,uint64_t bytes,uint64_t align){
+  return at && !(at%align) && at<=m->length && bytes<=m->length-at;
 }
-static inline int mesh_entry_valid(const struct hdr *m,struct mesh_entry e){
-  if(!mesh_entry_table_valid(m,e))return 0;
-  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+e.spans);
-  for(uint64_t i=0;i<e.units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
+/* whether a transfer's words and table lie in the region, and each of its spans is valid */
+static inline int mesh_crossing_valid(const struct hdr *m,const struct mesh_crossing *t){
+  if(!t->units || t->units>(m->length-m->data_off)/sizeof(struct mesh_dma_span) ||
+     !mesh_region_holds(m,t->spans,t->units*sizeof(struct mesh_dma_span),_Alignof(struct mesh_dma_span)) || t->spans<m->data_off ||
+     (t->gate && !mesh_region_holds(m,t->gate,t->gates?(uint64_t)t->gates*sizeof(struct mesh_gate):8,8)) ||
+     (t->done && !mesh_region_holds(m,t->done,8,8)))return 0;
+  const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+t->spans);
+  for(uint64_t i=0;i<t->units;i++)if(!mesh_dma_span_valid(m,spans[i]))return 0;
   return 1;
 }
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
@@ -308,8 +317,8 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
 /* design/algorithm-sources.md#programkernel_call; design/transport.md */
 /* design/transport.md; design/transport.md: the node's region: `pages` arena pages of `block`
    pages a block (the bridge's registered memory, its node's configured share of its memory), a page-table row a block (its page
-   entry and buffer, and a bit in each plane), the bridge's own pages, the streams and the client slots; the map's
-   records and the streams' rings are leases the bridge takes from the arena (mesh_records, mesh_stream_at), which the
+   entry and buffer, and a bit in each plane), the bridge's own pages, its lane records, the orders toward nodes and
+   the client slots; the map's records, the lanes' pins and the orders' rings are leases the bridge takes from the arena (mesh_records, mesh_lanes_at, mesh_node_at), which the
    bridge registers whole once */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   uint32_t arena=pages/block*block,rows=arena/block;
@@ -320,7 +329,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->page_off=at; at+=(uint64_t)rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->bridge_off=at; at+=MESH_BRIDGE_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
-  h->stream_off=at; at+=(uint64_t)MESH_STREAMS*sizeof(struct mesh_stream); at=(at+pgsz-1)/pgsz*pgsz;
+  h->stream_off=at; at+=(uint64_t)MESH_STREAMS*sizeof(struct mesh_lanes); at=(at+pgsz-1)/pgsz*pgsz;
+  h->node_off=at; at+=(uint64_t)MESH_NODES*sizeof(struct mesh_node); at=(at+pgsz-1)/pgsz*pgsz;
   h->client_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)arena*pgsz;

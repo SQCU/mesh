@@ -1,4 +1,3 @@
-#include "mesh-peer-cables.h"
 /* design/whole-function.md#fabric */
 #include "nccl.h"
 #include "mesh-call.h"
@@ -241,10 +240,18 @@ struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t u
 /* a compiled collective the communicator runs for the calls it fits (ncclMeshProgram), its own copy */
 struct entry { uint64_t below; struct mesh_program program; struct mesh_trees trees; int whole; };
 
-/* a channel (design/transport.md section 14): toward rank `peer` on node `node`, the holding of the stream toward that
-   node its process holds (mesh-call.h mesh_stream_view: its two lists and its counts), and the Metal buffer over the
-   page that holds the counts (`buffer`: `ready` and `landed` at those offsets in it; `ready_at` the region
-   offset of `ready`, a landing's gate).  Its entries, each list in its own order: `sends` and `lands` laid by the
+/* a channel's entry, as the library lays it: a SEND's or a landing's span table (`spans`, `units` of them, region
+   offsets), its gate word (0: the channel's `ready`) and base (mesh.h struct mesh_crossing).  A channel's view: its
+   entries as it appended them to its node's order, each list's in its own log (`list`, CHANNEL_LOG of them, read by
+   the trace observer) and their count (`presented`), and its three counts, words of its process's own lease that its
+   entries' gates and done words name (mesh.h struct mesh_crossing: `sent` and `landed` rise in its entries' order) */
+struct mesh_entry { uint64_t spans, units, word, base; };
+#define CHANNEL_LOG MESH_RING
+struct channel_view { struct mesh_entry *list[2]; _Atomic uint64_t *presented[2], *ready, *sent, *landed; };
+/* a channel (design/node-addressed-transfers.md): toward rank `peer` on node `node`, its process's hold of that node's
+   order (`stream`, the hold's index: struct attach `holds`; `wire`, the hold's identity), its view, and the Metal
+   buffer over the page that holds its counts (`buffer`: `ready` and `landed` at those offsets in it; `ready_at` the
+   region offset of `ready`, a landing's gate).  Its entries, each list in its own order: `sends` and `lands` laid by the
    groups scheduled, `out` and `in` their pages (the value each count reaches once they are whole), `published` send
    entries published, `consumed` the AOT consumer prefix (not the physical landing prefix),
    `waited` consumer entries awaited by the GPU work encoded */
@@ -253,7 +260,7 @@ struct channel {
   int peer;
   uint32_t node, stream, cable;
   const uint64_t *wire;
-  struct mesh_stream_view view;
+  struct channel_view view;
   void *buffer;
   size_t ready, landed, sent;
   uint64_t ready_at, sends, lands, published, consumed, waited;
@@ -658,7 +665,7 @@ ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric **fabr
 }
 
 
-ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample *samples, int room, int *count) {
+ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshPeerSample *samples, int room, int *count) {
   if (!comm || !count || room < 0 || (room && !samples)) return fail(ncclInvalidArgument, "ncclMeshCommSample's arguments");
   pthread_mutex_lock(&group_lock);
   ncclResult_t result = ncclSuccess;
@@ -669,13 +676,13 @@ ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample *sam
     const uint64_t sent = atomic_load_explicit(c->view.sent, memory_order_acquire);
     const uint64_t landed = atomic_load_explicit(c->view.landed, memory_order_acquire);
     if (ready == UINT64_MAX || sent == UINT64_MAX || landed == UINT64_MAX) {
-      result = fail(ncclRemoteError, "sampling a lost physical cable %u", c->cable); break;
+      result = fail(ncclRemoteError, "sampling the lost order toward node %u", c->node); break;
     }
-    samples[h] = (struct ncclMeshCableSample){.wire = *c->wire, .cable = c->cable, .peer = (uint32_t)c->peer};
+    samples[h] = (struct ncclMeshPeerSample){.pair = comm->fabric.cable[c->cable].wire, .channel = c->cable, .peer = (uint32_t)c->peer};
     if (mesh_byte_account_at(c->payload, ready, &samples[h].ready) ||
         mesh_byte_account_at(c->payload, sent, &samples[h].sent) ||
         mesh_byte_account_at(c->payload + 1, landed, &samples[h].landed)) {
-      result = fail(ncclInternalError, "physical cable %u has a completion outside its compiled payload prefixes", c->cable); break;
+      result = fail(ncclInternalError, "the channel toward node %u has a completion outside its compiled payload prefixes", c->node); break;
     }
     channel_account_prune(comm->channels + h);
   }
@@ -759,10 +766,12 @@ static const struct entry *program_of(ncclComm_t comm, int what, int root, uint6
    NULL until then) */
 #include "mesh-lease-retire.h"
 struct lease { void *address; uint32_t row; size_t bytes; void *buffer; struct mesh_lease_retire reads; int returned; };
-/* design/transport.md section 14: the stream toward node `node` the process holds (`users` the communicator on it, 0
-   none: the hold vacant), its holding's view, and the identity it was taken by (`wire`: mesh-call.h mesh_stream_held,
-   comm_failure) */
-struct hold { uint32_t node, stream, users, padding; struct mesh_stream_view view; uint64_t wire, generation; };
+/* design/node-addressed-transfers.md: a channel's hold of the order toward node `node` (`users` the communicator on it,
+   0 none: the hold vacant), the order as opened, its view (its log and counts), and its identity (`wire`: the node and
+   the order's generation; `generation`, the hold's own, never reused).  Holding takes nothing of the bridge's: any
+   number of holds, of this process and others, use one order at once */
+#define NCCL_MESH_HOLDS 256u
+struct hold { uint32_t node, users; struct mesh_order order; struct channel_view view; uint64_t wire, generation, presented[2]; };
 struct attach {
   struct mesh_ctx context;
   struct lease *leases;
@@ -772,12 +781,21 @@ struct attach {
      the caller's GPU work, and its residency set, may hold those pages after the buffer is released, so such an attach
      is never let go and its process ends to leave the region (attach_settle) */
   _Atomic int wrapped;
-  struct hold holds[MESH_STREAMS];
+  struct hold holds[NCCL_MESH_HOLDS];
+  /* the leases of the holds' counts: each hold's three words its own, never another's after it (an entry of an ended
+     hold may still raise them), `counted` of the last lease's used */
+  struct mesh_section counts;
+  uint32_t counted;
   struct attach *next;
 };
 /* the process's one attach of the node's region (`attaches`, made at its first lease or communicator), under attach_lock */
 static struct attach *attaches;
 static uint64_t holding_generation;
+/* whether hold k is the attach's and its order still the one it opened (a restart of the order, a cable toward the
+   node lost, loses every entry of it) */
+static int hold_live(const struct attach *a, uint32_t k, uint64_t wire) {
+  return k < NCCL_MESH_HOLDS && a->holds[k].users && a->holds[k].wire == wire && mesh_order_live((struct mesh_ctx *)&a->context, &a->holds[k].order);
+}
 static pthread_mutex_t attach_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* whether attach `a`'s region is expired (released or replaced: its layout version 0) */
@@ -869,8 +887,8 @@ static ncclResult_t comm_refused(int status, const char *name) {
   return status == ENOMEM ? fail(ncclSystemError, "out of memory") : attach_fail(status, "communicator %s", name);
 }
 
-/* a communicator no longer a user of its attach's holds (`held`); a hold none uses let go (mesh-call.h mesh_stream_give:
-   the bridge posts nothing more of the holding and frees the stream); under attach_lock */
+/* a communicator no longer a user of its attach's holds (its channels'); a hold none uses vacant (it took nothing of
+   the bridge's); under attach_lock */
 static int lease_read_sample(void *, uint32_t, struct mesh_lease_retire_sample *);
 static void leases_reap(struct attach *);
 static void comm_let_go(struct ncclComm *comm) {
@@ -878,10 +896,12 @@ static void comm_let_go(struct ncclComm *comm) {
   comm->binding = 0;
   for (size_t i = 0; i < comm->attach->count; i++)
     mesh_lease_retire_ready(&comm->attach->leases[i].reads, lease_read_sample, comm->attach);
-  for (uint32_t k = 0; k < MESH_STREAMS; k++) {
-    struct hold *h = comm->attach->holds + k;
-    if (!(comm->held >> k & 1) || !h->users || --h->users) continue;
-    if (mesh_stream_held(&comm->attach->context, h->stream, h->wire)) mesh_stream_give(&comm->attach->context, h->stream);
+  for (uint32_t e = 0; comm->endpoint && e < comm->fabric.cables; e++) {
+    if (comm->endpoint[e] == UINT32_MAX) continue;
+    struct hold *h = comm->attach->holds + comm->endpoint[e];
+    comm->endpoint[e] = UINT32_MAX;
+    if (!h->users || --h->users) continue;
+    free(h->view.list[0]);
     *h = (struct hold){0};
   }
   comm->held = 0;
@@ -904,12 +924,12 @@ static void comm_leave(struct ncclComm *comm) {
 }
 
 /* a rank's report at a communicator's init (NCCL's bootstrap, below): its status (0, else why it cannot go on, so every
-   rank fails alike), its bridge's node and the nodes that bridge reaches with each one's bandwidth, and the streams free
-   to take, each one's node and identity (`frees` of them: reach_read, mesh-call.h mesh_streams_free) */
+   rank fails alike), its bridge's node and the nodes that bridge holds a live order toward, with each one's bandwidth
+   (reach_read, mesh-call.h mesh_nodes_reached) */
 struct report {
   int32_t rank, status;
   uint32_t node, count;
-  struct mesh_endpoint endpoint[MESH_STREAMS];
+  struct mesh_reach reach[MESH_NODES];
 };
 
 /* design/whole-function.md#fabric */
@@ -921,14 +941,20 @@ static int cable_order(const void *left, const void *right) {
 
 static int fabric_discover(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
-  struct mesh_cable *cables = calloc((size_t)n * MESH_STREAMS + 1, sizeof *cables);
+  struct mesh_cable *cables = calloc((size_t)n * n + 1, sizeof *cables);
   if (!cables) return ENOMEM;
   comm->fabric = (struct mesh_fabric){n, 0, cables};
+  /* design/node-addressed-transfers.md: one link of the communicator's fabric a pair of members whose bridges each hold
+     a live order toward the other's node, its bandwidth the lesser of the two orders' (the bridge's cables beneath
+     are its own); its identity the pair of nodes, alike at every member */
   for (uint32_t a = 0; a < n; a++) for (uint32_t b = a + 1; b < n; b++) {
     const struct report *x = reports + a, *y = reports + b;
-    int error = mesh_peer_cables(a, x->node, x->endpoint, x->count, b, y->node, y->endpoint, y->count,
-                                 cables, &comm->fabric.cables, 1);
-    if (error) return error;
+    uint64_t there = 0, back = 0;
+    for (uint32_t k = 0; k < x->count; k++) if (x->reach[k].node == y->node) there = x->reach[k].bandwidth ? x->reach[k].bandwidth : 1;
+    for (uint32_t k = 0; k < y->count; k++) if (y->reach[k].node == x->node) back = y->reach[k].bandwidth ? y->reach[k].bandwidth : 1;
+    if (!there || !back) continue;
+    const uint32_t lo = x->node < y->node ? x->node : y->node, hi = x->node < y->node ? y->node : x->node;
+    cables[comm->fabric.cables++] = (struct mesh_cable){((uint64_t)lo << 32) | hi, there < back ? there : back, {a, b}};
   }
   qsort(cables, comm->fabric.cables, sizeof *cables, cable_order);
   const uint32_t links = comm->fabric.cables;
@@ -1197,11 +1223,10 @@ static int gather(struct ncclComm *comm, int nranks, int rank, struct report *re
   return status;
 }
 
-/* this rank's report of its bridge's node, the nodes it reaches (mesh-call.h mesh_nodes_reached) and the streams free to
-   take (mesh_streams_free) */
+/* this rank's report of its bridge's node and the nodes it holds a live order toward (mesh-call.h mesh_nodes_reached) */
 static void reach_read(struct attach *a, struct report *report) {
   report->node = a->context.M->node;
-  report->count = mesh_endpoints(a->context.M, report->endpoint, MESH_STREAMS);
+  report->count = mesh_nodes_reached(a->context.M, report->reach, MESH_NODES);
 }
 
 /* design/whole-function.md#fabric */
@@ -1215,9 +1240,8 @@ static ncclResult_t apart_fail(const char *name) {
   return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings are kept a node)", name);
 }
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
-  return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another communicator holds, "
-              "or whose last holding its bridge is still ending; ENOLINK, no stream toward a member's node); a communicator made next "
-              "reads the streams as they then stand", name, rank, strerror(status));
+  return fail(ncclSystemError, "communicator %s: rank %d could not open its bridge's order toward a member's node (%s: ENOLINK, its "
+              "bridge holds no live order there); a communicator made next reads the orders as they then stand", name, rank, strerror(status));
 }
 
 /* a communicator's table, the caller's operands (nccl.h ncclMeshCommInitRank): its paths (NULL: none, the map's
@@ -1232,7 +1256,23 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
 }
 
 
-/* design/whole-function.md#fabric */
+/* hold h's three counts: words of the attach's counts lease (32 bytes a hold, never reused: a lease of a page made
+   where the last is used up), zeroed; 0, or mesh_section_create's error */
+static int hold_counts(struct attach *a, struct hold *h) {
+  const struct hdr *m = a->context.M;
+  const uint32_t each = 32, room = (uint32_t)(((uint64_t)m->block * m->pgsz) / each);
+  if (!a->counts.count || a->counted == room) {
+    const int status = mesh_section_create(&a->context, (size_t)m->block * m->pgsz, 1, &a->counts);
+    if (status) { a->counts = (struct mesh_section){0}; return status; }
+    a->counted = 0;
+  }
+  _Atomic uint64_t *words = (_Atomic uint64_t *)((char *)mesh_section_address(&a->context, a->counts, 0) + (size_t)each * a->counted++);
+  for (int k = 0; k < 4; k++) atomic_store_explicit(words + k, 0, memory_order_relaxed);
+  h->view.ready = words; h->view.sent = words + 1; h->view.landed = words + 2;
+  return 0;
+}
+/* design/whole-function.md#fabric: a hold of the order toward each member's node this rank is joined to (mesh-call.h
+   mesh_order_open: it takes nothing; any number of communicators use one order at once), its counts and its log */
 static int fabric_acquire(struct ncclComm *comm) {
   struct attach *a = comm->attach;
   int status = 0;
@@ -1241,22 +1281,27 @@ static int fabric_acquire(struct ncclComm *comm) {
     const struct mesh_cable *c = comm->fabric.cable + e;
     if (c->node[0] != (uint32_t)comm->rank && c->node[1] != (uint32_t)comm->rank) continue;
     const uint32_t peer = c->node[c->node[0] == (uint32_t)comm->rank];
-    uint32_t slot = 0, stream = 0;
-    while (slot < MESH_STREAMS && a->holds[slot].users) slot++;
-    if (slot == MESH_STREAMS) { status = ENOSPC; break; }
+    uint32_t slot = 0;
+    while (slot < NCCL_MESH_HOLDS && a->holds[slot].users) slot++;
+    if (slot == NCCL_MESH_HOLDS) { status = ENOSPC; break; }
     if (holding_generation == UINT64_MAX) { status = EOVERFLOW; break; }
-    if ((status = mesh_stream_take(&a->context, c->wire, &stream))) break;
     struct hold *h = a->holds + slot;
-    *h = (struct hold){.node = comm->members[peer], .stream = stream, .wire = c->wire, .users = 1, .generation = ++holding_generation};
-    comm->endpoint[e] = slot; comm->held |= UINT32_C(1) << slot; comm->binding = 1;
-    status = mesh_stream_view(&a->context, stream, &h->view);
+    *h = (struct hold){.node = comm->members[peer]};
+    if ((status = mesh_order_open(&a->context, h->node, &h->order))) break;
+    if ((status = hold_counts(a, h))) break;
+    if (!(h->view.list[0] = calloc(2 * (size_t)CHANNEL_LOG, sizeof *h->view.list[0]))) { status = ENOMEM; break; }
+    h->view.list[1] = h->view.list[0] + CHANNEL_LOG;
+    h->view.presented[0] = (_Atomic uint64_t *)&h->presented[0]; h->view.presented[1] = (_Atomic uint64_t *)&h->presented[1];
+    h->wire = ((uint64_t)h->node << 32) | h->order.generation;
+    h->users = 1; h->generation = ++holding_generation;
+    comm->endpoint[e] = slot; comm->binding = 1;
   }
   pthread_mutex_unlock(&attach_lock);
   return status;
 }
 
-/* the Metal buffer over the region's page (or pages) that holds a channel's counts, each count's offset in it, and
-   `ready`'s region offset */
+/* the Metal buffer over the page (or pages) of the attach's counts lease that holds a channel's counts, each count's
+   offset in it, and `ready`'s region offset */
 static int channel_buffer(struct channel *ch, const struct hdr *m) {
   const uintptr_t page = (uintptr_t)getpagesize();
   const uintptr_t at[3] = {(uintptr_t)ch->view.ready, (uintptr_t)ch->view.landed, (uintptr_t)ch->view.sent};
@@ -1288,7 +1333,7 @@ static int fabric_realize(struct ncclComm *comm) {
     const uint32_t peer = c->node[c->node[0] == (uint32_t)comm->rank];
     struct hold *h = comm->attach->holds + comm->endpoint[e];
     struct channel *ch = comm->channels + comm->count++;
-    *ch = (struct channel){.peer = (int)peer, .node = comm->members[peer], .stream = h->stream,
+    *ch = (struct channel){.peer = (int)peer, .node = comm->members[peer], .stream = comm->endpoint[e],
       .cable = e, .wire = &h->wire, .view = h->view};
     if (!(status = channel_buffer(ch, m))) atomic_store(&comm->attach->wrapped, 1);
   }
@@ -1525,16 +1570,13 @@ ncclResult_t ncclCommDeregister(const ncclComm_t comm, void *handle) {
    a reused stream's prefix from retiring an earlier source. attach_lock held. */
 static int lease_read_sample(void *context, uint32_t stream, struct mesh_lease_retire_sample *sample) {
   struct attach *a = context;
-  for (uint32_t k = 0; k < MESH_STREAMS; k++) {
-    const struct hold *h = a->holds + k;
-    if (!h->users || h->stream != stream) continue;
-    if (!mesh_stream_held(&a->context, stream, h->wire)) return ENOLINK;
-    *sample = (struct mesh_lease_retire_sample){.wire = h->wire, .holding = h->generation,
-      .sent = atomic_load_explicit(h->view.sent, memory_order_acquire),
-      .landed = atomic_load_explicit(h->view.landed, memory_order_acquire)};
-    return mesh_stream_held(&a->context, stream, h->wire) ? 0 : ENOLINK;
-  }
-  return ENOENT;
+  if (stream >= NCCL_MESH_HOLDS || !a->holds[stream].users) return ENOENT;
+  const struct hold *h = a->holds + stream;
+  if (!hold_live(a, stream, h->wire)) return ENOLINK;
+  *sample = (struct mesh_lease_retire_sample){.wire = h->wire, .holding = h->generation,
+    .sent = atomic_load_explicit(h->view.sent, memory_order_acquire),
+    .landed = atomic_load_explicit(h->view.landed, memory_order_acquire)};
+  return hold_live(a, stream, h->wire) ? 0 : ENOLINK;
 }
 
 /* Returning a dead tensor can hand outstanding posted reads to bridge-owned
@@ -1542,18 +1584,11 @@ static int lease_read_sample(void *context, uint32_t stream, struct mesh_lease_r
    This is not a proof allowing the application to overwrite the allocation. */
 static int lease_detachable(void *context, const struct mesh_lease_retire_dep *d) {
   struct attach *a = context;
-  for (uint32_t k = 0; k < MESH_STREAMS; k++) {
-    const struct hold *h = a->holds + k;
-    if (h->users && h->stream == d->stream && h->generation == d->holding) return EBUSY;
-  }
-  if (d->metadata) {
-    if (d->stream >= MESH_STREAMS) return EINVAL;
-    const uint64_t owner = atomic_load_explicit(&mesh_stream_at(a->context.M, d->stream)->owner, memory_order_acquire);
-    /* client|GIVEN prevents new DMA posts, but the progress thread can still
-       be reading a descriptor before unit_told notices the give. Only its
-       subsequent owner transition proves those local CPU reads have ended. */
-    if (owner != 0 && owner != MESH_STREAM_GIVEN) return EBUSY;
-  }
+  if (d->stream >= NCCL_MESH_HOLDS) return EINVAL;
+  const struct hold *h = a->holds + d->stream;
+  if (h->users && h->generation == d->holding) return EBUSY;
+  /* the bridge reads an entry's table and posts its bytes until it retires it, and holds a returned lease of a client
+     with an entry not retired (mesh-dataflow.c mesh_pinned) */
   return 0;
 }
 static int lease_returnable(struct attach *a, struct lease *l) {
@@ -1788,11 +1823,11 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
                      (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed));
   }
   struct attach *a = comm->attach;
-  for (uint32_t k = 0; comm->held && k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire))
-      return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
-                       "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)",
-                       a->holds[k].node, comm->name);
+  for (uint32_t h = 0; a && h < comm->count; h++)
+    if (!hold_live(a, comm->channels[h].stream, *comm->channels[h].wire))
+      return comm_fail(comm, ncclRemoteError, "the order toward node %u restarted (a cable toward it lost, or its bridge restarted): "
+                       "communicator %s's entries there are lost (design/node-addressed-transfers.md); it is made again "
+                       "(ncclCommDestroy, then an init)", comm->channels[h].node, comm->name);
   return ncclSuccess;
 }
 
@@ -2758,9 +2793,8 @@ static void touch(struct ncclComm *comm) {
 }
 /* whether channel ch's list (0 send, 1 landing) has room for `need` entries more: its entries presented and not taken
    by the bridge, with them, at most MESH_STREAM_ENTRIES */
-static int room_for(const struct channel *ch, int list, uint64_t need) {
-  return atomic_load_explicit(ch->view.presented[list], memory_order_relaxed) - atomic_load_explicit(ch->view.taken[list], memory_order_acquire) +
-         need <= MESH_STREAM_ENTRIES;
+static int room_for(const struct ncclComm *comm, const struct channel *ch, int list, uint64_t need) {
+  return mesh_order_outstanding((struct mesh_ctx *)&comm->attach->context, &comm->attach->holds[ch->stream].order, list) + need <= MESH_RING;
 }
 /* the wait for room on channel ch's list with group_lock released, as a condition variable's wait releases its mutex
    (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): comm kept from its destroy
@@ -2776,19 +2810,39 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
   atomic_fetch_add(&comm->runs, 1);
   pthread_mutex_unlock(&group_lock);
   ncclResult_t result = ncclSuccess;
-  const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: room on a stream's list for a group's entries (room_wait)", 0);
-  while (!result && !room_for(ch, list, need))
+  const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: room in a node's order for a group's entries (room_wait)", 0);
+  while (!result && !room_for(comm, ch, list, need))
     if (revoked(comm)) result = revoked_fail(comm);
-    else if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
-      result = fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
-                    "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
-    else mesh_deadline_left(&deadline);
+    else if (!hold_live(comm->attach, ch->stream, *ch->wire))
+      result = fail(ncclRemoteError, "communicator %s: the order toward node %u restarted before the group's entries there were "
+                    "presented (design/node-addressed-transfers.md); none was presented", comm->name, ch->node);
+    else { mesh_notify(&comm->attach->context.M->control); mesh_deadline_left(&deadline); }
   pthread_mutex_lock(&group_lock);
   atomic_fetch_sub(&comm->runs, 1);
   if (mine) touch(comm);
   return result ? result : comm_failure(comm);
 }
-/* each channel's entries presented (mesh-call.h mesh_stream_present), its send list's and then its landing list's, once
+/* a channel's entry appended to its node's order (mesh-call.h mesh_order_append: `list` 0 a SEND, 1 a landing), its
+   gate its word (0: the channel's `ready`) at its base, its done word the channel's `sent` or `landed` raised to `end`
+   (its last unit's count) once it has crossed; then logged for the trace observer.  A ring momentarily full of other
+   clients' transfers is appended to again until its deadline (the bridge retires them as they are done) */
+static int channel_present(struct ncclComm *comm, const struct channel *ch, int list, struct mesh_entry entry, uint64_t end) {
+  struct attach *a = comm->attach;
+  struct hold *h = a->holds + ch->stream;
+  const struct hdr *m = a->context.M;
+  const struct mesh_crossing t = {.spans = entry.spans, .units = entry.units,
+    .gate = list ? entry.word : entry.word ? entry.word : ch->ready_at, .base = entry.base,
+    .done = (uint64_t)((char *)(list ? ch->view.landed : ch->view.sent) - (char *)m), .value = end};
+  const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: an entry appended to a node's order (channel_present)", 0);
+  int status;
+  while ((status = mesh_order_append(&a->context, &h->order, list, &t)) == EAGAIN) mesh_deadline_left(&deadline);
+  if (status) return status;
+  const uint64_t n = atomic_load_explicit(h->view.presented[list], memory_order_relaxed);
+  h->view.list[list][n % CHANNEL_LOG] = entry;
+  atomic_store_explicit(h->view.presented[list], n + 1, memory_order_release);
+  return 0;
+}
+/* each channel's entries presented (channel_present), its send list's and then its landing list's, once
    the bridge has room for all of them (each list's entries presented and not taken fewer than MESH_STREAM_ENTRIES with
    them: the bridge takes an entry as it reads it while fewer than that of the list are taken and not done), so a group
    is presented whole or not at all; a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated
@@ -2802,11 +2856,11 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
     for (int list = 0; list < 2; list++) {
       const struct channel *ch = comm->channels + h;
       const uint64_t need = list ? plans[h].ins : plans[h].outs;
-      if (need > MESH_STREAM_ENTRIES)
-        return fail(ncclSystemError, "communicator %s: the group lays %llu entries on its %s list toward node %u, and its bridge takes at most %u "
-                    "not yet done (mesh.h MESH_STREAM_ENTRIES); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
-                    ch->node, MESH_STREAM_ENTRIES);
-      if (need && !room_for(ch, list, need)) {
+      if (need > MESH_RING)
+        return fail(ncclSystemError, "communicator %s: the group lays %llu entries on its %s list toward node %u, and its bridge's order holds at "
+                    "most %u not yet retired (mesh.h MESH_RING); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
+                    ch->node, MESH_RING);
+      if (need && !room_for(comm, ch, list, need)) {
         const ncclResult_t result = room_wait(comm, ch, list, need);
         if (result) return result;
       }
@@ -2818,7 +2872,7 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
   pthread_mutex_lock(&attach_lock);
   for (uint32_t h = 0; h < comm->count && !retained; h++) {
     const struct channel *ch = comm->channels + h;
-    const struct hold *hold = comm->attach->holds + comm->endpoint[ch->cable];
+    const struct hold *hold = comm->attach->holds + ch->stream;
     for (int send = 1; send >= 0 && !retained; send--) {
       const size_t count = send ? plans[h].outs : plans[h].ins;
       const struct message *items = send ? plans[h].out : plans[h].in;
@@ -2870,10 +2924,11 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
           before->first * before->piece.element_bytes, delta)} : pages_of(delta, comm->page);
         entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), units));
       }
-      status = mesh_stream_present(context, ch->stream, 0, entry);
+      status = channel_present(comm, ch, 0, entry, pages_to_word(m->end));
     }
     for (size_t k = 0; !status && k < p->ins; k++)
-      status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base});
+      status = channel_present(comm, ch, 1, (struct mesh_entry){p->in[k].table, pages_to_word(p->in[k].pages), p->word, p->base},
+                               pages_to_word(p->in[k].end));
     if (status)
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
                        "presented to its bridge: %s", comm->name, ch->node, strerror(status));
@@ -2947,7 +3002,7 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
       if (ch->consumed < lands && pages_lost(count_of(ch->view.landed)))
         return fail(ncclRemoteError, "the link to node %u was lost at landing entry %llu (its holding's counts ~0)", ch->node,
                     (unsigned long long)ch->consumed);
-      if ((ch->consumed < lands || ch->published < p->first[0] + p->outs) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
+      if ((ch->consumed < lands || ch->published < p->first[0] + p->outs) && !hold_live(comm->attach, ch->stream, *ch->wire))
         return held_fail(comm, ch);
       while (ch->consumed < lands) {
         const struct message *m = consumption_at(p, ch->consumed - p->first[1]);
@@ -3091,7 +3146,7 @@ static int gpu_wait(struct ncclComm *comm, int group) {
       if (status) { ended = status < 0 ? GPU_ERROR : status == 2 ? GPU_UNCOMMITTED : GPU_ENDED; break; }
       if (group && revoked(comm)) { ended = GPU_REVOKED; break; }
       for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
-        if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
+        if (!hold_live(comm->attach, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
       if (ended != GPU_ENDED) break;
       const uint64_t left = mesh_deadline_left(&deadline);
       metal_wait(finished, last, left < MESH_PAUSE_NS ? left : MESH_PAUSE_NS);
