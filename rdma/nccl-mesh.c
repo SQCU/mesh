@@ -1605,6 +1605,7 @@ static struct declaration *running, *capturing;
 static int declaration_names(const struct declaration *d, const struct ncclComm *comm);
 static ncclResult_t declared_end(void);
 static void declaration_free(struct declaration *d);
+static mesh_pages count_of(_Atomic uint64_t *word);
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
   comm_stop(comm);
@@ -1623,6 +1624,20 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   }
   gpu_wait(comm, 0);
   if (finished) metal_collect(finished);
+  /* a relay-only rank's last fused execution: its SENDs done before its holdings end (its bridge posts no page of a
+     holding that ended, and its peers' last landings are those SENDs), within the destroy's deadline; a channel lost
+     (~0) ends the wait */
+  const struct mesh_deadline relayed = mesh_deadline("ncclCommDestroy: a relay-only rank's last SENDs (`relayed`)", 0);
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    while (ch->relayed.n) {
+      if (atomic_load_explicit(ch->view.sent, memory_order_acquire) == UINT64_MAX || count_of(ch->view.sent).n >= ch->relayed.n) break;
+      pthread_mutex_unlock(&group_lock);
+      mesh_deadline_left(&relayed);
+      usleep(20);
+      pthread_mutex_lock(&group_lock);
+    }
+  }
   inflight_lose(comm);
   /* a program with a step on comm ends with it (its every node's program closed where it was issued: a whole number
      of executions where its calls were the program's), and a declaration under way naming it is let go */
