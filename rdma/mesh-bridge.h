@@ -36,7 +36,7 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
    (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lanes 0 and 1, on which nothing is posted, and from
    MESH_LANE_FIRST pairs (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1, the lane records of pair s).  Every lane of the
-   plan from MESH_LANE_FIRST is a queue pair of the order toward the link's peer (mesh-order.h order_place: the
+   plan from MESH_LANE_FIRST is a queue pair of the order toward the link's peer (mesh-order.h order_qp: the
    cable's queue pair j is lane MESH_LANE_FIRST + j); a lane's units land in the order its SENDs were posted */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_FIRST 2u

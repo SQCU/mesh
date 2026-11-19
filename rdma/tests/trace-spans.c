@@ -10,7 +10,7 @@
 #include "mesh-byte-account.h"
 
 struct mesh_entry { uint64_t spans, units, word, base; };
-#define CHANNEL_LOG MESH_RING
+#define CHANNEL_LOG 4096u
 struct channel_view { struct mesh_entry *list[2]; _Atomic uint64_t *presented[2], *ready, *sent, *landed; };
 struct channel {
   uint32_t cable;

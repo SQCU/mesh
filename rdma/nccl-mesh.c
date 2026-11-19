@@ -2845,8 +2845,7 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate) {
 }
 
 /* the communicators a program touched, each once, until its end (program_end); a program holds group_lock from its
-   begin to its end but across a wait (room_wait), which sets its list aside, so the list is empty at every taking of
-   the lock */
+   begin to its end, so the list is empty at every taking of the lock */
 static struct ncclComm *touching;
 static void touch(struct ncclComm *comm) {
   if (comm->touched) return;
