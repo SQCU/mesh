@@ -86,18 +86,19 @@ and EBUSY, and records that named each cable (a record now names nodes). libnccl
 node; its fused crossings are one publish and one await per (peer, frame). The peer service is a client library over
 the order. The quiet diagnostic names a node.
 
-## 4. The precondition and what breaks it
+## 4. The precondition: clients agree their order ahead of time
 
-The two ends' rings of a direction must hold the same transfers in the same order with spans of the same lengths:
-the operator's "both ends already share the program". One client per node pair (a communicator, a peer program) meets
-it by construction. Several clients meet it when their program issues their transfers toward the node in the same
-order at both nodes, NCCL's rule for communicators that share resources. Two unrelated programs that start at random
-times toward the same node do not meet it, and nothing in the hardware can make them: with FIFO receives, no copy and
-no per-transaction message, two independent streams cannot share a queue pair without an agreed interleaving. What
-happens then is a mismatch of SEND and receive lengths or contents on some queue pair; the remedy is the order's
-restart (losing a cable toward the node, or the bridge's restart), after which the clients make their communicators
-again. A client that dies with transfers its partner has not declared, or the reverse, likewise leaves the two rings
-apart until a restart.
+The two ends' rings of a direction hold the same transfers in the same order with spans of the same lengths: the
+operator's "both ends already share the program". A ring's order is the order clients append in, so this is a
+client-level agreement made ahead of time, not a problem the bridge solves at run time. One client per node pair (a
+communicator, a peer program) meets it by construction. Several clients toward one node meet it by whatever they
+already share: the same program's issue order (NCCL's rule for communicators that share resources), or atomics and
+semaphores they expose to one another, so that their transfers enter both rings in an order fixed before any of them
+is issued. The bridge arbitrates nothing and needs no per-transaction message, because no client ordering is left
+for it to discover.
+
+Clients that break the agreement they made produce a SEND/receive mismatch on some queue pair. The remedy is the
+order's restart, which also follows a client dying with transfers its partner has not declared, or the reverse.
 
 ## 5. Testing
 
