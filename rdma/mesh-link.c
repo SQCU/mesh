@@ -748,9 +748,8 @@ static void link_heard(struct port *port,const struct message *heard){
 
 /* ---- design/declared-programs.md: the order toward each node, the parent's part ---------------------------------
    The parent keeps, for each node it reaches, the order's epochs: the cables both ends hold up, sorted by identity.
-   When the cables it holds up toward a node are not the order's latest epoch's (a cable came up), it bounds each
-   direction's posting a little past every piece it has posted (`limit`, ORDER_SLACK pieces on: posting goes on
-   meanwhile), and sends the peer an ORDER naming the cables and that bound; once both ends' ORDERs name the same
+   When a cable joins, the parent reads each direction's posted frontier under the posting limit
+   (mesh-order.h order_agree_bound). It sends the peer an ORDER naming the cables and that bound. Once both ends name the same
    cables, each end appends the same epoch, from the later of the two ends' bounds each way, and lifts the bound.  A
    cable of the epoch lost restarts the order (order_restart, every program lost) and loses every cable toward the node,
    so both ends restart; so does a restart a client's declaration asked (`restart`).  Nothing is sent about any

@@ -74,13 +74,13 @@ execution k / period.
   piece, from unit index to a posted span's address.
 - **Done words.** Every port's child raises them, in each pass right after it reads its completion queues
   (mesh-link.c `order_done`), so the process that sees a completion first raises its words and no completion waits for
-  another process's pass. From every queue pair's done count, `order_done_through` takes the least piece not done, and
-  the done words of every transfer wholly below it are raised in the pieces' order (`order_raise_through`); that prefix
-  is `raised`. Past it, each done word has a cursor of its own (`struct order_raiser`) and rises through its own
+  another process's pass. Each port maps the shared queue counters to piece positions when the cable set changes
+  (`order_project`). As counters advance, `order_progress_read` computes the first unfinished piece.
+  `order_raise_through` publishes each complete transfer below that position and advances `raised`. Past it, each done word has a cursor of its own (`struct order_raiser`) and rises through its own
   transfers that are wholly done, passing over other words' transfers. A word several transfers count on therefore
   rises only as their prefix, and a transfer not yet done holds back its own word alone: one communicator's words never
-  wait for another's transfers (the earlier look-ahead of 64 transfers coupled them). A program declares
-  at most 16 done words a direction (`ORDER_PROGRAM_WORDS`). Raisers need no agreement: every done count only rises,
+  wait for another's transfers (the earlier look-ahead of 64 transfers coupled them). Each port sizes its cursor
+  table from the distinct completion words in the declarations. Every done count only rises,
   each word is raised to the greatest value any raiser computes, and `raised` moves only up.
 - **Posting is bounded by the issued steps.** A piece of execution e is posted only once its program's count of
   issued steps passes it, whatever its gate word holds, so the pieces either end posts are those of executions its
