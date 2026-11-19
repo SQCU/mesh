@@ -414,6 +414,8 @@ class Target:
         # status word its own call's plan (mesh_metal_status_prepare: a capture's own call)
         for value, function, index, declared in marks["received"]:
             landed = M.Range.from_buffer_copy(declared)
+            if landed.owner == mesh.ABSENT:
+                landed.owner = call
             held = owner.solution.planned.result[function].value[index] if function is not None else (
                 owner.solution.planned.root[index])
             operands = C.byref(context), C.byref(wires), C.byref(owner.binding), held.section
@@ -425,6 +427,8 @@ class Target:
             compiler.metal_ir_value_received(program, value, C.byref(landed))
         for value, sender, declared in marks["sent"]:
             release = M.Release.from_buffer_copy(declared)
+            if release.owner == mesh.ABSENT:
+                release.owner = sender
             origin = M.Origin()
             mesh.check(transport.mesh_metal_origin_slots_prepare(C.byref(context), C.byref(wires), C.byref(owner.binding),
                                                                 sender, C.byref(release), C.byref(origin)))

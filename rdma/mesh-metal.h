@@ -54,6 +54,7 @@ int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first)
 struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_generation generation; uint32_t partitions;
                           uint64_t page; const uint32_t *field; uint64_t at; uint32_t transfer,owner;
                           const struct mesh_graph_access *extent; size_t extents; };
+#define MESH_METAL_CURRENT_CALL UINT32_MAX
 /* Two stages, before and after mesh_plan (design/compilation-composition-change-request.md, "Complete replacement
    workgroup": structure from the declared program, words from the plan). Declared: the range transfer `transfer` of
    call `owner` lands for call `call`'s value of `bytes` bytes, partition 0 at byte `at` of its storage, `calls` the

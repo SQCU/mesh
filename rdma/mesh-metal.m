@@ -227,11 +227,12 @@ int mesh_metal_range_declare(struct mesh_ctx *context,const uint32_t *calls,uint
 }
 int mesh_metal_range_geometry(uint64_t page,const uint32_t *calls,uint32_t ncalls,uint32_t call,
   uint32_t owner,uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range){
-  if(!page || call>=ncalls || owner>=ncalls)return EINVAL;
+  const int current=call==MESH_METAL_CURRENT_CALL && owner==call;
+  if(!page || (!current && (call>=ncalls || owner>=ncalls)))return EINVAL;
   const uint64_t partitions=mesh_plan_quanta(bytes,page);
   if(partitions>UINT32_MAX)return EOVERFLOW;
   uint32_t every=0,producer=0,ordinal=0;
-  for(uint32_t k=0;k<ncalls;k++){
+  if(call!=owner)for(uint32_t k=0;k<ncalls;k++){
     every+=calls[k]==calls[call];
     producer+=calls[k]==calls[owner];
     ordinal+=k<owner && calls[k]==calls[owner];
