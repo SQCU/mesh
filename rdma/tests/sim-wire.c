@@ -159,8 +159,16 @@ static void dump_asked(int signal){ (void)signal; dumping=1; }
 static void dump(void){
   for(uint32_t n=0;n<2;n++){
     const struct mesh_node *x=w.node[n].x;
-    fprintf(stderr,"node %u: segments %llu raised %llu/%llu\n",w.node[n].m->node,(unsigned long long)atomic_load(&x->segments),
-            (unsigned long long)atomic_load(&x->raised[0]),(unsigned long long)atomic_load(&x->raised[1]));
+    const struct order_segments *a=w.told?segmented+n:w.segments+n;
+    fprintf(stderr,"node %u: segments %llu agreed %llu raised %llu/%llu; placing %llu told %llu scanned %llu open %llu/%llx/%llu\n",w.node[n].m->node,
+            (unsigned long long)atomic_load(&x->segments),(unsigned long long)atomic_load(&x->agreed),
+            (unsigned long long)atomic_load(&x->raised[0]),(unsigned long long)atomic_load(&x->raised[1]),(unsigned long long)a->placing,
+            (unsigned long long)a->told,(unsigned long long)a->scanned,(unsigned long long)a->open[0],(unsigned long long)a->open[1],(unsigned long long)a->open[2]);
+    for(uint64_t k=0;k<a->placing+1 && k<8;k++)
+      fprintf(stderr,"  heard place %llu: %llu %llx committed %llu rounds %lld; local %llu\n",(unsigned long long)k,(unsigned long long)a->heard[k][0],
+              (unsigned long long)a->heard[k][1],(unsigned long long)a->heard[k][2],(long long)a->heard[k][3],(unsigned long long)(k<a->placing?a->local[k]:UINT64_MAX));
+    for(uint64_t s=0;s<atomic_load(&x->segments) && s<8;s++)
+      fprintf(stderr,"  segment %llu digest %llx\n",(unsigned long long)s,(unsigned long long)order_segment_digest(w.node[n].m,x,s,w.node[n].m->node<w.node[1-n].m->node));
     for(uint32_t c=0;c<w.cables;c++)for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++)
       fprintf(stderr,"  cable %u %s lane %u: posted %llu done %llu\n",c,way?"receive":"send",j,(unsigned long long)w.node[n].posted[way][c][j],
               (unsigned long long)w.node[n].done[way][c][j]);

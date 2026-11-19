@@ -33,8 +33,8 @@ int main(int argc,char **argv){
     if(!node)continue;
     const uint32_t epochs=atomic_load(&x->epochs);
     const uint64_t segments=ld(&x->segments);
-    printf("order %u toward node %u: live %u generation %llu epochs %u segments %llu declaring %llu restart %llu\n",n,node,
-           atomic_load(&x->live),u(ld(&x->generation)),epochs,u(segments),u(ld(&x->declaring)),u(ld(&x->restart)));
+    printf("order %u toward node %u: live %u generation %llu epochs %u segments %llu agreed %llu declaring %llu restart %llu\n",n,node,
+           atomic_load(&x->live),u(ld(&x->generation)),epochs,u(segments),u(ld(&x->agreed)),u(ld(&x->declaring)),u(ld(&x->restart)));
     for(int d=0;d<2;d++)printf("  %s: limit %llu raised %llu\n",d?"receive":"send",u(ld(&x->limit[d])),u(ld(&x->raised[d])));
     for(uint32_t e=0;e<epochs && e<MESH_EPOCHS;e++){
       const struct mesh_epoch *at=x->epoch+e;

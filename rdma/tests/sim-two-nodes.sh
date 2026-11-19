@@ -16,7 +16,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 out=${TMPDIR:-/tmp}/mesh-sim.$$
 mkdir -p "$out" "$here/.build/tests"
 cables=${CABLES:-3} lanes=${LANES:-2} comms=${COMMS:-2} wait=${WAIT:-120} lag=${LAG:-1} programs=${PROGRAMS:-2} calls=${CALLS:-12000}
-for t in sim-wire peer-groups; do
+for t in sim-wire peer-groups sim-dangling; do
   cc -O2 -Wall -Wextra -Werror -o "$here/.build/tests/$t" "$here/tests/$t.c" -L"$here/.build" -lmesh -Wl,-rpath,"$here/.build" || exit 1
 done
 for t in sim-collectives sim-runahead sim-programs; do
@@ -168,6 +168,19 @@ programs_pair before 6; wait $r0; wait $r1
 kill -USR2 $sim
 programs_pair unseen 6; pair_end unseen either
 sleep 1; programs_pair seen 6; pair_end seen passed
+finish
+# a program left with a piece never sent (its last SEND's gate never opened, as a fused crossing's last frame whose
+# producer never ran: tests/sim-dangling.c), closed at the executions it issued and its clients gone: the queue pairs
+# its pieces are on wait at them, so the next declaration restarts the order and fails as values (before, the next
+# pair waited its deadline behind it, the hang of the M5 Ultra pair's logit_check, 2026-11-19), and the one after runs
+restarting 0
+MESH_REGION=/mesh-sim-11 bounded "$here/.build/tests/sim-dangling" 12 > "$out/dangling.0" 2>&1 &
+r0=$!
+MESH_REGION=/mesh-sim-12 bounded "$here/.build/tests/sim-dangling" 11 > "$out/dangling.1" 2>&1
+second=$?; wait $r0; first=$?
+echo "restarts, dangling: rank 0 $first rank 1 $second"; [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/dangling.0" "$out/dangling.1"; }
+programs_pair behind 6; pair_end behind either
+programs_pair cleared 6; pair_end cleared passed
 finish
 echo "two simulated nodes: $([ $failed = 0 ] && echo passed || echo FAILED)"
 exit $failed
