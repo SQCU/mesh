@@ -1436,6 +1436,15 @@ class Relation:
         self.data = self.descriptor.contents
         self.freed = weakref.finalize(self, _freed, pointer, allocated)
 
+    @classmethod
+    def from_edges(cls, vertices, edges):
+        source, sink = (C.c_uint32 * len(edges))(), (C.c_uint32 * len(edges))()
+        for i, (a, b) in enumerate(edges):
+            source[i], sink[i] = a, b
+        made = C.c_void_p()
+        _check(LIB.mesh_graph_relation_edges(vertices, len(edges), source, sink, C.byref(made)))
+        return cls(made.value)
+
     # a root over the caller's views and conflict records, borrowed for the Relation's lifetime
     @classmethod
     def create(cls, vertices, views, viewed, count, conflict, held=(), allocated=None):
