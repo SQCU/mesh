@@ -74,7 +74,7 @@ int main(int argc,char **argv){
     const struct mesh_node *x=NULL;
     for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(m,n)->node)==peer)x=mesh_node_at(m,n);
     const uint32_t epochs=x?atomic_load(&x->epochs):0;
-    printf("lanes %u (port %u): peer %u child %u",p,p/MESH_LINK_STREAMS,peer,atomic_load(&l->child));
+    printf("lanes %u (port %u): peer %u child %u passes %llu",p,p/MESH_LINK_STREAMS,peer,atomic_load(&l->child),u(ld(&l->passes)));
     for(int way=0;way<2;way++)
       for(int j=0;j<2;j++){
         const uint32_t lane=(p%MESH_LINK_STREAMS)*2+(uint32_t)j;

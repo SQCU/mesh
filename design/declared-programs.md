@@ -1,4 +1,4 @@
-# Declared programs (wire 137, layout 156)
+# Declared programs (wire 138, layout 157)
 
 Every unit on every wire is placed by a pure function of declarations that both ends hold alike. The placement is
 computed ahead of time, so at run time a client raises only one monotone counter. This replaces the shared order of
@@ -71,21 +71,31 @@ execution k / period.
 - **Done words.** Every port's child raises them, in each pass right after it reads its completion queues
   (mesh-link.c `order_done`), so the process that sees a completion first raises its words and no completion waits for
   another process's pass. From every queue pair's done count, `order_done_through` takes the least piece not done, and
-  the done words of every transfer wholly below it are raised in the pieces' order (`order_raise_through`). Beyond that
-  prefix, up to the latest piece any queue pair has done, a transfer that is wholly done has its word raised if no
-  earlier transfer not yet done names the same word (`order_raise_pass`). A word several transfers count on therefore
-  rises only as their prefix, and a transfer held by its gate holds back no other transfer's word. Raisers need no
-  agreement: every done count only rises, so each raiser's reading is true of the queue pairs, each word is raised to
-  the greatest value any raiser computes (`order_raise`, a compare-and-swap up), and `raised` moves only up
-  (`order_raised_to`). Measured the same way: 36 ns a pass.
+  the done words of every transfer wholly below it are raised in the pieces' order (`order_raise_through`); that prefix
+  is `raised`. Past it, each done word has a cursor of its own (`struct order_raiser`) and rises through its own
+  transfers that are wholly done, passing over other words' transfers. A word several transfers count on therefore
+  rises only as their prefix, and a transfer not yet done holds back its own word alone: one micro-batch's frames never
+  wait for another's. (The earlier look-ahead of 64 transfers did couple them: with two micro-batches' frames
+  alternating, one 32 frames ahead of the other stopped, and its GPU spun on a word nothing raised.) A program declares
+  at most 16 done words a direction (`ORDER_PROGRAM_WORDS`). Raisers need no agreement: every done count only rises,
+  each word is raised to the greatest value any raiser computes, and `raised` moves only up.
+- **Gates that are the issue.** A transfer flagged `MESH_GATE_ISSUES` is posted once its gate holds, its step's issued
+  count unread: its gate word passes execution e's threshold only as the client runs execution e. libnccl-mesh flags
+  every gated transfer of a Metal-path step (a send's gate is the GPU's publication count; a landing's is the group's
+  opening word its first dispatch stores, `gate_start` for a fused crossing's), so nothing the bridge posts for such a
+  step waits on the host's encoding of it.
 - **Composition.** Several clients' programs toward one node (a different process each) share its rounds. Each round
   is `count_p` executions of each program, in key order. A program joins or leaves only at a round that every program
   of the segment has reached. Clients agree that round between themselves, ahead of time (section 4).
 - **Cable epochs.** A cable coming up mid-run is the one hardware fact that needs the two bridges to agree on a
-  boundary. Each end bounds each direction's posting `ORDER_SLACK` pieces past everything it has posted (`limit`,
-  stored before the counts are read again: lane_post counts a unit before it reads the bound). Each end sends one ORDER
-  naming the cables and its bound, and the epoch begins at the later of the two bounds. The first epoch begins at
-  piece 0.
+  boundary (mesh-order.h `order_agree_turn`). The end of the lower node number proposes the cables it holds up whenever
+  they are not its latest epoch's, with its bound each way (it posts nothing at or past it meanwhile, `limit`, stored
+  before the counts are read again). The other end takes the latest proposal of the epoch it is at and accepts it once
+  every cable it names is up there: it bounds its own posting, appends the epoch from the later of the two bounds each
+  way, and answers ACCEPT with its bound and the proposer's echoed. The proposer appends what the ACCEPT names. An end
+  appends only a proposal its peer accepted, and the peer accepts one proposal an epoch, so both append the same
+  epochs whenever cables come up. (The earlier symmetric exchange let one end append an epoch over one cable while the
+  other, three cables up by then, never did: seen on the first deploy.) The first epoch begins at piece 0.
 - **Restart.** Losing a cable of the epoch restarts the order: the generation moves, every program is lost (its done
   words go to UINT64_MAX) and both ends' cables are lost. A declaration also asks for a restart when it meets a
   program of a client gone with pieces outstanding or mid-execution, because only a restart realigns the two ends.

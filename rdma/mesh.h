@@ -28,7 +28,7 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node) */
-#define MESH_LAYOUT 156u
+#define MESH_LAYOUT 157u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes it
    holds an order toward (struct mesh_node) and its client slots; and the bytes of the bridge's own pages, which it
@@ -234,7 +234,9 @@ struct mesh_lanes {
   _Atomic uint32_t live;
   uint64_t rows;
   _Atomic uint64_t bandwidth,wire;
-  uint64_t reserved[3];
+  /* the passes its port's progress thread made (mesh-link.c port_pass; mesh-order-state reads them: a pass's period) */
+  _Atomic uint64_t passes;
+  uint64_t reserved[2];
   _Atomic uint32_t child,padding;
   uint64_t child_start;
   struct mesh_posts posts[2];
