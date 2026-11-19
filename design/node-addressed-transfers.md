@@ -1,5 +1,9 @@
 # Node-addressed transfers (wire 136, layout 155)
 
+Superseded in part by [declared-programs.md](declared-programs.md) (wire 137, layout 156): clients still name a node
+and bytes (sections 1 and 2's first point), but no transfer is appended at run time. A client declares its program once
+and raises one counter, and the ring, its slots, the walkers, retirement and the freeze described below are deleted.
+
 A client names a destination node and some bytes, and nothing else. The bridge is the only process that knows that
 cables, devices, queue pairs or a per-wire order exist. This replaces the per-cable `struct mesh_stream` contract
 (owner word, `wire`, per-cable lists and counts, EBUSY) and the earlier plan in

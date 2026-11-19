@@ -15,8 +15,8 @@ types, root and arrays) or fails.  Every rank declares its own calls of the same
     for _ in range(steps):
         comm.Allreduce(local, total, op=SUM)
 
-A loop that changes size or buffers declares again where it changes.  Barrier and allreduce use arrays the
-communicator keeps (one a dtype), so they are declarable steps like any other.
+A loop that changes size or buffers declares again where it changes.  allreduce uses an array the communicator keeps
+(one a dtype), so it is a declarable step like any other; Barrier meets the ranks over the bootstrap and is no step.
 
 Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
 communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
@@ -430,7 +430,7 @@ class Comm:
         check(lib.ncclScatter(at(sendbuf if self.rank == root else None), at(target), count * k, t, root, self.comm, ffi.NULL))
 
     def _box(self, dtype):
-        """The one-element array of `dtype` this communicator keeps for Barrier and allreduce (a declared step names its
+        """The one-element array of `dtype` this communicator keeps for allreduce (a declared step names its
         buffers: design/declared-programs.md)."""
         boxes = self.__dict__.setdefault('_boxes', {})
         dtype = np.dtype(dtype)
@@ -439,9 +439,10 @@ class Comm:
         return boxes[dtype]
 
     def Barrier(self):
-        box = self._box(np.int32)
-        box[0] = 0
-        self.Allreduce(IN_PLACE, box)
+        """Every rank met over the communicator's bootstrap (ncclMeshCommConfigGather: configuration, which no declared
+        program carries, so a Barrier is never a step)."""
+        mine, every = ffi.new('char[1]', b'\x01'), ffi.new('char[]', self.size)
+        check(lib.ncclMeshCommConfigGather(self.comm, mine, every, 1))
 
     def allreduce(self, value, op=SUM):
         box = self._box(value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)

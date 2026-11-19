@@ -108,6 +108,8 @@ def bandwidth(config):
                 b.fill_(-1)
                 c.fill_(rank + 1)
                 part.fill_(rank + 1)
+                with torch_mesh.declare():   # the program: the figure's one call on its tensors (design/declared-programs.md)
+                    call()
                 call()
                 seconds, traffic = timed(call, calls, sample, group)
                 once = latency(call, config['latency_calls'], group)

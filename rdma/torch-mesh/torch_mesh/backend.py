@@ -356,7 +356,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._issue([(BROADCAST, [t], [], [], 0, opts.rootRank) for t in tensors], tensors, asynchronous(opts))
 
     def barrier(self, opts=None):
-        return self.allreduce([empty(1, dtype=torch.float32, device='cpu').fill_(1)])
+        """Every rank met over the communicator's bootstrap (ncclMeshCommConfigGather: configuration, which no declared
+        program carries), torch's stream committed and drained first so the work before it has run."""
+        _stream.commit()
+        torch.mps.synchronize()
+        mine, every = ffi.new('char[1]', b'\x01'), ffi.new('char[]', self._size)
+        check(LIB.ncclMeshCommConfigGather(self.comm, mine, every, 1))
+        return done([])
 
     def all_gather_single_coalesced(self, outputs, inputs, opts=None):
         return self._issue([(ALLGATHER, [i], [o], [i.numel()] * self._size, 0, 0) for o, i in zip(outputs, inputs)], outputs,

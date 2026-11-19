@@ -5,7 +5,8 @@
    tests/wire.h, CABLES cables of LANES queue pairs, which enforces receive-before-send, each queue pair's post order and
    equal lengths, and that both ends took every piece for the same piece of the same transfer (any mismatch ends the
    simulator).  Queue pairs are served in a rotating, jittered order; with LAG set (a queue pair's index: direction,
-   cable, lane), that one is served once in 64 turns at most, so it lags far behind the others.
+   cable, lane), that one is served once in 64 turns at most, so it lags far behind the others; with BURST set, each queue
+   pair served makes up to that many matches a turn (else 1 to 8 at random).
 
    usage: sim-wire NODE_A NODE_B CABLES LANES MIB   (runs until SIGTERM; prints "ready" once both regions are live) */
 #include "wire.h"
@@ -62,6 +63,8 @@ int main(int argc,char **argv){
   const uint32_t lag=lagging && *lagging?(uint32_t)strtoul(lagging,NULL,0):UINT32_MAX;
   signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGUSR1,dump_asked);
   wire_make(&w,cables,lanes,256);
+  /* BURST: every queue pair's matches a turn drained up to it (the wire's jitter then in which queue pairs are served) */
+  w.burst=getenv("BURST")?strtoull(getenv("BURST"),NULL,0):0;
   node_make(0,a,b,strtoull(argv[5],NULL,0));node_make(1,b,a,strtoull(argv[5],NULL,0));
   /* the one epoch both ends agree: every cable from piece 0, cables named by port c, identity c + 1 at both ends */
   wire_epoch(&w,cables,0);

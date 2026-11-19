@@ -16,6 +16,13 @@ an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreate
 its own keys merged by the rows' logsumexp into the attention over all of them; partition's ring attention merges by it
 (a reduce-scatter by the operator).
 
+declare() is the process's transfer program declared (libnccl-mesh's ncclMeshDeclareBegin/End, design/declared-programs.md):
+the collectives a `with torch_mesh.declare():` block issues, on any groups, are captured with their tensors as the steps
+of the program, nothing moving; every later collective that crosses a link runs the next step in order and must be it
+(the same collective, group, shape, dtype and tensors: a step's tensors are its own, allocated once, such as empty()'s,
+and reused), else it fails.  Every rank declares its own calls of the same steps at the same point; a program that
+changes shape declares again where it changes.
+
 plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
 compiled then, so none is planned where it is issued.
 
@@ -238,6 +245,28 @@ def check_memory():
                       'zero copy, and the GPU wires them beside the region, which risks the node. Make them with '
                       'torch_mesh.empty (docs/writing-a-service.md#memory-outside-the-region)', stacklevel=2)
     return outside
+
+
+class _Declaration:
+    """`with declare():` (ncclMeshDeclareBegin on entry, ncclMeshDeclareEnd on exit, after torch's stream has taken what
+    the block issued)."""
+
+    def __enter__(self):
+        from . import backend
+        backend.check(backend.LIB.ncclMeshDeclareBegin())
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        from . import backend
+        ended = backend.LIB.ncclMeshDeclareEnd()
+        if kind is None:
+            backend.check(ended)
+        return False
+
+
+def declare():
+    """The process's transfer program declared by the collectives a `with` block issues (this module's docstring)."""
+    return _Declaration()
 
 
 def plan(group, calls):

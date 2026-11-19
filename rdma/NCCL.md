@@ -60,9 +60,11 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
 
 ## Communicators
 
-Since wire 136 a communicator holds one channel per peer node, its entries appended to the bridge's order toward that
-node (design/node-addressed-transfers.md); the bridge alone places them on cables. Text below that speaks of a
-channel per cable, streams or holdings describes the contract before it.
+Since wire 136 a communicator holds one channel per peer node; since wire 137 its entries are the transfers of the
+process's declared program (design/declared-programs.md: `ncclMeshDeclareBegin`, the step's groups, `ncclMeshDeclareEnd`;
+every later crossing group runs its step and raises the program's count of steps issued), and the bridge alone places
+them on cables. A crossing group with no program declared, or one that is not its step, fails as a value. Text below
+that speaks of a channel per cable, streams or holdings describes the contract before it.
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens, on the node's fabric address where it holds one), where

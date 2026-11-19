@@ -40,6 +40,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/quiet-link.md](design/quiet-link.md): an adjunct to data-model.md section 3: what a link's first SEND after
   a quiet stretch costs, where mesh runs meet it, and the transfer size above which the cost is under 1%, filed as an
   idiosyncrasy that moves no kernel on the (throughput, latency) frontier.
+- [design/declared-programs.md](design/declared-programs.md): wire 137's contract: every piece's cable, queue pair,
+  program, execution and transfer a pure function of the programs both ends' clients declared (immutable tables, a
+  period, one counter of steps issued) and of the cable epochs; several programs toward a node composed by rounds; the
+  literature it relies on, what it deleted (the rings, slots, walkers, retirement and freeze), its tests and what may
+  fall short. It supersedes node-addressed-transfers.md sections 2, 4 and 5.
 - [design/node-addressed-transfers.md](design/node-addressed-transfers.md): wire 136's client contract: a client
   names a node and bytes; every client's transfers toward a node are one shared order whose pieces the bridges place
   on cables and queue pairs by a pure function, with ORDER exchanged only as cables change; the literature it rests on,

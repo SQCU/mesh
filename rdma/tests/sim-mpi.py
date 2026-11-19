@@ -1,5 +1,5 @@
 """design/declared-programs.md "Testing": one rank of a two-rank mesh_mpi communicator over the two-node simulator
-(tests/sim-two-nodes.sh): a program of an Allreduce, a Bcast, a Barrier and an allreduce of a number declared with
+(tests/sim-two-nodes.sh): a program of an Allreduce, a Bcast and an allreduce of a number declared (a Barrier between, over the bootstrap: no step) with
 `with declare():`, run ROUNDS times with every value checked, then a Bcast of another size from rank 1 declared again and run ahead of its receiver.
 _mesh_c is found first on PYTHONPATH (the simulator's build of it), then beside rdma/.  usage: sim-mpi.py RANK [ROUNDS]"""
 import os
@@ -19,7 +19,6 @@ def main():
     with declare():
         comm.Allreduce(x, y, op=SUM)
         comm.Bcast(b, root=0)
-        comm.Barrier()
         comm.allreduce(1.0)
     for r in range(rounds):
         x[:] = rank + 1 + r

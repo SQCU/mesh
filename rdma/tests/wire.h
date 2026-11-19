@@ -25,7 +25,7 @@ struct wire {
   /* fifo[d][c][j]: node d's SENDs on cable c queue pair j, and node 1-d's receives there */
   struct wire_fifo fifo[2][WIRE_CABLES][WIRE_LANES];
   uint32_t cables,lanes,room;
-  uint64_t matched,bytes,random;
+  uint64_t matched,bytes,random,burst;   /* burst: the most matches a queue pair makes a turn (0: 1 to 8 at random) */
 };
 static inline void wire_make(struct wire *w,uint32_t cables,uint32_t lanes,uint32_t room){
   w->cables=cables;w->lanes=lanes;w->room=room;w->random=0x9e3779b97f4a7c15u;
@@ -117,8 +117,8 @@ static inline void wire_epoch(struct wire *w,uint32_t cables,uint64_t slack){
     for(int way=0;way<2;way++)atomic_store(&w->node[n].x->limit[way],UINT64_MAX);
   }
 }
-/* one turn of the wire: every node's posts, then every queue pair's matches in a rotating order with a quarter of them
-   skipped at random, `lag` (a queue pair index, UINT32_MAX none) served once in `rarely` turns at most, then the raises */
+/* one turn of the wire: every node's posts, then every queue pair's matches (up to `burst`, else 1 to 8 at random) in a
+   rotating order with a quarter of them skipped at random, `lag` (a queue pair index, UINT32_MAX none) served once in `rarely` turns at most, then the raises */
 static inline void wire_turn(struct wire *w,uint64_t turn,uint32_t lag,uint32_t rarely){
   const uint32_t cables=w->cables,lanes=w->lanes,q=2*cables*lanes;
   for(uint32_t n=0;n<2;n++)for(uint32_t c=0;c<cables;c++)for(uint32_t j=0;j<lanes;j++)wire_post(w,n,c,j);
@@ -127,7 +127,7 @@ static inline void wire_turn(struct wire *w,uint64_t turn,uint32_t lag,uint32_t 
     const uint64_t r=wire_next_random(w);
     if(r%4==0)continue;
     if(at==lag && (r>>8)%rarely)continue;
-    wire_match(w,at/(cables*lanes),at/lanes%cables,at%lanes,1+(r>>20)%8);
+    wire_match(w,at/(cables*lanes),at/lanes%cables,at%lanes,w->burst?w->burst:1+(r>>20)%8);
   }
   for(uint32_t n=0;n<2;n++)wire_raise(w,n);
 }
