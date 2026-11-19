@@ -213,6 +213,8 @@ uint32_t mesh_graph_pack(uint32_t vertices, uint32_t edges, const uint32_t *from
 uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uint64_t *start, uint64_t *count, uint64_t *index);
 uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t *parent);
 /* design/joint-compilation.md §3, row 4 */
+double mesh_graph_fill_ordered(uint32_t parts,const size_t *order,const double *latency,double base,
+                               const double *rate,uint64_t units,uint64_t *count);
 double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count);
 /* design/joint-compilation.md §3, row 10 */
 double mesh_graph_list_schedule(uint32_t machines, const double *rate, uint64_t units, const uint64_t *bytes,

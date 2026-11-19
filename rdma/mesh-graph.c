@@ -1268,18 +1268,22 @@ uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t 
   free(first);free(head);free(depth);free(marked);
   return most;
 }
-double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count){
+double mesh_graph_fill_ordered(uint32_t parts,const size_t *order,const double *latency,double base,
+                               const double *rate,uint64_t units,uint64_t *count){
+#define FILL_TREE(p) (order?order[p]:(p))
+#define FILL_DELAY(p) (latency?latency[FILL_TREE(p)]-base:0.0)
+#define FILL_RATE(p) rate[FILL_TREE(p)]
   for(uint32_t p=0;p<parts;p++)count[p]=0;
   if(!units || !parts)return 0;
   double lo=INFINITY,hi=0;
-  for(uint32_t p=0;p<parts;p++)if(rate[p]>0){
-    if(latency[p]<lo)lo=latency[p];
-    const double alone=latency[p]+(double)units/rate[p];
+  for(uint32_t p=0;p<parts;p++)if(FILL_RATE(p)>0){
+    if(FILL_DELAY(p)<lo)lo=FILL_DELAY(p);
+    const double alone=FILL_DELAY(p)+(double)units/FILL_RATE(p);
     if(!(hi>0) || alone<hi)hi=alone;
   }
   if(!isfinite(lo))return INFINITY;
-#define MESH_FILL_BY(T) ({ uint64_t n_=0; for(uint32_t p_=0;p_<parts;p_++) if(rate[p_]>0 && (T)>latency[p_]) \
-    n_+=(uint64_t)floor(((T)-latency[p_])*rate[p_]); n_; })
+#define MESH_FILL_BY(T) ({ uint64_t n_=0; for(uint32_t p_=0;p_<parts;p_++) if(FILL_RATE(p_)>0 && (T)>FILL_DELAY(p_)) \
+    n_+=(uint64_t)floor(((T)-FILL_DELAY(p_))*FILL_RATE(p_)); n_; })
   for(int i=0;i<200 && hi-lo>0;i++){
     const double mid=lo+(hi-lo)/2;
     if(mid<=lo || mid>=hi)break;
@@ -1288,20 +1292,26 @@ double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate
 #undef MESH_FILL_BY
   uint64_t total=0;
   for(uint32_t p=0;p<parts;p++)
-    if(rate[p]>0 && hi>latency[p]){count[p]=(uint64_t)floor((hi-latency[p])*rate[p]);total+=count[p];}
+    if(FILL_RATE(p)>0 && hi>FILL_DELAY(p)){count[p]=(uint64_t)floor((hi-FILL_DELAY(p))*FILL_RATE(p));total+=count[p];}
   while(total<units){
     uint32_t best=UINT32_MAX;double soon=INFINITY;
-    for(uint32_t p=0;p<parts;p++)if(rate[p]>0 && latency[p]+(double)(count[p]+1)/rate[p]<soon){soon=latency[p]+(double)(count[p]+1)/rate[p];best=p;}
+    for(uint32_t p=0;p<parts;p++)if(FILL_RATE(p)>0 && FILL_DELAY(p)+(double)(count[p]+1)/FILL_RATE(p)<soon){soon=FILL_DELAY(p)+(double)(count[p]+1)/FILL_RATE(p);best=p;}
     count[best]++;total++;
   }
   while(total>units){
     uint32_t worst=UINT32_MAX;double late=-INFINITY;
-    for(uint32_t p=0;p<parts;p++)if(count[p] && latency[p]+(double)count[p]/rate[p]>late){late=latency[p]+(double)count[p]/rate[p];worst=p;}
+    for(uint32_t p=0;p<parts;p++)if(count[p] && FILL_DELAY(p)+(double)count[p]/FILL_RATE(p)>late){late=FILL_DELAY(p)+(double)count[p]/FILL_RATE(p);worst=p;}
     count[worst]--;total--;
   }
   double end=0;
-  for(uint32_t p=0;p<parts;p++)if(count[p] && latency[p]+(double)count[p]/rate[p]>end)end=latency[p]+(double)count[p]/rate[p];
+  for(uint32_t p=0;p<parts;p++)if(count[p] && FILL_DELAY(p)+(double)count[p]/FILL_RATE(p)>end)end=FILL_DELAY(p)+(double)count[p]/FILL_RATE(p);
+#undef FILL_RATE
+#undef FILL_DELAY
+#undef FILL_TREE
   return end;
+}
+double mesh_graph_fill(uint32_t parts,const double *latency,const double *rate,uint64_t units,uint64_t *count){
+  return mesh_graph_fill_ordered(parts,NULL,latency,0,rate,units,count);
 }
 
 /* design/page-queue-change-request.md, "The rule both ends compute" */

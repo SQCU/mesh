@@ -311,6 +311,12 @@ struct mesh_plan_links {
   uint32_t arc[MESH_NODES_MOST][MESH_NODES_MOST];
   double capacity[MESH_NODES_MOST*(MESH_NODES_MOST-1)],rate[MESH_NODES_MOST*(MESH_NODES_MOST-1)];
 };
+struct mesh_plan_packing {
+  uint32_t nodes,demands,trees,*root,*demand,*parent;
+  uint64_t *leaves;
+  size_t *first,*order;
+  double *capacity,*volume,*share,*rate,*startup;
+};
 struct mesh_plan_flow {
   const struct mesh_plan_geometry *geometry;
   const struct mesh_declared *declared;
@@ -339,7 +345,8 @@ struct mesh_plan_flow {
   const uint32_t *of;
   struct mesh_grouped own;
   const struct mesh_plan_links *links;
-  uint32_t *parent;
+  const struct mesh_plan_packing *packing;
+  uint32_t first_demand;
   uint64_t *run;
   uint32_t made;
   uint64_t *members;
@@ -421,6 +428,7 @@ struct mesh_plan_analysis {
   size_t nsubmissions;
   struct mesh_graph_dependence *submissions;
   struct mesh_plan_links links;
+  struct mesh_plan_packing packing;
 };
 
 void mesh_plan_analysis_retain(struct mesh_plan_analysis *);

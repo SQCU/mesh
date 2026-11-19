@@ -415,6 +415,14 @@ class PlanLinks(C.Structure):
                 ('rate', D * (NODES_MOST * (NODES_MOST - 1)))]
 
 
+class PlanPacking(C.Structure):
+    _fields_ = [('nodes', U), ('demands', U), ('trees', U), ('root', C.POINTER(U)),
+                ('demand', C.POINTER(U)), ('parent', C.POINTER(U)), ('leaves', C.POINTER(Q)),
+                ('first', C.POINTER(Z)), ('order', C.POINTER(Z)), ('capacity', C.POINTER(D)),
+                ('volume', C.POINTER(D)), ('share', C.POINTER(D)), ('rate', C.POINTER(D)),
+                ('startup', C.POINTER(D))]
+
+
 PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINTER(Declared)), ('transfers', U),
                 ('given', C.POINTER(Value)), ('value_lag', C.POINTER(U)), ('givens', U),
                 ('named', C.POINTER(C.c_ubyte)), ('uncovered', C.POINTER(U)),
@@ -427,7 +435,7 @@ PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINT
                 ('weights', C.POINTER(Weight)), ('dependence', C.POINTER(Dependence)), ('dependences', U),
                 ('demand', C.POINTER(PlanDemand)), ('demands', U), ('n', U), ('self', U), ('copies', U),
                 ('start_lead', U), ('view', ViewId), ('of', C.POINTER(U)), ('own', Grouped), ('links', C.POINTER(PlanLinks)),
-                ('parent', C.POINTER(U)), ('run', C.POINTER(Q)), ('made', U),
+                ('packing', C.POINTER(PlanPacking)), ('first_demand', U), ('run', C.POINTER(Q)), ('made', U),
                 ('members', C.POINTER(Q)), ('span', C.POINTER(mesh_graph.Interval)),
                 ('releases', Q), ('blocks', Q), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
                 ('nroots', U), ('carried', C.POINTER(C.c_ubyte)), ('bound', C.POINTER(U)),
@@ -458,7 +466,7 @@ PlanAnalysis._fields_ = [
     ('carried', C.POINTER(C.c_ubyte)),
     ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p),
     ('occurrence', SourceOccurrences), ('later', C.POINTER(U)), ('lag', C.POINTER(Q)),
-    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence)), ('links', PlanLinks)]
+    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence)), ('links', PlanLinks), ('packing', PlanPacking)]
 
 
 class PlanSync(C.Structure):

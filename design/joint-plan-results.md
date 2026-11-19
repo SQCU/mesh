@@ -42,6 +42,19 @@ chain enumeration, lag queries, interval sets, and the existing optimization
 algorithms. Their producers retain complete solution arrays and correspondence;
 their consumers read those same arrays by view.
 
+The analysis owns one `mesh_plan_packing` for the complete call block. Each
+demand records its root, destinations and offered byte volume across all calls
+of its body. Each solver tree retains its global demand, parent row and
+fractional share. With nonzero link startup, `rate` records the tree's
+allocated bytes/ns and `startup` its maximum root-to-leaf delay in ns. The
+zero-startup fill uses the fractional shares directly. The candidate's
+directed capacities use the same arc indices as the program topology.
+
+`first[d]..first[d+1]` selects a demand's trees in `order`. A body locates its
+demands with `first_demand`. Its tree adjacency points into the corresponding
+global parent row. The archive stores the packing arrays once and restores the
+same relationships on load.
+
 ## Archives
 
 The common local archive stores the original function values, actors, declared
