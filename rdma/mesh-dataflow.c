@@ -132,25 +132,21 @@ static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static uint64_t peer_capacity(struct mesh_record *a,struct mesh_record *b){
-  uint64_t total=0;
-  for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++){
-    const struct mesh_reach x=a->reach[i];
-    if(x.node!=b->node)continue;
+static void peer_capacity(const struct mesh_record *a,const struct mesh_record *b,uint64_t *forward,uint64_t *reverse){
+  unsigned char left[MESH_STREAMS]={0},right[MESH_STREAMS]={0};
+  *forward=*reverse=0;
+  for(int keyed=1;keyed>=0;keyed--)for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++){
+    const struct mesh_reach *x=a->reach+i;
+    if(left[i] || x->node!=b->node)continue;
     for(uint32_t j=0;j<b->reached && j<MESH_STREAMS;j++){
-      const struct mesh_reach y=b->reach[j];
-      if(y.node!=a->node)continue;
-      if(!x.padding || !y.padding){
-        uint64_t rate=0;
-        const uint32_t common=mesh_join(a,b,&rate);
-        return (uint64_t)common*rate;
-      }
-      if(x.padding!=y.padding)continue;
-      total+=x.bandwidth<y.bandwidth?x.bandwidth:y.bandwidth;
+      const struct mesh_reach *y=b->reach+j;
+      if(right[j] || y->node!=a->node)continue;
+      if(keyed?(!x->padding || x->padding!=y->padding):(x->padding && y->padding))continue;
+      left[i]=right[j]=1;
+      *forward+=x->bandwidth;*reverse+=y->bandwidth;
       break;
     }
   }
-  return total;
 }
 int mesh_peer_topology(struct mesh_ctx *ctx,uint32_t room,uint32_t *nodes,uint64_t *capacity,uint64_t *serial){
   if(!ctx || !ctx->M || !nodes || !capacity || !serial)return -EINVAL;
@@ -163,7 +159,7 @@ int mesh_peer_topology(struct mesh_ctx *ctx,uint32_t room,uint32_t *nodes,uint64
     nodes[i]=records[i].node;
     capacity[(size_t)i*room+i]=0;
     for(int j=i+1;j<count;j++)
-      capacity[(size_t)i*room+j]=capacity[(size_t)j*room+i]=peer_capacity(records+i,records+j);
+      peer_capacity(records+i,records+j,capacity+(size_t)i*room+j,capacity+(size_t)j*room+i);
   }
   free(records);
   return count;
@@ -512,6 +508,13 @@ int mesh_owner_names(struct hdr *m,uint64_t owner,struct mesh_dma_span allocatio
         if(!t)continue;
         if(mesh_span_overlaps(allocation,(struct mesh_dma_span){d->program.table[way],d->program.transfers[way]*sizeof *t}))return 1;
         for(uint64_t i=0;i<d->program.transfers[way];i++){
+          if(t[i].done && mesh_span_overlaps(allocation,(struct mesh_dma_span){t[i].done,8}))return 1;
+          const uint64_t gate_bytes=t[i].gates?t[i].gates*sizeof(struct mesh_gate_term):8;
+          if(mesh_region_holds(m,t[i].gate,gate_bytes,8)){
+            if(mesh_span_overlaps(allocation,(struct mesh_dma_span){t[i].gate,gate_bytes}))return 1;
+            const struct mesh_gate_term *g=(const void *)((const char *)m+t[i].gate);
+            for(uint32_t k=0;k<t[i].gates;k++)if(mesh_span_overlaps(allocation,(struct mesh_dma_span){g[k].word,8}))return 1;
+          }
           if(!mesh_region_holds(m,t[i].spans,t[i].units*sizeof(struct mesh_dma_span),8))continue;
           if(mesh_span_overlaps(allocation,(struct mesh_dma_span){t[i].spans,t[i].units*sizeof(struct mesh_dma_span)}))return 1;
           const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+t[i].spans);

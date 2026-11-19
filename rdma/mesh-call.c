@@ -57,7 +57,10 @@ static int program_valid(const struct hdr *m,const struct mesh_declaration *p){
       if(t[i].first!=pieces || !t[i].units || t[i].step>=p->period || t[i].spans<m->data_off ||
          t[i].units>(m->length-m->data_off)/sizeof(struct mesh_dma_span) ||
          !words_held(m,t[i].spans,t[i].units*sizeof(struct mesh_dma_span)) ||
-         (t[i].gate && !words_held(m,t[i].gate,8)) || (t[i].done && !words_held(m,t[i].done,8)))return 0;
+         ((t[i].gates || t[i].gate) && !words_held(m,t[i].gate,t[i].gates?t[i].gates*sizeof(struct mesh_gate_term):8)) ||
+         (t[i].done && !words_held(m,t[i].done,8)))return 0;
+      const struct mesh_gate_term *gate=(const void *)((const char *)m+t[i].gate);
+      for(uint32_t k=0;k<t[i].gates;k++)if(!words_held(m,gate[k].word,8) || gate[k].threshold==UINT64_MAX)return 0;
       const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+t[i].spans);
       for(uint64_t k=0;k<t[i].units;k++)if(!mesh_dma_span_valid(m,spans[k]) || spans[k].bytes>piece)return 0;
       pieces+=t[i].units;

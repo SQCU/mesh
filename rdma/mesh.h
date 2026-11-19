@@ -138,12 +138,13 @@ static inline int mesh_span_overlaps(struct mesh_dma_span a,struct mesh_dma_span
    a count kept over several transfers is a prefix.  A lost transfer (a cable of the node lost, the order restarted)
    raises every done word of its program to UINT64_MAX */
 #define MESH_GATE_WHOLE 1u
+struct mesh_gate_term { uint64_t word,threshold; };
 struct mesh_crossing {
   uint64_t spans,units,first;
   uint32_t step,flags;
   uint64_t gate,gate_base,gate_step;
   uint64_t done,done_value,done_step;
-  uint64_t reserved[2];
+  uint32_t gates,reserved[3];
 };
 _Static_assert(sizeof(struct mesh_crossing)==96,"mesh_crossing ABI");
 /* A program as its client declares it: its `key` (equal at both ends: the order of programs sharing a node's rounds),

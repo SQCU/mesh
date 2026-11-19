@@ -154,13 +154,30 @@ static inline int order_locate(const struct hdr *m,const struct mesh_node *x,uin
 }
 /* whether the piece at `at` of direction d may be posted: its step issued (its program's counter past it: what bounds
    every end's posting to the executions its client runs) and its gate holding (a SEND of span s: the word at gate_base + s + 1 + e gate_step; a receive: gate_base + e gate_step) */
-static inline int order_ready(const struct hdr *m,const struct mesh_node *x,const struct order_at *at,int d){
-  const struct mesh_declared *p=x->program+at->slot;
+static inline int order_threshold(const struct hdr *m,uint64_t offset,uint64_t threshold){
+  const uint64_t value=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+offset),memory_order_acquire);
+  return value==UINT64_MAX?-1:value>=threshold;
+}
+static inline int order_gate(const struct hdr *m,const struct order_at *at,int d){
   const struct mesh_crossing *t=at->t;
-  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=at->execution*p->program.period+t->step)return 0;
-  if(!t->gate || t->gate%8 || t->gate+8>m->length)return 1;
-  const uint64_t threshold=t->gate_base+at->execution*t->gate_step+(d || t->flags&MESH_GATE_WHOLE?0:at->span+1);
-  return atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire)>=threshold;
+  if(!t->gate)return 1;
+  const uint64_t add=at->execution*t->gate_step+(d || t->flags&MESH_GATE_WHOLE?0:at->span+1);
+  if(!t->gates)return order_threshold(m,t->gate,t->gate_base+add);
+  const struct mesh_gate_term *g=(const void *)((const char *)m+t->gate);
+  int ready=1;
+  for(uint32_t k=0;k<t->gates;k++){
+    const int term=order_threshold(m,g[k].word,g[k].threshold+add);
+    if(term<0)return term;
+    ready&=term;
+  }
+  return ready;
+}
+static inline int order_ready(struct hdr *m,const struct mesh_node *x,const struct order_at *at,int d){
+  const struct mesh_declared *p=x->program+at->slot;
+  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=at->execution*p->program.period+at->t->step)return 0;
+  const int ready=order_gate(m,at,d);
+  if(ready<0 && at->t->done)order_raise(m,at->t->done,UINT64_MAX);
+  return ready>0;
 }
 /* every done word of the transfers of direction d wholly below piece `through`, from piece `from` (a transfer's first
    piece), raised in the pieces' order to its execution's value; the piece it reached (the first transfer's first piece
@@ -189,10 +206,7 @@ static inline int order_gate_shut(const struct hdr *m,const struct mesh_node *x,
   for(uint64_t n=from;n<to;n++){
     struct order_at at;
     if(!order_locate(m,x,segments,d,n,&hint,&at) || at.slot!=slot)continue;
-    const struct mesh_crossing *t=at.t;
-    if(!t->gate || t->gate%8 || t->gate+8>m->length)continue;
-    const uint64_t threshold=t->gate_base+at.execution*t->gate_step+(d || t->flags&MESH_GATE_WHOLE?0:at.span+1);
-    if(atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire)<threshold)return 1;
+    if(order_gate(m,&at,d)<=0)return 1;
   }
   return 0;
 }
@@ -200,7 +214,7 @@ static inline int order_gate_shut(const struct hdr *m,const struct mesh_node *x,
    A lane's next piece to post each way: the piece its unit u is (order_unit_piece), where it lies (order_locate) and
    whether it may go (order_ready, below the order's posting bound `limit`): 1 with *n and *at filled, else 0 (the lane
    waits at that piece: nothing is skipped) */
-static inline int order_next(const struct hdr *m,const struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,uint32_t port,
+static inline int order_next(struct hdr *m,const struct mesh_node *x,uint32_t epochs,uint64_t segments,int d,uint32_t port,
                              uint32_t lane,uint64_t u,uint64_t *hint,uint64_t *n,struct order_at *at){
   *n=order_unit_piece(x,epochs,d,port,lane,u);
   return *n!=ORDER_NONE && *n<atomic_load_explicit(&x->limit[d],memory_order_acquire) && order_locate(m,x,segments,d,*n,hint,at) &&

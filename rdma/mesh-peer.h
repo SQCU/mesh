@@ -8,10 +8,11 @@
    one declared program of one execution (its key the group), each direction's records in `match` order, so the two
    ends' transfers meet by that order alone, with nothing exchanged.  A record's release gate: the word at `ready` (0:
    none) reaching `threshold`, for the whole record.  Once every byte of it has crossed, the word at `completed` is
-   raised to `value` (UINT64_MAX: lost).  `reserved` is 0.  All offsets are bytes from the region base */
+   raised to `value` (UINT64_MAX: lost). With `gates` terms, `ready` addresses their mesh_gate_term array.
+   All offsets are bytes from the region base */
 struct mesh_peer_transfer {
   uint64_t match,spans,units,ready,threshold,completed,value;
-  uint32_t land,reserved;
+  uint32_t land,gates;
 };
 /* 0 where this node's bridge holds a live order toward `peer`, else ENOLINK */
 int mesh_peer_capable(struct mesh_ctx *,uint32_t peer);
