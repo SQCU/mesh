@@ -480,8 +480,29 @@ static inline int order_compose(const struct mesh_node *x,uint32_t closing,uint3
   for(uint32_t k=0;k<count;k++){next->slot[k]=slots[k];next->base[k]=base[k];}
   return 0;
 }
+static inline uint64_t order_hash(uint64_t h,uint64_t v){ for(int i=0;i<8;i++){h^=(v>>(8*i))&0xff;h*=UINT64_C(0x100000001b3);} return h; }
+/* The segment digest, alike at both ends: its directions in the pair's order (`lower`: this end the lower node, its
+   direction 0 first; else its direction 1), its start and round, and each program in its order: its key, base, count,
+   period, and each direction's pieces and transfers and every transfer's units and step */
+static inline uint64_t order_segment_digest(const struct hdr *m,const struct mesh_node *x,const struct mesh_segment *g){
+  const int lower=m->node<atomic_load_explicit(&x->node,memory_order_relaxed);
+  uint64_t h=order_hash(UINT64_C(0xcbf29ce484222325),g->programs);
+  for(int k=0;k<2;k++){const int d=lower?k:1-k;h=order_hash(h,g->start[d]);h=order_hash(h,g->round[d]);}
+  for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
+    if(g->slot[k]>=MESH_PROGRAMS){h=order_hash(h,UINT64_MAX);continue;}
+    const struct mesh_declared *p=x->program+g->slot[k];
+    h=order_hash(h,p->program.key);h=order_hash(h,g->base[k]);h=order_hash(h,p->program.count);h=order_hash(h,p->program.period);
+    for(int dd=0;dd<2;dd++){
+      const int d=lower?dd:1-dd;
+      const struct mesh_crossing *t=order_table(m,p,d);
+      h=order_hash(h,p->program.pieces[d]);h=order_hash(h,p->program.transfers[d]);
+      for(uint64_t i=0;t && i<p->program.transfers[d];i++){h=order_hash(h,t[i].units);h=order_hash(h,t[i].step);}
+    }
+  }
+  return h;
+}
 /* segment `s` (the node's next) written from `next`, the last segment closed at its rounds and the count published */
-static inline void order_publish_segment(struct mesh_node *x,uint64_t s,const struct order_next *next){
+static inline void order_publish_segment(const struct hdr *m,struct mesh_node *x,uint64_t s,const struct order_next *next){
   struct mesh_segment *g=x->segment+s%MESH_SEGMENTS;
   g->start[0]=next->start[0];g->start[1]=next->start[1];
   g->round[0]=g->round[1]=0;
@@ -491,6 +512,7 @@ static inline void order_publish_segment(struct mesh_node *x,uint64_t s,const st
     if(k<next->programs)for(int d=0;d<2;d++)
       g->round[d]+=(uint64_t)x->program[next->slot[k]].program.count*x->program[next->slot[k]].program.pieces[d];
   }
+  g->digest=order_segment_digest(m,x,g);
   atomic_store_explicit(&g->rounds,UINT64_MAX,memory_order_release);
   if(s)atomic_store_explicit(&x->segment[(s-1)%MESH_SEGMENTS].rounds,next->rounds,memory_order_release);
   atomic_store_explicit(&x->segments,s+1,memory_order_release);
@@ -666,30 +688,9 @@ struct order_segments {
   uint64_t open[3];                              /* the open segment as last told: place + 1, digest, committed */
   uint64_t heard[MESH_SEGMENTS][4];              /* the peer's, by place: place + 1, digest, committed, rounds */
 };
-static inline uint64_t order_hash(uint64_t h,uint64_t v){ for(int i=0;i<8;i++){h^=(v>>(8*i))&0xff;h*=UINT64_C(0x100000001b3);} return h; }
 /* the order's session: its first epoch's first cable's identity (0: no epoch) */
 static inline uint64_t order_session(const struct mesh_node *x){
   return atomic_load_explicit(&x->epochs,memory_order_acquire)?x->epoch[0].cable[0].wire:0;
-}
-/* segment s's digest, alike at both ends: its directions in the pair's order (`lower`: this end the lower node, its
-   direction 0 first; else its direction 1), its start and round, and each program in its order: its key, base, count,
-   period, and each direction's pieces and transfers and every transfer's units and step */
-static inline uint64_t order_segment_digest(const struct hdr *m,const struct mesh_node *x,uint64_t s,int lower){
-  const struct mesh_segment *g=order_segment(x,s);
-  uint64_t h=order_hash(UINT64_C(0xcbf29ce484222325),g->programs);
-  for(int k=0;k<2;k++){const int d=lower?k:1-k;h=order_hash(h,g->start[d]);h=order_hash(h,g->round[d]);}
-  for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-    if(g->slot[k]>=MESH_PROGRAMS){h=order_hash(h,UINT64_MAX);continue;}
-    const struct mesh_declared *p=x->program+g->slot[k];
-    h=order_hash(h,p->program.key);h=order_hash(h,g->base[k]);h=order_hash(h,p->program.count);h=order_hash(h,p->program.period);
-    for(int dd=0;dd<2;dd++){
-      const int d=lower?dd:1-dd;
-      const struct mesh_crossing *t=order_table(m,p,d);
-      h=order_hash(h,p->program.pieces[d]);h=order_hash(h,p->program.transfers[d]);
-      for(uint64_t i=0;t && i<p->program.transfers[d];i++){h=order_hash(h,t[i].units);h=order_hash(h,t[i].step);}
-    }
-  }
-  return h;
 }
 /* the rounds segment s's clients began in it (its programs' executions begun there over its counts, the least: what
    it places at most) and whether any issued a step in it at all */
@@ -719,7 +720,7 @@ static inline void order_segments_heard(struct order_segments *a,const struct me
 /* one turn: what this end has not yet told (*say, at most ORDER_TELLS messages, *says of them: the caller sends each in
    turn, and where it cannot, calls order_segments_untold), and the agreement moved as far as the peer's digests are
    this end's (`agreed`); ORDER_LOST where the two ends cannot come to agree (the caller restarts the order), else 0 */
-static inline int order_segments_turn(const struct hdr *m,struct mesh_node *x,int lower,struct order_segments *a,
+static inline int order_segments_turn(struct mesh_node *x,struct order_segments *a,
                                       struct segment_message *say,uint32_t *says){
   *says=0;
   const uint64_t session=order_session(x);
@@ -731,12 +732,13 @@ static inline int order_segments_turn(const struct hdr *m,struct mesh_node *x,in
     if(atomic_load_explicit(&order_segment(x,a->scanned)->rounds,memory_order_acquire))a->local[a->placing++%MESH_SEGMENTS]=a->scanned;
   for(;a->told<a->placing && *says<ORDER_TELLS;a->told++){
     const uint64_t s=a->local[a->told%MESH_SEGMENTS];
-    say[(*says)++]=(struct segment_message){session,a->told,order_segment_digest(m,x,s,lower),1,
+    say[(*says)++]=(struct segment_message){session,a->told,order_segment(x,s)->digest,1,
                                             atomic_load_explicit(&order_segment(x,s)->rounds,memory_order_acquire)};
   }
   const uint64_t open=segments-1,place=a->placing;
   int committed;
-  const uint64_t issued=order_segment_issued(x,open,&committed),digest=order_segment_digest(m,x,open,lower);
+  const uint64_t issued=order_segment_issued(x,open,&committed),digest=order_segment(x,open)->digest;
+  if(segments!=atomic_load_explicit(&x->segments,memory_order_acquire))return 0;
   if(*says<ORDER_TELLS && a->told==a->placing && (a->open[0]!=place+1 || a->open[1]!=digest || a->open[2]!=(uint64_t)committed)){
     say[(*says)++]=(struct segment_message){session,place,digest,(uint64_t)committed,UINT64_MAX};
     a->open[0]=place+1;a->open[1]=digest;a->open[2]=(uint64_t)committed;
@@ -754,7 +756,7 @@ static inline int order_segments_turn(const struct hdr *m,struct mesh_node *x,in
     if(!last && !atomic_load_explicit(&order_segment(x,agreed)->rounds,memory_order_acquire))continue;
     const uint64_t *e=a->heard[at%MESH_SEGMENTS];
     if(e[0]!=at+1)break;
-    const uint64_t mine=last?digest:order_segment_digest(m,x,agreed,lower);
+    const uint64_t mine=last?digest:order_segment(x,agreed)->digest;
     if(e[1]!=mine){
       int here=1;
       if(last)here=committed;

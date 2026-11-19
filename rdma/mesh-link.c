@@ -880,7 +880,7 @@ static void order_turn(void){
     }
     /* the segments: each one's digest told the peer, and those both ends declared alike agreed (posted from) */
     struct segment_message said[ORDER_TELLS];uint32_t says=0;
-    if(order_segments_turn(M,x,M->node<node,segmented+n,said,&says)&ORDER_LOST){
+    if(order_segments_turn(x,segmented+n,said,&says)&ORDER_LOST){
       say("order toward node %u: its segments as declared here and there cannot agree (a program going on at one end, "
           "closed at the other: a client gone at one end only): the order restarts\n",node);
       order_restart(M,x);*o=(struct order_agree){0};segmented[n]=(struct order_segments){0};record_changed();order_lose(node);continue;

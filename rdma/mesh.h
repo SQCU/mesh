@@ -31,8 +31,8 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node); 158 adds the segments
-   both ends agree (struct mesh_node `agreed`) */
-#define MESH_LAYOUT 158u
+   both ends agree (struct mesh_node `agreed`); 159 stores each declared segment's digest with the segment */
+#define MESH_LAYOUT 159u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes it
    holds an order toward (struct mesh_node) and its client slots; and the bytes of the bridge's own pages, which it
@@ -178,11 +178,12 @@ _Static_assert(sizeof(struct mesh_declared)==128,"mesh_declared ABI");
 struct mesh_segment {
   uint64_t start[2],round[2];
   _Atomic uint64_t rounds;
+  uint64_t digest;
   uint32_t programs,padding;
   uint32_t slot[MESH_SEGMENT_PROGRAMS];
   uint64_t base[MESH_SEGMENT_PROGRAMS];
 };
-_Static_assert(sizeof(struct mesh_segment)==96,"mesh_segment ABI");
+_Static_assert(sizeof(struct mesh_segment)==104,"mesh_segment ABI");
 /* An epoch of a node's cables: from piece first[d] each direction on, the queue pairs of its `cables` cables (named by
    the bridge's port, sorted by their identity `wire`, alike at both ends), taken in turn (mesh-order.h order_qp) */
 struct mesh_epoch { uint64_t first[2]; uint32_t cables,padding; struct { uint32_t port,lanes; uint64_t wire; } cable[MESH_PORTS]; };

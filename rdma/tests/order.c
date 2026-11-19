@@ -265,6 +265,10 @@ int main(void){
     assert(mesh_declare(&c,o,&p.program,&r)==EINVAL);
   }
 
+  struct order_segments delayed={0};
+  struct segment_message notices[ORDER_TELLS];
+  uint32_t notices_count;
+  uint64_t initial_digest;
   /* done words raised word by word, and posting bounded by the issued steps: a program of two words alternating
      transfer by transfer, every transfer gated each way, its gate words set far past every execution; with its
      executions issued, the second word's gates held shut, the first's executions cross and its word rises through them
@@ -312,6 +316,8 @@ int main(void){
     }
     for(int n=0;n<2;n++)atomic_store(word(n,gate[n][1]),UINT64_MAX/2);
     run(20000,UINT32_MAX);
+    assert(!order_segments_turn(w.node[0].x,&delayed,notices,&notices_count) && notices_count==1);
+    initial_digest=notices[0].digest;
     for(int n=0;n<2;n++){
       for(int d=0;d<2;d++)assert(atomic_load(word(n,p[n].done[d][1]))==RUNS*FRAMES);
       uint64_t posted=0;
@@ -333,6 +339,8 @@ int main(void){
     struct mesh_ctx c=client(n,CLIENT_A);
     assert(!mesh_declare(&c,o+n,&pa[n].program,ra+n));
   }
+  assert(!order_segments_turn(w.node[0].x,&delayed,notices,&notices_count) && notices_count>=1);
+  assert(notices[0].rounds==4 && notices[0].digest==initial_digest);
   enum { E1=40 };
   for(int n=0;n<2;n++)mesh_issue(ra+n,E1*PERIOD);   /* every execution issued at once */
   uint64_t last_shared[2]={0,0};

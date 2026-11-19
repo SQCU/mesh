@@ -157,7 +157,7 @@ static int declare_held(struct mesh_ctx *context,const struct mesh_order *order,
       atomic_store_explicit(&d->closed,g->base[k]+next.rounds*d->program.count,memory_order_release);
     }
   }
-  order_publish_segment(x,segments,&next);
+  order_publish_segment(m,x,segments,&next);
   /* the bridge woken: it tells the peer the segment's digest (mesh-order.h order_segments_turn) */
   mesh_notify(&m->control);
   if(run)*run=(struct mesh_run){.order=*order,.program=joining,.issued=joining<MESH_PROGRAMS?&x->program[joining].issued:NULL};

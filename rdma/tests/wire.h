@@ -138,7 +138,7 @@ static inline void wire_agree(struct wire *w){
   for(int n=0;n<2;n++){
     struct wire_node *v=w->node+n,*p=w->node+1-n;
     struct segment_message said[ORDER_TELLS];uint32_t says=0;
-    if(order_segments_turn(v->m,v->x,v->m->node<p->m->node,w->segments+n,said,&says)&ORDER_LOST){
+    if(order_segments_turn(v->x,w->segments+n,said,&says)&ORDER_LOST){
       fprintf(stderr,"wire: node %u's segments and node %u's cannot agree: the two ends declared apart\n",v->m->node,p->m->node);
       exit(3);
     }

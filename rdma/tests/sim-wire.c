@@ -123,7 +123,7 @@ static void order_turn_at(uint32_t n){
   }
   /* the segments' digests told and agreed (mesh-link.c order_turn) */
   struct segment_message said[ORDER_TELLS];uint32_t says=0;
-  if(order_segments_turn(v->m,x,v->m->node<w.node[1-n].m->node,segmented+n,said,&says)&ORDER_LOST){
+  if(order_segments_turn(x,segmented+n,said,&says)&ORDER_LOST){
     order_restart_at(n,"its segments as declared here and there cannot agree");return;
   }
   for(uint32_t k=0;k<says;k++){
@@ -169,7 +169,7 @@ static void dump(void){
       fprintf(stderr,"  heard place %llu: %llu %llx committed %llu rounds %lld; local %llu\n",(unsigned long long)k,(unsigned long long)a->heard[k][0],
               (unsigned long long)a->heard[k][1],(unsigned long long)a->heard[k][2],(long long)a->heard[k][3],(unsigned long long)(k<a->placing?a->local[k]:UINT64_MAX));
     for(uint64_t s=0;s<atomic_load(&x->segments) && s<8;s++)
-      fprintf(stderr,"  segment %llu digest %llx\n",(unsigned long long)s,(unsigned long long)order_segment_digest(w.node[n].m,x,s,w.node[n].m->node<w.node[1-n].m->node));
+      fprintf(stderr,"  segment %llu digest %llx\n",(unsigned long long)s,(unsigned long long)order_segment(x,s)->digest);
     for(uint32_t c=0;c<w.cables;c++)for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++)
       fprintf(stderr,"  cable %u %s lane %u: posted %llu done %llu\n",c,way?"receive":"send",j,(unsigned long long)w.node[n].posted[way][c][j],
               (unsigned long long)atomic_load(wire_done(w.node+n,way,c,j)));
