@@ -298,13 +298,7 @@ int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t 
   if(first)*first=UINT64_MAX;
   if(!plan)return EINVAL;
   struct mesh_status *status=(struct mesh_status *)((char *)context->M+mesh_state_at(context->M,plan)->status);
-  const uint32_t ahead=atomic_load_explicit(&status->ahead,memory_order_acquire);
-  const uint32_t behind=atomic_load_explicit(&status->behind,memory_order_acquire);
-  const uint64_t failed=atomic_load_explicit(&status->first,memory_order_acquire);
-  if(failed && first)*first=~failed;
-  if(behind)return cause?cause:ENOLINK;
-  if(ahead)return EPROTO;
-  return 0;
+  return mesh_status_result(status,cause,first);
 }
 
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){

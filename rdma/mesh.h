@@ -1,6 +1,7 @@
 #ifndef MESH_H
 #define MESH_H
 #include <stdint.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <infiniband/verbs.h>
@@ -100,6 +101,15 @@ static inline uint64_t mesh_group_bytes(uint32_t pages){ return ((uint64_t)pages
 struct mesh_status { _Atomic uint32_t behind,ahead; _Atomic uint64_t first; };
 _Static_assert(sizeof(struct mesh_status)==16 && offsetof(struct mesh_status,ahead)==4 &&
   offsetof(struct mesh_status,first)==8,"mesh_status");
+static inline int mesh_status_result(const struct mesh_status *status,int cause,uint64_t *first){
+  const uint32_t ahead=atomic_load_explicit(&status->ahead,memory_order_acquire);
+  const uint32_t behind=atomic_load_explicit(&status->behind,memory_order_acquire);
+  const uint64_t failed=atomic_load_explicit(&status->first,memory_order_acquire);
+  if(first)*first=failed?~failed:UINT64_MAX;
+  if(behind)return cause?cause:ENOLINK;
+  if(ahead)return EPROTO;
+  return 0;
+}
 /* JGroups (https://raw.githubusercontent.com/belaban/JGroups/master/src/org/jgroups/ViewId.java);
    src/org/jgroups/util/UUID.java */
 struct mesh_view_id { uint64_t id; uint32_t sequencer,padding; uint64_t boot; };
