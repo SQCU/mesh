@@ -75,7 +75,7 @@ static void product(thread const Perturb &P, device const float *W, int stride, 
 kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net &net [[buffer(1)]],
                     device const uint *which [[buffer(2)]], device float *objective [[buffer(3)]],
                     device float *done_out [[buffer(4)]], device const uint2 *perturb [[buffer(5)]],
-                    constant float &sigma [[buffer(6)]], constant uint &mode [[buffer(7)]],
+                    constant float &sigma [[buffer(6)]], constant uint &mode [[buffer(7)]], device float *first_weighting [[buffer(8)]],
                     uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
                     uint sg [[simdgroup_index_in_threadgroup]], uint ln [[thread_index_in_simdgroup]]) {
   const Perturb P = {(device const float *)&net, perturb[r].x, perturb[r].y ? -sigma : sigma};
@@ -196,6 +196,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
         for (int k = 0; k < K; k++) p[j * K + k] /= sum;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (t == 0 && tid < uint(JK)) first_weighting[size_t(r) * JK + tid] = p[tid];   // for inspection
       for (int i = tid; i < J * D; i += T) {
         const int j = i / D, d = i % D; float a = 0;
         for (int k = 0; k < K; k++) a += p[j * K + k] * float(emb[j * K + k][d]);

@@ -169,6 +169,8 @@ let whichBuf = device.makeBuffer(length: R * 4, options: .storageModeShared)!, p
 let objBuf = device.makeBuffer(length: R * 4, options: .storageModeShared)!, doneBuf = device.makeBuffer(length: R * 4, options: .storageModeShared)!
 let weightBuf = device.makeBuffer(length: M * 8, options: .storageModeShared)!, keyBuf = device.makeBuffer(length: M * 4, options: .storageModeShared)!
 let gradBuf = device.makeBuffer(length: 2 * P * 4, options: .storageModeShared)!
+let weightingBuf = device.makeBuffer(length: R * J * K * 4, options: .storageModeShared)!
+let weighting = weightingBuf.contents().bindMemory(to: Float.self, capacity: R * J * K)
 let queue = device.makeCommandQueue()!
 let which = whichBuf.contents().bindMemory(to: UInt32.self, capacity: R), perturb = perturbBuf.contents().bindMemory(to: UInt32.self, capacity: 2 * R)
 let obj = objBuf.contents().bindMemory(to: Float.self, capacity: R), done = doneBuf.contents().bindMemory(to: Float.self, capacity: R)
@@ -181,7 +183,7 @@ func rollouts(_ count: Int, amplitude: Float, mode: UInt32) {
   enc.setBuffer(scenBuf, offset: 0, index: 0); enc.setBuffer(netBuf, offset: 0, index: 1); enc.setBuffer(whichBuf, offset: 0, index: 2)
   enc.setBuffer(objBuf, offset: 0, index: 3); enc.setBuffer(doneBuf, offset: 0, index: 4); enc.setBuffer(perturbBuf, offset: 0, index: 5)
   var a = amplitude, m = mode
-  enc.setBytes(&a, length: 4, index: 6); enc.setBytes(&m, length: 4, index: 7)
+  enc.setBytes(&a, length: 4, index: 6); enc.setBytes(&m, length: 4, index: 7); enc.setBuffer(weightingBuf, offset: 0, index: 8)
   enc.dispatchThreadgroups(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
   enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
   if let e = cb.error { print("error: \(e)"); exit(1) }
@@ -204,6 +206,12 @@ func ranks(_ v: [Float]) -> [Float] {
 
 print("network \(P) parameters; \(M) pairs a step; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes a rank")
 print("start: " + measure())
+if ProcessInfo.processInfo.environment["WEIGHTING"] != nil {   // the policy's first weighting on the measured cluster's held-out scenarios
+  for i in 0..<sizes.count { which[i] = UInt32(pool + i); perturb[2 * i] = 0; perturb[2 * i + 1] = 0 }
+  rollouts(sizes.count, amplitude: 0, mode: 0)
+  for i in 0..<sizes.count { print("size \(Int(sizes[i])): " + (0..<4).map { j in (0..<K).map { String(format: "%.3f", weighting[(i * J + j) * K + $0]) }.joined(separator: " ") }.joined(separator: " | ")) }
+  exit(0)
+}
 var m1 = [Double](repeating: 0, count: P), m2 = [Double](repeating: 0, count: P)
 var rolloutTime = 0.0, stepTime = 0.0
 for k in 0..<steps {
