@@ -266,9 +266,11 @@ func measure(_ r: Runner, _ fabric: inout route_fabric) -> String {
   }
   return out.joined(separator: " | ")
 }
-// rank 0's measurement on a thread of its own (its runner, its network: a snapshot of theta), so no rank waits for it
-let evaluator: Runner? = rank == 0 ? Runner(device, net: Net(device, device.makeCommandQueue()!, library: library, runs: 48, refreshes: 1, contexts: 48 * CONTEXTS,
-                                                              initial: [Float](repeating: 0, count: nlay.count)), slots: 48, rows: 48 * CONTEXTS) : nil
+// rank 0's measurement on a thread of its own (its runner, its network: a snapshot of theta), so no rank waits for it:
+// at the start and the end alone
+let measuredRuns = kinds.count * sizes.count * 4   // measure()'s: each kind and size, four rollouts
+let evaluator: Runner? = rank == 0 ? Runner(device, net: Net(device, device.makeCommandQueue()!, library: library, runs: measuredRuns, refreshes: 1, contexts: measuredRuns * CONTEXTS,
+                                                              initial: [Float](repeating: 0, count: nlay.count)), slots: measuredRuns, rows: measuredRuns * CONTEXTS) : nil
 let evaluating = DispatchSemaphore(value: 1), evalQueue = DispatchQueue(label: "evaluation")
 func evaluate(_ label: String, wait: Bool) {
   guard let ev = evaluator, evaluating.wait(timeout: wait ? .distantFuture : .now()) == .success else { return }   // one at a time; a busy one skipped
@@ -494,8 +496,6 @@ func learnStep(_ batch: [(runs: [DoneRun], version: Int)]) {
   exchange.add(floats(net.grads, TASKS * nlay.count))
   for (mean, gram) in exchange.ready() { apply(mean, gram) }
 }
-// rank 0 measures a snapshot of theta on the measurement thread as often as the measurement takes (one at a time)
-var lastEvaluation = Date(), evaluationEvery = 0.0
 let learner = Thread {
   while true {
     shareLock.lock()
@@ -507,11 +507,8 @@ let learner = Thread {
     shareLock.unlock()
     learnStep(batch)
     learned += 1; route_tel_add(tel(RT_STEPS), 1); route_tel_phase(tel(RT_PHASE_FIRST_STEP))
-    shareLock.lock(); published = net.step; shareLock.unlock()
-    if rank == 0, let ev = evaluator, Date().timeIntervalSince(lastEvaluation) > evaluationEvery {   // a snapshot measured on its thread
-      lastEvaluation = Date(); evaluate("theta after \(learned) steps, \(net.step) optimizer steps", wait: false); _ = ev
-    }
-    if learned >= steps { shareLock.lock(); finishedLearning = true; shareLock.broadcast(); shareLock.unlock(); break }
+    shareLock.lock(); published = net.step; shareLock.unlock(); R0.wake()
+    if learned >= steps { shareLock.lock(); finishedLearning = true; shareLock.broadcast(); shareLock.unlock(); R0.wake(); break }
   }
 }
 learner.qualityOfService = .userInitiated; learner.stackSize = 16 << 20
@@ -524,7 +521,7 @@ while true {
   if version != thetaVersion { syncForward(); thetaVersion = version }   // the learner's theta, between forwards
   while R0.runnable < R0.workers.count, let g = freeGroups.popLast() { startGroup(g) }
   route_tel_set(tel(RT_RUNS_IN_FLIGHT), UInt64(TX - 4 * freeGroups.count))
-  let ended = R0.service(timeout: 0.002)
+  let ended = R0.service()
   for t in ended {
     let st = R0.slots[t].state
     if pool.count < 4096 { pool.append(st) } else if route_uniform(&rng) < 0.05 { pool[Int(route_uniform(&rng) * 4096) % 4096] = st }

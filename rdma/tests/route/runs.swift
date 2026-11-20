@@ -121,7 +121,9 @@ final class Runner {
   // or its end (its costs, counts and credit then made); the run goes to `awaiting` (a refresh) or `finished`. The main
   // thread forwards whatever awaits as one batch and queues those runs again; no run waits on another run. ----
   let lock = NSCondition()
-  var queue: [Int] = [], awaiting: [Int] = [], finished: [Int] = [], workers: [Thread] = [], workerBusy = 0.0, streamSince = Date()
+  var queue: [Int] = [], awaiting: [Int] = [], finished: [Int] = [], workers: [Thread] = [], workerBusy = 0.0, streamSince = Date(), woken = false
+  // wakes service() with nothing for it (another thread has news for the main thread: theta published, the end)
+  func wake() { lock.lock(); woken = true; lock.broadcast(); lock.unlock() }
   // a worker on every hardware thread, below the learner's and the exchange's scheduling class: the OS gives those the
   // CPU when they need it, the environment every cycle left
   func startWorkers() {
@@ -159,11 +161,12 @@ final class Runner {
       route_tel_add(Int32(RT_WORKER_NS.rawValue), UInt64(spent * 1e9)); route_tel_add(Int32(RT_CREDIT_NS.rawValue), UInt64(c * 1e9))
     }
   }
-  // the main thread's turn: wait until a run awaits or has finished (at most `timeout`); forward every awaiting run as
+  // the main thread's turn: wait until a run awaits or has finished (or wake()); forward every awaiting run as
   // one batch (kept for the learning batch) and queue them again. Returns the runs that finished
-  func service(timeout: Double) -> [Int] {
+  func service() -> [Int] {
     lock.lock()
-    if awaiting.isEmpty && finished.isEmpty { _ = lock.wait(until: Date(timeIntervalSinceNow: timeout)) }
+    while awaiting.isEmpty && finished.isEmpty && !woken { lock.wait() }
+    woken = false
     let batch = awaiting, done = finished
     awaiting = []; finished = []
     lock.unlock()

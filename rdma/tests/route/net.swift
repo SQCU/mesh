@@ -134,7 +134,6 @@ final class Net {
   let T: MTLBuffer, X: [MTLBuffer], ZC: [MTLBuffer], H: [MTLBuffer], XM: [MTLBuffer], U: [MTLBuffer], Nn: MTLBuffer, inv: MTLBuffer, nextScratch: MTLBuffer
   let dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, inj: MTLBuffer, segBuf: MTLBuffer
   let cA: Codes, cB: Codes, qx: MTLBuffer, sx: MTLBuffer, qy: MTLBuffer, sy: MTLBuffer, partial: MTLBuffer
-  let splitTarget = 768
   // the call being encoded: one command buffer, its compute encoder (profiling: one encoder a kernel, timestamps at each
   // encoder's start and end, so a kernel's GPU time; the labels "phase kernel")
   var cb: MTLCommandBuffer!, e: MTLComputeCommandEncoder!, phase = ""
@@ -187,7 +186,7 @@ final class Net {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
     self.library = lib
-    for n in ["seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_splits", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
+    for n in ["seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_pairs", "copy_floats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
       pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
     }
     let laneCap = runs * refreshes * L, cap = laneCap + contexts
@@ -215,7 +214,7 @@ final class Net {
     dhp = p(3 * contexts * D); inj = p(3 * runs * refreshes * D); segBuf = f(runs * refreshes * 2)
     let rowsPad = (cap + 255) / 256 * 256
     cA = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); cB = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); qx = b8(rowsPad * 256); sx = p(256 * rowsPad / 256); qy = b8(rowsPad * 256); sy = p(256 * rowsPad / 256)
-    partial = p(splitTarget * 64 * 32)   // splits x tiles <= splitTarget, a tile 64 x 32
+    partial = p((rowsPad / 256 + 1) * 2 * D * (E + 1))   // a 256-row block's partial sums each, the widest wgrad (M N <= 128 x 193)
     let cb = queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
     bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0); bl.endEncoding()
     cb.commit(); cb.waitUntilCompleted()
@@ -225,11 +224,12 @@ final class Net {
   // ---- encoders ----
   func set(_ name: String, _ bufs: [(MTLBuffer?, Int)], _ params: [[UInt32]]) {
     mark(name)
-    e.setComputePipelineState(pipes[name]!)
+    current = pipes[name]!; e.setComputePipelineState(current!)
     for (i, (b, off)) in bufs.enumerated() { e.setBuffer(b, offset: off * 4, index: i) }
     for (k, a) in params.enumerated() { a.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: bufs.count + k) } }
   }
-  func threads(_ n: Int, _ w: Int = 256) { if n > 0 { e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1)) } }
+  var current: MTLComputePipelineState? = nil   // the pipeline set last: a dispatch's threadgroup its own widest
+  func threads(_ n: Int) { if n > 0, let p = current { e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: p.maxTotalThreadsPerThreadgroup, height: 1, depth: 1)) } }
   func nextSeed() -> UInt32 { seed = seed &* 1664525 &+ 1013904223; return seed | 1 }
   // rows of x (map, ld, the first `valid` columns) -> codes (cols wide) into c from code row `at`; returns the seed
   @discardableResult
@@ -237,7 +237,7 @@ final class Net {
     let sd = given ?? (stochastic ? nextSeed() : 0)
     if rows == 0 { return sd }
     mark("quant_rows" + type)
-    e.setComputePipelineState(pipes["quant_rows" + type]!)
+    current = pipes["quant_rows" + type]!; e.setComputePipelineState(current!)
     e.setBuffer(x, offset: xoff * (type == "" ? 4 : 2), index: 0); e.setBuffer(c.q, offset: at * cols, index: 1); e.setBuffer(c.s, offset: at * 4, index: 2)
     let pr: [UInt32] = [UInt32(rows), UInt32(cols), UInt32(ld), UInt32(valid), 1, sd, 0, 0] + map
     pr.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 3) }
@@ -305,20 +305,24 @@ final class Net {
     if rows == 0 { return }
     set("quant_cols" + xType, [(x, 0), (qx, 0), (sx, 0)], [[UInt32(K), UInt32(Nw), UInt32(ldx), UInt32(rows), 256, 1, 0, mt.bias ? UInt32(mt.cols) : NONE, UInt32(xoff), UInt32(mt.cols), 0, 0]])
     e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    let tiles = ((Nw + 31) / 32) * ((M + 63) / 64), want = max(1, min(nb, splitTarget / tiles, 64)), per = (nb + want - 1) / want, splits = (nb + per - 1) / per
+    // a threadgroup a 256-row block (the exactness unit), its partial sum each; then a pairwise tree over the blocks
     for t in 0..<3 {
       set("quant_cols" + dyType, [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(t * stride + yoff), UInt32(M), 0, 0]])
       e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-      set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), UInt32(per)]])
-      e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: splits), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-      set("reduce_splits", [(partial, 0), (dW[w]!, t * M * Nw)], [[UInt32(M * Nw), UInt32(splits)]])
-      threads(M * Nw)
+      set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), 1]])
+      e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: nb), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+      var stride = 1
+      while stride < nb {   // partial[z] += partial[z + stride] for z a multiple of 2 stride: log2(nb) passes, a fixed order
+        set("reduce_pairs", [(partial, 0)], [[UInt32(M * Nw), UInt32(nb), UInt32(stride), 0]]); threads(M * Nw * ((nb + 2 * stride - 1) / (2 * stride)))
+        stride *= 2
+      }
+      set("copy_floats", [(partial, 0), (dW[w]!, t * M * Nw)], [[UInt32(M * Nw)]]); threads(M * Nw)
     }
   }
   // each matrix's W, and its two sets of codes, from theta
   func encodeWeights() {
     for mt in lay.mats {
-      set("weff", [(theta, 0), (W[mt.name]!, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]]); threads(mt.rows, 64)
+      set("weff", [(theta, 0), (W[mt.name]!, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]]); threads(mt.rows)
       qrows(W[mt.name]!, 0, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, into: Codes(q: wf[mt.name]!, s: wfs[mt.name]!))
       set("quant_cols", [(W[mt.name]!, 0), (wb[mt.name]!, 0), (wbs[mt.name]!, 0)],
           [[UInt32(pad64(mt.rows)), UInt32(mt.cols), UInt32(mt.cols), UInt32(mt.rows), UInt32(pad64(mt.rows)), 1, 0, NONE, 0, UInt32(mt.cols), 0, 0]])
@@ -342,7 +346,7 @@ final class Net {
       let r0 = l == 0 ? 0 : LR, n = N - r0   // layer 1's lanes: their states only
       set("scan_fwd", [(ZC[l], 0), (mask, 0), (h0, 0), (H[l], 0), (X[l], 0), (XM[l], 0), (next, 0)], [[UInt32(B), UInt32(K * L), UInt32(l), l == 0 ? 1 : 0]])
       e.setBuffer(other.q, offset: 0, index: 8); e.setBuffer(other.s, offset: 0, index: 9)
-      threads(B * 32, 64)
+      threads(B * 32)
       if R > 0 {
         set("ctx_fwd", [(ZC[l], LR * D) /* fp16: LR 2D halves */, (H[l], 0), (pos, 0), (X[l], LR * D), (XM[l], LR * D)], [[UInt32(R), UInt32(l == 0 ? LR : 0)]])
         e.setBuffer(other.q, offset: 0, index: 6); e.setBuffer(other.s, offset: 0, index: 7)
@@ -407,7 +411,7 @@ final class Net {
     for mt in lay.mats {
       phase = "back params"
       set("chain", [(dW[mt.name]!, 0), (theta, 0), (grads, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)], [UInt32(P), mt.bias ? 1 : 0, 3]])
-      threads(3 * mt.rows, 64)
+      threads(3 * mt.rows)
     }
     phase = "back params"
     set("gram", [(grads, 0), (gram, 0)], [[UInt32(P)]]); e.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
@@ -427,7 +431,7 @@ final class Net {
     set("scan_bwd", [(dXM, 0), (inj, 0), (segBuf, 0), (ZC[l], 0), (mask, 0), (H[l], 0), (h0, 0), (dZC, 0)],
         [[UInt32(B), UInt32(K * L), UInt32(l), upstreamDX != nil ? 1 : 0, UInt32(K), UInt32(L), UInt32(N), 3, UInt32(R), sd, 0, 0]])
     e.setBuffer(codes.q, offset: 0, index: 9); e.setBuffer(codes.s, offset: 0, index: 10)
-    threads(3 * B * 32, 64)
+    threads(3 * B * 32)
     probe("scan/ctx bwd -> dZC\(l) codes (dZC bf16)", codes, at: 0, rows: 3 * N, cols: 128, x: dZC, xoff: 0, ld: 2 * D, valid: 2 * D, seed: sd, type: "_b")
     let s2 = product("zh\(l)", forward: false, M: 3 * N, src: codes, flags: 16, out: (out, ident(), D), res: (dXM, ident(), D), dst: next, stochastic: true)
     if let nx = next { probe("zh\(l) dgrad -> dX codes", nx, at: 0, rows: 3 * N, cols: 64, x: out, xoff: 0, ld: D, valid: D, seed: s2) }
@@ -443,14 +447,14 @@ final class Net {
     var c = SIMD4<Float>(Float(1 - pow(0.9, Double(step))), Float(1 - pow(0.999, Double(step))), 0, 0), n = UInt32(lay.count), pc = UInt32(pinCount)
     begin(); phase = "optimizer"
     mark("adam")
-    e.setComputePipelineState(pipes["adam"]!)
+    current = pipes["adam"]!; e.setComputePipelineState(current!)
     for (i, b) in [theta, m, v, grads].enumerated() { e.setBuffer(b, offset: 0, index: i) }
     e.setBytes(&a, length: 16, index: 4); e.setBytes(&c, length: 16, index: 5); e.setBytes(&n, length: 4, index: 6)
     threads(lay.count)
     mark("pin")
-    e.setComputePipelineState(pipes["pin"]!)
+    current = pipes["pin"]!; e.setComputePipelineState(current!)
     e.setBuffer(theta, offset: 0, index: 0); e.setBuffer(matsBuf, offset: 0, index: 1); e.setBuffer(pinRows, offset: 0, index: 2); e.setBytes(&pc, length: 4, index: 3)
-    threads(pinCount, 64)
+    threads(pinCount)
     encodeWeights()
     finish("optimizer")
     return alpha

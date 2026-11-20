@@ -272,7 +272,7 @@ QFWD(gemmq_nt, true, (K, N), (0, n0))
 QFWD(gemmq_nn, false, (N, K), (n0, 0))
 
 // wgrad (TN: a [K][M] against b [K][N], K the rows): 256-row blocks, one scale a column a block; the blocks [z per,
-// (z + 1) per) of split z summed into partial [z][M][N]; reduce_splits adds the splits in order
+// (z + 1) per) of threadgroup z summed into partial [z][M][N] (per 1 in the trainer: a block a threadgroup); reduce_pairs adds them
 struct WP { uint M, N, K, per; };
 kernel void gemm_tn(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)]], device const float *sa [[buffer(2)]], device const float *sb [[buffer(3)]],
                     device float *partial [[buffer(4)]], constant WP &p [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]]) {
@@ -299,9 +299,14 @@ kernel void gemm_tn(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)
   }
   for (int i = 0; i < 32; ++i) if (mi[i] >= 0) partial[(size_t(tg.z) * M + mi[i]) * N + ni[i]] = acc[i];
 }
-kernel void reduce_splits(device const float *partial [[buffer(0)]], device float *out [[buffer(1)]], constant uint2 &p [[buffer(2)]], uint i [[thread_position_in_grid]]) {
-  if (i >= p.x) return;   // p: (M N, splits)
-  float s = 0;
-  for (uint z = 0; z < p.y; z++) s += partial[size_t(z) * p.x + i];
-  out[i] = s;
+// the blocks' partial sums [nb][MN], pairwise: partial[z] += partial[z + stride] for z a multiple of 2 stride, a thread
+// an (element, pair); log2(nb) passes leave the sum in partial[0], in the same order every time
+kernel void reduce_pairs(device float *partial [[buffer(0)]], constant uint4 &p [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+  const uint mn = p.x, nb = p.y, stride = p.z, pairs = (nb + 2 * stride - 1) / (2 * stride);   // p: (M N, blocks, stride)
+  if (i >= mn * pairs) return;
+  const uint e = i % mn, z = i / mn * 2 * stride;
+  if (z + stride < nb) partial[size_t(z) * mn + e] += partial[size_t(z + stride) * mn + e];
+}
+kernel void copy_floats(device const float *from [[buffer(0)]], device float *to [[buffer(1)]], constant uint &n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+  if (i < n) to[i] = from[i];
 }

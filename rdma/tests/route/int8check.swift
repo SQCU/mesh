@@ -9,7 +9,7 @@ import Foundation
 let device = MTLCreateSystemDefaultDevice()!, queue = device.makeCommandQueue()!
 let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: CommandLine.arguments[1]))
 func pipe(_ n: String) -> MTLComputePipelineState { try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
-let P0 = ["quant_rows", "quant_cols", "gemm_tn", "reduce_splits"].reduce(into: [String: MTLComputePipelineState]()) { $0[$1] = pipe($1) }
+let P0 = ["quant_rows", "quant_cols", "gemm_tn", "reduce_pairs", "copy_floats"].reduce(into: [String: MTLComputePipelineState]()) { $0[$1] = pipe($1) }
 var cache: [String: MTLComputePipelineState] = [:]
 func pipe(_ n: String, flags: UInt32) -> MTLComputePipelineState {   // a product's pipeline for its epilogue flags (FLAGS)
   if let p = cache["\(n) \(flags)"] { return p }
@@ -183,28 +183,29 @@ for outliers in [false, true] {
     let dy = data(rows * Mw, outliers: outliers), x = data(rows * Xc, outliers: outliers)
     let (qa, sa, _) = qcols(dy, rows: Kp, cols: Mw, ld: Mw, valid: rows, block: 256, seed: 24680, ones: -1, off: 0, xcols: Mw)
     let (qb, sb, _) = qcols(x, rows: Kp, cols: Nw, ld: Xc, valid: rows, block: 256, seed: 0, ones: ones ? Xc : -1, off: 0, xcols: Xc)
-    let tiles = ((Nw + 31) / 32) * ((Mw + 63) / 64), want = max(1, min(nb, 768 / tiles)), per = (nb + want - 1) / want, splits = (nb + per - 1) / per
-    let partial = zeros(splits * Mw * Nw * 4), out = zeros(Mw * Nw * 4)
-    _ = run("gemm_tn", [buf(qa), buf(qb), buf(sa), buf(sb), partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), UInt32(per)]], .groups((Nw + 31) / 32, (Mw + 63) / 64, splits, 128))
-    _ = run("reduce_splits", [partial, out], [[UInt32(Mw * Nw), UInt32(splits)]], .threads(Mw * Nw, 256))
+    // a threadgroup a 256-row block, then the pairwise tree (net.swift's)
+    let partial = zeros(nb * Mw * Nw * 4), out = zeros(Mw * Nw * 4)
+    _ = run("gemm_tn", [buf(qa), buf(qb), buf(sa), buf(sb), partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
+    var stride = 1
+    while stride < nb { _ = run("reduce_pairs", [partial], [[UInt32(Mw * Nw), UInt32(nb), UInt32(stride), 0]], .threads(Mw * Nw * ((nb + 2 * stride - 1) / (2 * stride)), 256)); stride *= 2 }
+    _ = run("copy_floats", [partial, out], [[UInt32(Mw * Nw)]], .threads(Mw * Nw, 256))
     let got = read(out, Mw * Nw, Float.self)
     var ref = [Float](repeating: 0, count: Mw * Nw), plain = [Float](repeating: 0, count: Mw * Nw)
     for m in 0..<Mw { for n in 0..<Nw {
-      var tot: Float = 0
-      for z in 0..<splits {
-        var acc: Float = 0
-        for kb in (z * per)..<min(nb, (z + 1) * per) {
-          var s: Int32 = 0
-          for k in (kb * 256)..<(kb * 256 + 256) { s += Int32(qa[k * Mw + m]) * Int32(qb[k * Nw + n]) }
-          acc = i8_acc(s, sa[m * nb + kb], sb[n * nb + kb], acc)
-        }
-        tot += acc
+      var part = [Float](repeating: 0, count: nb)
+      for kb in 0..<nb {
+        var s: Int32 = 0
+        for k in (kb * 256)..<(kb * 256 + 256) { s += Int32(qa[k * Mw + m]) * Int32(qb[k * Nw + n]) }
+        part[kb] = i8_acc(s, sa[m * nb + kb], sb[n * nb + kb], 0)
       }
+      var st = 1
+      while st < nb { var z = 0; while z + st < nb { part[z] += part[z + st]; z += 2 * st }; st *= 2 }
+      let tot = part[0]
       ref[m * Nw + n] = tot
       var e = 0.0; for k in 0..<rows { e += Double(dy[k * Mw + m]) * (n < Xc ? Double(x[k * Xc + n]) : 1) }; plain[m * Nw + n] = Float(e)
     } }
     let (d, r) = exact(got, ref)
-    report("gemm_tn \(Mw)x\(Nw) over \(rows) rows, \(splits) splits (\(tag))", d == 0, String(format: "differing %d, max diff / max %.1e", d, r))
+    report("gemm_tn \(Mw)x\(Nw) over \(rows) rows, \(nb) blocks, tree (\(tag))", d == 0, String(format: "differing %d, max diff / max %.1e", d, r))
     print(String(format: "    against the fp32 product (stochastic dY): relative error %.4f", relErr(got, plain)))
   }
 }
@@ -263,10 +264,14 @@ for (M, N, K) in [(147456, 64, 64), (147456, 128, 64), (147456, 192, 64), (14745
                tq * 1e6, Double(M * N * 5) / tq / 1e9, tc * 1e6, Double(M * K * 5) / tc / 1e9))
 }
 for (rows, Mw, Nw) in [(147456, 128, 65), (147456, 192, 65), (147456, 64, 193)] {
-  let Kp = rows, nb = Kp / 256, a = zeros(Kp * Mw), b = zeros(Kp * Nw), sa = zeros(Mw * nb * 4), sb = zeros(Nw * nb * 4)
-  let tiles = ((Nw + 31) / 32) * ((Mw + 63) / 64), want = max(1, min(nb, 768 / tiles)), per = (nb + want - 1) / want, splits = (nb + per - 1) / per, partial = zeros(splits * Mw * Nw * 4)
-  let t = median { run("gemm_tn", [a, b, sa, sb, partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), UInt32(per)]], .groups((Nw + 31) / 32, (Mw + 63) / 64, splits, 128)) }
-  print(String(format: "wgrad %3dx%3d over %6d rows (%d splits): gemm_tn %7.1f us %5.1f TOP/s", Mw, Nw, rows, splits, t * 1e6, 2 * Double(Mw * Nw * rows) / t / 1e12))
+  let Kp = rows, nb = Kp / 256, a = zeros(Kp * Mw), b = zeros(Kp * Nw), sa = zeros(Mw * nb * 4), sb = zeros(Nw * nb * 4), partial = zeros(nb * Mw * Nw * 4)
+  let t = median {
+    var total = run("gemm_tn", [a, b, sa, sb, partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
+    var stride = 1
+    while stride < nb { total += run("reduce_pairs", [partial], [[UInt32(Mw * Nw), UInt32(nb), UInt32(stride), 0]], .threads(Mw * Nw * ((nb + 2 * stride - 1) / (2 * stride)), 256)); stride *= 2 }
+    return total
+  }
+  print(String(format: "wgrad %3dx%3d over %6d rows (%d blocks, tree): %7.1f us %5.1f TOP/s", Mw, Nw, rows, nb, t * 1e6, 2 * Double(Mw * Nw * rows) / t / 1e12))
 }
 print(failures == 0 ? "all checks pass" : "\(failures) checks FAILED")
 exit(failures == 0 ? 0 : 1)
