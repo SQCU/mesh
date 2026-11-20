@@ -3,7 +3,8 @@
 //
 // Each step: M antithetic pairs, each pair one scenario drawn from the pool and run at theta + sigma eps and
 // theta - sigma eps (eps a sign a parameter, from the pair's key); two tasks, the smooth area objective and the true
-// completion over the floor; each task's gradient from the centered ranks of its 2 M results (route.metal gradient);
+// completion over the floor; each task's gradient from each pair's two sides' difference over their mean (route.metal
+// gradient);
 // the two combined at their min-norm point (MGDA for two) and applied by Adam.
 //
 // The pool's network kinds: random connected graphs, rings, stars, rings with a relay hub, full meshes, and the measured
@@ -215,8 +216,12 @@ for k in 0..<steps {
   let t1 = Date()
   rollouts(R, amplitude: sigma, mode: 0)
   rolloutTime += Date().timeIntervalSince(t1)
-  let a = ranks((0..<R).map { obj[$0] }), b = ranks((0..<R).map { done[$0] })
-  for m in 0..<M { weights[2 * m] = (a[2 * m] - a[2 * m + 1]) / (2 * sigma * Float(M)); weights[2 * m + 1] = (b[2 * m] - b[2 * m + 1]) / (2 * sigma * Float(M)) }
+  // each pair scored on its own scenario: its two sides' difference over their mean, for each task
+  for m in 0..<M {
+    let oa = obj[2 * m], ob = obj[2 * m + 1], da = done[2 * m], db = done[2 * m + 1]
+    weights[2 * m] = (oa - ob) / max((oa + ob) / 2, 1e-6) / (2 * sigma * Float(M))
+    weights[2 * m + 1] = (da - db) / max((da + db) / 2, 1e-6) / (2 * sigma * Float(M))
+  }
   let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
   enc.setComputePipelineState(gradientPipeline)
   enc.setBuffer(weightBuf, offset: 0, index: 0); enc.setBuffer(keyBuf, offset: 0, index: 1); enc.setBuffer(gradBuf, offset: 0, index: 2)
