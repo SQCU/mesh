@@ -156,7 +156,7 @@ def rollout(policy, a, mode):
     lag = mx.minimum(mx.ceil((lat + PAGE / mx.maximum(rate, 1e-6)) / dt[:, None]), H - 1).astype(mx.int32)  # [B, L]
     laneg = mx.minimum(a['lane'], L - 1); edge = (a['lane'] < L).astype(mx.float32)   # [B, J, K, N]
     bidx = mx.arange(B)[:, None, None, None]
-    elag = mx.take_along_axis(lag[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1)
+    elag = mx.take_along_axis(mx.broadcast_to(lag[:, None, None, :], (B, J, K, L)), laneg, -1)
     nodes = mx.arange(N); dest = a['dest']; demand = a['demand']; jv = a['jvalid']
     srcmask = (nodes[None, None, :] == a['src'][..., None]).astype(mx.float32)   # [B, J, N]
     # the source's release rate: its out-lanes' total a slot
@@ -171,24 +171,24 @@ def rollout(policy, a, mode):
         # what each edge can send: its tail's arrivals not yet sent on it
         tailarr = mx.take_along_axis(arrived, a['tail'], -1)
         avail = mx.maximum(tailarr - sent, 0) * edge
-        laneq = mx.zeros((B, L + 1)).at[bidx.broadcast_to(avail.shape).reshape(-1), a['lane'].reshape(-1)].add(avail.reshape(-1))[:, :L]
+        laneq = mx.zeros((B, L + 1)).at[mx.broadcast_to(bidx, avail.shape).reshape(-1), a['lane'].reshape(-1)].add(avail.reshape(-1))[:, :L]
         want = laneq + bg
         share = mx.minimum(1.0, cap / mx.maximum(want, 1e-3))
         if mode == 'policy' and t % REFRESH == 0:
             # the policy's inputs, from the fluid state now: each candidate's node tokens
             qtime = want / mx.maximum(rate, 1e-6)                                # ns of queue a lane
-            lq = mx.take_along_axis(qtime[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1) * edge
-            lr = mx.take_along_axis(rate[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1)
+            lq = mx.take_along_axis(mx.broadcast_to(qtime[:, None, None, :], (B, J, K, L)), laneg, -1) * edge
+            lr = mx.take_along_axis(mx.broadcast_to(rate[:, None, None, :], (B, J, K, L)), laneg, -1)
             parent = mx.where(edge > 0, a['tail'], mx.where(nodes[None, None, None, :] == a['src'][:, :, None, None], N, N + 1))
             qlevel = mx.clip(mx.floor(mx.log2(1 + 64 * lq / floor[:, None, None, None])), 0, 15).astype(mx.int32)
             rband = mx.clip(mx.floor(mx.log2(mx.maximum(lr, 1.0))) - 2, 0, 3).astype(mx.int32) * (edge > 0)
             tokens = (parent * 64 + qlevel * 4 + rband).astype(mx.int32)       # [B, J, K, N]
             ownq = ((qtime[:, None, :] * (a['lsrc'][:, None, :] == a['src'][..., None])).sum(-1)) / floor[:, None]
-            ctx = mx.stack([mx.log1p(a['S'] / PAGE)[:, None].broadcast_to((B, J)), mx.full((B, J), 1.0), mx.full((B, J), t / SLOTS * 1.0),
+            ctx = mx.stack([mx.broadcast_to(mx.log1p(a['S'] / PAGE)[:, None], (B, J)), mx.full((B, J), 1.0), mx.full((B, J), t / SLOTS * 1.0),
                             ownq, ownq, (a['lsrc'][:, None, :] == a['src'][..., None]).sum(-1) / 8.0, mx.full((B, J), K / 8.0),
-                            dest.sum(-1) / 8, (rate.sum(-1) / mx.maximum(a['lvalid'].sum(-1), 1) / 10)[:, None].broadcast_to((B, J)),
-                            (lat.sum(-1) / mx.maximum(a['lvalid'].sum(-1), 1) / 1e4)[:, None].broadcast_to((B, J)),
-                            a['kind'][:, None].broadcast_to((B, J)), (a['phase'] == 2).astype(mx.float32)], -1)
+                            dest.sum(-1) / 8, mx.broadcast_to((rate.sum(-1) / mx.maximum(a['lvalid'].sum(-1), 1) / 10)[:, None], (B, J)),
+                            mx.broadcast_to((lat.sum(-1) / mx.maximum(a['lvalid'].sum(-1), 1) / 1e4)[:, None], (B, J)),
+                            mx.broadcast_to(a['kind'][:, None], (B, J)), (a['phase'] == 2).astype(mx.float32)], -1)
             logits, state, emb = policy(ctx.reshape(B * J, CTX), last, tokens.reshape(B * J, K, N), state)
             p = mx.softmax(logits, -1).reshape(B, J, K)
             last = (p.reshape(B * J, K)[..., None] * emb).sum(-2)
@@ -203,7 +203,7 @@ def rollout(policy, a, mode):
             pool_cap = mx.where(a['phase'] == 2, demand * mx.minimum(frac, 1.0), demand)
             r = mx.minimum(mx.maximum(pool_cap - released, 0), outcap) * jv
             released = released + r; assigned = assigned + r[..., None] * p
-        sendinc = avail * mx.take_along_axis(share[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1)
+        sendinc = avail * mx.take_along_axis(mx.broadcast_to(share[:, None, None, :], (B, J, K, L)), laneg, -1)
         bg = bg - bg * share
         sent = sent + sendinc
         hist = hist[1:] + [sendinc]
