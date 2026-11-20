@@ -14,7 +14,7 @@
 //
 // The policy, a commodity at a time: a 64-wide stream from the commodity's context and its last weighting's expected
 // candidate embedding, through two layers of a GRU block (recurrent over refreshes) and a feed-forward block expanding
-// to 192; each candidate tree is its N node tokens (parent, in-lane queue level, rate band), embedded, rotated by node
+// to 192; each candidate tree is its N node tokens (parent, in-lane queue level, in-lane one-page delay against the floor), embedded, rotated by node
 // position (RoPE at the embedding only), mean-pooled, and dotted with the stream. A matrix-vector product reads each
 // weight row once, coalesced along the row across a SIMD group's lanes, for every commodity at once.
 #include <metal_stdlib>
@@ -24,7 +24,7 @@
 using namespace metal;
 
 constant constexpr int N = 6, L = 32, J = 6, K = 8, H = 12, SLOTS = 64, REFRESH = 8;
-constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64, T = 256, SG = T / 32;
+constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 8 * 16, T = 256, SG = T / 32;
 constant constexpr int JK = J * K, JKN = J * K * N;
 constant constexpr float PAGE = 16384.0f;
 
@@ -166,12 +166,13 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
         for (int v = 0; v < N; v++) {
           const int lane = s.lane[j][k][v];
           const int parent = lane == 255 ? (v == s.src[j] ? N : N + 1) : s.lsrc[lane];
-          int level = 0, band = 0;
+          int level = 0, delay = 0;
           if (lane != 255) {
-            level = clamp(int(floor(log2(1 + 64 * want[lane] / max(s.rate[lane], 1e-6f) / fl))), 0, 15);
-            band = clamp(int(floor(log2(max(s.rate[lane], 1.0f)))) - 2, 0, 3);
+            // the in-lane's queue, and its delay for one page (latency and the page's time), each against the floor
+            level = clamp(int(floor(log2(1 + 64 * want[lane] / max(s.rate[lane], 1e-6f) / fl))), 0, 7);
+            delay = clamp(int(floor(16 * (s.lat[lane] + PAGE / max(s.rate[lane], 1e-6f)) / fl)), 0, 15);
           }
-          const int token = parent * 64 + level * 4 + band;
+          const int token = (parent * 8 + level) * 16 + delay;
           const float u = read(P, &net.tok[token][2 * pair]), w2 = read(P, &net.tok[token][2 * pair + 1]), c = cos(v * theta), sn = sin(v * theta);
           a += u * c - w2 * sn; b += u * sn + w2 * c;
         }

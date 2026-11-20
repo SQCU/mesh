@@ -15,7 +15,7 @@
 import Foundation
 import Metal
 
-let N = 6, L = 32, J = 6, K = 8, H = 12, D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64
+let N = 6, L = 32, J = 6, K = 8, H = 12, D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 8 * 16
 let page = 16384.0, scenarioBytes = 1444
 
 struct Mix { var s: UInt64
@@ -234,10 +234,10 @@ for k in 0..<steps {
     theta[i] -= Float(rate * (m1[i] / (1 - pow(0.9, Double(k + 1)))) / (sqrt(m2[i] / (1 - pow(0.999, Double(k + 1)))) + 1e-8))
   }
   stepTime += Date().timeIntervalSince(t0)
-  if k % 25 == 24 || k + 1 == steps {
+  if k < 10 || k % 25 == 24 || k + 1 == steps {
     let meanDone = (0..<R).map { done[$0] }.reduce(0, +) / Float(R)
     print(String(format: "step %d: train T/floor %.3f, lambda %.2f, %.1f steps/s, %.0f rollouts/s | ", k + 1, meanDone, lambda,
-                 25 / stepTime, Double(25 * R) / rolloutTime) + measure())
+                 Double(k < 10 ? 1 : 25) / stepTime, Double((k < 10 ? 1 : 25) * R) / rolloutTime) + measure())
     fflush(stdout)
     rolloutTime = 0; stepTime = 0
   }
