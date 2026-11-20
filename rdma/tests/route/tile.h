@@ -95,9 +95,8 @@ static inline void put_s(threadgroup float *S, Lanes c, uint row, thread const f
 }
 // the column pass over S's 64 columns (the tile's 64 rows): codes rotated along the rows, one scale a column, into
 // xt + column (stride RT) at the tile's rows (row0 global); the first `valid` columns; sums (if given) the columns'
-// unrotated sums. A column's rows strided over its eight lanes (lane li: rows li + 8 k, int8mm.h's i8_fwht64_strided):
+// unrotated sums. Stochastic index: column RT + row0 + 8 (row % 8) + row / 8. A column's rows strided over its eight lanes (lane li: rows li + 8 k, int8mm.h's i8_fwht64_strided):
 // rows 68 words apart then put a load's 32 lanes on 32 banks (eight consecutive rows a lane: eight lanes a bank).
-// Stochastic index: column RT + row
 static inline void col_codes(threadgroup const float *S, Lanes c, device int8_t *xt, uint RT, uint row0, device float *sc, device float *sums, uint valid, uint seed) {
   _Pragma("unroll") for (uint s = 0; s < 2; s++) {
     const uint col = 8 * c.sg + 4 * s + c.q;
@@ -113,8 +112,8 @@ static inline void col_codes(threadgroup const float *S, Lanes c, device int8_t 
     if (col < valid) {
       if (c.li == 0) sc[col] = i8_scale(m);
       device int8_t *o = xt + size_t(col) * RT + row0 + c.li;
-      const uint at = col * RT + row0 + c.li;
-      _Pragma("unroll") for (uint k = 0; k < 8; k++) o[8 * k] = i8_code(v[k], inv, seed, at + 8 * k);
+      const uint at = col * RT + row0 + 8 * c.li;   // row li + 8 k's index: 8 li + k (a lane's pairs share a hash)
+      _Pragma("unroll") for (uint k = 0; k < 8; k++) o[8 * k] = i8_code(v[k], inv, seed, at + k);
     }
   }
 }

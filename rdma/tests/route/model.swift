@@ -391,7 +391,7 @@ final class Net {
         let m = v.reduce(0) { max($0, abs($1)) }, inv = i8_inverse(m)
         if i8_scale(m).bitPattern != sc[col].bitPattern { badS += 1 }
         for r in 0..<64 {
-          let want = i8_code(v[r], inv, seed, UInt32(truncatingIfNeeded: col * RT + row0 + r)), got = q[col * RT + row0 + r]
+          let want = i8_code(v[r], inv, seed, UInt32(truncatingIfNeeded: col * RT + row0 + 8 * (r % 8) + r / 8)), got = q[col * RT + row0 + r]   // tile.h's index
           if want != got { bad += 1; if abs(Int(want) - Int(got)) > 1 { big += 1 } }
         }
       }

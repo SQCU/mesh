@@ -6,7 +6,8 @@
      with the 1/8 in the same step (i8_fwht64; on the GPU i8_fwht64_lanes, eight lanes a block, eight values a lane:
      the same steps); both operands rotated alike, so the product is unchanged;
    - one scale a row: s = max|y| / 127, codes q = y 127 / max|y| rounded to nearest (even), or stochastically
-     (floor(x + u), u from i8_mix of the element's index and a seed: unbiased), clamped to +-127 (i8_code);
+     (floor(x + u), u 16 bits of i8_mix of the element pair's index and a seed: unbiased below 2^-17 of a step),
+     clamped to +-127 (i8_code);
    - the int32 sum exact while K x 127^2 < 2^31 (K < 133,000); forward and dgrad one sum over the whole K (<= 256),
      wgrad blocks of I8_WBLOCK rows (one scale a column a block), each block's sum accumulated in fp32 (i8_acc).
      I8_WBLOCK is the producers' tile (64 rows), so a tile makes its own wgrad codes; measured (stages, the wgrad
@@ -40,7 +41,10 @@ static inline float i8_inverse(float m) { return m > 0 ? I8_DIV(127.0f, m) : 0.0
 static inline float i8_scale(float m) { return I8_DIV(m, 127.0f); }                     /* y ~ codes i8_scale(max|y|) */
 static inline int8_t i8_code(float v, float inv, uint32_t seed, uint32_t at) {          /* seed 0: to nearest */
   const float x = v * inv;
-  const float r = seed ? I8_FLOOR(x + (float)(i8_mix(seed ^ (at * 0x9e3779b1u)) >> 8) * (1.0f / 16777216.0f)) : I8_RINT(x);
+  /* one hash a pair of elements (at, at ^ 1): its low 16 bits element 2j's uniform, its high 16 bits 2j + 1's (the
+     bias of floor(x + u) at that resolution below 2^-17 of a step); a pair's two codes made together share it */
+  const uint32_t h = seed ? i8_mix(seed ^ ((at >> 1) * 0x9e3779b1u)) : 0u;
+  const float r = seed ? I8_FLOOR(x + (float)((h >> (16 * (at & 1))) & 0xffffu) * (1.0f / 65536.0f)) : I8_RINT(x);
   return (int8_t)I8_CLAMP(r);
 }
 static inline float i8_out(int32_t sum, float sa, float sb, float bias) { return I8_FMA((float)sum * sa, sb, bias); }
