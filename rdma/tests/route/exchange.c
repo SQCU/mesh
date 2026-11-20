@@ -37,3 +37,11 @@ int route_exchange_sum(void) {
   return r == ncclSuccess ? 0 : fail("ncclAllReduce", r);
 }
 const char *route_exchange_failure(void) { return failure; }
+/* the communicator destroyed (its program ended: one step a period, so always after a whole number of executions) and
+   the lease freed, so no program of a client gone with pieces outstanding is left on the bridges (one such restarts its
+   order at the next declaration, losing every program there: design/declared-programs.md) */
+void route_exchange_close(void) {
+  if (!comm) return;
+  ncclCommDestroy(comm); comm = 0;
+  if (buf) { ncclMemFree(buf); buf = 0; }
+}

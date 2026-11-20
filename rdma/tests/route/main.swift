@@ -167,7 +167,8 @@ func join() {
   guard world > 1 else { return }
   let id = env["MESH_ID"] ?? ""
   precondition(!id.isEmpty, "MESH_ID: the bootstrap root's host:port")
-  if route_exchange_open(Int32(rank), Int32(world), id, size_t(TASKS * nlay.count)) != 0 { print("exchange: " + String(cString: route_exchange_failure())); exit(1) }
+  if route_exchange_open(Int32(rank), Int32(world), id, size_t(TASKS * nlay.count)) != 0 { print("exchange: " + String(cString: route_exchange_failure())); route_exchange_close(); exit(1) }
+  atexit { route_exchange_close() }   // every exit: no program left behind with pieces outstanding
   print("rank \(rank) of \(world): joined through the mesh (bootstrap \(id))"); fflush(stdout)
 }
 // p [n]: every rank's mean, in place (through the lease)
@@ -175,7 +176,7 @@ func meshMean(_ p: UnsafeMutablePointer<Float>, _ n: Int) {
   guard world > 1 else { return }
   let lease = route_exchange_buffer()!
   memcpy(lease, p, n * 4)
-  if route_exchange_sum() != 0 { print("exchange: " + String(cString: route_exchange_failure())); exit(1) }
+  if route_exchange_sum() != 0 { print("exchange: " + String(cString: route_exchange_failure())); fflush(stdout); exit(1) }   // atexit closes
   let inv = 1 / Float(world)
   for i in 0..<n { p[i] = lease[i] * inv }
 }
@@ -207,9 +208,19 @@ final class Exchange {
 let exchange = Exchange(P: nlay.count)
 join()
 if let n = env["XBENCH"].flatMap({ Int($0) }) {   // the exchange alone: n rounds of the three gradients' mean, no compute between
+  // n 0: declare and close, no step issued: leaves no program with pieces outstanding (a flush of a dead run's)
+  if n == 0 { route_exchange_close(); print("rank \(rank): declared and closed, no step"); exit(0) }
   let P = TASKS * nlay.count
   var t: [Double] = []
-  for _ in 0..<n { let t0 = Date(); meshMean(floats(net.grads, P), P); t.append(Date().timeIntervalSince(t0)) }
+  let g = floats(net.grads, P)
+  var wrong = 0
+  for r in 0..<n {   // each round's values the rank's own, so its mean is known: (rank + 1 + round + i mod 7) averaged
+    for i in 0..<P { g[i] = Float(rank + 1 + r % 5 + i % 7) }
+    let t0 = Date(); meshMean(g, P); t.append(Date().timeIntervalSince(t0))
+    let base = Float(world + 1) / 2 + Float(r % 5)
+    for i in 0..<P where g[i] != base + Float(i % 7) { wrong += 1 }
+  }
+  print("rank \(rank): \(wrong) of \(n * P) means wrong")
   t.sort()
   print(String(format: "rank %d: the exchange alone (%d floats, %.0f KB), %d rounds: median %.2f ms, p90 %.2f ms, max %.2f ms", rank, P, Double(P * 4) / 1024, n, t[n / 2] * 1e3, t[n * 9 / 10] * 1e3, t[n - 1] * 1e3))
   exit(0)
@@ -500,3 +511,4 @@ for k in 0..<steps {
 if world > 1, exchange.collect(into: floats(net.grads, TASKS * nlay.count), gram: floats(net.gram, 9)) { _ = net.apply(rate: rate) }   // the last step's mean
 if let path = env["THETA"], rank == 0 { try! Data(bytes: net.theta.contents(), count: nlay.count * 4).write(to: URL(fileURLWithPath: path)); print("parameters written to \(path)") }
 if let path = env["THETA_INT8"], rank == 0 { net.writeCodes(path); print("int8 weights (for deployment: tests/switch.c's ROUTE_THETA) written to \(path)") }
+route_exchange_close()

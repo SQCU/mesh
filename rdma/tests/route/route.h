@@ -151,6 +151,7 @@ int route_exchange_open(int rank, int world, const char *id, size_t n);
 float *route_exchange_buffer(void);
 int route_exchange_sum(void);
 const char *route_exchange_failure(void);
+void route_exchange_close(void);   /* the communicator destroyed, the lease freed: before every exit */
 
 /* ---- the features: what the policy reads, defined once ---- */
 static inline double route_send1(const struct route_stream *s, int l) { return ROUTE_PAGE * s->f.cables[l] / s->f.rate[l]; }   /* one page, one cable */
