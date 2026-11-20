@@ -155,13 +155,15 @@ int route_params_read(struct route_params *p, const char *path);
 size_t route_forward_scratch(int nc);
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
 
-/* The trainer's gradient exchange (exchange.c): libnccl-mesh's host path over the nodes' bridges. open: this rank's
+/* The trainer's gradient exchange (exchange.c): libnccl-mesh's Metal path over the nodes' bridges. open: this rank's
    communicator (NCCL's bootstrap at id, the root's host:port), a lease of n floats in the node's region, the declared
-   program of its one step (the in-place sum); sum: that step, on the lease route_exchange_buffer gives. 0, or -1 with
-   route_exchange_failure naming what failed */
-int route_exchange_open(int rank, int world, const char *id, size_t n);
+   program of its one step (the in-place sum, on a Metal stream: commandBuffer an id<MTLCommandBuffer>, not used);
+   encode: that step into commandBuffer (the caller commits and waits, then status), on the lease
+   route_exchange_buffer gives. 0, or -1 with route_exchange_failure naming what failed */
+int route_exchange_open(int rank, int world, const char *id, size_t n, void *commandBuffer);
 float *route_exchange_buffer(void);
-int route_exchange_sum(void);
+int route_exchange_encode(void *commandBuffer);
+int route_exchange_status(void);
 const char *route_exchange_failure(void);
 void route_exchange_close(void);   /* the communicator destroyed, the lease freed: before every exit */
 

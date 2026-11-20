@@ -134,13 +134,13 @@ final class Runner {
   var queue: [Int] = [], awaiting: [Int] = [], finished: [Int] = [], workers: [Thread] = [], workerBusy = 0.0, streamSince = Date(), woken = false
   // wakes service() with nothing for it (another thread has news for the main thread: theta published, the end)
   func wake() { lock.lock(); woken = true; lock.broadcast(); lock.unlock() }
-  // a worker on every hardware thread, below the learner's and the exchange's scheduling class: the OS gives those the
-  // CPU when they need it, the environment every cycle left
+  // a worker on every hardware thread, in the learner's scheduling class (the OS shares the cores; the exchange, whose
+  // work is the GPU's, parks)
   func startWorkers() {
     route_tel_set(Int32(RT_WORKERS.rawValue), UInt64(threads))
     for _ in 0..<threads {
       let th = Thread { [unowned self] in self.work() }
-      th.stackSize = 8 << 20; th.qualityOfService = .utility; workers.append(th); th.start()
+      th.stackSize = 8 << 20; th.qualityOfService = .userInitiated; workers.append(th); th.start()
     }
   }
   var runnable: Int { lock.lock(); defer { lock.unlock() }; return queue.count }
@@ -169,39 +169,69 @@ final class Runner {
       route_tel_add(Int32(RT_WORKER_NS.rawValue), UInt64(spent * 1e9)); route_tel_add(Int32(RT_CREDIT_NS.rawValue), UInt64(c * 1e9))
     }
   }
-  // the main thread's turn: wait until a run awaits or has finished (or wake()); forward every awaiting run as
-  // one batch (kept for the learning batch) and queue them again. Returns the runs that finished
+  // ---- the main thread's turn, its forwards asynchronous: two forward sets (each its own input and output buffers),
+  // so one batch is packed and committed while the other runs on the GPU; a completed forward's results go to its
+  // runs (their states, their answers) and the runs to the queue. Waits (no timeout) until a forward has completed, a
+  // run awaits and a set is free, a run has finished, or wake(). Returns the runs that finished ----
+  final class FSet {
+    let laneBuf: MTLBuffer, maskBuf: MTLBuffer, stateBuf: MTLBuffer, nextBuf: MTLBuffer, tokBuf: MTLBuffer, idxBuf: MTLBuffer, wBuf: MTLBuffer
+    var busy = false, done = false, gpu = 0.0, runs: [Int] = [], rowOf: [Int] = []
+    init(_ device: MTLDevice, slots n: Int, rows: Int) {
+      func shared(_ floats: Int) -> MTLBuffer { device.makeBuffer(length: max(16, floats * 4), options: .storageModeShared)! }
+      laneBuf = shared(n * L * IN); maskBuf = shared(n * L); stateBuf = shared(n * 2 * D); nextBuf = shared(n * 2 * D); tokBuf = shared(rows * IN); idxBuf = shared(rows); wBuf = shared(rows * FS)
+    }
+    func f(_ b: MTLBuffer) -> UnsafeMutablePointer<Float> { b.contents().bindMemory(to: Float.self, capacity: b.length / 4) }
+  }
+  lazy var sets: [FSet] = (0..<2).map { _ in FSet(MTLCreateSystemDefaultDevice()!, slots: n, rows: rows) }
   func service() -> [Int] {
     lock.lock()
-    while awaiting.isEmpty && finished.isEmpty && !woken { lock.wait() }
+    while !(sets.contains { $0.done } || (!awaiting.isEmpty && sets.contains { !$0.busy }) || !finished.isEmpty || woken) { lock.wait() }
     woken = false
-    let batch = awaiting, done = finished
-    awaiting = []; finished = []
+    let ended = finished; finished = []
+    let completed = sets.filter { $0.done }
+    for c in completed { c.done = false }
+    let free = sets.first { !$0.busy }
+    var batch: [Int] = []
+    if free != nil { batch = awaiting; awaiting = [] }
     lock.unlock()
-    if batch.isEmpty { return done }
-    ticks += 1
+    for c in completed {   // its runs' states and answers, then the runs queued again
+      let nx = c.f(c.nextBuf), wp = c.f(c.wBuf)
+      for (b, t) in c.runs.enumerated() {
+        for i in 0..<(2 * D) { slots[t].state[i] = nx[b * 2 * D + i] }
+        slots[t].answer = Array(UnsafeBufferPointer(start: wp + c.rowOf[b] * FS, count: Int(decisions[t].contexts) * FS)); slots[t].answered = true
+      }
+      ticks += 1; forwardTime += c.gpu; forwards += 1; decided += c.runs.count
+      route_tel_add(Int32(RT_FORWARDS.rawValue), 1); route_tel_add(Int32(RT_EVALUATIONS.rawValue), UInt64(c.runs.count)); route_tel_add(Int32(RT_FORWARD_NS.rawValue), UInt64(c.gpu * 1e9))
+      route_tel_phase(Int32(RT_PHASE_FIRST_FORWARD.rawValue))
+      let runs = c.runs
+      lock.lock(); c.busy = false; lock.unlock()
+      submit(runs)
+    }
+    guard let s = free ?? sets.first(where: { !$0.busy }), !batch.isEmpty else {
+      if !batch.isEmpty { lock.lock(); awaiting += batch; lock.unlock() }
+      return ended
+    }
+    let lp = s.f(s.laneBuf), mp = s.f(s.maskBuf), sp = s.f(s.stateBuf), tp = s.f(s.tokBuf), ip = s.idxBuf.contents().bindMemory(to: Int32.self, capacity: rows)
     var rowOf: [Int] = [], used = 0, take = 0
     for t in batch {   // a forward's rows at most `rows`: the rest wait for the next
       let nc = Int(decisions[t].contexts)
       if used + nc > rows { break }
       take += 1
       let b = take - 1, nl = Int(decisions[t].lanes)
-      memcpy(laneP + b * L * IN, laneTokens(t), L * IN * 4)
-      for q in 0..<L { maskP[b * L + q] = q < nl ? 1 : 0 }
-      for i in 0..<(2 * D) { stateP[b * 2 * D + i] = slots[t].state[i] }
-      memcpy(tokP + used * IN, tokens[t], nc * IN * 4)
-      for c in 0..<nc { idxP[used + c] = Int32(b * L + L - 1) }
+      memcpy(lp + b * L * IN, laneTokens(t), L * IN * 4)
+      for q in 0..<L { mp[b * L + q] = q < nl ? 1 : 0 }
+      for i in 0..<(2 * D) { sp[b * 2 * D + i] = slots[t].state[i] }
+      memcpy(tp + used * IN, tokens[t], nc * IN * 4)
+      for c in 0..<nc { ip[used + c] = Int32(b * L + L - 1) }
       rowOf.append(used); used += nc
       slots[t].kept.append(Kept(lanes: Array(UnsafeBufferPointer(start: laneTokens(t), count: L * IN)), lanesUsed: nl, tokens: Array(UnsafeBufferPointer(start: tokens[t], count: nc * IN)), contexts: nc))
     }
     if take < batch.count { lock.lock(); awaiting += batch[take...]; lock.unlock() }
-    let sent = Array(batch[0..<take])
-    forward(take, used)
-    for (b, t) in sent.enumerated() {
-      for i in 0..<(2 * D) { slots[t].state[i] = nextP[b * 2 * D + i] }
-      slots[t].answer = Array(UnsafeBufferPointer(start: wP + rowOf[b] * FS, count: Int(decisions[t].contexts) * FS)); slots[t].answered = true
+    s.runs = Array(batch[0..<take]); s.rowOf = rowOf; s.busy = true
+    rowsRun += used; route_tel_add(Int32(RT_FORWARD_ROWS.rawValue), UInt64(used))
+    net.forwardAsync(lanes: s.laneBuf, mask: s.maskBuf, h0: s.stateBuf, tokens: s.tokBuf, pos: s.idxBuf, B: take, R: used, w: s.wBuf, next: s.nextBuf) { [unowned self] gpu in
+      self.lock.lock(); s.gpu = gpu; s.done = true; self.lock.broadcast(); self.lock.unlock()
     }
-    submit(sent)
-    return done
+    return ended
   }
 }

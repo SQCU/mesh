@@ -368,6 +368,17 @@ final class Net {
     }
     if R > 0 { product("out", forward: true, M: R, src: xc, flags: 0, out: (w, ident(), FS)) }
   }
+  // the same, committed and not waited for: `done` runs when it completes, with its GPU time (s)
+  func forwardAsync(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer, done: @escaping (Double) -> Void) {
+    begin(); phase = "forward"
+    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next, keep: false)
+    e.endEncoding()
+    cb.addCompletedHandler { c in
+      if let err = c.error { fatalError("forward: \(err)") }
+      done(c.gpuEndTime - c.gpuStartTime)
+    }
+    cb.commit()
+  }
   func forward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) {
     begin(); phase = "forward"
     encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next, keep: false)
@@ -499,4 +510,11 @@ final class Net {
   }
   // after theta was written from the CPU
   func refresh() { begin(); phase = "weights"; encodeWeights(); finish("weights") }
+  // theta from `staging` (shared, P floats), in this network's queue's order (after the forwards already committed),
+  // then the codes rebuilt
+  func refresh(from staging: MTLBuffer) {
+    begin(); phase = "weights"
+    blit { $0.copy(from: staging, sourceOffset: 0, to: self.theta, destinationOffset: 0, size: self.lay.count * 4) }
+    encodeWeights(); finish("weights")
+  }
 }

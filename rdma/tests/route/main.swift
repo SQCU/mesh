@@ -120,22 +120,28 @@ func gather(_ runs: [DoneRun], _ adv: [Double]) -> (Int, Int, Int, Net.Credit, [
 // MESH_ID: the bootstrap root's host:port (rank 0's). Every rank's sum is the same bits (the library's reduction is one
 // program every rank runs). The exchange of step k's gradients runs while step k + 1 computes; step k + 1 applies step
 // k's mean (a declared one-step delay: every rank applies the same mean in the same order).
+let exchangeQueue = device.makeCommandQueue()!   // the exchange's steps
 func join() {
   guard world > 1 else { return }
   let id = env["MESH_ID"] ?? ""
   precondition(!id.isEmpty, "MESH_ID: the bootstrap root's host:port")
-  if route_exchange_open(Int32(rank), Int32(world), id, size_t(TASKS * nlay.count + 2)) != 0 { print("exchange: " + String(cString: route_exchange_failure())); route_exchange_close(); exit(1) }
+  let declaring = exchangeQueue.makeCommandBuffer()!
+  if route_exchange_open(Int32(rank), Int32(world), id, size_t(TASKS * nlay.count + 2), Unmanaged.passUnretained(declaring).toOpaque()) != 0 { print("exchange: " + String(cString: route_exchange_failure())); route_exchange_close(); exit(1) }
   atexit { route_exchange_close() }   // every exit: no program left behind with pieces outstanding
   print("rank \(rank) of \(world): joined through the mesh (bootstrap \(id))"); fflush(stdout)
   route_tel_phase(tel(RT_PHASE_JOINED))
 }
 // p [n]: every rank's mean, in place (through the lease)
-// p [n]: every rank's sum (through the lease), in place
+// p [n]: every rank's sum (through the lease), in place: the step in a command buffer of the exchange's own queue, its
+// combining and waits GPU kernels; this thread parks until it completes
 func meshSum(_ p: UnsafeMutablePointer<Float>, _ n: Int) {
   guard world > 1 else { return }
   let lease = route_exchange_buffer()!
   memcpy(lease, p, n * 4)
-  if route_exchange_sum() != 0 { print("exchange: " + String(cString: route_exchange_failure())); fflush(stdout); exit(1) }   // atexit closes
+  let cb = exchangeQueue.makeCommandBuffer()!
+  if route_exchange_encode(Unmanaged.passUnretained(cb).toOpaque()) != 0 { print("exchange: " + String(cString: route_exchange_failure())); fflush(stdout); exit(1) }   // atexit closes
+  cb.commit(); cb.waitUntilCompleted()
+  if cb.status != .completed || route_exchange_status() != 0 { print("exchange: " + String(cString: route_exchange_failure()) + " \(cb.error.map { "\($0)" } ?? "")"); fflush(stdout); exit(1) }
   memcpy(p, lease, n * 4)
 }
 func meshMean(_ p: UnsafeMutablePointer<Float>, _ n: Int) { meshSum(p, n); let inv = 1 / Float(world); for i in 0..<n { p[i] *= inv } }
@@ -480,6 +486,7 @@ let shareLock = NSCondition()
 var ready: [(runs: [DoneRun], version: Int)] = [], published = 0, finishedLearning = false
 var groupVersion = [Int](repeating: 0, count: TX / 4), groupLeft = [Int](repeating: 0, count: TX / 4), freeGroups = Array((0..<(TX / 4)).reversed())
 var thetaVersion = 0   // the learner's optimizer steps, as the producers last copied them
+let thetaSnapshot = shared(nlay.count), thetaStaging = shared(nlay.count)   // the learner's published theta; the producers' copy of it
 func startGroup(_ g: Int) {
   let (s, w, h) = newWindow(), k0 = UInt32(truncatingIfNeeded: route_next(&rng))
   for q in 0..<4 {
@@ -521,7 +528,7 @@ let learner = Thread {
     shareLock.unlock()
     learnStep(batch)
     learned += 1; route_tel_add(tel(RT_STEPS), 1); route_tel_phase(tel(RT_PHASE_FIRST_STEP))
-    shareLock.lock(); published = net.step; shareLock.unlock(); R0.wake()
+    shareLock.lock(); memcpy(thetaSnapshot.contents(), net.theta.contents(), nlay.count * 4); published = net.step; shareLock.unlock(); R0.wake()
     if learned >= steps { shareLock.lock(); finishedLearning = true; shareLock.broadcast(); shareLock.unlock(); R0.wake(); break }
   }
 }
@@ -532,7 +539,10 @@ learner.start()
 while true {
   shareLock.lock(); let over = finishedLearning, version = published; shareLock.unlock()
   if over { break }
-  if version != thetaVersion { syncForward(); thetaVersion = version }   // the learner's theta, between forwards
+  if version != thetaVersion {   // the learner's theta: its snapshot staged, copied in the forwards' queue order
+    shareLock.lock(); memcpy(thetaStaging.contents(), thetaSnapshot.contents(), nlay.count * 4); shareLock.unlock()
+    fnet.refresh(from: thetaStaging); thetaVersion = version
+  }
   while R0.runnable < R0.workers.count, let g = freeGroups.popLast() { startGroup(g) }
   route_tel_set(tel(RT_RUNS_IN_FLIGHT), UInt64(TX - 4 * freeGroups.count))
   let ended = R0.service()
