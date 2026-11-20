@@ -9,7 +9,15 @@ import Foundation
 let device = MTLCreateSystemDefaultDevice()!, queue = device.makeCommandQueue()!
 let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: CommandLine.arguments[1]))
 func pipe(_ n: String) -> MTLComputePipelineState { try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
-let P = ["quant_rows", "quant_cols", "gemm_nt", "gemm_nn", "gemm_tn", "reduce_splits"].reduce(into: [String: MTLComputePipelineState]()) { $0[$1] = pipe($1) }
+let P0 = ["quant_rows", "quant_cols", "gemm_tn", "reduce_splits"].reduce(into: [String: MTLComputePipelineState]()) { $0[$1] = pipe($1) }
+var cache: [String: MTLComputePipelineState] = [:]
+func pipe(_ n: String, flags: UInt32) -> MTLComputePipelineState {   // a product's pipeline for its epilogue flags (FLAGS)
+  if let p = cache["\(n) \(flags)"] { return p }
+  let c = MTLFunctionConstantValues(); var f = flags; c.setConstantValue(&f, type: .uint, index: 0)
+  let p = try! device.makeComputePipelineState(function: try! lib.makeFunction(name: n, constantValues: c)); cache["\(n) \(flags)"] = p; return p
+}
+struct Pipes { subscript(_ n: String) -> MTLComputePipelineState? { P0[n] } }
+let P = Pipes()
 let NONE = UInt32.max
 var rng = SystemRandomNumberGenerator()
 func buf<T>(_ a: [T]) -> MTLBuffer { device.makeBuffer(bytes: a, length: max(16, a.count * MemoryLayout<T>.stride), options: .storageModeShared)! }
@@ -18,7 +26,7 @@ func read<T>(_ b: MTLBuffer, _ n: Int, _: T.Type) -> [T] { Array(UnsafeBufferPoi
 enum Grid { case threads(Int, Int), groups(Int, Int, Int, Int) }
 func run(_ name: String, _ bufs: [MTLBuffer?], _ params: [[UInt32]], _ g: Grid) -> Double {
   let cb = queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
-  e.setComputePipelineState(P[name]!)
+  e.setComputePipelineState(name.hasPrefix("gemm_n") || name.hasPrefix("gemmq") ? pipe(name, flags: params[0][3]) : P[name]!)
   for (i, b) in bufs.enumerated() { e.setBuffer(b, offset: 0, index: i) }
   for (k, a) in params.enumerated() { a.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: bufs.count + k) } }
   switch g {
@@ -201,17 +209,58 @@ for outliers in [false, true] {
   }
 }
 
+// ---- the fused product: its stored values and codes against the plain product then quant_rows (bit for bit) ----
+for (nt, M, N, Kv, flags, seed) in [(true, 300, 64, 48, UInt32(0), UInt32(0)), (true, 333, 192, 64, 2, 0), (true, 300, 64, 192, 16, 0), (false, 450, 192, 64, 8, 777), (false, 450, 64, 128, 16, 999), (false, 450, 64, 192, 16, 31)] {
+  let K = (Kv + 63) / 64 * 64, cols = (N + 63) / 64 * 64
+  let x = data(M * Kv, outliers: true), w = data(N * Kv, outliers: true).map { $0 / 8 }
+  let (qa, sa, _) = qrows(x, rows: M, cols: K, ld: Kv, valid: Kv, map: [NONE, 0, 0, 0], seed: 0)
+  let (qb, sb, _) = nt ? qrows(w, rows: N, cols: K, ld: Kv, valid: Kv, map: [NONE, 0, 0, 0], seed: 0)
+                       : qcols(w.map { $0 }, rows: K, cols: N, ld: N, valid: Kv, block: K, seed: 0, ones: -1, off: 0, xcols: N)
+  let bias = data(N, outliers: false), res = data(M * N, outliers: false), aux = data(M * N, outliers: false)
+  let plainOut = zeros(M * N * 4), fusedOut = zeros(M * N * 4), q = zeros(M * cols), qs = zeros(M * 4)
+  let p: [UInt32] = [UInt32(M), UInt32(N), UInt32(K), flags | (nt ? 1 : 0), UInt32(N), UInt32(N), UInt32(N), UInt32(M)] + [NONE, 0, 0, 0] + [NONE, 0, 0, 0] + [0, seed, 0, 0]
+  _ = run(nt ? "gemm_nt" : "gemm_nn", [buf(qa), buf(qb), buf(sa), buf(sb), plainOut, buf(bias), buf(res), buf(aux)], [p], .groups((N + 31) / 32, (M + 63) / 64, 1, 128))
+  var pf = p; pf[3] |= 32 | 64
+  let cb = queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+  e.setComputePipelineState(pipe(nt ? "gemmq_nt" : "gemmq_nn", flags: pf[3]))
+  for (i, b) in [buf(qa), buf(qb), buf(sa), buf(sb), fusedOut, buf(bias), buf(res), buf(aux)].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+  pf.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 8) }
+  e.setBuffer(q, offset: 0, index: 9); e.setBuffer(qs, offset: 0, index: 10); e.setBuffer(nil, offset: 0, index: 11); e.setThreadgroupMemoryLength(32 * (cols + 4) * 4, index: 0)
+  e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+  e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  let a1 = read(plainOut, M * N, Float.self), a2 = read(fusedOut, M * N, Float.self)
+  let (rq, rs, _) = qrows(a1, rows: M, cols: cols, ld: N, valid: N, map: [NONE, 0, 0, 0], seed: seed)
+  let dq = same(read(q, M * cols, Int8.self), rq), ds = same(read(qs, M, Float.self), rs), dv = same(a1, a2)
+  report("gemmq_\(nt ? "nt" : "nn") \(M)x\(N)x\(K) flags \(flags)\(seed != 0 ? " stochastic" : "") vs product + quant_rows", dq == 0 && ds == 0 && dv == 0, "stored differing \(dv), codes \(dq), scales \(ds)")
+  let t1 = median { run(nt ? "gemm_nt" : "gemm_nn", [buf(qa), buf(qb), buf(sa), buf(sb), plainOut, buf(bias), buf(res), buf(aux)], [p], .groups((N + 31) / 32, (M + 63) / 64, 1, 128)) }
+  _ = t1
+}
+
 // ---- rates at the network's shapes (GPU clock, median of 9) ----
 func median(_ f: () -> Double) -> Double { (0..<9).map { _ in f() }.sorted()[4] }
 for (M, N, K) in [(147456, 64, 64), (147456, 128, 64), (147456, 192, 64), (147456, 64, 192), (442368, 64, 128), (442368, 192, 64), (442368, 64, 192)] {
   let a = zeros(M * K), b = zeros(N * K), sa = zeros(M * 4), sb = zeros(N * 4), out = zeros(M * N * 4), x = zeros(M * K * 4)
   let p: [UInt32] = [UInt32(M), UInt32(N), UInt32(K), 1, UInt32(N), UInt32(N), 0, 1] + [NONE, 0, 0, 0] + [NONE, 0, 0, 0] + [0, 0, 0, 0]
   let t = median { run("gemm_nt", [a, b, sa, sb, out, sb, nil, nil], [p], .groups((N + 31) / 32, (M + 63) / 64, 1, 128)) }
+  var pq = p; pq[3] |= 32 | 64
+  let cq = zeros(M * ((N + 63) / 64 * 64)), cs = zeros(M * 4)
+  let tf = median {
+    let cb = queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+    e.setComputePipelineState(pipe("gemmq_nt", flags: pq[3]))
+    for (i, bb) in [a, b, sa, sb, out, sb, nil, nil].enumerated() { e.setBuffer(bb, offset: 0, index: i) }
+    pq.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 8) }
+    e.setBuffer(cq, offset: 0, index: 9); e.setBuffer(cs, offset: 0, index: 10); e.setThreadgroupMemoryLength(32 * ((N + 63) / 64 * 64 + 4) * 4, index: 0)
+    e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    e.endEncoding(); cb.commit(); cb.waitUntilCompleted(); return cb.gpuEndTime - cb.gpuStartTime
+  }
   let perSimd = K <= 64 ? 4 : K <= 128 ? 2 : 1
-  let tq = median { run("quant_rows", [x, a, sa], [[UInt32(M), UInt32(K), UInt32(K), UInt32(K), 1, 0, 0, 0, NONE, 0, 0, 0]], .threads((M + perSimd - 1) / perSimd * 32, 256)) }
+  let pso = N <= 64 ? 4 : N <= 128 ? 2 : 1, oc = (N + 63) / 64 * 64, qo = zeros(M * oc)
+  let tq = median { run("quant_rows", [out, qo, sa], [[UInt32(M), UInt32(oc), UInt32(N), UInt32(N), 1, 0, 0, 0, NONE, 0, 0, 0]], .threads((M + pso - 1) / pso * 32, 256)) }
+  _ = perSimd
   let tc = median { run("quant_cols", [x, a, sa], [[UInt32(M / 256 * 256), UInt32(K), UInt32(K), UInt32(M), 256, 1, 7, NONE, 0, UInt32(K), 0, 0]], .groups((K + 31) / 32, M / 256, 1, 256)) }
-  print(String(format: "M %6d N %3d K %3d: gemm_nt %7.1f us %5.1f TOP/s | quant_rows %6.1f us %4.0f GB/s | quant_cols %6.1f us %4.0f GB/s", M, N, K, t * 1e6, 2 * Double(M * N * K) / t / 1e12,
-               tq * 1e6, Double(M * K * 5) / tq / 1e9, tc * 1e6, Double(M * K * 5) / tc / 1e9))
+  print(String(format: "M %6d N %3d K %3d: fused gemmq_nt (stores and codes) %7.1f us %5.1f TOP/s; apart:", M, N, K, tf * 1e6, 2 * Double(M * N * K) / tf / 1e12))
+  print(String(format: "M %6d N %3d K %3d: gemm_nt %7.1f us %5.1f TOP/s | quant_rows of its output %6.1f us %4.0f GB/s | quant_cols %6.1f us %4.0f GB/s", M, N, K, t * 1e6, 2 * Double(M * N * K) / t / 1e12,
+               tq * 1e6, Double(M * N * 5) / tq / 1e9, tc * 1e6, Double(M * K * 5) / tc / 1e9))
 }
 for (rows, Mw, Nw) in [(147456, 128, 65), (147456, 192, 65), (147456, 64, 193)] {
   let Kp = rows, nb = Kp / 256, a = zeros(Kp * Mw), b = zeros(Kp * Nw), sa = zeros(Mw * nb * 4), sb = zeros(Nw * nb * 4)

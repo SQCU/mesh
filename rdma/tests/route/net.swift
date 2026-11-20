@@ -110,12 +110,20 @@ struct NetLayout {
 }
 
 func pad64(_ n: Int) -> Int { (n + 63) / 64 * 64 }
+struct Codes { let q: MTLBuffer, s: MTLBuffer }   // int8 codes [rows][cols], a scale a row
 let NONE = UInt32.max
 func ident(_ off: Int = 0) -> [UInt32] { [NONE, 0, UInt32(off), 0] }   // a RowMap: rows from `off`
 
 final class Net {
   let device: MTLDevice, queue: MTLCommandQueue, lay: NetLayout
-  var pipes: [String: MTLComputePipelineState] = [:]
+  var pipes: [String: MTLComputePipelineState] = [:], library: MTLLibrary? = nil
+  // a product's pipeline, compiled for its epilogue flags (int8.metal's FLAGS function constant), once each
+  func pipe(_ name: String, _ flags: UInt32) -> MTLComputePipelineState {
+    let key = "\(name) \(flags)"
+    if let p = pipes[key] { return p }
+    let c = MTLFunctionConstantValues(); var f = flags; c.setConstantValue(&f, type: .uint, index: 0)
+    let p = try! device.makeComputePipelineState(function: try! library!.makeFunction(name: name, constantValues: c)); pipes[key] = p; return p
+  }
   let runs: Int, refreshes: Int, laneCap: Int, ctxCap: Int, cap: Int
   // parameters, optimizer state
   let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer, matsBuf: MTLBuffer, pinRows: MTLBuffer, pinCount: Int
@@ -124,8 +132,8 @@ final class Net {
   var W: [String: MTLBuffer] = [:], wf: [String: MTLBuffer] = [:], wfs: [String: MTLBuffer] = [:], wb: [String: MTLBuffer] = [:], wbs: [String: MTLBuffer] = [:], dW: [String: MTLBuffer] = [:]
   // activations (fp32), the backward's (tasks stacked), the codes' scratch
   let T: MTLBuffer, X: [MTLBuffer], ZC: [MTLBuffer], H: [MTLBuffer], XM: [MTLBuffer], U: [MTLBuffer], Nn: MTLBuffer, inv: MTLBuffer, nextScratch: MTLBuffer
-  let dN: MTLBuffer, dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, segBuf: MTLBuffer
-  let qa: MTLBuffer, sa: MTLBuffer, qx: MTLBuffer, sx: MTLBuffer, qy: MTLBuffer, sy: MTLBuffer, partial: MTLBuffer
+  let dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, inj: MTLBuffer, segBuf: MTLBuffer
+  let cA: Codes, cB: Codes, qx: MTLBuffer, sx: MTLBuffer, qy: MTLBuffer, sy: MTLBuffer, partial: MTLBuffer
   let splitTarget = 768
   // the call being encoded: one command buffer, its compute encoder (profiling: one encoder a kernel, timestamps at each
   // encoder's start and end, so a kernel's GPU time; the labels "phase kernel")
@@ -178,7 +186,8 @@ final class Net {
   init(_ device: MTLDevice, _ queue: MTLCommandQueue, library: String, runs: Int, refreshes: Int, contexts: Int, initial: [Float]) {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
-    for n in ["quant_rows", "quant_cols", "gemm_nt", "gemm_nn", "gemm_tn", "reduce_splits", "scan_fwd", "ctx_fwd", "rms_fwd", "rms_bwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
+    self.library = lib
+    for n in ["seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_splits", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
       pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
     }
     let laneCap = runs * refreshes * L, cap = laneCap + contexts
@@ -200,12 +209,12 @@ final class Net {
     }
     matsBuf = device.makeBuffer(bytes: mats, length: mats.count * 4, options: .storageModeShared)!
     pinRows = device.makeBuffer(bytes: rows, length: rows.count * 4, options: .storageModeShared)!; pinCount = rows.count / 2
-    T = p(cap * IN); X = (0..<3).map { _ in p(cap * D) }; ZC = (0..<2).map { _ in p(cap * 2 * D) }; H = (0..<2).map { _ in p(laneCap * D) }
-    XM = (0..<2).map { _ in p(cap * D) }; U = (0..<2).map { _ in p(cap * E) }; Nn = p(contexts * D); inv = p(contexts); nextScratch = p(runs * 2 * D)
-    dN = p(3 * contexts * D); dX2 = p(3 * contexts * D); dU = p(3 * cap * E); dXM = p(3 * cap * D); dZC = p(3 * cap * 2 * D); dXa = p(3 * cap * D); dXb = p(3 * cap * D)
-    dhp = p(3 * contexts * D); segBuf = f(runs * refreshes * 2)
+    T = p(cap * IN); X = (0..<3).map { _ in p(cap * D) }; ZC = (0..<2).map { _ in p(cap * D) }   /* fp16 */; H = (0..<2).map { _ in p(laneCap * D) }
+    XM = (0..<2).map { _ in p(cap * D) }; U = (0..<2).map { _ in p(cap * E / 2) } /* fp16 */; Nn = p(contexts * D); inv = p(contexts); nextScratch = p(runs * 2 * D)
+    dX2 = p(3 * contexts * D); dU = p(3 * cap * E / 2) /* bf16 */; dXM = p(3 * cap * D); dZC = p(3 * cap * D) /* bf16 */; dXa = p(3 * cap * D); dXb = p(3 * cap * D)
+    dhp = p(3 * contexts * D); inj = p(3 * runs * refreshes * D); segBuf = f(runs * refreshes * 2)
     let rowsPad = (cap + 255) / 256 * 256
-    qa = b8(3 * cap * 256); sa = p(3 * cap); qx = b8(rowsPad * 256); sx = p(256 * rowsPad / 256); qy = b8(rowsPad * 256); sy = p(256 * rowsPad / 256)
+    cA = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); cB = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); qx = b8(rowsPad * 256); sx = p(256 * rowsPad / 256); qy = b8(rowsPad * 256); sy = p(256 * rowsPad / 256)
     partial = p(splitTarget * 64 * 32)   // splits x tiles <= splitTarget, a tile 64 x 32
     let cb = queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
     bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0); bl.endEncoding()
@@ -222,38 +231,83 @@ final class Net {
   }
   func threads(_ n: Int, _ w: Int = 256) { if n > 0 { e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1)) } }
   func nextSeed() -> UInt32 { seed = seed &* 1664525 &+ 1013904223; return seed | 1 }
-  // rows of x (map, ld, the first `valid` columns) -> codes in qa (cols wide) and scales in sa, from qa row `at`
-  func qrows(_ x: MTLBuffer, _ xoff: Int, rows: Int, cols: Int, ld: Int, valid: Int, map: [UInt32], stochastic: Bool, q: MTLBuffer? = nil, s: MTLBuffer? = nil, at: Int = 0) {
-    if rows == 0 { return }
-    mark("quant_rows")
-    e.setComputePipelineState(pipes["quant_rows"]!)
-    e.setBuffer(x, offset: xoff * 4, index: 0); e.setBuffer(q ?? qa, offset: at * cols, index: 1); e.setBuffer(s ?? sa, offset: at * 4, index: 2)
-    let pr: [UInt32] = [UInt32(rows), UInt32(cols), UInt32(ld), UInt32(valid), 1, stochastic ? nextSeed() : 0, 0, 0] + map
+  // rows of x (map, ld, the first `valid` columns) -> codes (cols wide) into c from code row `at`; returns the seed
+  @discardableResult
+  func qrows(_ x: MTLBuffer, _ xoff: Int, rows: Int, cols: Int, ld: Int, valid: Int, map: [UInt32], stochastic: Bool, into c: Codes, at: Int = 0, seed given: UInt32? = nil, type: String = "") -> UInt32 {
+    let sd = given ?? (stochastic ? nextSeed() : 0)
+    if rows == 0 { return sd }
+    mark("quant_rows" + type)
+    e.setComputePipelineState(pipes["quant_rows" + type]!)
+    e.setBuffer(x, offset: xoff * (type == "" ? 4 : 2), index: 0); e.setBuffer(c.q, offset: at * cols, index: 1); e.setBuffer(c.s, offset: at * 4, index: 2)
+    let pr: [UInt32] = [UInt32(rows), UInt32(cols), UInt32(ld), UInt32(valid), 1, sd, 0, 0] + map
     pr.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 3) }
     let perSimd = cols <= 64 ? 4 : cols <= 128 ? 2 : 1   // rows a SIMD group (int8.metal's quant_rows)
     threads((rows + perSimd - 1) / perSimd * 32)
+    return sd
   }
-  // a product from qa/sa (rows M, width K) against matrix `w`: nt (forward: N = its rows) or nn (dgrad: N = its columns)
-  func gemm(_ w: String, forward: Bool, M: Int, out: MTLBuffer, _ outMap: [UInt32], ldo: Int, flags: UInt32,
-            res: (MTLBuffer, [UInt32], Int)? = nil, aux: (MTLBuffer, Int, Int, Int)? = nil) {
-    if M == 0 { return }
+  // a product of codes `src` (rows M) against matrix `w`: forward (nt: N = its rows) or dgrad (nn: N = its columns). Its
+  // epilogue's flags (int8.metal); out (buffer, map, ld) stored if given; codes of the result into `dst` if given (the
+  // fused product, stochastic if `stochastic`; the next product's input), inv for RMS / RMSB. Returns the codes' seed
+  @discardableResult
+  func product(_ w: String, forward: Bool, M: Int, src: Codes, flags: UInt32, out: (MTLBuffer, [UInt32], Int)?, res: (MTLBuffer, [UInt32], Int)? = nil,
+               aux: (MTLBuffer, Int, Int, Int)? = nil, dst: Codes? = nil, stochastic: Bool = false, inv: MTLBuffer? = nil) -> UInt32 {
     let mt = lay.mat(w), N = forward ? mt.rows : mt.cols, K = forward ? pad64(mt.cols) : pad64(mt.rows)
+    let fused = dst != nil || flags & (128 | 256 | 512 | 1024) != 0, sd: UInt32 = dst != nil && stochastic ? nextSeed() : 0
+    if M == 0 { return sd }
     let bias: (MTLBuffer?, Int) = mt.bias && forward ? (theta, mt.g + mt.rows) : (nil, 0)
-    let params: [UInt32] = [UInt32(M), UInt32(N), UInt32(K), flags | (bias.0 != nil ? 1 : 0), UInt32(ldo), UInt32(res?.2 ?? 0), UInt32(aux?.3 ?? 0), UInt32(aux?.2 ?? 1)]
-      + outMap + (res?.1 ?? ident()) + [UInt32(aux?.1 ?? 0), 0, 0, 0]
-    set(forward ? "gemm_nt" : "gemm_nn", [(qa, 0), (forward ? wf[w]! : wb[w]!, 0), (sa, 0), (forward ? wfs[w]! : wbs[w]!, 0), (out, 0), bias, (res?.0, 0), (aux?.0, 0)], [params])
-    e.dispatchThreadgroups(MTLSize(width: (N + 31) / 32, height: (M + 63) / 64, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    let f = flags | (bias.0 != nil ? 1 : 0) | (fused && out != nil ? 32 : 0) | (dst != nil ? 64 : 0)
+    let params: [UInt32] = [UInt32(M), UInt32(N), UInt32(K), f, UInt32(out?.2 ?? 0), UInt32(res?.2 ?? 0), UInt32(aux?.3 ?? 0), UInt32(aux?.2 ?? 1)]
+      + (out?.1 ?? ident()) + (res?.1 ?? ident()) + [UInt32(aux?.1 ?? 0), sd, 0, 0]
+    var bufs: [(MTLBuffer?, Int)] = [(src.q, 0), (forward ? wf[w]! : wb[w]!, 0), (src.s, 0), (forward ? wfs[w]! : wbs[w]!, 0), (out?.0, 0), bias, (res?.0, 0), (aux?.0, 0)]
+    if fused {
+      precondition(N % 64 == 0, "a fused product's width is whole 64-blocks")
+      mark(forward ? "gemmq_nt" : "gemmq_nn")
+      e.setComputePipelineState(pipe(forward ? "gemmq_nt" : "gemmq_nn", f))
+      bufs += [(dst?.q, 0), (dst?.s, 0), (inv, 0)]
+      for (i, (b, off)) in bufs.enumerated() { e.setBuffer(b, offset: off * 4, index: i < 8 ? i : i + 1) }   // 8: the parameters
+      params.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 8) }
+      e.setThreadgroupMemoryLength(32 * (pad64(N) + 4) * 4, index: 0)   // the 32 rows' int32 sums
+      e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    } else {
+      mark(forward ? "gemm_nt" : "gemm_nn")
+      e.setComputePipelineState(pipe(forward ? "gemm_nt" : "gemm_nn", f))
+      for (i, (b, off)) in bufs.enumerated() { e.setBuffer(b, offset: off * 4, index: i) }
+      params.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 8) }
+      e.dispatchThreadgroups(MTLSize(width: (N + 31) / 32, height: (M + 63) / 64, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    }
+    return sd
+  }
+  // NETCHECK: a fused producer's codes against quant_rows of what it stored (same seed), compared after the call
+  var checking = false, probes: [(String, MTLBuffer, MTLBuffer, MTLBuffer, MTLBuffer, Int)] = []
+  func probe(_ label: String, _ c: Codes, at: Int, rows: Int, cols: Int, x: MTLBuffer, xoff: Int, ld: Int, valid: Int, seed: UInt32, type: String = "") {
+    if !checking || rows == 0 { return }
+    let got = device.makeBuffer(length: rows * cols, options: .storageModeShared)!, gs = device.makeBuffer(length: rows * 4, options: .storageModeShared)!
+    let want = device.makeBuffer(length: rows * cols, options: .storageModeShared)!, ws = device.makeBuffer(length: rows * 4, options: .storageModeShared)!
+    blit { $0.copy(from: c.q, sourceOffset: at * cols, to: got, destinationOffset: 0, size: rows * cols); $0.copy(from: c.s, sourceOffset: at * 4, to: gs, destinationOffset: 0, size: rows * 4) }
+    // quant_rows indexes the stochastic hash by its own row: shift the seed's rows by giving it the same logical rows
+    qrows(x, xoff, rows: rows, cols: cols, ld: ld, valid: valid, map: ident(), stochastic: false, into: Codes(q: want, s: ws), seed: seed, type: type)
+    probes.append((label + (at != 0 && seed != 0 ? " (row offset: stochastic indices differ)" : ""), got, want, gs, ws, rows * cols))
+  }
+  func probeReport() -> [String] {
+    defer { probes = [] }
+    return probes.map { (label, got, want, gs, ws, n) in
+      let a = got.contents().bindMemory(to: Int8.self, capacity: n), b = want.contents().bindMemory(to: Int8.self, capacity: n)
+      var d = 0, big = 0; for i in 0..<n where a[i] != b[i] { d += 1; if abs(Int(a[i]) - Int(b[i])) > 1 { big += 1 } }
+      let r = n / max(1, gs.length / 4), sa = gs.contents().bindMemory(to: Float.self, capacity: n / r), sb = ws.contents().bindMemory(to: Float.self, capacity: n / r)
+      var ds = 0; for i in 0..<(n / r) where sa[i] != sb[i] { ds += 1 }
+      return String(format: "  %-52@ codes differing %d of %d (by more than 1: %d), scales %d", label, d, n, big, ds)
+    }
   }
   // dW[w][task] = dY_t^T [X, 1]: dY rows `rows` from row (t stride + yoff) of dy (width M = w's rows, ld ldy); X rows from
   // row xoff of x (w's columns, ld ldx); stochastic codes for dY; the bias's column if w has one
-  func wgrad(_ w: String, dy: MTLBuffer, yoff: Int, stride: Int, ldy: Int, x: MTLBuffer, xoff: Int, ldx: Int, rows: Int) {
+  func wgrad(_ w: String, dy: MTLBuffer, yoff: Int, stride: Int, ldy: Int, x: MTLBuffer, xoff: Int, ldx: Int, rows: Int, dyType: String = "", xType: String = "") {
     let mt = lay.mat(w), K = (rows + 255) / 256 * 256, nb = K / 256, Nw = mt.cols + (mt.bias ? 1 : 0), M = mt.rows
     if rows == 0 { return }
-    set("quant_cols", [(x, 0), (qx, 0), (sx, 0)], [[UInt32(K), UInt32(Nw), UInt32(ldx), UInt32(rows), 256, 1, 0, mt.bias ? UInt32(mt.cols) : NONE, UInt32(xoff), UInt32(mt.cols), 0, 0]])
+    set("quant_cols" + xType, [(x, 0), (qx, 0), (sx, 0)], [[UInt32(K), UInt32(Nw), UInt32(ldx), UInt32(rows), 256, 1, 0, mt.bias ? UInt32(mt.cols) : NONE, UInt32(xoff), UInt32(mt.cols), 0, 0]])
     e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    let tiles = ((Nw + 31) / 32) * ((M + 63) / 64), want = max(1, min(nb, splitTarget / tiles)), per = (nb + want - 1) / want, splits = (nb + per - 1) / per
+    let tiles = ((Nw + 31) / 32) * ((M + 63) / 64), want = max(1, min(nb, splitTarget / tiles, 64)), per = (nb + want - 1) / want, splits = (nb + per - 1) / per
     for t in 0..<3 {
-      set("quant_cols", [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(t * stride + yoff), UInt32(M), 0, 0]])
+      set("quant_cols" + dyType, [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(t * stride + yoff), UInt32(M), 0, 0]])
       e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
       set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), UInt32(per)]])
       e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: splits), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
@@ -265,7 +319,7 @@ final class Net {
   func encodeWeights() {
     for mt in lay.mats {
       set("weff", [(theta, 0), (W[mt.name]!, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]]); threads(mt.rows, 64)
-      qrows(W[mt.name]!, 0, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, q: wf[mt.name]!, s: wfs[mt.name]!)
+      qrows(W[mt.name]!, 0, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, into: Codes(q: wf[mt.name]!, s: wfs[mt.name]!))
       set("quant_cols", [(W[mt.name]!, 0), (wb[mt.name]!, 0), (wbs[mt.name]!, 0)],
           [[UInt32(pad64(mt.rows)), UInt32(mt.cols), UInt32(mt.cols), UInt32(mt.rows), UInt32(pad64(mt.rows)), 1, 0, NONE, 0, UInt32(mt.cols), 0, 0]])
       e.dispatchThreadgroups(MTLSize(width: (mt.cols + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -273,36 +327,46 @@ final class Net {
   }
 
   // the forward: B runs' K refreshes (lane tokens [B K L][IN] and masks [B K L] in `lanes`, `mask`, their states h0
-  // [B][2][D]), R contexts (tokens [R][IN], each its lane row pos[r]): w [R][FS] and each run's last states [B][2][D]
-  func encodeForward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, K: Int, R: Int, w: MTLBuffer, next: MTLBuffer) {
+  // [B][2][D]), R contexts (tokens [R][IN], each its lane row pos[r]): w [R][FS] and each run's last states [B][2][D].
+  // Each producer writes the next product's codes (cA / cB in turn); `keep`: store what the backward reads
+  func encodeForward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, K: Int, R: Int, w: MTLBuffer, next: MTLBuffer, keep: Bool) {
     let LR = B * K * L, N = LR + R
     precondition(B <= runs && K <= refreshes && R <= ctxCap, "a batch past the network's buffers")
-    qrows(lanes, 0, rows: LR, cols: 64, ld: IN, valid: IN, map: ident(), stochastic: false)
-    qrows(tokens, 0, rows: R, cols: 64, ld: IN, valid: IN, map: ident(), stochastic: false, at: LR)   // the contexts' after the lanes'
-    gemm("inp", forward: true, M: N, out: X[0], ident(), ldo: D, flags: 0)
+    qrows(lanes, 0, rows: LR, cols: 64, ld: IN, valid: IN, map: ident(), stochastic: false, into: cA)
+    qrows(tokens, 0, rows: R, cols: 64, ld: IN, valid: IN, map: ident(), stochastic: false, into: cA, at: LR)   // the contexts' after the lanes'
+    product("inp", forward: true, M: N, src: cA, flags: 0, out: (X[0], ident(), D), dst: cB)
+    probe("inp -> X0 codes", cB, at: 0, rows: N, cols: 64, x: X[0], xoff: 0, ld: D, valid: D, seed: 0)
+    var xc = cB, other = cA   // X_l's codes; the free buffer
     for l in 0..<2 {
-      qrows(X[l], 0, rows: N, cols: 64, ld: D, valid: D, map: ident(), stochastic: false)
-      gemm("zh\(l)", forward: true, M: N, out: ZC[l], ident(), ldo: 2 * D, flags: 4)
-      set("scan_fwd", [(ZC[l], 0), (mask, 0), (h0, 0), (H[l], 0), (X[l], 0), (XM[l], 0), (next, 0)], [[UInt32(B), UInt32(K * L), UInt32(l), l == 0 ? 1 : 0]])
-      threads(B * D, 64)
-      if R > 0 {
-        set("ctx_fwd", [(ZC[l], LR * 2 * D), (H[l], 0), (pos, 0), (X[l], LR * D), (XM[l], LR * D)], [[UInt32(R)]]); threads(R * D)
-      }
+      product("zh\(l)", forward: true, M: N, src: xc, flags: 4 | 512, out: (ZC[l], ident(), 2 * D))   // the gates, fp16
       let r0 = l == 0 ? 0 : LR, n = N - r0   // layer 1's lanes: their states only
-      qrows(XM[l], 0, rows: n, cols: 64, ld: D, valid: D, map: ident(r0), stochastic: false)
-      gemm("up\(l)", forward: true, M: n, out: U[l], ident(r0), ldo: E, flags: 2)
-      qrows(U[l], 0, rows: n, cols: 192, ld: E, valid: E, map: ident(r0), stochastic: false)
-      gemm("down\(l)", forward: true, M: n, out: X[l + 1], ident(r0), ldo: D, flags: 16, res: (XM[l], ident(r0), D))
+      set("scan_fwd", [(ZC[l], 0), (mask, 0), (h0, 0), (H[l], 0), (X[l], 0), (XM[l], 0), (next, 0)], [[UInt32(B), UInt32(K * L), UInt32(l), l == 0 ? 1 : 0]])
+      e.setBuffer(other.q, offset: 0, index: 8); e.setBuffer(other.s, offset: 0, index: 9)
+      threads(B * 32, 64)
+      if R > 0 {
+        set("ctx_fwd", [(ZC[l], LR * D) /* fp16: LR 2D halves */, (H[l], 0), (pos, 0), (X[l], LR * D), (XM[l], LR * D)], [[UInt32(R), UInt32(l == 0 ? LR : 0)]])
+        e.setBuffer(other.q, offset: 0, index: 6); e.setBuffer(other.s, offset: 0, index: 7)
+        threads(R * 32)
+      }
+      probe("scan/ctx -> XM\(l) codes", other, at: 0, rows: n, cols: 64, x: XM[l], xoff: r0 * D, ld: D, valid: D, seed: 0)
+      let xm = other; other = xc
+      product("up\(l)", forward: true, M: n, src: xm, flags: 2 | 512, out: keep ? (U[l], ident(r0), E) : nil, dst: other)   // U fp16
+      if keep { probe("up\(l) -> U\(l) codes (U fp16)", other, at: 0, rows: n, cols: 192, x: U[l], xoff: r0 * E, ld: E, valid: E, seed: 0, type: "_h") }
+      let uc = other; other = xm
+      if l == 0 {
+        product("down0", forward: true, M: n, src: uc, flags: 16, out: (X[1], ident(), D), res: (XM[0], ident(), D), dst: other)
+        probe("down0 -> X1 codes", other, at: 0, rows: N, cols: 64, x: X[1], xoff: 0, ld: D, valid: D, seed: 0)
+      } else if R > 0 {   // the readout's rms fused: n = x2 / rms(x2), its codes
+        product("down1", forward: true, M: R, src: uc, flags: 16 | 128, out: keep ? (Nn, ident(), D) : nil, res: (XM[1], ident(LR), D), dst: other, inv: inv)
+        if keep { probe("down1 + rms -> Nn codes", other, at: 0, rows: R, cols: 64, x: Nn, xoff: 0, ld: D, valid: D, seed: 0) }
+      }
+      xc = other; other = uc
     }
-    if R > 0 {
-      set("rms_fwd", [(X[2], LR * D), (Nn, 0), (inv, 0)], [[UInt32(R)]]); threads(R * 32)
-      qrows(Nn, 0, rows: R, cols: 64, ld: D, valid: D, map: ident(), stochastic: false)
-      gemm("out", forward: true, M: R, out: w, ident(), ldo: FS, flags: 0)
-    }
+    if R > 0 { product("out", forward: true, M: R, src: xc, flags: 0, out: (w, ident(), FS)) }
   }
   func forward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) {
     begin(); phase = "forward"
-    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next)
+    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next, keep: false)
     finish("forward")
   }
 
@@ -313,31 +377,29 @@ final class Net {
     seg.withUnsafeBytes { memcpy(segBuf.contents(), $0.baseAddress!, $0.count) }
     begin(); phase = "learn forward"
     blit { $0.fill(buffer: self.dXM, range: 0..<(3 * N * D * 4), value: 0); $0.fill(buffer: self.grads, range: 0..<(3 * P * 4), value: 0) }
-    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch)
-    // readout: dN = dw out; out's wgrad; through the rms
+    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch, keep: true)
+    // readout: dX2 = rms's backward of dw out (fused), its codes; out's wgrad
     phase = "back readout"
-    qrows(dw, 0, rows: 3 * R, cols: 64, ld: FS, valid: FS, map: ident(), stochastic: true)
-    gemm("out", forward: false, M: 3 * R, out: dN, ident(), ldo: D, flags: 0)
+    qrows(dw, 0, rows: 3 * R, cols: 64, ld: FS, valid: FS, map: ident(), stochastic: true, into: cA)
+    var sd = product("out", forward: false, M: 3 * R, src: cA, flags: 256, out: (dX2, ident(), D), aux: (Nn, 0, R, D), dst: cB, stochastic: true, inv: inv)
+    probe("out dgrad + rms bwd -> dX2 codes", cB, at: 0, rows: 3 * R, cols: 64, x: dX2, xoff: 0, ld: D, valid: D, seed: sd)
     wgrad("out", dy: dw, yoff: 0, stride: R, ldy: FS, x: Nn, xoff: 0, ldx: D, rows: R)
-    set("rms_bwd", [(dN, 0), (Nn, 0), (inv, 0), (dX2, 0)], [[UInt32(R), UInt32(3 * R)]]); threads(3 * R * 32)
     phase = "back layer 1"
     // layer 1's feed-forward, its context rows: dX2 [3][R] -> dU [3][R] -> dXM's context rows ([3][N] from LR)
-    qrows(dX2, 0, rows: 3 * R, cols: 64, ld: D, valid: D, map: ident(), stochastic: true)
-    gemm("down1", forward: false, M: 3 * R, out: dU, ident(), ldo: E, flags: 8, aux: (U[1], LR, R, E))
-    wgrad("down1", dy: dX2, yoff: 0, stride: R, ldy: D, x: U[1], xoff: LR, ldx: E, rows: R)
-    qrows(dU, 0, rows: 3 * R, cols: 192, ld: E, valid: E, map: ident(), stochastic: true)
-    gemm("up1", forward: false, M: 3 * R, out: dXM, [UInt32(R), UInt32(N), UInt32(LR), 0], ldo: D, flags: 16, res: (dX2, ident(), D))
-    wgrad("up1", dy: dU, yoff: 0, stride: R, ldy: E, x: XM[1], xoff: LR, ldx: D, rows: R)
-    layerBack(1, B: B, K: K, R: R, h0: h0, mask: mask, pos: pos, upstreamDX: nil, out: dXa)
+    sd = product("down1", forward: false, M: 3 * R, src: cB, flags: 8 | 1024 | 2048, out: (dU, ident(), E), aux: (U[1], LR, R, E), dst: cA, stochastic: true)
+    probe("down1 dgrad (masked) -> dU codes (dU bf16)", cA, at: 0, rows: 3 * R, cols: 192, x: dU, xoff: 0, ld: E, valid: E, seed: sd, type: "_b")
+    wgrad("down1", dy: dX2, yoff: 0, stride: R, ldy: D, x: U[1], xoff: LR, ldx: E, rows: R, xType: "_h")
+    product("up1", forward: false, M: 3 * R, src: cA, flags: 16, out: (dXM, [UInt32(R), UInt32(N), UInt32(LR), 0], D), res: (dX2, ident(), D))
+    wgrad("up1", dy: dU, yoff: 0, stride: R, ldy: E, x: XM[1], xoff: LR, ldx: D, rows: R, dyType: "_b")
+    layerBack(1, B: B, K: K, R: R, h0: h0, mask: mask, pos: pos, upstreamDX: nil, out: dXa, codes: cB, next: cA)
     phase = "back layer 0"
     // layer 0, every row: dXa -> dU -> dXM -> (the recurrence) -> dZC -> dXb
-    qrows(dXa, 0, rows: 3 * N, cols: 64, ld: D, valid: D, map: ident(), stochastic: true)
-    gemm("down0", forward: false, M: 3 * N, out: dU, ident(), ldo: E, flags: 8, aux: (U[0], 0, N, E))
-    wgrad("down0", dy: dXa, yoff: 0, stride: N, ldy: D, x: U[0], xoff: 0, ldx: E, rows: N)
-    qrows(dU, 0, rows: 3 * N, cols: 192, ld: E, valid: E, map: ident(), stochastic: true)
-    gemm("up0", forward: false, M: 3 * N, out: dXM, ident(), ldo: D, flags: 16, res: (dXa, ident(), D))
-    wgrad("up0", dy: dU, yoff: 0, stride: N, ldy: E, x: XM[0], xoff: 0, ldx: D, rows: N)
-    layerBack(0, B: B, K: K, R: R, h0: h0, mask: mask, pos: pos, upstreamDX: dXM, out: dXb)
+    sd = product("down0", forward: false, M: 3 * N, src: cA, flags: 8 | 1024 | 2048, out: (dU, ident(), E), aux: (U[0], 0, N, E), dst: cB, stochastic: true)
+    probe("down0 dgrad (masked) -> dU codes (dU bf16)", cB, at: 0, rows: 3 * N, cols: 192, x: dU, xoff: 0, ld: E, valid: E, seed: sd, type: "_b")
+    wgrad("down0", dy: dXa, yoff: 0, stride: N, ldy: D, x: U[0], xoff: 0, ldx: E, rows: N, xType: "_h")
+    product("up0", forward: false, M: 3 * N, src: cB, flags: 16, out: (dXM, ident(), D), res: (dXa, ident(), D))
+    wgrad("up0", dy: dU, yoff: 0, stride: N, ldy: E, x: XM[0], xoff: 0, ldx: D, rows: N, dyType: "_b")
+    layerBack(0, B: B, K: K, R: R, h0: h0, mask: mask, pos: pos, upstreamDX: dXM, out: dXb, codes: cA, next: nil)
     // the input projection's tokens: lanes' then contexts' (two sources; wgrad reads one buffer, so T holds both)
     phase = "back input"
     blit { b in b.copy(from: lanes, sourceOffset: 0, to: self.T, destinationOffset: 0, size: LR * IN * 4); if R > 0 { b.copy(from: tokens, sourceOffset: 0, to: self.T, destinationOffset: LR * IN * 4, size: R * IN * 4) } }
@@ -352,18 +414,24 @@ final class Net {
     finish("learn")
   }
   // a layer's recurrence and gates, backward: dXM [3][N] (its context rows' gradients; its lanes' too if upstreamDX, the
-  // local path) -> dZC [3][N] -> out = dXM + dZC zh (dX, [3][N]); zh's wgrad
-  func layerBack(_ l: Int, B: Int, K: Int, R: Int, h0: MTLBuffer, mask: MTLBuffer, pos: MTLBuffer, upstreamDX: MTLBuffer?, out: MTLBuffer) {
-    let LR = B * K * L, N = LR + R
+  // local path) -> dZC [3][N] (stored, and its codes into `codes`) -> out = dXM + dZC zh (dX, [3][N]; its codes into
+  // `next`, the next layer's down dgrad input, if given); zh's wgrad
+  func layerBack(_ l: Int, B: Int, K: Int, R: Int, h0: MTLBuffer, mask: MTLBuffer, pos: MTLBuffer, upstreamDX: MTLBuffer?, out: MTLBuffer, codes: Codes, next: Codes?) {
+    let LR = B * K * L, N = LR + R, sd = nextSeed()
     if R > 0 {
-      set("ctx_bwd", [(dXM, 0), (ZC[l], 0), (H[l], 0), (pos, 0), (dZC, 0), (dhp, 0)], [[UInt32(R), 3, UInt32(N), UInt32(LR)]]); threads(3 * R * D)
+      set("ctx_bwd", [(dXM, 0), (ZC[l], 0), (H[l], 0), (pos, 0), (dZC, 0), (dhp, 0)], [[UInt32(R), 3, UInt32(N), UInt32(LR), sd, 0, 0, 0]])
+      e.setBuffer(codes.q, offset: 0, index: 7); e.setBuffer(codes.s, offset: 0, index: 8)
+      threads(3 * R * 32)
     }
-    set("scan_bwd", [(dXM, 0), (dhp, 0), (segBuf, 0), (ZC[l], 0), (mask, 0), (H[l], 0), (h0, 0), (dZC, 0)],
-        [[UInt32(B), UInt32(K * L), UInt32(l), upstreamDX != nil ? 1 : 0, UInt32(K), UInt32(L), UInt32(N), 3, UInt32(R), 0, 0, 0]])
-    threads(3 * B * D, 64)
-    qrows(dZC, 0, rows: 3 * N, cols: 128, ld: 2 * D, valid: 2 * D, map: ident(), stochastic: true)
-    gemm("zh\(l)", forward: false, M: 3 * N, out: out, ident(), ldo: D, flags: 16, res: (dXM, ident(), D))
-    wgrad("zh\(l)", dy: dZC, yoff: 0, stride: N, ldy: 2 * D, x: X[l], xoff: 0, ldx: D, rows: N)
+    set("seg_sum", [(dhp, 0), (segBuf, 0), (inj, 0)], [[UInt32(B * K), 3, UInt32(R)]]); threads(3 * B * K * D)
+    set("scan_bwd", [(dXM, 0), (inj, 0), (segBuf, 0), (ZC[l], 0), (mask, 0), (H[l], 0), (h0, 0), (dZC, 0)],
+        [[UInt32(B), UInt32(K * L), UInt32(l), upstreamDX != nil ? 1 : 0, UInt32(K), UInt32(L), UInt32(N), 3, UInt32(R), sd, 0, 0]])
+    e.setBuffer(codes.q, offset: 0, index: 9); e.setBuffer(codes.s, offset: 0, index: 10)
+    threads(3 * B * 32, 64)
+    probe("scan/ctx bwd -> dZC\(l) codes (dZC bf16)", codes, at: 0, rows: 3 * N, cols: 128, x: dZC, xoff: 0, ld: 2 * D, valid: 2 * D, seed: sd, type: "_b")
+    let s2 = product("zh\(l)", forward: false, M: 3 * N, src: codes, flags: 16, out: (out, ident(), D), res: (dXM, ident(), D), dst: next, stochastic: true)
+    if let nx = next { probe("zh\(l) dgrad -> dX codes", nx, at: 0, rows: 3 * N, cols: 64, x: out, xoff: 0, ld: D, valid: D, seed: s2) }
+    wgrad("zh\(l)", dy: dZC, yoff: 0, stride: N, ldy: 2 * D, x: X[l], xoff: 0, ldx: D, rows: N, dyType: "_b")
   }
 
   // ---- the optimizer: UPGrad's weights from the Gram matrix (learn.swift's upgrad), Adam, V back to unit rows, codes ----

@@ -308,7 +308,10 @@ if env["CHECK"] != nil {
   // weights W = g V / |V|), through the window's refreshes: w, and each task's gradient (the reference's dW mapped to
   // (dV, dg, db) by the same chain rule)
   let (B, K, R, packed, seg) = gather([0], [1])
+  net.checking = true
   gradients(B, K, R, packed, seg)
+  net.checking = false
+  print("fused producers' codes against quant_rows of what they stored (bit for bit):"); for line in net.probeReport() { print(line) }
   let P = nlay.count, wInt = Array(UnsafeBufferPointer(start: wP, count: R * FS)), gInt = Array(UnsafeBufferPointer(start: floats(net.grads, TASKS * P), count: TASKS * P))
   let old = nlay.toOld(Array(UnsafeBufferPointer(start: floats(net.theta, P), count: P)), lay), oldBuf = device.makeBuffer(bytes: old, length: old.count * 4, options: .storageModeShared)!
   let refIdx = shared(max(R, 1)), ri = refIdx.contents().bindMemory(to: Int32.self, capacity: max(R, 1))
