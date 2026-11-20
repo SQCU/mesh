@@ -47,8 +47,10 @@ kernel void mm(device \(inT) *a [[buffer(0)]], device \(inT) *b [[buffer(1)]], d
   auto r = op.get_destination_cooperative_tensor<decltype(SA), decltype(SB), \(accT)>();
   for (uint16_t i = 0; i < r.get_capacity(); ++i) if (r.is_valid_element(i)) r[i] = 0;
   for (int k0 = 0; k0 < K; k0 += \(kb)) {
-    for (uint i = tid; i < \(tm * kb); i += \(32 * sg)) sa[i] = a[size_t(m0 + i / \(kb)) * K + k0 + i % \(kb)];
-    for (uint i = tid; i < \(tn * kb); i += \(32 * sg)) sb[i] = b[size_t(n0 + i / \(kb)) * K + k0 + i % \(kb)];
+    // the K-block's rows, 16 bytes a thread a step (a row's K-block is kb * sizeof elements, whole 16-byte words)
+    { constexpr uint w = \(kb) * sizeof(\(inT)) / 16;
+      for (uint i = tid; i < \(tm) * w; i += \(32 * sg)) ((threadgroup uint4 *)sa)[i] = ((device const uint4 *)(a + size_t(m0 + i / w) * K + k0))[i % w];
+      for (uint i = tid; i < \(tn) * w; i += \(32 * sg)) ((threadgroup uint4 *)sb)[i] = ((device const uint4 *)(b + size_t(n0 + i / w) * K + k0))[i % w]; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     op.run(SA, SB, r);
     threadgroup_barrier(mem_flags::mem_threadgroup);
