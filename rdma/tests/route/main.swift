@@ -51,6 +51,9 @@ var pool: [[Float]] = []   // states windows ended with, to start later windows 
 
 // ---- batches, in shared buffers; graphs built once a shape ----
 func bucket(_ n: Int, _ least: Int) -> Int { var b = least; while b < n { b *= 2 }; return b }
+// one shape a graph, so each compiles once: every forward batch FB runs x FR context rows, every learning batch FB runs x
+// KMAX refreshes x LR rows (padding runs and rows add nothing: zero masks, zero dw)
+let FB = bucket(max(4 * windows, 48), 16), FR = 131072, LR = 65536
 let ROWS = 1 << 18, BATCH = 1024
 func shared(_ floats: Int) -> MTLBuffer { device.makeBuffer(length: floats * 4, options: .storageModeShared)! }
 func floats(_ b: MTLBuffer, _ n: Int) -> UnsafeMutablePointer<Float> { b.contents().bindMemory(to: Float.self, capacity: n) }
@@ -63,9 +66,9 @@ let opt = Optimizer(device, queue, initial: lay.initial(&thetaRng))
 func td(_ b: MTLBuffer, _ shape: [Int], _ type: MPSDataType = .float32) -> MPSGraphTensorData { MPSGraphTensorData(b, shape: dims(shape), dataType: type) }
 
 // one refresh's forward for `bd` runs (lanes, masks, states written) and `rows` context rows: w and the next states
-var forwardTime = 0.0
+var forwardTime = 0.0, forwards = 0, decided = 0, rowsRun = 0, exchangeTime = 0.0
 func runForward(_ bd: Int, _ rows: Int) {
-  let B = bucket(bd, 16), R = bucket(rows, 1024)
+  let B = FB, R = FR
   precondition(B <= BATCH && R <= ROWS, "a batch past its buffers")
   for i in rows..<R { idxP[i] = 0 }; memset(tokP + rows * IN, 0, (R - rows) * IN * 4); memset(maskP + bd * L, 0, (B - bd) * L * 4); memset(stateP + bd * 2 * D, 0, (B - bd) * 2 * D * 4)
   let key = B << 32 | R
@@ -74,7 +77,7 @@ func runForward(_ bd: Int, _ rows: Int) {
   p.g.run(with: queue, feeds: [p.theta: td(opt.theta, [lay.count]), p.lanes: td(laneBuf, [B, L, IN]), p.mask: td(maskBuf, [B, L]), p.state: td(stateBuf, [B, 2, D]),
                                p.tokens: td(tokBuf, [R, IN]), p.index: td(idxBuf, [R], .int32)], targetOperations: nil,
           resultsDictionary: [p.w: td(wBuf, [R, FS]), p.next: td(nextBuf, [B, 2, D])])
-  forwardTime += Date().timeIntervalSince(t0)
+  forwardTime += Date().timeIntervalSince(t0); forwards += 1; decided += bd; rowsRun += rows
 }
 
 // runs `ids` to the end: mode 0 the policy (each pending refresh one batch), else a reference router
@@ -122,7 +125,7 @@ func gather(_ ids: [Int], _ adv: [Double]) -> (Int, Int, Int, MTLBuffer, Int) {
     credit[k] = all
   }
   creditTime += Date().timeIntervalSince(t0)
-  let B = bucket(ids.count, 16), K = max(1, ids.map { kept[$0].count }.max()!)
+  let B = FB, K = KMAX
   precondition(B <= BATCH && K <= KMAX, "a learning batch past its buffers")
   memset(laneP, 0, K * B * L * IN * 4); memset(maskP, 0, K * B * L * 4); memset(stateP, 0, B * 2 * D * 4)
   var rows = 0
@@ -137,7 +140,7 @@ func gather(_ ids: [Int], _ adv: [Double]) -> (Int, Int, Int, MTLBuffer, Int) {
         var used = false
         for task in 0..<TASKS { for f in 0..<FS where credit[b][at + (task * d.contexts + c) * FS + f] != 0 { used = true } }
         if !used { continue }
-        precondition(rows < ROWS, "learning rows past their buffer")
+        precondition(rows < LR, "learning rows past the learning graph's")
         for i in 0..<IN { tokP[rows * IN + i] = d.tokens[c * IN + i] }
         idxP[rows] = Int32(k * B + b)
         for task in 0..<TASKS {
@@ -149,7 +152,7 @@ func gather(_ ids: [Int], _ adv: [Double]) -> (Int, Int, Int, MTLBuffer, Int) {
       at += TASKS * d.contexts * FS
     }
   }
-  let R = bucket(rows, 1024)
+  let R = LR
   for i in rows..<R { idxP[i] = 0 }; memset(tokP + rows * IN, 0, (R - rows) * IN * 4)
   let packed = shared(TASKS * R * FS), pp = floats(packed, TASKS * R * FS)
   for task in 0..<TASKS { memcpy(pp + task * R * FS, dwP + task * ROWS * FS, rows * FS * 4); memset(pp + task * R * FS + rows * FS, 0, (R - rows) * FS * 4) }
@@ -356,6 +359,18 @@ if let path = env["THETA_IN"] {   // continue from these parameters
 print(online ? "online: continuing on the deployment's distribution" : "offline: random fabrics, streams, windows")
 print("\(arm), \(lay.count) parameters; \(windows) windows x 4 rollouts a step, up to \(KMAX) refreshes a window; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes, refreshed every 100 us, 100 us late")
 if rank == 0 { print("start: " + measure()) }
+// the graphs, built and compiled before the first step (the time it takes, apart)
+do {
+  let t0 = Date()
+  memset(laneP, 0, FB * L * IN * 4); memset(maskP, 0, FB * L * 4); memset(stateP, 0, FB * 2 * D * 4)
+  runForward(1, 1)
+  let packed = shared(TASKS * LR * FS); memset(packed.contents(), 0, TASKS * LR * FS * 4); memset(laneP, 0, KMAX * FB * L * IN * 4); memset(maskP, 0, KMAX * FB * L * 4)
+  for i in 0..<LR { idxP[i] = 0 }
+  gradients(FB, KMAX, LR, packed)
+  print(String(format: "graphs (forward %d runs x %d rows, learning %d x %d refreshes x %d rows) built and compiled in %.1f s", FB, FR, FB, KMAX, LR, Date().timeIntervalSince(t0)))
+  forwardTime = 0; learnTime = 0; forwards = 0; decided = 0; rowsRun = 0
+}
+var counted = [UInt64](repeating: 0, count: 4), transactions = 0
 let wall = Date()
 var stepTime = 0.0, since = 0
 for k in 0..<steps {
@@ -373,7 +388,12 @@ for k in 0..<steps {
   let adv = ids.map { t -> Double in let s = t / 4 * 4, total = T[s] + T[s + 1] + T[s + 2] + T[s + 3]; return T[t] - (total - T[t]) / 3 }
   let (B, K, R, packed, _) = gather(ids, adv)
   gradients(B, K, R, packed)
+  let tx0 = Date()
   if world > 1 { allMean(floats(opt.grads, TASKS * lay.count), TASKS * lay.count); gramOfMean() }
+  exchangeTime += Date().timeIntervalSince(tx0)
+  var n4 = [UInt64](repeating: 0, count: 4)
+  for t in ids { var c = [UInt64](repeating: 0, count: 4); route_sim_counts(sims[t], &c); for q in 0..<4 { n4[q] += c[q] } }
+  for q in 0..<4 { counted[q] += n4[q] }; transactions += ids.count
   let alpha = opt.apply(rate: rate)
   stepTime += Date().timeIntervalSince(t0); since += 1
   if k < 3 || (k + 1) % 50 == 0 || k + 1 == steps {
@@ -383,6 +403,10 @@ for k in 0..<steps {
     print(String(format: "step %d (%.0fs): train throughput %.3f latency %.3f queueing %.3f, weights %.2f %.2f %.2f, %.2f steps/s (simulate %.0f%%, forward %.0f%%, credit %.0f%%, learn %.0f%%)",
                  k + 1, Date().timeIntervalSince(wall), mean[0], mean[1], mean[2], alpha[0], alpha[1], alpha[2], Double(since) / stepTime,
                  100 * simTime / stepTime, 100 * forwardTime / stepTime, 100 * creditTime / stepTime, 100 * (learnTime - creditTime) / stepTime))
+    let sec = stepTime
+    print(String(format: "  this rank, per second: %.0f transactions, %.0f policy evaluations in %.1f forward batches (%.0f context rows), %.0f events, %.0f sends, %.0f draws, %.0f table entries (40-wide dot products); exchange %.0f%%",
+                 Double(transactions) / sec, Double(decided) / sec, Double(forwards) / sec, Double(rowsRun) / sec, Double(counted[0]) / sec, Double(counted[3]) / sec, Double(counted[1]) / sec, Double(counted[2]) / sec, 100 * exchangeTime / sec))
+    counted = [0, 0, 0, 0]; transactions = 0; forwards = 0; decided = 0; rowsRun = 0; exchangeTime = 0
     if rank == 0 && ((k + 1) % 100 == 0 || k + 1 == steps) { print("  measured cluster: " + measure()) }
     fflush(stdout); stepTime = 0; since = 0; simTime = 0; forwardTime = 0; learnTime = 0; creditTime = 0
   }
