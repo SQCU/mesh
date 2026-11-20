@@ -837,7 +837,7 @@ int mesh_graph_relation_synchronization(struct mesh_graph_relation *, const unsi
    witness's hazard in the asked orientation, view_conflicts' own: key and given the record's, from_view and to_view
    as asked; ENODATA where not known, ENOENT where there is none */
 enum { MESH_GRAPH_QUERY_NONE, MESH_GRAPH_QUERY_DIRECTED, MESH_GRAPH_QUERY_SELF };
-int mesh_graph_relation_ranked_views(uint32_t vertices, const uint32_t *rank,size_t views,const struct mesh_graph_view *view,
+int mesh_graph_relation_ranked_views(uint32_t vertices, const uint64_t *rank,size_t views,const struct mesh_graph_view *view,
                                      size_t supplied,const uint32_t *from,const uint32_t *to,
                                      void (*release)(void *),void *owner,struct mesh_graph_relation **out);
 int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,

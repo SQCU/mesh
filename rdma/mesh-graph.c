@@ -1899,7 +1899,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
                           int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
                           void *context, struct mesh_graph_conflict **conflict, struct mesh_graph_origin **origin,
                           struct mesh_graph_relation ***decider, const uint32_t ***decider_map, size_t *deciders,
-                          size_t *edges,const uint32_t *rank);
+                          size_t *edges,const uint64_t *rank);
 /* design/compilation-composition-change-request.md items 6, 6.4 and 7: mesh-graph.h struct mesh_graph_relation */
 struct mesh_graph_relation {
   size_t references;
@@ -2104,7 +2104,7 @@ int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh
                                      out);
 }
 static int relation_ordered(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
-                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,const uint32_t *rank,
+                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,const uint64_t *rank,
                                 int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
                                 void *context, void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
   *out = NULL;
@@ -2135,7 +2135,7 @@ int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct me
                                 void *context, void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
   return relation_ordered(vertices,views,view,supplied,from,to,self,map,NULL,decide,context,release,owner,out);
 }
-int mesh_graph_relation_ranked_views(uint32_t vertices,const uint32_t *rank,size_t views,const struct mesh_graph_view *view,
+int mesh_graph_relation_ranked_views(uint32_t vertices,const uint64_t *rank,size_t views,const struct mesh_graph_view *view,
                                      size_t supplied,const uint32_t *from,const uint32_t *to,
                                      void (*release)(void *),void *owner,struct mesh_graph_relation **out){
   return relation_ordered(vertices,views,view,supplied,from,to,0,NULL,rank,NULL,NULL,release,owner,out);
@@ -4307,7 +4307,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
                           int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
                           void *context, struct mesh_graph_conflict **conflict, struct mesh_graph_origin **origin,
                           struct mesh_graph_relation ***decider, const uint32_t ***decider_map, size_t *deciders,
-                          size_t *edges,const uint32_t *rank) {
+                          size_t *edges,const uint64_t *rank) {
   *conflict = NULL; *edges = 0;
   if (origin) *origin = NULL;
   if (decider) { *decider = NULL; *decider_map = NULL; *deciders = 0; }
@@ -4391,7 +4391,8 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
       }
       if (meets < 0) { result = -meets; break; }
       if (!meets) continue;
-      const int earlier = rank ? rank[a->vertex] < rank[b->vertex] : a->vertex < b->vertex;
+      const int earlier = rank && rank[a->vertex] != rank[b->vertex] ?
+                          rank[a->vertex] < rank[b->vertex] : a->vertex < b->vertex;
       const struct mesh_graph_view *lo = earlier ? a : b, *hi = earlier ? b : a;
       uint32_t kind = view_hazard(lo, hi);
       const unsigned directions = 1 + (lo->vertex == hi->vertex && kind != MESH_GRAPH_WRITE_AFTER_WRITE);
