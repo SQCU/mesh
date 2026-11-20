@@ -1,5 +1,6 @@
-// The routing policy's training rollout (design/switched-multipath-dma.md), fused: one threadgroup a rollout. v0: the
-// forward pass, all-gather transactions, fp32.
+// The routing policy's training rollout (design/switched-multipath-dma.md), fused: one threadgroup a rollout, its
+// parameters read through its own evolution-strategies perturbation; all-gather transactions, fp32. `mode` 0 is the
+// policy, 1 all traffic on candidate 0 (the unloaded shortest-path tree), 2 a uniform split.
 //
 // A rollout is one scenario's transaction in the fluid model, SLOTS slots long, each slot `dt` ns. Each slot:
 // - at a refresh (every REFRESH slots), the policy's weighting of each commodity's K candidate trees;
@@ -44,28 +45,39 @@ struct Net { float inp[D][CTX + D], binp[D]; Layer layer[2]; float tok[VOCAB][D]
 
 static inline float sigmoid(float v) { return 1.0f / (1.0f + exp(-v)); }
 
+// A rollout's perturbation of the parameters (evolution strategies): parameter i reads as theta[i] + amp * eps(key, i),
+// eps a sign, one bit of a hash of the key and i / 32, so nothing perturbed is stored. amp 0 reads theta.
+struct Perturb { device const float *base; uint key; float amp; };
+static inline uint fmix(uint h) { h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16; return h; }
+static inline float sign_of(uint key, uint i) { return (fmix(key ^ ((i >> 5) * 0x9e3779b1u)) >> (i & 31) & 1) ? 1.0f : -1.0f; }
+static inline float read(thread const Perturb &P, device const float *w) {
+  return P.amp == 0 ? *w : *w + P.amp * sign_of(P.key, uint(w - P.base));
+}
+
 // out[j][row] = (add ? out[j][row] : bias[row] or 0) + sum over q < cols of W[row][q] in[j][q], for every row and every
 // commodity j < nj; W's rows `stride` apart. SIMD group sg takes rows sg, sg + SG, ...; its lanes stride along the row.
-static void product(device const float *W, int stride, int rows, int cols, threadgroup const float *in, int istride,
+static void product(thread const Perturb &P, device const float *W, int stride, int rows, int cols, threadgroup const float *in, int istride,
                     threadgroup float *out, int ostride, device const float *bias, bool add, int nj, uint sg, uint ln) {
   for (int row = sg; row < rows; row += SG) {
     float acc[J] = {0, 0, 0, 0, 0, 0};
     for (int q = ln; q < cols; q += 32) {
-      const float w = W[row * stride + q];
+      const float w = read(P, &W[row * stride + q]);
       for (int j = 0; j < J; j++) acc[j] += w * in[j * istride + q];
     }
     for (int j = 0; j < J; j++) {
       const float v = simd_sum(acc[j]);
-      if (ln == 0 && j < nj) out[j * ostride + row] = (add ? out[j * ostride + row] : (bias ? bias[row] : 0.0f)) + v;
+      if (ln == 0 && j < nj) out[j * ostride + row] = (add ? out[j * ostride + row] : (bias ? read(P, &bias[row]) : 0.0f)) + v;
     }
   }
 }
 
 kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net &net [[buffer(1)]],
                     device const uint *which [[buffer(2)]], device float *objective [[buffer(3)]],
-                    device float *done_out [[buffer(4)]],
+                    device float *done_out [[buffer(4)]], device const uint2 *perturb [[buffer(5)]],
+                    constant float &sigma [[buffer(6)]], constant uint &mode [[buffer(7)]],
                     uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
                     uint sg [[simdgroup_index_in_threadgroup]], uint ln [[thread_index_in_simdgroup]]) {
+  const Perturb P = {(device const float *)&net, perturb[r].x, perturb[r].y ? -sigma : sigma};
   // the scenario, copied once into threadgroup memory: every slot reads it, and a device read in a dependent chain
   // costs hundreds of nanoseconds
   threadgroup Scenario s;
@@ -97,14 +109,14 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
     const int j = tid; float o = 0;
     for (int l = 0; l < nl; l++) if (s.lsrc[l] == s.src[j]) o += s.rate[l] * dt;
     outcap[j] = o; released[j] = 0;
-    for (int k = 0; k < K; k++) { assigned[j * K + k] = 0; p[j * K + k] = 1.0f / K; }
+    for (int k = 0; k < K; k++) { assigned[j * K + k] = 0; p[j * K + k] = mode == 1 ? (k == 0 ? 1.0f : 0.0f) : 1.0f / K; }
     for (int v = 0; v < N; v++) { area[j * N + v] = 0; frac[j * N + v] = 0; }
   }
   if (tid == 0) finished = SLOTS;
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int t = 0; t < SLOTS; t++) {
-    if (!NOPOLICY && t % REFRESH == 0) {
+    if (!NOPOLICY && mode == 0 && t % REFRESH == 0) {
       // the stream: context and last expected embedding, then two layers of GRU and feed-forward
       if (tid < uint(J)) {
         const int j = tid;
@@ -113,23 +125,23 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
         ctx[j][7] = float(popcount(uint(s.dest[j]))) / 8; ctx[j][8] = 0; ctx[j][9] = 0; ctx[j][10] = 0; ctx[j][11] = 0;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
-      product(&net.inp[0][0], CTX + D, D, CTX, &ctx[0][0], CTX, &x[0][0], D, net.binp, false, nj, sg, ln);
+      product(P, &net.inp[0][0], CTX + D, D, CTX, &ctx[0][0], CTX, &x[0][0], D, net.binp, false, nj, sg, ln);
       threadgroup_barrier(mem_flags::mem_threadgroup);
-      product(&net.inp[0][CTX], CTX + D, D, D, &last[0][0], D, &x[0][0], D, nullptr, true, nj, sg, ln);
+      product(P, &net.inp[0][CTX], CTX + D, D, D, &last[0][0], D, &x[0][0], D, nullptr, true, nj, sg, ln);
       threadgroup_barrier(mem_flags::mem_threadgroup);
       for (int layer = 0; layer < 2; layer++) {
         device const Layer &w = net.layer[layer];
-        product(&w.z[0][0], 2 * D, D, D, &h[layer][0][0], D, &gz[0][0], D, w.bz, false, nj, sg, ln);
-        product(&w.r[0][0], 2 * D, D, D, &h[layer][0][0], D, &gr[0][0], D, w.br, false, nj, sg, ln);
+        product(P, &w.z[0][0], 2 * D, D, D, &h[layer][0][0], D, &gz[0][0], D, w.bz, false, nj, sg, ln);
+        product(P, &w.r[0][0], 2 * D, D, D, &h[layer][0][0], D, &gr[0][0], D, w.br, false, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        product(&w.z[0][D], 2 * D, D, D, &x[0][0], D, &gz[0][0], D, nullptr, true, nj, sg, ln);
-        product(&w.r[0][D], 2 * D, D, D, &x[0][0], D, &gr[0][0], D, nullptr, true, nj, sg, ln);
+        product(P, &w.z[0][D], 2 * D, D, D, &x[0][0], D, &gz[0][0], D, nullptr, true, nj, sg, ln);
+        product(P, &w.r[0][D], 2 * D, D, D, &x[0][0], D, &gr[0][0], D, nullptr, true, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int i = tid; i < J * D; i += T) { gz[i / D][i % D] = sigmoid(gz[i / D][i % D]); gr[i / D][i % D] = sigmoid(gr[i / D][i % D]) * h[layer][i / D][i % D]; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        product(&w.c[0][0], 2 * D, D, D, &gr[0][0], D, &ex[0][0], E, w.bc, false, nj, sg, ln);
+        product(P, &w.c[0][0], 2 * D, D, D, &gr[0][0], D, &ex[0][0], E, w.bc, false, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        product(&w.c[0][D], 2 * D, D, D, &x[0][0], D, &ex[0][0], E, nullptr, true, nj, sg, ln);
+        product(P, &w.c[0][D], 2 * D, D, D, &x[0][0], D, &ex[0][0], E, nullptr, true, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int i = tid; i < J * D; i += T) {
           const int j = i / D, d = i % D;
@@ -137,13 +149,13 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
           h[layer][j][d] = hn; x[j][d] += hn;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        product(&w.up[0][0], D, E, D, &x[0][0], D, &ex[0][0], E, w.bu, false, nj, sg, ln);
+        product(P, &w.up[0][0], D, E, D, &x[0][0], D, &ex[0][0], E, w.bu, false, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int i = tid; i < J * E; i += T) ex[i / E][i % E] = max(ex[i / E][i % E], 0.0f);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        product(&w.down[0][0], E, D, E, &ex[0][0], E, &x[0][0], D, nullptr, true, nj, sg, ln);
+        product(P, &w.down[0][0], E, D, E, &ex[0][0], E, &x[0][0], D, nullptr, true, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (int i = tid; i < J * D; i += T) x[i / D][i % D] += w.bd[i % D];
+        for (int i = tid; i < J * D; i += T) x[i / D][i % D] += read(P, &w.bd[i % D]);
         threadgroup_barrier(mem_flags::mem_threadgroup);
       }
       // each candidate: its node tokens, embedded, rotated by node position, pooled
@@ -160,7 +172,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
             band = clamp(int(floor(log2(max(s.rate[lane], 1.0f)))) - 2, 0, 3);
           }
           const int token = parent * 64 + level * 4 + band;
-          const float u = net.tok[token][2 * pair], w2 = net.tok[token][2 * pair + 1], c = cos(v * theta), sn = sin(v * theta);
+          const float u = read(P, &net.tok[token][2 * pair]), w2 = read(P, &net.tok[token][2 * pair + 1]), c = cos(v * theta), sn = sin(v * theta);
           a += u * c - w2 * sn; b += u * sn + w2 * c;
         }
         emb[jk][2 * pair] = half(a / N); emb[jk][2 * pair + 1] = half(b / N);
@@ -250,4 +262,14 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
     objective[r] = 0.05f * (most + log(sum));
     done_out[r] = float(finished) * dt / fl;
   }
+}
+
+// Each parameter's gradient of two tasks by evolution strategies: the sum over pairs m of task weight w[m][task]
+// (centered-rank difference of the pair's two sides, over 2 M sigma) times the pair's sign for the parameter.
+kernel void gradient(device const float *w [[buffer(0)]], device const uint *key [[buffer(1)]], device float *g [[buffer(2)]],
+                     constant uint &pairs [[buffer(3)]], constant uint &params [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+  if (i >= params) return;
+  float a = 0, b = 0;
+  for (uint m = 0; m < pairs; m++) { const float e = sign_of(key[m], i); a += w[2 * m] * e; b += w[2 * m + 1] * e; }
+  g[i] = a; g[params + i] = b;
 }
