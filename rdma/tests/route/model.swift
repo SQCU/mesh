@@ -133,7 +133,7 @@ final class Net {
   let st: MTLBuffer, lzc: MTLBuffer, lh: MTLBuffer, lu: MTLBuffer, czc: MTLBuffer, cu: MTLBuffer, cn: MTLBuffer, cinv: MTLBuffer, nextScratch: MTLBuffer
   let gq: MTLBuffer, gs: MTLBuffer, gradTable: MTLBuffer, dhp: MTLBuffer, partial: MTLBuffer
   var matg: [[UInt32]] = [], partialOff: [Int] = []
-  var dwBuf: MTLBuffer? = nil
+  var dwBuf: MTLBuffer? = nil, diffBuf: MTLBuffer? = nil
   // the call being encoded; profiling: an encoder a kernel, timestamps at each encoder's ends ("phase kernel")
   var cb: MTLCommandBuffer!, e: MTLComputeCommandEncoder!, phase = ""
   var profiling = false, samples: MTLCounterSampleBuffer? = nil, labels: [String] = [], tick = 1.0, lastGPU = 0.0
@@ -303,10 +303,14 @@ final class Net {
     let dw = room(&dwBuf, 3 * R * FS * 4, shared: true)
     phase = "learn forward"
     encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch, store: true)
-    phase = "credit"
-    let cp: [UInt32] = [UInt32(R), 0, c.scale.bitPattern, 0]
-    set(pipe("credit"), "credit", [0: (c.draws, 0), 1: (c.wrows, 0), 2: (w, 0), 3: (c.first, 0), 4: (c.scale0, 0), 5: (dw, 0), 6: (c.ll, 0)], [7: cp])
-    e.dispatchThreads(MTLSize(width: R * 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    phase = "credit"   // a draw a SIMD group (credit.metal), then a row's draws summed in order
+    let diff = room(&diffBuf, max(1, c.count) * FS * 4, shared: false)
+    if c.count > 0 {
+      set(pipe("credit_draws"), "credit_draws", [0: (c.draws, 0), 1: (c.wrows, 0), 2: (w, 0), 3: (diff, 0), 4: (c.ll, 0)], [5: [UInt32(c.count)]])
+      e.dispatchThreads(MTLSize(width: c.count * 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    }
+    set(pipe("credit_rows"), "credit_rows", [0: (diff, 0), 1: (c.draws, 0), 2: (c.first, 0), 3: (c.scale0, 0), 4: (dw, 0)], [5: [UInt32(R), 0, c.scale.bitPattern, 0]])
+    e.dispatchThreads(MTLSize(width: 3 * R * FS, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     phase = "backward"
     let prm = fp(B: B, K: K, R: R, seed: nextSeed())
     last = (B, K, R, prm[5], lanes, tokens)
