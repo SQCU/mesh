@@ -26,9 +26,9 @@ let lay = Layout(full: false)   // the fp32 reference's layout (CHECK, earlier p
 let nlay = NetLayout()
 let arm = "minGRU (int8 products)"
 let CONTEXTS = Int(ROUTE_CONTEXTS), KMAX = 4
-// data-parallel across machines: RANK of WORLD, rank 0 at LEADER (host:port) summing every rank's three gradients each
-// step and returning their mean, so every rank takes the same step from the same theta (its initial seed the same on
-// every rank; each rank's windows its own, SEED + RANK)
+// data-parallel across machines: RANK of WORLD, MESH_ID the bootstrap root's host:port: the three gradients' mean an
+// all-reduce through the mesh's bridges, overlapped with the next step (Exchange), so every rank takes the same steps from the same theta
+// (its initial seed the same on every rank; each rank's windows its own, SEED + RANK)
 let rank = Int(env["RANK"] ?? "0")!, world = Int(env["WORLD"] ?? "1")!
 var rng = route_rng(s: UInt64(env["SEED"] ?? "20261119")! &+ UInt64(rank) &* 0x9e3779b97f4a7c15)
 var thetaRng = route_rng(s: 20261119)
@@ -158,45 +158,62 @@ func gather(_ ids: [Int], _ adv: [Double]) -> (Int, Int, Int, MTLBuffer, [UInt32
   learnTime += Date().timeIntervalSince(t0)
   return (B, K, R, packed, seg)
 }
-// ---- the gradients' sum across machines (a star through rank 0, over TCP) ----
-var peers: [Int32] = []
-func fullSend(_ fd: Int32, _ p: UnsafeRawPointer, _ n: Int) { var at = 0; while at < n { let r = Darwin.send(fd, p + at, n - at, 0); precondition(r > 0, "send to a rank failed"); at += r } }
-func fullRecv(_ fd: Int32, _ p: UnsafeMutableRawPointer, _ n: Int) { var at = 0; while at < n { let r = Darwin.recv(fd, p + at, n - at, 0); precondition(r > 0, "a rank went away"); at += r } }
+// ---- the gradients' mean across machines: an all-reduce through the mesh (exchange.c: libnccl-mesh over the nodes'
+// bridges, the Thunderbolt fabric as the mesh routes it), on its own thread ----
+// MESH_ID: the bootstrap root's host:port (rank 0's). Every rank's sum is the same bits (the library's reduction is one
+// program every rank runs). The exchange of step k's gradients runs while step k + 1 computes; step k + 1 applies step
+// k's mean (a declared one-step delay: every rank applies the same mean in the same order).
 func join() {
   guard world > 1 else { return }
-  let parts = (env["LEADER"] ?? "").split(separator: ":"), port = UInt16(parts.count > 1 ? String(parts[1]) : "47611")!
-  if rank == 0 {
-    let fd = socket(AF_INET, SOCK_STREAM, 0); var one: Int32 = 1
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, 4)
-    var a = sockaddr_in(); a.sin_family = sa_family_t(AF_INET); a.sin_port = port.bigEndian; a.sin_addr.s_addr = INADDR_ANY
-    precondition(withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0, "bind failed")
-    listen(fd, 16)
-    for _ in 1..<world { let c = accept(fd, nil, nil); precondition(c >= 0); setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, 4); peers.append(c) }
-  } else {
-    var hints = addrinfo(); hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM
-    var res: UnsafeMutablePointer<addrinfo>? = nil
-    precondition(getaddrinfo(String(parts[0]), String(port), &hints, &res) == 0, "cannot resolve the leader")
-    var fd: Int32 = -1
-    for _ in 0..<600 { fd = socket(AF_INET, SOCK_STREAM, 0); if connect(fd, res!.pointee.ai_addr, res!.pointee.ai_addrlen) == 0 { break }; close(fd); fd = -1; usleep(500_000) }
-    precondition(fd >= 0, "cannot reach the leader"); var one: Int32 = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, 4); peers = [fd]
-  }
-  print("rank \(rank) of \(world): joined"); fflush(stdout)
+  let id = env["MESH_ID"] ?? ""
+  precondition(!id.isEmpty, "MESH_ID: the bootstrap root's host:port")
+  if route_exchange_open(Int32(rank), Int32(world), id, size_t(TASKS * nlay.count)) != 0 { print("exchange: " + String(cString: route_exchange_failure())); exit(1) }
+  print("rank \(rank) of \(world): joined through the mesh (bootstrap \(id))"); fflush(stdout)
 }
-func allMean(_ p: UnsafeMutablePointer<Float>, _ n: Int) {
+// p [n]: every rank's mean, in place (through the lease)
+func meshMean(_ p: UnsafeMutablePointer<Float>, _ n: Int) {
   guard world > 1 else { return }
-  if rank == 0 {
-    let part = UnsafeMutablePointer<Float>.allocate(capacity: n); defer { part.deallocate() }
-    for fd in peers { fullRecv(fd, part, n * 4); for i in 0..<n { p[i] += part[i] } }
-    for i in 0..<n { p[i] /= Float(world) }
-    for fd in peers { fullSend(fd, p, n * 4) }
-  } else { fullSend(peers[0], p, n * 4); fullRecv(peers[0], p, n * 4) }
+  let lease = route_exchange_buffer()!
+  memcpy(lease, p, n * 4)
+  if route_exchange_sum() != 0 { print("exchange: " + String(cString: route_exchange_failure())); exit(1) }
+  let inv = 1 / Float(world)
+  for i in 0..<n { p[i] = lease[i] * inv }
 }
-// the mean gradients' Gram matrix, for UPGrad (each rank's own Gram is of its own gradients)
-func gramOfMean() {
-  let P = nlay.count, g = floats(net.grads, TASKS * P), G = floats(net.gram, 9)
-  for a in 0..<3 { for b in 0..<3 { var d = 0.0; for i in 0..<P { d += Double(g[a * P + i]) * Double(g[b * P + i]) }; G[3 * a + b] = Float(d) } }
+// the exchange thread: post(step k's gradients) returns at once; collect() waits for the posted mean (if not done yet)
+// and returns it with its Gram matrix (UPGrad's, of the mean gradients)
+final class Exchange {
+  let n: Int, P: Int, buf: UnsafeMutablePointer<Float>, q = DispatchQueue(label: "exchange"), done = DispatchSemaphore(value: 0)
+  var pending = false, gram = [Float](repeating: 0, count: 9), spent = 0.0, waited = 0.0, rounds = 0
+  init(P: Int) { self.P = P; n = TASKS * P; buf = .allocate(capacity: TASKS * P) }
+  func post(_ g: UnsafePointer<Float>) {
+    precondition(!pending, "an exchange is still in flight")
+    memcpy(buf, g, n * 4); pending = true
+    q.async { [self] in
+      let t0 = Date()
+      meshMean(buf, n)
+      for a in 0..<3 { for b in a..<3 { var d = 0.0; for i in 0..<P { d += Double(buf[a * P + i]) * Double(buf[b * P + i]) }; gram[3 * a + b] = Float(d); gram[3 * b + a] = Float(d) } }
+      spent += Date().timeIntervalSince(t0); rounds += 1
+      done.signal()
+    }
+  }
+  // the mean into grads and its Gram into gram (net's buffers), or false if nothing was posted
+  func collect(into grads: UnsafeMutablePointer<Float>, gram G: UnsafeMutablePointer<Float>) -> Bool {
+    guard pending else { return false }
+    let t0 = Date(); done.wait(); waited += Date().timeIntervalSince(t0); pending = false
+    memcpy(grads, buf, n * 4); for i in 0..<9 { G[i] = gram[i] }
+    return true
+  }
 }
+let exchange = Exchange(P: nlay.count)
 join()
+if let n = env["XBENCH"].flatMap({ Int($0) }) {   // the exchange alone: n rounds of the three gradients' mean, no compute between
+  let P = TASKS * nlay.count
+  var t: [Double] = []
+  for _ in 0..<n { let t0 = Date(); meshMean(floats(net.grads, P), P); t.append(Date().timeIntervalSince(t0)) }
+  t.sort()
+  print(String(format: "rank %d: the exchange alone (%d floats, %.0f KB), %d rounds: median %.2f ms, p90 %.2f ms, max %.2f ms", rank, P, Double(P * 4) / 1024, n, t[n / 2] * 1e3, t[n * 9 / 10] * 1e3, t[n - 1] * 1e3))
+  exit(0)
+}
 
 func gradients(_ B: Int, _ K: Int, _ R: Int, _ packed: MTLBuffer, _ seg: [UInt32]) {
   let t0 = Date()
@@ -446,13 +463,22 @@ for k in 0..<steps {
   let adv = ids.map { t -> Double in let s = t / 4 * 4, total = T[s] + T[s + 1] + T[s + 2] + T[s + 3]; return T[t] - (total - T[t]) / 3 }
   let (B, K, R, packed, seg) = gather(ids, adv)
   gradients(B, K, R, packed, seg)
-  let tx0 = Date()
-  if world > 1 { allMean(floats(net.grads, TASKS * nlay.count), TASKS * nlay.count); gramOfMean() }
-  exchangeTime += Date().timeIntervalSince(tx0)
   var n4 = [UInt64](repeating: 0, count: 4)
   for t in ids { var c = [UInt64](repeating: 0, count: 4); route_sim_counts(sims[t], &c); for q in 0..<4 { n4[q] += c[q] } }
   for q in 0..<4 { counted[q] += n4[q] }; transactions += ids.count
-  let alpha = net.apply(rate: rate)
+  // one machine: this step's gradients now. Several: post this step's; apply the previous step's mean (its exchange
+  // ran while this step computed: a wait only if it took longer)
+  var alpha = [0.0, 0.0, 0.0]
+  if world == 1 { alpha = net.apply(rate: rate) }
+  else {
+    let P3 = TASKS * nlay.count, mine = UnsafeMutablePointer<Float>.allocate(capacity: P3); defer { mine.deallocate() }
+    memcpy(mine, net.grads.contents(), P3 * 4)
+    let t1 = Date()
+    let had = exchange.collect(into: floats(net.grads, P3), gram: floats(net.gram, 9))
+    exchangeTime += Date().timeIntervalSince(t1)
+    exchange.post(mine)
+    if had { alpha = net.apply(rate: rate) }
+  }
   stepTime += Date().timeIntervalSince(t0); since += 1
   if k < 3 || (k + 1) % 50 == 0 || k + 1 == steps {
     let c = ids.map { costs($0) }
@@ -462,12 +488,15 @@ for k in 0..<steps {
                  k + 1, Date().timeIntervalSince(wall), mean[0], mean[1], mean[2], alpha[0], alpha[1], alpha[2], Double(since) / stepTime,
                  100 * simTime / stepTime, 100 * forwardTime / stepTime, 100 * creditTime / stepTime, 100 * (learnTime - creditTime) / stepTime))
     let sec = stepTime
-    print(String(format: "  this rank, per second: %.0f transactions, %.0f policy evaluations in %.1f forward batches (%.0f context rows), %.0f events, %.0f sends, %.0f draws, %.0f table entries (40-wide dot products); exchange %.0f%%",
-                 Double(transactions) / sec, Double(decided) / sec, Double(forwards) / sec, Double(rowsRun) / sec, Double(counted[0]) / sec, Double(counted[3]) / sec, Double(counted[1]) / sec, Double(counted[2]) / sec, 100 * exchangeTime / sec))
+    print(String(format: "  this rank, per second: %.0f transactions, %.0f policy evaluations in %.1f forward batches (%.0f context rows), %.0f events, %.0f sends, %.0f draws, %.0f table entries (40-wide dot products); waiting on the exchange %.1f%% of the time (each exchange %.1f ms on its own thread, overlapped)",
+                 Double(transactions) / sec, Double(decided) / sec, Double(forwards) / sec, Double(rowsRun) / sec, Double(counted[0]) / sec, Double(counted[3]) / sec, Double(counted[1]) / sec, Double(counted[2]) / sec, 100 * exchangeTime / sec,
+                 exchange.rounds > 0 ? exchange.spent / Double(exchange.rounds) * 1e3 : 0))
+    exchange.spent = 0; exchange.rounds = 0
     counted = [0, 0, 0, 0]; transactions = 0; forwards = 0; decided = 0; rowsRun = 0; exchangeTime = 0
     if rank == 0 && ((k + 1) % 100 == 0 || k + 1 == steps) { print("  measured cluster: " + measure()) }
     fflush(stdout); stepTime = 0; since = 0; simTime = 0; forwardTime = 0; learnTime = 0; creditTime = 0
   }
 }
+if world > 1, exchange.collect(into: floats(net.grads, TASKS * nlay.count), gram: floats(net.gram, 9)) { _ = net.apply(rate: rate) }   // the last step's mean
 if let path = env["THETA"], rank == 0 { try! Data(bytes: net.theta.contents(), count: nlay.count * 4).write(to: URL(fileURLWithPath: path)); print("parameters written to \(path)") }
 if let path = env["THETA_INT8"], rank == 0 { net.writeCodes(path); print("int8 weights (for deployment: tests/switch.c's ROUTE_THETA) written to \(path)") }

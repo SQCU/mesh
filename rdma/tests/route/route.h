@@ -143,6 +143,15 @@ int route_params_read(struct route_params *p, const char *path);
 size_t route_forward_scratch(int nc);
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
 
+/* The trainer's gradient exchange (exchange.c): libnccl-mesh's host path over the nodes' bridges. open: this rank's
+   communicator (NCCL's bootstrap at id, the root's host:port), a lease of n floats in the node's region, the declared
+   program of its one step (the in-place sum); sum: that step, on the lease route_exchange_buffer gives. 0, or -1 with
+   route_exchange_failure naming what failed */
+int route_exchange_open(int rank, int world, const char *id, size_t n);
+float *route_exchange_buffer(void);
+int route_exchange_sum(void);
+const char *route_exchange_failure(void);
+
 /* ---- the features: what the policy reads, defined once ---- */
 static inline double route_send1(const struct route_stream *s, int l) { return ROUTE_PAGE * s->f.cables[l] / s->f.rate[l]; }   /* one page, one cable */
 static inline double route_hop(const struct route_stream *s, const struct route_state *st, int l) {
