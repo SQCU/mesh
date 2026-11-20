@@ -1,35 +1,26 @@
-// The routing policy trained on the GPU (route.metal) by evolution strategies and two-task Jacobian descent, over
-// randomised network kinds, and measured on the five-node cluster as measured (tests/fabric-20261119.txt).
+// The routing policy (route.metal) trained as in Kool, van Hoof & Welling 2019: REINFORCE on each rollout's completion
+// over the floor, each rollout's baseline the mean of its scenario's other three rollouts; two tasks (the completion,
+// and its spread about the scenario's mean), their gradients combined at their min-norm point, then Adam. Measured on
+// the five-node cluster as measured, at decode sizes, against all traffic on the unloaded shortest-path tree and
+// against lanes chosen uniformly. The metallib's arm (GRU or minGRU) and layout come from its `layout` kernel.
 //
-// Each step: M antithetic pairs, each pair one scenario drawn from the pool and run at theta + sigma eps and
-// theta - sigma eps (eps a sign a parameter, from the pair's key); two tasks, the smooth area objective and the true
-// completion over the floor; each task's gradient from each pair's two sides' difference over their mean (route.metal
-// gradient);
-// the two combined at their min-norm point (MGDA for two) and applied by Adam.
-//
-// The pool's network kinds: random connected graphs, rings, stars, rings with a relay hub, full meshes, and the measured
-// five-node cluster with its rates and latencies jittered; 3 to 6 nodes, relays only where the kind has them; 1 to 4
-// cables a pair, each direction 4 to 12 GB/s a cable and 2 to 13 us; background bytes on some lanes; an all-gather of
-// 6 KB to 12.6 MB a rank.
-//
-// usage: route METALLIB FABRIC [steps] [pairs a step]
+// usage: route METALLIB FABRIC [steps] [scenarios a step]      CHECK=1: the gradient against central differences
 import Foundation
 import Metal
+import MetalPerformanceShaders
 
-let N = 6, L = 32, J = 6, K = 8, H = 12, D = 64, E = 192, CTX = 12, VOCAB = N + 2
-let page = 16384.0, scenarioBytes = 1444
+let N = 6, L = 32, J = 6, KS = 3, EP = 4, TMAX = N - 1, H = 12, D = 64, E = 192, CF = 8, IN = CF + D, LF = 4
+let TR = EP * KS, JTN = J * TR * N, DEC = EP * KS * TMAX * J, KREC = 196, TAPE = IN + 2 * D + 4
+let page = 16384.0, scenarioBytes = 548
 
 struct Mix { var s: UInt64
   mutating func next() -> UInt64 { s &+= 0x9e3779b97f4a7c15; var z = s; z = (z ^ (z >> 30)) &* 0xbf58476d1ce4e5b9; z = (z ^ (z >> 27)) &* 0x94d049bb133111eb; return z ^ (z >> 31) }
   mutating func uniform() -> Double { Double(next() >> 11) / 9007199254740992.0 }
   mutating func normal() -> Double { sqrt(-2 * log(max(uniform(), 1e-300))) * cos(2 * Double.pi * uniform()) }
 }
-
 struct Fabric { var n: Int; var compute: [Int]; var src: [Int]; var dst: [Int]; var rate: [Double]; var lat: [Double] }
 
-// a scenario, laid out as route.metal's Scenario: the fabric, background bytes, an all-gather of S a rank among the
-// compute nodes, the floor, the slot width, and K candidate trees a commodity (shortest-path trees under unloaded
-// delays, k = 0, and under randomly perturbed ones), pruned to the nodes that lead to a destination
+// a scenario, as route.metal's Scenario: an all-gather of S a rank among the compute nodes
 func scenario(_ f: Fabric, _ S: Double, _ g: inout Mix, background: Bool) -> [UInt8] {
   let n = f.n, nl = f.src.count, q = min(S, page), nc = f.compute.count
   let bg = (0..<nl).map { background && g.uniform() < 0.3 ? f.rate[$0] * 50e3 * g.uniform() : 0 }
@@ -47,43 +38,31 @@ func scenario(_ f: Fabric, _ S: Double, _ g: inout Mix, background: Bool) -> [UI
   let floor = max(cut, reach)
   let slowest = (0..<nl).map { f.lat[$0] + page / f.rate[$0] }.max()!
   let dt = max(floor * 6 / 64, slowest / Double(H - 2))
-  var lane = Array(repeating: Array(repeating: Array(repeating: UInt8(255), count: N), count: K), count: J)
-  for (j, s) in f.compute.enumerated() {
-    for k in 0..<K {
-      let w = (0..<nl).map { (f.lat[$0] + q / f.rate[$0]) * (k == 0 ? 1 : exp(0.6 * g.normal())) }
-      var at = Array(repeating: Double.infinity, count: n), by = Array(repeating: -1, count: n), done = Array(repeating: false, count: n)
-      at[s] = 0
-      for _ in 0..<n {
-        var u = -1
-        for v in 0..<n where !done[v] && at[v].isFinite && (u < 0 || at[v] < at[u]) { u = v }
-        if u < 0 { break }
-        done[u] = true
-        for i in 0..<nl where f.src[i] == u && at[u] + w[i] < at[f.dst[i]] { at[f.dst[i]] = at[u] + w[i]; by[f.dst[i]] = i }
-      }
-      var keep = Array(repeating: false, count: n)
-      for d in f.compute where d != s { var v = d; while v != s { keep[v] = true; v = f.src[by[v]] } }
-      for v in 0..<n where keep[v] { lane[j][k][v] = UInt8(by[v]) }
-    }
-  }
   var b = [UInt8](repeating: 0, count: scenarioBytes)
   func f32(_ at: Int, _ v: Double) { var x = Float(v); withUnsafeBytes(of: &x) { for i in 0..<4 { b[at + i] = $0[i] } } }
   func u32(_ at: Int, _ v: Int) { var x = UInt32(v); withUnsafeBytes(of: &x) { for i in 0..<4 { b[at + i] = $0[i] } } }
-  func u16(_ at: Int, _ v: Int) { b[at] = UInt8(v & 255); b[at + 1] = UInt8(v >> 8) }
   for l in 0..<nl { f32(4 * l, f.rate[l]); f32(128 + 4 * l, f.lat[l]); f32(256 + 4 * l, bg[l]); b[384 + l] = UInt8(f.src[l]); b[416 + l] = UInt8(f.dst[l]) }
-  for j in 0..<J { for k in 0..<K { for v in 0..<N { b[448 + (j * K + k) * N + v] = lane[j][k][v] } } }
-  for (j, s) in f.compute.enumerated() {
-    b[736 + j] = UInt8(s); var mask = 0; for d in f.compute where d != s { mask |= 1 << d }; b[742 + j] = UInt8(mask)
-    f32(748 + 4 * j, S)
+  for i in 0..<(J * N) { b[448 + i] = 255 }
+  let w = (0..<nl).map { f.lat[$0] + q / f.rate[$0] }
+  for (j, s) in f.compute.enumerated() {   // the unloaded shortest-path tree, pruned to what leads to a destination
+    var at = Array(repeating: Double.infinity, count: n), by = Array(repeating: -1, count: n), done = Array(repeating: false, count: n)
+    at[s] = 0
+    for _ in 0..<n {
+      var u = -1
+      for v in 0..<n where !done[v] && at[v].isFinite && (u < 0 || at[v] < at[u]) { u = v }
+      if u < 0 { break }
+      done[u] = true
+      for i in 0..<nl where f.src[i] == u && at[u] + w[i] < at[f.dst[i]] { at[f.dst[i]] = at[u] + w[i]; by[f.dst[i]] = i }
+    }
+    var keep = Array(repeating: false, count: n)
+    for d in f.compute where d != s { var v = d; while v != s { keep[v] = true; v = f.src[by[v]] } }
+    for v in 0..<n where keep[v] { b[448 + j * N + v] = UInt8(by[v]) }
+    b[484 + j] = UInt8(s); var mask = 0; for d in f.compute where d != s { mask |= 1 << d }; b[490 + j] = UInt8(mask)
+    f32(496 + 4 * j, S)
   }
-  f32(772, floor); f32(776, dt); f32(780, S); u32(784, nc); u32(788, nl); u32(792, n)
-  var edges: [[Int]] = Array(repeating: [], count: L)
-  for j in 0..<J { for k in 0..<K { for v in 0..<N where lane[j][k][v] != 255 { edges[Int(lane[j][k][v])].append((j * K + k) * N + v) } } }
-  var at = 0
-  for l in 0..<L { u16(800 + 2 * l, at); for e in edges[l] { u16(866 + 2 * at, e); at += 1 } }
-  u16(800 + 2 * L, at)
+  f32(520, floor); f32(524, dt); f32(528, S); u32(532, nc); u32(536, nl); u32(540, n)
   return b
 }
-
 func cabled(_ n: Int, _ compute: [Int], _ pairs: [(Int, Int)], _ g: inout Mix) -> Fabric {
   var f = Fabric(n: n, compute: compute, src: [], dst: [], rate: [], lat: [])
   for (u, v) in pairs {
@@ -92,48 +71,35 @@ func cabled(_ n: Int, _ compute: [Int], _ pairs: [(Int, Int)], _ g: inout Mix) -
   }
   return f
 }
-// one network of a random kind
-func network(_ g: inout Mix, _ measured: Fabric) -> Fabric {
+func network(_ g: inout Mix, _ measured: Fabric) -> Fabric {   // one network of a random kind
   let kind = Int(g.uniform() * 6), n = 3 + Int(g.uniform() * 4)
   var pairs: [(Int, Int)] = []
   switch kind {
-  case 0:   // a random connected graph, up to 2 relays
+  case 0:   // a random connected graph, degree at most 4, up to two relays
     var joined = Set<Int>(), degree = Array(repeating: 0, count: n)
     for v in 1..<n { let u = Int(g.uniform() * Double(v)); pairs.append((u, v)); joined.insert(u * 8 + v); degree[u] += 1; degree[v] += 1 }
     for u in 0..<n { for v in (u + 1)..<n where !joined.contains(u * 8 + v) && degree[u] < 4 && degree[v] < 4 && g.uniform() < 0.35 { pairs.append((u, v)); degree[u] += 1; degree[v] += 1 } }
-    let relays = min(Int(g.uniform() * 3), n - 2)
-    return cabled(n, Array(0..<(n - relays)), pairs, &g)
-  case 1:   // a ring
-    for v in 0..<n { pairs.append((v, (v + 1) % n)) }
-    if n == 3 { pairs.removeLast() }
-    return cabled(n, Array(0..<n), pairs, &g)
-  case 2:   // a star, its hub a relay or a compute node
-    for v in 1..<n { pairs.append((0, v)) }
-    return cabled(n, g.uniform() < 0.5 ? Array(1..<n) : Array(0..<n), pairs, &g)
-  case 3:   // a ring of compute nodes with a relay hub joined to up to three of them
+    return cabled(n, Array(0..<(n - min(Int(g.uniform() * 3), n - 2))), pairs, &g)
+  case 1: for v in 0..<n { pairs.append((v, (v + 1) % n)) }; if n == 3 { pairs.removeLast() }; return cabled(n, Array(0..<n), pairs, &g)
+  case 2: for v in 1..<n { pairs.append((0, v)) }; return cabled(n, g.uniform() < 0.5 ? Array(1..<n) : Array(0..<n), pairs, &g)
+  case 3:   // a ring of compute nodes and a relay hub
     let m = min(max(n - 1, 3), N - 1)
     for v in 0..<m { pairs.append((v, (v + 1) % m)) }
     for v in 0..<min(3, m) { pairs.append((m, v)) }
     return cabled(m + 1, Array(0..<m), pairs, &g)
-  case 4:   // a full mesh
-    for u in 0..<n { for v in (u + 1)..<n { pairs.append((u, v)) } }
-    return cabled(n, Array(0..<n), pairs, &g)
-  default:  // the measured cluster, its rates and latencies jittered
+  case 4: for u in 0..<n { for v in (u + 1)..<n { pairs.append((u, v)) } }; return cabled(n, Array(0..<n), pairs, &g)
+  default:   // the measured cluster, jittered
     var f = measured
     for i in 0..<f.rate.count { f.rate[i] *= exp(0.3 * g.normal()); f.lat[i] *= exp(0.3 * g.normal()) }
     return f
   }
 }
-
 func load(_ path: String) -> Fabric {
   var names: [String] = [], compute: [Int] = [], f = Fabric(n: 0, compute: [], src: [], dst: [], rate: [], lat: [])
   for line in try! String(contentsOfFile: path, encoding: .utf8).split(separator: "\n") where !line.hasPrefix("#") {
     let w = line.split(separator: " ").map(String.init)
     if w.first == "node" { names.append(w[1]); if w[2] == "compute" { compute.append(names.count - 1) } }
-    if w.first == "link" {
-      let a = names.firstIndex(of: w[1])!, b = names.firstIndex(of: w[2])!
-      f.src.append(a); f.dst.append(b); f.rate.append(Double(w[3])!); f.lat.append(Double(w[4])! * 1e3)
-    }
+    if w.first == "link" { f.src.append(names.firstIndex(of: w[1])!); f.dst.append(names.firstIndex(of: w[2])!); f.rate.append(Double(w[3])!); f.lat.append(Double(w[4])! * 1e3) }
   }
   f.n = names.count; f.compute = compute
   return f
@@ -142,117 +108,188 @@ func load(_ path: String) -> Fabric {
 let args = CommandLine.arguments
 let device = MTLCreateSystemDefaultDevice()!
 let library = try device.makeLibrary(URL: URL(fileURLWithPath: args[1]))
-let rolloutPipeline = try device.makeComputePipelineState(function: library.makeFunction(name: "rollout")!)
-let gradientPipeline = try device.makeComputePipelineState(function: library.makeFunction(name: "gradient")!)
+func pipe(_ name: String) -> MTLComputePipelineState { try! device.makeComputePipelineState(function: library.makeFunction(name: name)!) }
+let rollPipe = pipe("rollout"), backPipe = pipe("backward"), layoutPipe = pipe("layout")
+let queue = device.makeCommandQueue()!
+
+// the layout, from the kernel
+let lay: [Int] = {
+  let b = device.makeBuffer(length: 32 * 4, options: .storageModeShared)!
+  let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+  enc.setComputePipelineState(layoutPipe); enc.setBuffer(b, offset: 0, index: 0)
+  enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+  enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  let p = b.contents().bindMemory(to: Int32.self, capacity: 32)
+  return (0..<18).map { Int(p[$0]) }
+}()
+let full = lay[0] == 1, P = lay[1], REC = lay[12], SCRATCH = lay[13], LS = lay[14], RLS = lay[11]
+let L_IN = lay[2], L_DR = lay[3], L_RX = lay[4], L_DZ = lay[5], L_DHT = lay[6], L_XM = lay[7], L_DU = lay[8], L_U = lay[9], L_DY = lay[10]
+let R_DX0 = 0, R_IN = 64, R_LAYER = 136, R_DQ = lay[15], R_XF = lay[16], R_DST = lay[17]
+let GW = full ? 2 * D : D, G = D * GW
+
+// parameters (as route.metal's Net) and the gradient jobs: (records: 0 decisions, 1 keys; delta offset; input offset or
+// -1 for ones; rows; cols; parameter offset)
+let O_LAYER = D * IN + 2 * D, O_OUT = O_LAYER + 2 * LS, O_K1 = O_OUT + D * D, O_BK1 = O_K1 + D * LF, O_K2 = O_BK1 + D, O_BK2 = O_K2 + D * D
+precondition(O_BK2 + D == P, "layout")
+var jobs: [(Int, Int, Int, Int, Int, Int)] = [(0, R_DX0, R_IN, D, IN, 0), (0, R_DX0, -1, D, 1, D * IN), (0, R_DST, -1, D, 1, D * IN + D)]
+var blocks: [(String, Int, Int)] = [("inp", 0, D * IN), ("binp", D * IN, D), ("start", D * IN + D, D)]
+for layer in 0..<2 {
+  let B = R_LAYER + layer * RLS, P0 = O_LAYER + layer * LS
+  let oz = P0, obz = oz + G, or = obz + D, obr = or + G, oh = full ? obr + D : obz + D, obh = oh + G, oup = obh + D, obu = oup + E * D, odn = obu + E, obd = odn + D * E
+  precondition(obd + D == P0 + LS, "layer layout")
+  jobs += [(0, B + L_DZ, B + L_IN, D, GW, oz), (0, B + L_DZ, -1, D, 1, obz),
+           (0, B + L_DHT, B + (full ? L_RX : L_IN), D, GW, oh), (0, B + L_DHT, -1, D, 1, obh),
+           (0, B + L_DU, B + L_XM, E, D, oup), (0, B + L_DU, -1, E, 1, obu), (0, B + L_DY, B + L_U, D, E, odn), (0, B + L_DY, -1, D, 1, obd)]
+  if full { jobs += [(0, B + L_DR, B + L_IN, D, GW, or), (0, B + L_DR, -1, D, 1, obr)]; blocks += [("r\(layer)", or, G)] }
+  blocks += [("z\(layer)", oz, G), ("h\(layer)", oh, G), ("bh\(layer)", obh, D), ("up\(layer)", oup, E * D), ("down\(layer)", odn, D * E), ("bd\(layer)", obd, D)]
+}
+jobs += [(0, R_DQ, R_XF, D, D, O_OUT), (1, 0, 64, D, D, O_K2), (1, 0, -1, D, 1, O_BK2), (1, 128, 192, D, LF, O_K1), (1, 128, -1, D, 1, O_BK1)]
+blocks += [("out", O_OUT, D * D), ("k1", O_K1, D * LF), ("bk1", O_BK1, D), ("k2", O_K2, D * D), ("bk2", O_BK2, D)]
+let covered = jobs.map { $0.3 * $0.4 }.reduce(0, +)
+precondition(covered == P, "gradient jobs cover \(covered) of \(P) parameters")
+
 let measured = load(args[2])
-let steps = args.count > 3 ? Int(args[3])! : 300, M = args.count > 4 ? Int(args[4])! : 2048
-let sigma: Float = 0.02, rate = Double(ProcessInfo.processInfo.environment["RATE"] ?? "3e-3")!
-
-var g = Mix(s: 20261119)
-let pool = 16384
-var scen = [UInt8](); scen.reserveCapacity((pool + 64) * scenarioBytes)
+let steps = args.count > 3 ? Int(args[3])! : 200, B = args.count > 4 ? Int(args[4])! : 64
+let rate = Double(ProcessInfo.processInfo.environment["RATE"] ?? "1e-3")!
+let R = max(4 * B, 6 * 32)
+var g = Mix(s: UInt64(ProcessInfo.processInfo.environment["SEED"] ?? "20261119")!)
+let pool = 8192
+var scen = [UInt8](); scen.reserveCapacity((pool + 8) * scenarioBytes)
 for _ in 0..<pool { let f = network(&g, measured); let S = exp(log(6144.0) + g.uniform() * (log(12582912.0) - log(6144.0))).rounded(); scen += scenario(f, S, &g, background: true) }
-let sizes = [2, 8, 32, 128, 1024, 4096].map { Double($0 * 1536 * 2) }
-for S in sizes { scen += scenario(measured, S, &g, background: false) }   // the measured cluster, held out, at decode sizes
-var net = [Float]()
-func fill(_ count: Int, _ fan: Int) { for _ in 0..<count { net.append(Float(g.normal() / sqrt(Double(fan)))) } }
-func zero(_ count: Int) { net += [Float](repeating: 0, count: count) }
-fill(D * (CTX + D), CTX + D); zero(D)
-for _ in 0..<2 { fill(D * 2 * D, 2 * D); fill(D * 2 * D, 2 * D); fill(D * 2 * D, 2 * D); zero(3 * D); fill(E * D, D); zero(E); fill(D * E, E); zero(D) }
-fill(VOCAB * D, D); fill(2 * D, D)
-let P = net.count
+let sizes = [6144.0, 24576, 98304, 393216, 3145728, 12582912]
+for S in sizes { scen += scenario(measured, S, &g, background: false) }
+var net = [Float](repeating: 0, count: P)
+for (name, at, count) in blocks where !name.hasPrefix("b") {   // weights at 1/sqrt(fan-in), biases zero
+  let fan = name == "start" ? 1 : name == "inp" ? IN : name.hasPrefix("down") ? E : name.hasPrefix("k1") ? LF : (name.hasPrefix("z") || name.hasPrefix("r") || name.hasPrefix("h")) ? GW : D
+  for i in 0..<count { net[at + i] = Float(g.normal() / sqrt(Double(fan))) }
+}
 
+func buffer(_ bytes: Int, _ mode: MTLResourceOptions = .storageModeShared) -> MTLBuffer { device.makeBuffer(length: max(bytes, 16), options: mode)! }
 let scenBuf = device.makeBuffer(bytes: scen, length: scen.count, options: .storageModeShared)!
 let netBuf = device.makeBuffer(bytes: net, length: P * 4, options: .storageModeShared)!
-let R = 2 * M
-let whichBuf = device.makeBuffer(length: R * 4, options: .storageModeShared)!, perturbBuf = device.makeBuffer(length: R * 8, options: .storageModeShared)!
-let objBuf = device.makeBuffer(length: R * 4, options: .storageModeShared)!, doneBuf = device.makeBuffer(length: R * 4, options: .storageModeShared)!
-let weightBuf = device.makeBuffer(length: M * 8, options: .storageModeShared)!, keyBuf = device.makeBuffer(length: M * 4, options: .storageModeShared)!
-let gradBuf = device.makeBuffer(length: 2 * P * 4, options: .storageModeShared)!
-let weightingBuf = device.makeBuffer(length: R * J * K * 4, options: .storageModeShared)!
-let weighting = weightingBuf.contents().bindMemory(to: Float.self, capacity: R * J * K)
-let queue = device.makeCommandQueue()!
-let which = whichBuf.contents().bindMemory(to: UInt32.self, capacity: R), perturb = perturbBuf.contents().bindMemory(to: UInt32.self, capacity: 2 * R)
-let obj = objBuf.contents().bindMemory(to: Float.self, capacity: R), done = doneBuf.contents().bindMemory(to: Float.self, capacity: R)
-let weights = weightBuf.contents().bindMemory(to: Float.self, capacity: 2 * M), keys = keyBuf.contents().bindMemory(to: UInt32.self, capacity: M)
-let grad = gradBuf.contents().bindMemory(to: Float.self, capacity: 2 * P), theta = netBuf.contents().bindMemory(to: Float.self, capacity: P)
+let whichBuf = buffer(R * 4), drawBuf = buffer(R * 4), doneBuf = buffer(R * 4), llBuf = buffer(R * 4)
+let tapeBuf = buffer(R * DEC * TAPE * 4, .storageModePrivate), phiBuf = buffer(R * EP * L * LF * 4, .storageModePrivate)
+let rsBuf = buffer(R * 2 * L * D * 4, .storageModePrivate), bsBuf = buffer(R * SCRATCH * 4, .storageModePrivate), ringBuf = buffer(R * H * JTN * 2, .storageModePrivate)
+let recBuf = buffer(R * DEC * REC * 4, .storageModePrivate), krecBuf = buffer(R * EP * L * KREC * 4, .storageModePrivate)
+let rec2Buf = buffer(R * DEC * REC * 4, .storageModePrivate), krec2Buf = buffer(R * EP * L * KREC * 4, .storageModePrivate)
+let onesBuf = device.makeBuffer(bytes: [Float](repeating: 1, count: R * DEC), length: R * DEC * 4, options: .storageModeShared)!
+let wBuf = buffer(R * 8), gBuf = buffer(2 * P * 4)
+let which = whichBuf.contents().bindMemory(to: UInt32.self, capacity: R), draw = drawBuf.contents().bindMemory(to: UInt32.self, capacity: R)
+let done = doneBuf.contents().bindMemory(to: Float.self, capacity: R), ll = llBuf.contents().bindMemory(to: Float.self, capacity: R)
+let w = wBuf.contents().bindMemory(to: Float.self, capacity: 2 * R), grad = gBuf.contents().bindMemory(to: Float.self, capacity: 2 * P)
+let theta = netBuf.contents().bindMemory(to: Float.self, capacity: P)
 
-func rollouts(_ count: Int, amplitude: Float, mode: UInt32) {
+func run(_ count: Int, rollout mode: UInt32?, backward: Bool, gradient: Bool) {
   let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
-  enc.setComputePipelineState(rolloutPipeline)
-  enc.setBuffer(scenBuf, offset: 0, index: 0); enc.setBuffer(netBuf, offset: 0, index: 1); enc.setBuffer(whichBuf, offset: 0, index: 2)
-  enc.setBuffer(objBuf, offset: 0, index: 3); enc.setBuffer(doneBuf, offset: 0, index: 4); enc.setBuffer(perturbBuf, offset: 0, index: 5)
-  var a = amplitude, m = mode
-  enc.setBytes(&a, length: 4, index: 6); enc.setBytes(&m, length: 4, index: 7); enc.setBuffer(weightingBuf, offset: 0, index: 8)
-  enc.dispatchThreadgroups(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-  enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  let tg = MTLSize(width: 256, height: 1, depth: 1), grid = MTLSize(width: count, height: 1, depth: 1)
+  if var m = mode {
+    enc.setComputePipelineState(rollPipe)
+    for (i, b) in [scenBuf, netBuf, whichBuf, drawBuf, doneBuf, tapeBuf, phiBuf, rsBuf, ringBuf].enumerated() { enc.setBuffer(b, offset: 0, index: i) }
+    enc.setBytes(&m, length: 4, index: 9)
+    enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
+  }
+  if backward {
+    enc.setComputePipelineState(backPipe)
+    for (i, b) in [netBuf, tapeBuf, phiBuf, recBuf, krecBuf, bsBuf, llBuf, wBuf, rec2Buf, krec2Buf].enumerated() { enc.setBuffer(b, offset: 0, index: i) }
+    enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
+  }
+  enc.endEncoding()
+  if gradient {   // each weight block, each task: G = delta^T input over every record, a GEMM
+    for task in 0..<2 {
+      for (kind, dOff, xOff, rows, cols, gOff) in jobs {
+        let n = count * (kind == 0 ? DEC : EP * L), stride = (kind == 0 ? REC : KREC) * 4
+        let deltas = task == 0 ? (kind == 0 ? recBuf : krecBuf) : (kind == 0 ? rec2Buf : krec2Buf), inputs = kind == 0 ? recBuf : krecBuf
+        let A = MPSMatrix(buffer: deltas, offset: dOff * 4, descriptor: MPSMatrixDescriptor(rows: n, columns: rows, rowBytes: stride, dataType: .float32))
+        let X = xOff < 0 ? MPSMatrix(buffer: onesBuf, offset: 0, descriptor: MPSMatrixDescriptor(rows: n, columns: 1, rowBytes: 4, dataType: .float32))
+                         : MPSMatrix(buffer: inputs, offset: xOff * 4, descriptor: MPSMatrixDescriptor(rows: n, columns: cols, rowBytes: stride, dataType: .float32))
+        let C = MPSMatrix(buffer: gBuf, offset: (task * P + gOff) * 4, descriptor: MPSMatrixDescriptor(rows: rows, columns: cols, rowBytes: cols * 4, dataType: .float32))
+        MPSMatrixMultiplication(device: device, transposeLeft: true, transposeRight: false, resultRows: rows, resultColumns: cols, interiorColumns: n, alpha: 1, beta: 0)
+          .encode(commandBuffer: cb, leftMatrix: A, rightMatrix: X, resultMatrix: C)
+      }
+    }
+  }
+  cb.commit(); cb.waitUntilCompleted()
   if let e = cb.error { print("error: \(e)"); exit(1) }
 }
-// the measured cluster at the decode sizes: the policy, all on the shortest-path tree, a uniform split
+let arm = full ? "GRU" : "minGRU"
+
+if ProcessInfo.processInfo.environment["PROFILE"] != nil {   // each kernel's GPU time, one step's worth
+  let B = args.count > 4 ? Int(args[4])! : 64
+  for i in 0..<(4 * B) { which[i] = UInt32(i / 4); draw[i] = UInt32(i + 1) }
+  for i in 0..<(8 * B) { w[i] = 1e-3 }
+  for (name, m, b, gr) in [("rollout", UInt32(0) as UInt32?, false, false), ("backward", nil, true, false), ("backward+GEMM", nil, true, true)] {
+    let t0 = Date(); run(4 * B, rollout: m, backward: b, gradient: gr); run(4 * B, rollout: m, backward: b, gradient: gr)
+    print(String(format: "%@ %@: %.1f ms for %d rollouts", arm, name, Date().timeIntervalSince(t0) * 500, 4 * B))
+  }
+  exit(0)
+}
+
+if ProcessInfo.processInfo.environment["CHECK"] != nil {
+  // d(-sum log p of rollout 0's recorded choices)/d theta, the backward pass against central differences
+  which[0] = UInt32(pool - 1); draw[0] = 12345
+  for i in 0..<(2 * R) { w[i] = 0 }; w[0] = 1
+  run(1, rollout: 0, backward: false, gradient: false)
+  run(1, rollout: nil, backward: true, gradient: true)
+  let analytic = (0..<P).map { Double(grad[$0]) }
+  print(String(format: "%@, %d parameters; rollout 0: log-likelihood of its choices %.4f", arm, P, ll[0]))
+  for (name, at, count) in blocks {
+    var rows: [String] = [], worst = 0.0, scale = 0.0
+    for _ in 0..<3 {
+      let i = at + Int(g.uniform() * Double(count)), eps: Float = 1e-2, keep = theta[i]
+      theta[i] = keep + eps; run(1, rollout: nil, backward: true, gradient: false); let up = Double(ll[0])
+      theta[i] = keep - eps; run(1, rollout: nil, backward: true, gradient: false); let down = Double(ll[0])
+      theta[i] = keep
+      let numeric = -(up - down) / Double(2 * eps)
+      worst = max(worst, abs(numeric - analytic[i])); scale = max(scale, abs(numeric), abs(analytic[i]))
+      rows.append(String(format: "%+.4f/%+.4f", analytic[i], numeric))
+    }
+    print(String(format: "  %-6@ largest difference %.1e of %.1e   (analytic/numeric) %@", name, worst, scale, rows.joined(separator: " ")))
+  }
+  exit(0)
+}
+
 func measure() -> String {
+  let draws = 32
   var out: [String] = []
-  let draws = 64   // each size's completion the mean over this many piece draws
-  for (mode, name) in [(UInt32(0), "policy"), (1, "spt"), (2, "uniform")] {
-    for i in 0..<sizes.count { for d in 0..<draws { let r = i * draws + d; which[r] = UInt32(pool + i); perturb[2 * r] = UInt32(d + 1); perturb[2 * r + 1] = 0 } }
-    rollouts(sizes.count * draws, amplitude: 0, mode: mode)
+  for (mode, name) in [(UInt32(0), "sampled"), (1, "greedy"), (2, "spt"), (3, "uniform")] {
+    for i in 0..<sizes.count { for d in 0..<draws { which[i * draws + d] = UInt32(pool + i); draw[i * draws + d] = UInt32(77 + d) } }
+    run(sizes.count * draws, rollout: mode, backward: false, gradient: false)
     out.append(name + " " + (0..<sizes.count).map { i in String(format: "%.2f", (0..<draws).map { done[i * draws + $0] }.reduce(0, +) / Float(draws)) }.joined(separator: " "))
   }
   return out.joined(separator: " | ")
 }
-func ranks(_ v: [Float]) -> [Float] {
-  let order = v.indices.sorted { v[$0] < v[$1] }; var r = [Float](repeating: 0, count: v.count)
-  for (i, j) in order.enumerated() { r[j] = Float(i) / Float(v.count - 1) - 0.5 }
-  return r
-}
 
-print("network \(P) parameters; \(M) pairs a step; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes a rank")
+print("\(arm), \(P) parameters; \(B) scenarios x 4 rollouts a step; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes a rank")
 print("start: " + measure())
-if ProcessInfo.processInfo.environment["WEIGHTING"] != nil {   // the policy's first weighting on the measured cluster's held-out scenarios
-  for i in 0..<sizes.count { which[i] = UInt32(pool + i); perturb[2 * i] = 1; perturb[2 * i + 1] = 0 }
-  rollouts(sizes.count, amplitude: 0, mode: 0)
-  for i in 0..<sizes.count { print("size \(Int(sizes[i])): " + (0..<4).map { j in (0..<K).map { String(format: "%.3f", weighting[(i * J + j) * K + $0]) }.joined(separator: " ") }.joined(separator: " | ")) }
-  exit(0)
-}
 var m1 = [Double](repeating: 0, count: P), m2 = [Double](repeating: 0, count: P)
-var rolloutTime = 0.0, stepTime = 0.0
+var elapsed = 0.0, since = 0
+let wall = Date()
 for k in 0..<steps {
   let t0 = Date()
-  for m in 0..<M {
-    keys[m] = UInt32(truncatingIfNeeded: g.next()); let sc = UInt32(Int(g.uniform() * Double(pool)))
-    which[2 * m] = sc; which[2 * m + 1] = sc
-    perturb[4 * m] = keys[m]; perturb[4 * m + 1] = 0; perturb[4 * m + 2] = keys[m]; perturb[4 * m + 3] = 1
+  for s in 0..<B { let sc = UInt32(Int(g.uniform() * Double(pool))); for q in 0..<4 { which[4 * s + q] = sc; draw[4 * s + q] = UInt32(truncatingIfNeeded: g.next()) } }
+  run(4 * B, rollout: 0, backward: false, gradient: false)
+  // Buy 4: each rollout's baseline the mean of its scenario's other three; d c / d theta = -sum (c - b) d(-log p)
+  for s in 0..<B {
+    let c = (0..<4).map { Double(done[4 * s + $0]) }, mu = c.reduce(0, +) / 4, v = c.map { ($0 - mu) * ($0 - mu) }
+    for q in 0..<4 {
+      let b1 = (c.reduce(0, +) - c[q]) / 3, b2 = (v.reduce(0, +) - v[q]) / 3
+      w[2 * (4 * s + q)] = Float(-(c[q] - b1) / Double(4 * B)); w[2 * (4 * s + q) + 1] = Float(-(v[q] - b2) / Double(4 * B))
+    }
   }
-  let t1 = Date()
-  rollouts(R, amplitude: sigma, mode: 0)
-  rolloutTime += Date().timeIntervalSince(t1)
-  // each pair scored on its own scenario: its two sides' difference over their mean, for each task
-  for m in 0..<M {
-    let oa = obj[2 * m], ob = obj[2 * m + 1], da = done[2 * m], db = done[2 * m + 1]
-    weights[2 * m] = (oa - ob) / max((oa + ob) / 2, 1e-6) / (2 * sigma * Float(M))
-    weights[2 * m + 1] = (da - db) / max((da + db) / 2, 1e-6) / (2 * sigma * Float(M))
-  }
-  let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
-  enc.setComputePipelineState(gradientPipeline)
-  enc.setBuffer(weightBuf, offset: 0, index: 0); enc.setBuffer(keyBuf, offset: 0, index: 1); enc.setBuffer(gradBuf, offset: 0, index: 2)
-  var pm = UInt32(M), pp = UInt32(P)
-  enc.setBytes(&pm, length: 4, index: 3); enc.setBytes(&pp, length: 4, index: 4)
-  enc.dispatchThreads(MTLSize(width: P, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-  enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  run(4 * B, rollout: nil, backward: true, gradient: true)
   var g11 = 0.0, g22 = 0.0, g12 = 0.0
   for i in 0..<P { let x = Double(grad[i]), y = Double(grad[P + i]); g11 += x * x; g22 += y * y; g12 += x * y }
-  let den = g11 - 2 * g12 + g22
-  let lambda = den > 0 ? min(max((g22 - g12) / den, 0), 1) : 0.5
-  for i in 0..<P {   // Adam on the min-norm combination
+  let den = g11 - 2 * g12 + g22, lambda = den > 0 ? min(max((g22 - g12) / den, 0), 1) : 0.5
+  let c1 = 1 - pow(0.9, Double(k + 1)), c2 = 1 - pow(0.999, Double(k + 1))
+  for i in 0..<P {
     let d = lambda * Double(grad[i]) + (1 - lambda) * Double(grad[P + i])
     m1[i] = 0.9 * m1[i] + 0.1 * d; m2[i] = 0.999 * m2[i] + 0.001 * d * d
-    theta[i] -= Float(rate * (m1[i] / (1 - pow(0.9, Double(k + 1)))) / (sqrt(m2[i] / (1 - pow(0.999, Double(k + 1)))) + 1e-8))
+    theta[i] -= Float(rate * (m1[i] / c1) / (sqrt(m2[i] / c2) + 1e-8))
   }
-  stepTime += Date().timeIntervalSince(t0)
-  if k < 10 || k % 25 == 24 || k + 1 == steps {
-    let meanDone = (0..<R).map { done[$0] }.reduce(0, +) / Float(R)
-    print(String(format: "step %d: train T/floor %.3f, lambda %.2f, %.1f steps/s, %.0f rollouts/s | ", k + 1, meanDone, lambda,
-                 Double(k < 10 ? 1 : 25) / stepTime, Double((k < 10 ? 1 : 25) * R) / rolloutTime) + measure())
-    fflush(stdout)
-    rolloutTime = 0; stepTime = 0
+  elapsed += Date().timeIntervalSince(t0); since += 1
+  if k < 3 || (k + 1) % 50 == 0 || k + 1 == steps {
+    let mean = (0..<(4 * B)).map { done[$0] }.reduce(0, +) / Float(4 * B)
+    print(String(format: "step %d (%.0fs): train %.3f, lambda %.2f, %.1f steps/s | ", k + 1, Date().timeIntervalSince(wall), mean, lambda, Double(since) / elapsed) + measure())
+    fflush(stdout); elapsed = 0; since = 0
   }
 }
