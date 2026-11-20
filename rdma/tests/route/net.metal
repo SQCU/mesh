@@ -2,6 +2,8 @@
 // lane rows first ([run][refresh][lane]: a run's window one sequence of K L positions), then context rows.
 #include <metal_stdlib>
 #include "int8mm.h"
+#include "split.h"
+#include "upgrad.h"
 using namespace metal;
 constant uint D = 64;
 
@@ -196,84 +198,65 @@ kernel void gram(device const float *g [[buffer(0)]], device float *G [[buffer(1
   }
 }
 // Adam on the aggregate (a: the three tasks' weights, the step size; c: the bias corrections), in place
+// UPGrad's weights from the Gram matrix of the step's gradients (upgrad.h), for adam: (alpha, rate)
+kernel void upgrad_weights(device const float *gram [[buffer(0)]], device float4 &a [[buffer(1)]], constant float &rate [[buffer(2)]], constant float &inv [[buffer(3)]],
+                           uint i [[thread_position_in_grid]]) {   // inv: the gradients a sum over that many ranks' (their mean's weights)
+  if (i > 0) return;
+  float G[9], alpha[3];
+  for (int k = 0; k < 9; k++) G[k] = gram[k];
+  upgrad3(G, alpha);
+  a = float4(alpha[0] * inv, alpha[1] * inv, alpha[2] * inv, rate);
+}
 kernel void adam(device float *theta [[buffer(0)]], device float *m [[buffer(1)]], device float *v [[buffer(2)]], device const float *g [[buffer(3)]],
-                 constant float4 &a [[buffer(4)]], constant float4 &c [[buffer(5)]], constant uint &P [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+                 device const float4 &a [[buffer(4)]], constant float4 &c [[buffer(5)]], constant uint &P [[buffer(6)]], uint i [[thread_position_in_grid]]) {
   if (i >= P) return;
   const float d = a.x * g[i] + a.y * g[P + i] + a.z * g[2 * P + i];
   m[i] = 0.9f * m[i] + 0.1f * d; v[i] = 0.999f * v[i] + 0.001f * d * d;
   theta[i] -= a.w * (m[i] / c.x) / (sqrt(v[i] / c.y) + 1e-8f);
 }
 
-// ---- credit (route.h route_draw; sim.c route_sim_credit is the CPU reference): each draw's score function,
-// psi(token) - E_p[psi] over its table (the softmax of CLIP tanh(w . phi / sqrt(FS)) over the allowed splits), and its
-// log-likelihood; then each learning row's three tasks' dw: its draws' advantages times that, summed in order ----
+// ---- credit: each draw's score function under the learning forward's own w, psi(token) - E_p[psi] over its table
+// (split.h, as the simulator's sampler and route_draw_score: one definition), times its importance ratio
+// pi_current(token) / pi_behaviour(token) (wb: the w it was drawn under); then each learning row's three tasks' dw ----
 constant uint FS = 40;
-struct Draw { float arrive[30]; uint valid, mask, S, token, deg, ntok, row; float unit, a1, a2; };
-// a draw a SIMD group, its table's tokens across the lanes: under the current w (wc: the learning call's own forward)
-// psi(token) - E[psi], times the draw's importance ratio pi_current(token) / pi_behaviour(token) (wb: the w it was drawn
-// under); both log-sum-exps in one pass (each token's features once, two dot products), each lane's running sums
-// rescaled as its maximum grows, then the lanes' combined. ll: the log ratio
-kernel void credit_draws(device const Draw *draws [[buffer(0)]], device const float *wbRows [[buffer(1)]], device const float *wcRows [[buffer(2)]],
+// a draw a SIMD group, its table's splits across the lanes; each lane's log-sum-exps online (split.h), then the lanes'
+// merged. ll: the log ratio
+kernel void credit_draws(device const route_draw *draws [[buffer(0)]], device const float *wbRows [[buffer(1)]], device const float *wcRows [[buffer(2)]],
                          device float *diff [[buffer(3)]], device float *ll [[buffer(4)]], device const uint *first [[buffer(5)]], constant uint2 &p [[buffer(6)]],
                          uint gid [[thread_position_in_grid]]) {   // p: (draws, rows)
   const uint i = gid / 32, lane = gid % 32;
   if (i >= p.x) return;
-  const Draw d = draws[i];
+  const route_draw d = draws[i];
   uint lo = 0, hi = p.y;   // the draw's row: the last row whose first draw is at or before it (first[] ascending)
   while (hi - lo > 1) { const uint mid = (lo + hi) / 2; if (first[mid] <= i) lo = mid; else hi = mid; }
-  const device float *wb = wbRows + size_t(lo) * FS, *wc = wcRows + size_t(lo) * FS;
-  const float root = sqrt(float(FS));
-  float m = -INFINITY, s = 0, mb = -INFINITY, sb = 0, lgTok = 0, lgbTok = 0, e[40], psi[40];
-  for (uint f = 0; f < FS; f++) { e[f] = 0; psi[f] = 0; }
-  bool owner = false;
+  device const float *wb = wbRows + size_t(lo) * FS, *wc = wcRows + size_t(lo) * FS;
+  split_lse cur; split_lse_init(&cur);
+  float mb = -INFINITY, sb = 0, lgTok = 0, lgbTok = 0, psi[SPLIT_FS];
+  for (uint f = 0; f < FS; f++) psi[f] = 0;
   for (uint k = lane; k < d.ntok; k += 32) {
-    uint tok = k, used = 0, cnt = 0, at[6], nd = 0;
-    bool valid = true, fits = true;
-    float most = 0, sum = 0, a = 0, ab = 0;
-    for (uint dd = 0; dd < 6; dd++) {
-      if (!((d.S >> dd) & 1)) continue;
-      const uint kk = tok % d.deg; tok /= d.deg;
-      const uint b = dd * 5 + kk;
-      valid = valid && ((d.valid >> b) & 1); fits = fits && ((d.mask >> b) & 1);
-      const float ar = d.arrive[b];
-      most = max(most, ar); sum += ar; cnt++; used |= 1u << kk; a += wc[b]; ab += wb[b]; at[nd++] = b;
-    }
-    for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) { a += wc[30 + kk]; ab += wb[30 + kk]; }
-    const float c1 = float(max(cnt, 1u)), f35 = most / d.unit, f36 = sum / c1 / d.unit, f37 = float(popcount(used)) / c1;
-    a += wc[35] * f35 + wc[36] * f36 + wc[37] * f37; ab += wb[35] * f35 + wb[36] * f36 + wb[37] * f37;
-    const bool ok = valid && fits;
-    if (!ok && k != d.token) continue;
-    const float th = tanh(clamp(a / root, -20.0f, 20.0f)), lg = 10.0f * th, dv = 10.0f * (1.0f - th * th) / root;
-    const float lgb = 10.0f * tanh(clamp(ab / root, -20.0f, 20.0f));
-    if (k == d.token) {
-      owner = true; lgTok = ok ? lg : -INFINITY; lgbTok = ok ? lgb : -INFINITY;
-      for (uint q = 0; q < nd; q++) psi[at[q]] = dv;
-      for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) psi[30 + kk] = dv;
-      psi[35] = dv * f35; psi[36] = dv * f36; psi[37] = dv * f37;
-    }
-    if (!ok) continue;
+    const split sp = split_of(&d, k);
+    if (!sp.ok && k != d.token) continue;
+    const float th = split_tanh(split_dot(&sp, wc)), lg = split_logit(th), lgb = split_logit(split_tanh(split_dot(&sp, wb)));
+    if (k == d.token) { lgTok = sp.ok ? lg : -INFINITY; lgbTok = sp.ok ? lgb : -INFINITY; split_add(&sp, split_slope(th), psi); }
+    if (!sp.ok) continue;
     if (lgb > mb) { sb *= sb > 0 ? exp(mb - lgb) : 0.0f; mb = lgb; }
     sb += exp(lgb - mb);
-    if (lg > m) { const float r = s > 0 ? exp(m - lg) : 0.0f; s *= r; for (uint f = 0; f < FS; f++) e[f] *= r; m = lg; }
-    const float x = exp(lg - m), xd = x * dv;
-    s += x;
-    for (uint q = 0; q < nd; q++) e[at[q]] += xd;
-    for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) e[30 + kk] += xd;
-    e[35] += xd * f35; e[36] += xd * f36; e[37] += xd * f37;
+    split_lse_add(&cur, lg, split_slope(th), &sp);
   }
-  const float M = simd_max(m), scale = s > 0 ? exp(m - M) : 0.0f, S = simd_sum(s * scale);
+  const bool owner = d.token % 32 == lane;
+  const float M = simd_max(cur.m), scale = cur.s > 0 ? exp(cur.m - M) : 0.0f, S = simd_sum(cur.s * scale);
   const float Mb = simd_max(mb), Sb = simd_sum(sb > 0 ? sb * exp(mb - Mb) : 0.0f);
   const float lt = simd_sum(owner ? lgTok : 0.0f), lbt = simd_sum(owner ? lgbTok : 0.0f);
   const float logRatio = (lt - (M + log(S))) - (lbt - (Mb + log(Sb))), ratio = exp(logRatio);
   for (uint f = 0; f < FS; f++) {
-    const float ef = simd_sum(e[f] * scale) / S, pf = simd_sum(psi[f]);
+    const float ef = simd_sum(cur.e[f] * scale) / S, pf = simd_sum(psi[f]);
     if (f % 32 == lane) diff[size_t(i) * FS + f] = ratio * (pf - ef);
   }
   if (lane == 0) ll[i] = logRatio;
 }
 // dw [task][row][FS] = (task 0: scale0[row], else scale) sum over the row's draws (first[row] .. first[row + 1]) of its
 // advantage (task 0: 1, 1: a1, 2: a2) times diff, in order
-kernel void credit_rows(device const float *diff [[buffer(0)]], device const Draw *draws [[buffer(1)]], device const uint *first [[buffer(2)]],
+kernel void credit_rows(device const float *diff [[buffer(0)]], device const route_draw *draws [[buffer(1)]], device const uint *first [[buffer(2)]],
                         device const float *scale0 [[buffer(3)]], device float *dw [[buffer(4)]], constant uint &R [[buffer(5)]], constant float &scale [[buffer(6)]],
                         uint gid [[thread_position_in_grid]]) {
   if (gid >= 3 * R * FS) return;

@@ -124,7 +124,7 @@ static struct route_stream policy_stream;static struct route_topology policy_top
 static float *policy_w,*policy_next,*policy_tokens,*policy_scratch,policy_state[2*ROUTE_D],policy_lanes[ROUTE_L][ROUTE_IN];
 static int policy_pattern[ROUTE_CONTEXTS],policy_node[ROUTE_CONTEXTS],policy_nc,policy_ctx[ROUTE_J][ROUTE_N][ROUTE_SETS];static uint32_t policy_owed[ROUTE_CONTEXTS];
 static struct route_state policy_st,policy_stnext;
-static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3125],policy_us,policy_ctx_us;
+static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_us,policy_ctx_us;static float policy_logits[3125];
 /* the refresh's state and the contexts' tokens, next and active; a context's w computed when the router first reads it
    under the active refresh (its generation), not at the refresh */
 static float policy_hnext[2*ROUTE_D],policy_hact[2*ROUTE_D],*policy_tokact;static uint32_t policy_gen=1,*policy_wgen;static uint64_t policy_ctxs;
@@ -217,7 +217,7 @@ static uint32_t policy_route(double t,uint32_t from,uint32_t k,uint64_t to,uint6
     live.wait[q]=w;live.dup[q]=busy?duplex:1;
   }
   if(!visited && from==pieces[k].source)policy_sent[k]=1;
-  uint32_t tok=route_split(&policy_stream,&policy_st,&policy_topology,(int)from,(uint32_t)to,(uint32_t)visited,&live,policy_w+(size_t)c*ROUTE_FS,u,policy_cdf);
+  uint32_t tok=route_split(&policy_stream,&policy_st,&policy_topology,(int)from,(uint32_t)to,(uint32_t)visited,&live,policy_w+(size_t)c*ROUTE_FS,u,policy_logits);
   policy_draws++;
   const int deg=policy_topology.deg[from];uint64_t share[ROUTE_DEG]={0};
   for(int d=0;d<ROUTE_N;d++)if(to>>d&1){share[tok%(uint32_t)deg]|=UINT64_C(1)<<d;tok/=(uint32_t)deg;}

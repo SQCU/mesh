@@ -46,5 +46,10 @@ static inline void route_tel_max(int k, uint64_t n) {
   uint64_t o = __atomic_load_n(&route_tel->v[k], __ATOMIC_RELAXED);
   while (o < n && !__atomic_compare_exchange_n(&route_tel->v[k], &o, n, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
 }
+/* the same, as functions (for callers that bind symbols: the Python driver) */
+void route_tel_inc(int k, uint64_t n);
+void route_tel_put(int k, uint64_t n);
+void route_tel_top(int k, uint64_t n);
+void route_tel_reach(int k);
 static inline void route_tel_phase(int k) { uint64_t z = 0; __atomic_compare_exchange_n(&route_tel->v[k], &z, route_tel_now(), 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED); }
 #endif

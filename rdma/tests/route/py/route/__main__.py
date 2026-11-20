@@ -1,7 +1,7 @@
 """python -m route COMMAND [--config route.toml] [--set section.key=value ...]: every result a JSON record a line.
 
-  train       one rank's training: the cases drawn here and pushed as the trainer has room; its end states into the
-              pool; a telemetry record every report.interval; rank 0's evaluations at evaluation.at
+  train       one rank's training: loop.train, the data flow (design/dataflow.png); a telemetry record every
+              report.interval; rank 0's evaluations at evaluation.at
   evaluate    the measured cluster's table for run.theta_in (or the initial theta): each mode, kind and size
   simcheck    tests/switch.c's fixed router on the measured cluster (us): the simulator against switch.c's own table
   cases       the distribution's draws: their rate, and what they are (state sources, fabrics, windows, streams)
@@ -9,8 +9,9 @@
               switch.c's router) answering: tests/switch.c ROUTE_DUMP's format (--set dump.*: see DUMP)
   compare     two dumps, refresh by refresh: the first features that differ
   deploy      the CPU forward against the GPU's on the first refresh of the 12 MB all-reduce
-  check       the credit against central differences (--graph: the int8 network against the fp32 reference)
-  bench       each call's time, kernel by kernel; the environment's on drawn cases
+  check       the GPU's credit against split.h's on the CPU, scores against central differences (--graph: the int8
+              network against the fp32 reference)
+  bench       one forward and one learning step of the training's sizes, kernel by kernel
   xbench      the exchange alone (world > 1): N rounds (0: declare and close, a dead run's programs flushed)
   stat        telemetry records of tables (FILE...) where they lie
   cluster     python -m route cluster {build|train|xbench|stat} ...: every host of cluster.hosts (cluster.py)"""
@@ -23,7 +24,7 @@ import time
 import numpy as np
 
 from . import cases as C
-from . import config, fabric, native, telemetry
+from . import config, fabric, loop, native, telemetry
 from .native import const, dtype, ffi
 
 DUMP = {'kind': 1, 'size': 12582912, 'burst': 0, 'out': '/tmp/sim-all.bin', 'params': ''}
@@ -47,97 +48,75 @@ def args(argv):
     return config.load(cfgpath, sets), rest, sets
 
 
-def open_trainer(cfg, lib, steps=None):
-    r = cfg['run']; keep = []
-    def s(v):
-        if not v:
-            return ffi.NULL
-        b = ffi.new('char[]', v.encode()); keep.append(b); return b
-    c = ffi.new('struct route_config *', {'rank': r['rank'], 'world': r['world'], 'steps': r['steps'] if steps is None else steps, 'rate': r['rate'],
-                                          'seed': r['theta_seed'], 'forward_rows': cfg['capacity']['forward_rows'], 'learn_runs': cfg['capacity']['learn_runs'],
-                                          'refreshes': cfg['capacity']['refreshes']})
-    c.mesh_id, c.metallib, c.theta_in, c.telemetry = s(r['mesh_id']), s(r['metallib']), s(r['theta_in']), s(r['telemetry'])
-    lib.route_argmax = 1 if r['argmax'] else 0
-    t = lib.route_trainer_open(c)
-    if t == ffi.NULL:
-        emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(lib.route_trainer_failure()).decode()}); sys.exit(1)
-    return t
+def network(cfg, lib, runs, refreshes, rows):
+    r = cfg['run']
+    n = lib.route_net_new(r['metallib'].encode(), runs, refreshes, rows, r['theta_seed'], r['theta_in'].encode() if r['theta_in'] else ffi.NULL)
+    if n == ffi.NULL:
+        emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(lib.route_net_failure()).decode()}); sys.exit(1)
+    return n
 
 
-def cases_ptr(c):
-    return native.records('struct route_case', c)
-
-
-def evaluation(cfg, lib, t, measured, label):
-    c, rows = C.measured(measured, [(m, b) for _, m, b in MODES])
-    out = np.empty((len(c), 4))
-    lib.route_trainer_evaluate(t, cases_ptr(c), len(c), ffi.from_buffer('double[]', out, require_writable=True))
+def evaluation(cfg, lib, learner, measured, label, modes=MODES):
+    """the measured cluster: each mode, kind and size (cases.measured), under the learner's theta"""
+    c, rows = C.measured(measured, [(m, b) for _, m, b in modes])
+    ev = network(cfg, lib, 4 * len(c), 1, 4 * len(c) * loop.CX)
+    T = loop.evaluate(lib, learner, ev, c)
+    lib.route_net_free(ev)
     table = {}
-    for (name, m, b) in MODES:
+    for (name, m, b) in modes:
         for k, kind in enumerate(C.KINDS):
             for s in C.SIZES:
-                i = rows.index((m, b, k, s)); T = float(out[i].mean())
+                i = rows.index((m, b, k, s)); t = float(T[i].mean())
                 floor = lib.route_op_floor(ffi.from_buffer('struct route_fabric *', measured), k, float(s), int(measured['compute'][0]))
-                table.setdefault(name, {}).setdefault(kind, {})[s] = {'over_floor': round(T, 4), 'us': round(T * floor / 1e3, 2)}
+                table.setdefault(name, {}).setdefault(kind, {})[s] = {'over_floor': round(t, 4), 'us': round(t * floor / 1e3, 2)}
     emit({'record': 'evaluation', 'label': label, 'table': table})
+    return table
 
 
 def train(cfg, lib):
-    r = cfg['run']; measured = fabric.load(r['fabric'])
-    rng = np.random.default_rng([r['data_seed'], r['rank']])
-    dist = C.Distribution(config.flat(cfg), measured, lib, rng)
-    t = open_trainer(cfg, lib)
+    r, cap = cfg['run'], cfg['capacity']
+    measured = fabric.load(r['fabric'])
+    dist = C.Distribution(config.flat(cfg), measured, lib, np.random.default_rng([r['data_seed'], r['rank']]))
+    lib.route_tel_open(r['telemetry'].encode(), r['rank'], r['world']); lib.route_tel_reach(lib.RT_PHASE_START)
+    half = cap['forward_rows'] // loop.CX // 2
+    learner = network(cfg, lib, cap['learn_runs'], cap['refreshes'], cap['forward_rows'])
+    actor = network(cfg, lib, half, 1, half * loop.CX)
+    lib.route_tel_reach(lib.RT_PHASE_NETWORKS)
+    if r['world'] > 1:
+        if lib.route_net_join(learner, r['rank'], r['world'], r['mesh_id'].encode()) != 0:
+            emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(lib.route_exchange_failure()).decode()}); sys.exit(1)
+        lib.route_tel_reach(lib.RT_PHASE_JOINED)
     evaluating = r['rank'] in cfg['evaluation']['ranks']
-    ev = threading.Thread(target=evaluation, args=(cfg, lib, t, measured, 'start')) if evaluating and 'start' in cfg['evaluation']['at'] else None
-    if ev:
-        ev.start()
+    if evaluating and 'start' in cfg['evaluation']['at']:
+        evaluation(cfg, lib, learner, measured, 'start')
     table = telemetry.Table(r['telemetry']); table.sample()
     done = threading.Event()
-    def report():
+    def report():   # the telemetry table's records (the table is the store; this only reads it)
         while not done.wait(cfg['report']['interval']):
             rec = table.sample()
             if rec:
                 rec['pool'] = dist.pool.count; emit(rec)
-    reporter = threading.Thread(target=report, daemon=True); reporter.start()
-    lib.route_trainer_start(t)
-    room = lib.route_trainer_groups(t) * 4 * 4
-    ended = np.empty((room, C.D2), np.float32)
-    while True:
-        n = lib.route_trainer_room(t, cfg['report']['interval'])
-        got = lib.route_trainer_ended(t, ffi.from_buffer('float[]', ended, require_writable=True), room)
-        dist.pool.add(ended[:got])
-        if n < 0:
-            break
-        if n > 0:
-            c, _ = dist.draw(n)
-            lib.route_trainer_push(t, cases_ptr(c), n)
-    lib.route_trainer_finish(t)
-    done.set()
-    if ev:
-        ev.join()
-    failure = lib.route_trainer_failure()
+    threading.Thread(target=report, daemon=True).start()
+    loop.train(cfg, lib, dist, learner, actor, r['steps'], r['world'])
+    done.set(); lib.route_tel_reach(lib.RT_PHASE_DONE)
+    failure = lib.route_net_failure()
     if failure != ffi.NULL:
         emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(failure).decode()})
     if evaluating and 'end' in cfg['evaluation']['at']:
-        evaluation(cfg, lib, t, measured, f'end, {lib.route_trainer_learned(t)} steps')
+        evaluation(cfg, lib, learner, measured, f'end, {lib.route_net_steps(learner)} steps')
     if r['rank'] == 0 and (r['theta'] or r['theta_int8']):
-        lib.route_trainer_save(t, r['theta'].encode() if r['theta'] else ffi.NULL, r['theta_int8'].encode() if r['theta_int8'] else ffi.NULL)
+        lib.route_net_save(learner, r['theta'].encode() if r['theta'] else ffi.NULL, r['theta_int8'].encode() if r['theta_int8'] else ffi.NULL)
         emit({'record': 'saved', 'theta': r['theta'], 'theta_int8': r['theta_int8']})
-    lib.route_trainer_close(t)
+    if r['world'] > 1:
+        lib.route_exchange_close()
 
 
 def simcheck(cfg, lib):
+    """tests/switch.c's fixed router on the measured cluster, us (no network involved: mode 4)"""
     measured = fabric.load(cfg['run']['fabric'])
-    t = open_trainer(cfg, lib, steps=0)
-    c, rows = C.measured(measured, [(4, 0)])
-    out = np.empty((len(c), 4))
-    lib.route_trainer_evaluate(t, cases_ptr(c), len(c), ffi.from_buffer('double[]', out, require_writable=True))
-    table = {}
-    for i, (_, _, k, s) in enumerate(rows):
-        floor = lib.route_op_floor(ffi.from_buffer('struct route_fabric *', measured), k, float(s), int(measured['compute'][0]))
-        table.setdefault(C.KINDS[k], {})[s] = round(float(out[i].mean()) * floor / 1e3, 2)
-    emit({'record': 'simcheck', 'router': 'switch.c fixed', 'us': table})
-    lib.route_trainer_close(t)
+    learner = network(cfg, lib, 4, 1, loop.CX)
+    t = evaluation(cfg, lib, learner, measured, 'switch.c fixed', [('switch.c fixed', 4, 0)])
+    emit({'record': 'simcheck', 'us': {k: {s: v['us'] for s, v in t['switch.c fixed'][k].items()} for k in C.KINDS}})
 
 
 def describe(cfg, lib, n=4096):
@@ -218,46 +197,122 @@ def compare(a, b, tol=1e-4):
     emit({'record': 'compare', 'a': a, 'b': b, 'refreshes': [len(A), len(B)], 'by_refresh': rows})
 
 
+def one_case(cfg, lib):
+    measured = fabric.load(cfg['run']['fabric'])
+    dist = C.Distribution(config.flat(cfg), measured, lib, np.random.default_rng([cfg['run']['data_seed'], cfg['run']['rank']]))
+    return measured, dist
+
+
 def deploy(cfg, lib):
+    """the CPU forward (forward.c, as switch.c's router) against the GPU's, the first refresh of the 12 MB all-reduce"""
     measured = fabric.load(cfg['run']['fabric'])
-    t = open_trainer(cfg, lib, steps=0)
-    path = f'/tmp/route-deploy-{os.getpid()}.i8'; lib.route_trainer_save(t, ffi.NULL, path.encode())
+    net = network(cfg, lib, 4, 1, 4 * loop.CX)
+    path = f'/tmp/route-deploy-{os.getpid()}.i8'; lib.route_net_save(net, ffi.NULL, path.encode())
     p = ffi.new('struct route_params *'); assert lib.route_params_read(p, path.encode()) == 0; os.unlink(path)
-    s = stream_one(lib, measured, 1, 12582912.0)
-    w = ffi.new('struct route_window *', {'t0': 0, 'dt': 100e3, 'lag': 100e3, 'points': 0, 'warm': 2, 'burst': 0})
-    sim = lib.route_sim_new(); lib.route_sim_begin(sim, s, w, 0, 1, 1)
-    CX = const('ROUTE_CONTEXTS'); dec = ffi.new('struct route_decision *'); tok = np.zeros((CX, const('ROUTE_IN')), np.float32)
-    lib.route_sim_decide(sim, dec, ffi.from_buffer('float[]', tok, require_writable=True))
-    nl, nc = dec.lanes, dec.contexts
-    hg, hc = np.zeros(2 * const('ROUTE_D'), np.float32), np.zeros(2 * const('ROUTE_D'), np.float32)
-    wg, wc = np.zeros((nc, const('ROUTE_FS')), np.float32), np.zeros((nc, const('ROUTE_FS')), np.float32)
-    lib.route_trainer_forward(t, ffi.cast('float *', dec.lane), nl, ffi.from_buffer('float[]', tok), nc, ffi.from_buffer('float[]', hg, require_writable=True), ffi.from_buffer('float[]', wg, require_writable=True))
-    lib.route_forward(p, ffi.cast('float *', dec.lane), nl, ffi.from_buffer('float[]', tok), nc, ffi.from_buffer('float[]', hc, require_writable=True), ffi.from_buffer('float[]', wc, require_writable=True), ffi.new('float[]', lib.route_forward_scratch(CX)))
-    emit({'record': 'deploy', 'lanes': nl, 'contexts': nc, 'w_largest_difference': float(np.abs(wg - wc).max()), 'w_largest': float(np.abs(wg).max()), 'state_largest_difference': float(np.abs(hg - hc).max())})
-    lib.route_trainer_close(t)
+    c, _ = C.measured(measured, [(0, 0)]); c = c[[C.KINDS.index('all-reduce') * len(C.SIZES) + C.SIZES.index(12582912)]]
+    ro = loop.Rollouts(lib, net, 1, 1, halves=1); ro.begin([0], c); ro.tick(0)
+    F = ro.F[0]
+    nc = int((F.pos[:4 * loop.CX] == loop.L - 1).sum())   # slot 0's rows: their state its lane row L - 1
+    nl = int(F.mask[0].sum())
+    lanes, tok = F.lanes[0].copy(), F.tokens[:nc].copy()
+    F.wait()
+    h, w = np.zeros(loop.D2, np.float32), np.zeros((nc, loop.FS), np.float32)
+    lib.route_forward(p, ffi.from_buffer('float[]', lanes), nl, ffi.from_buffer('float[]', tok), nc, ffi.from_buffer('float[]', h, require_writable=True),
+                      ffi.from_buffer('float[]', w, require_writable=True), ffi.new('float[]', lib.route_forward_scratch(loop.CX)))
+    emit({'record': 'deploy', 'lanes': nl, 'contexts': nc, 'w_largest_difference': float(np.abs(F.w[:nc] - w).max()), 'w_largest': float(np.abs(w).max()),
+          'state_largest_difference': float(np.abs(F.next[0] - h).max())})
+    lib.route_sims_free(ro.sims); lib.route_net_free(net)
 
 
-def report_call(cfg, lib, name, fn, *extra):
-    measured = fabric.load(cfg['run']['fabric'])
-    rng = np.random.default_rng([cfg['run']['data_seed'], cfg['run']['rank']])
-    dist = C.Distribution(config.flat(cfg), measured, lib, rng)
-    c, _ = dist.draw(200)
-    t = open_trainer(cfg, lib, steps=0)
-    buf = ffi.new('char[]', 1 << 22)
-    rc = fn(t, cases_ptr(c), len(c), *extra, buf, 1 << 22)
-    emit({'record': name, 'report': json.loads(ffi.string(buf).decode()) if rc == 0 else None})
-    lib.route_trainer_close(t)
+def check(cfg, lib, graph):
+    """one drawn case's group, learned on (rate 0): the GPU's credit against split.h's on the CPU (route_draw_score),
+    each draw's score against central differences of its log-probability, the fused producers' codes; graph: the int8
+    network against the fp32 reference (w, each task's gradients)"""
+    K = cfg['capacity']['refreshes']
+    measured, dist = one_case(cfg, lib)
+    net = network(cfg, lib, 4, K, 4 * K * loop.CX)
+    ro = loop.Rollouts(lib, net, 1, K, halves=1); B = loop.Batch(lib, net, 4, K, 4 * K * loop.CX)
+    score = np.zeros(loop.FS, np.float32)
+    def scores(draws, w):   # each draw's score under w (its row's), split.h on the CPU
+        out = np.zeros((len(draws), loop.FS), np.float32)
+        for i in range(len(draws)):
+            lib.route_draw_score(ffi.from_buffer('struct route_draw *', draws[i:i + 1]), ffi.from_buffer('float[]', np.ascontiguousarray(w[draws[i]['row']])), ffi.from_buffer('float[]', score, require_writable=True))
+            out[i] = score
+        return out
+    tried = 0
+    while True:   # cases drawn until one's draws had a choice (a table of more than one allowed split)
+        tried += 1
+        ro.begin([0], dist.draw(1)[0]); ro.run_out()
+        _, m, R, ND, scale = loop.load(lib, ro, np.array([0]), B)
+        if ND and np.abs(scores(loop.view(B.p.draws, loop.DRAW, ND), B.w)).max() > 0:
+            break
+    lib.route_net_probes(net, 1, ffi.NULL, 0)
+    lib.route_net_step(net, B.p, m, K, R, ND, scale, 0.0, 1); B.wait()
+    buf = ffi.new('char[]', 1 << 20); lib.route_net_probes(net, 0, buf, 1 << 20)
+    draws = loop.view(B.p.draws, loop.DRAW, ND)
+    gpu = np.frombuffer(ffi.buffer(lib.route_net_dw(net), 3 * R * loop.FS * 4), np.float32).reshape(3, R, loop.FS)
+    cpu = np.zeros((3, R, loop.FS), np.float32)
+    sc = scores(draws, B.wcur)   # under the learning forward's w (the GPU's credit's), ratio 1 at rate 0
+    for t, a in enumerate((B.scale0[draws['row']], scale * draws['a1'], scale * draws['a2'])):
+        np.add.at(cpu[t], draws['row'], a[:, None] * sc)
+    # central differences of a row's draws' log-probability, the row with the most draws, its largest scores
+    row = int(np.bincount(draws['row'], weights=np.abs(sc).sum(1), minlength=R).argmax()); mine = np.nonzero(draws['row'] == row)[0]
+    total = sc[mine].sum(0)
+    def logp(w):
+        return sum(lib.route_draw_score(ffi.from_buffer('struct route_draw *', draws[i:i + 1]), ffi.from_buffer('float[]', w), ffi.from_buffer('float[]', score, require_writable=True)) for i in mine)
+    pairs, eps = [], 1e-2
+    for f in np.argsort(-np.abs(total))[:6]:
+        up, down = B.wcur[row].copy(), B.wcur[row].copy(); up[f] += eps; down[f] -= eps
+        pairs.append({'feature': int(f), 'score': float(total[f]), 'central_difference': float((logp(up) - logp(down)) / (2 * eps))})
+    rec = {'record': 'check', 'cases_tried': tried, 'runs': m, 'rows': R, 'draws': ND, 'gpu_credit_vs_cpu': {'largest_difference': float(np.abs(gpu - cpu).max()), 'largest': float(np.abs(cpu).max())},
+           'score_vs_central_difference': pairs, 'fused_codes_vs_quant_rows': json.loads(ffi.string(buf).decode())}
+    if graph:
+        P = ffi.new('int *'); lib.route_net_theta(net, P); P = P[0]
+        wref, gref = np.zeros((R, loop.FS), np.float32), np.zeros(3 * P, np.float32)
+        lib.route_net_reference(net, B.p, m, K, R, ffi.from_buffer('float[]', wref, require_writable=True), ffi.from_buffer('float[]', gref, require_writable=True))
+        gint = np.frombuffer(ffi.buffer(lib.route_net_grads(net), 3 * P * 4), np.float32).reshape(3, P); gref = gref.reshape(3, P)
+        rec['w_relative_error'] = float(np.linalg.norm(B.wcur[:R] - wref) / max(np.linalg.norm(wref), 1e-30))
+        rec['gradient_cosine_by_task'] = [float(gint[t] @ gref[t] / max(np.linalg.norm(gint[t]) * np.linalg.norm(gref[t]), 1e-30)) for t in range(3)]
+    emit(rec)
+    lib.route_sims_free(ro.sims); lib.route_net_free(net)
+
+
+def bench(cfg, lib):
+    """one forward and one learning step of the training's sizes, kernel by kernel on the GPU clock"""
+    K, cap = cfg['capacity']['refreshes'], cfg['capacity']
+    measured, dist = one_case(cfg, lib)
+    groups = cap['forward_rows'] // loop.CX // 4
+    actor = network(cfg, lib, groups * 2, 1, groups * 2 * loop.CX); learner = network(cfg, lib, cap['learn_runs'], K, cap['forward_rows'])
+    ro = loop.Rollouts(lib, actor, groups, K); ro.begin(np.arange(groups), dist.draw(groups)[0])
+    out = ffi.new('char[]', 1 << 22); rec = {'record': 'bench'}
+    ro.tick(0); ro.tick(1); ro.F[0].wait()
+    lib.route_net_profile(actor, 1, ffi.NULL, 0); ro.tick(0); ro.F[0].wait(); lib.route_net_profile(actor, 0, out, 1 << 22)
+    rec['forward'] = {'runs': int(len(ro.pend[0])), 'kernels': json.loads(ffi.string(out).decode())}
+    while not len(ro.ready()):
+        ro.tick(0); ro.tick(1)
+    B = loop.Batch(lib, learner, cap['learn_runs'], K, cap['forward_rows'])
+    _, m, R, ND, scale = loop.load(lib, ro, ro.ready(), B)
+    lib.route_net_profile(learner, 1, ffi.NULL, 0); lib.route_net_step(learner, B.p, m, K, R, ND, scale, 0.0, 1); B.wait(); lib.route_net_profile(learner, 0, out, 1 << 22)
+    rec['step'] = {'runs': m, 'rows': R, 'draws': ND, 'kernels': json.loads(ffi.string(out).decode())}
+    emit(rec)
 
 
 def xbench(cfg, lib, n):
-    t = open_trainer(cfg, lib, steps=0)
-    if n == 0:
-        lib.route_trainer_close(t); emit({'record': 'xbench', 'rank': cfg['run']['rank'], 'rounds': 0, 'declared_and_closed': True}); return
-    s = np.zeros(n); wrong = ffi.new('long *')
-    ok = lib.route_trainer_xbench(t, n, ffi.from_buffer('double[]', s, require_writable=True), wrong) == 0
-    emit({'record': 'xbench', 'rank': cfg['run']['rank'], 'rounds': n, 'ok': ok, 'wrong': int(wrong[0]),
-          'ms': {'median': float(np.median(s)) * 1e3, 'p90': float(np.quantile(s, 0.9)) * 1e3, 'max': float(s.max()) * 1e3}})
-    lib.route_trainer_close(t)
+    """the exchange alone: n sums of known values through the mesh (0: joined and closed, a dead run's programs flushed)"""
+    r = cfg['run']
+    net = network(cfg, lib, 4, 1, loop.CX)
+    if lib.route_net_join(net, r['rank'], r['world'], r['mesh_id'].encode()) != 0:
+        emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(lib.route_exchange_failure()).decode()}); sys.exit(1)
+    P = ffi.new('int *'); lib.route_net_theta(net, P); P = 3 * P[0]
+    g = np.frombuffer(ffi.buffer(lib.route_net_grads(net), P * 4), np.float32)
+    seconds, wrong = [], 0
+    for k in range(n):
+        g[:] = r['rank'] + 1 + k % 5 + np.arange(P) % 7
+        t0 = time.perf_counter(); lib.route_net_exchange(net); lib.route_net_grads(net); seconds.append(time.perf_counter() - t0)
+        wrong += int((g != r['world'] * (r['world'] + 1) / 2 + r['world'] * (k % 5 + np.arange(P) % 7)).sum())
+    lib.route_exchange_close()
+    s = np.array(seconds) if n else np.zeros(1)
+    emit({'record': 'xbench', 'rank': r['rank'], 'rounds': n, 'floats': P, 'wrong': wrong, 'ms': {'median': float(np.median(s)) * 1e3, 'max': float(s.max()) * 1e3}})
 
 
 def stat(files, interval, samples):
@@ -283,10 +338,11 @@ def main(argv):
         from . import cluster
         cluster.main(cfg, rest[1:], sets); return
     lib = native.load(cfg['run']['library'])
+    lib.route_argmax = 1 if cfg['run']['argmax'] else 0
     if cmd == 'train':
         train(cfg, lib)
     elif cmd == 'evaluate':
-        t = open_trainer(cfg, lib, steps=0); evaluation(cfg, lib, t, fabric.load(cfg['run']['fabric']), cfg['run']['theta_in'] or 'initial'); lib.route_trainer_close(t)
+        evaluation(cfg, lib, network(cfg, lib, 4, 1, loop.CX), fabric.load(cfg['run']['fabric']), cfg['run']['theta_in'] or 'initial')
     elif cmd == 'simcheck':
         simcheck(cfg, lib)
     elif cmd == 'cases':
@@ -296,9 +352,9 @@ def main(argv):
     elif cmd == 'deploy':
         deploy(cfg, lib)
     elif cmd == 'check':
-        report_call(cfg, lib, 'check', lib.route_trainer_check, 1e-3, 1 if '--graph' in rest else 0)
+        check(cfg, lib, '--graph' in rest)
     elif cmd == 'bench':
-        report_call(cfg, lib, 'bench', lib.route_trainer_bench)
+        bench(cfg, lib)
     elif cmd == 'xbench':
         xbench(cfg, lib, int(rest[1]))
     else:

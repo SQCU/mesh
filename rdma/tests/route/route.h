@@ -24,6 +24,7 @@
 #ifndef ROUTE_H
 #define ROUTE_H
 #include "telemetry.h"
+#include "split.h"
 
 enum {
   ROUTE_N = 6,                    /* nodes */
@@ -117,18 +118,12 @@ int route_sim_decide(struct route_sim *x, struct route_decision *d, float *token
 /* the policy's answer for the refresh just returned ([contexts][FS]; NULL outside mode 0) */
 void route_sim_answer(struct route_sim *x, const float *w);
 void route_sim_costs(const struct route_sim *x, struct route_costs *c);
-/* after the run: refresh `point`'s dw ([TASKS][contexts][FS], the throughput channel at unit advantage, the caller
-   scaling it), and the log-likelihood of the draws from its table */
-void route_sim_credit(struct route_sim *x, int point, float *dw, double *loglik);
+/* a draw's log-probability under w (its context's) and its score psi(token) - E psi into score [FS] (split.h's table;
+   the GPU's credit computes the same, net.metal credit_draws) */
+float route_draw_score(const struct route_draw *d, const float *w, float *score);
 int route_sim_points(const struct route_sim *x);
 int route_sim_contexts(const struct route_sim *x);
 float *route_sim_w(struct route_sim *x, int point);   /* refresh `point`'s stored w, which the credit reads */
-/* A draw as credit reads it (the GPU's credit kernels, net.metal): its table's quantities at the draw (each owed
-   destination's lanes' arrival estimates and validity), its group's mask, S, the out-degree and the table's size, the
-   drawn token, its learning row (set by the caller), the stream's unit, and its latency and queueing advantages (each
-   the piece against the other pieces of its flow posted at the same refresh, over the window's posted pieces). 160 bytes,
-   no padding: net.metal declares the same. */
-struct route_draw { float arrive[ROUTE_N][ROUTE_DEG]; uint32_t valid, mask, S, token, deg, ntok, row; float unit, a1, a2; };
 /* refresh `point`'s draws: route_sim_draw_count records; route_sim_draws writes them ordered by context (each context's
    in its groups' order, each group's in its draws'), ctx[i] the i-th distinct context (ascending) and first[i] its first
    record (first[n] the count); returns n, the distinct contexts. A record's row is its context's index i. */
@@ -140,11 +135,11 @@ void route_sim_counts(const struct route_sim *x, uint64_t out[4]);   /* events, 
 int route_contexts(const struct route_stream *s, const struct route_topology *t, int *pattern, int *node, uint32_t *owed);
 void route_topology_make(const struct route_fabric *f, const struct route_stream *s, struct route_topology *t);
 /* A split drawn from context (v, S)'s table (w its policy vector), masked to the lanes that leave `visited` and reach
-   their share without coming back; u in [0, 1). Returns the token; the table is built into `cdf` (route_tokens(t, v, S)
-   doubles). */
+   their share without coming back; u in [0, 1). Returns the token; the table's logits are built into `logits` (route_tokens(t, v, S)
+   floats). */
 int route_tokens(const struct route_topology *t, int v, uint32_t S);
 uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
-                     const struct route_live *live, const float *w, double u, double *cdf);
+                     const struct route_live *live, const float *w, double u, float *logits);
 extern int route_argmax;   /* sim.c: set, every draw is its table's most probable allowed split */
 uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
 
@@ -220,65 +215,23 @@ static inline void route_context_token(const struct route_stream *s, const struc
   o[43] = (float)(__builtin_log(1 + st->pending[j] / out / u));   /* the burst waiting to post, as time on the source's lanes */
   o[44] = (float)most; o[45] = 1; o[46] = 1; o[47] = (float)(__builtin_log(1 + st->demand[j] / ROUTE_PAGE) / 8);
 }
-/* a draw's per-(destination, out-lane) quantities, made once: whether the lane leads to the destination without coming
-   back to v, and the destination's arrival through it (v's lane at the draw's instant, then the refresh's cost-to-go).
-   Every split's features are these combined. */
-struct route_pre { double arrive[ROUTE_N][ROUTE_DEG]; uint8_t valid[ROUTE_N][ROUTE_DEG]; };
-static inline void route_pre_make(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
-                                  const struct route_live *live, struct route_pre *pre) {
+/* a draw's record (split.h): each (destination, out-lane)'s arrival through the lane (v's lane at the draw's instant,
+   `live`, then the refresh's cost-to-go) and whether it reaches the destination without coming back to v; the allowed
+   lanes `mask`; made once, at the draw, and read by every split of it, the sampler's and the credit's */
+static inline void route_draw_make(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
+                                   const struct route_live *live, uint32_t mask, struct route_draw *r) {
+  for (int i = 0; i < ROUTE_N * ROUTE_DEG; i++) r->arrive[i] = 0;
+  r->valid = 0; r->mask = mask; r->S = S; r->token = 0; r->deg = (uint32_t)t->deg[v]; r->ntok = (uint32_t)route_tokens(t, v, S);
+  r->row = 0; r->unit = (float)s->unit; r->a1 = 0; r->a2 = 0;
   for (int d = 0; d < ROUTE_N; d++) {
     if (!(S >> d & 1)) continue;
     for (int k = 0; k < t->deg[v]; k++) {
       const int l = t->out[v][k], h = s->f.to[l];
       double g = h == d ? 0 : st->togo[h][d]; if (g > 1e3 * s->unit) g = 1e3 * s->unit;
-      pre->valid[d][k] = (uint8_t)(h == d || route_reaches(t, h, 1u << v, 1u << d));
-      pre->arrive[d][k] = live->wait[k] + route_send1(s, l) * live->dup[k] + s->f.latency[l] + g;
+      if (h == d || route_reaches(t, h, 1u << v, 1u << d)) r->valid |= 1u << (ROUTE_DEG * d + k);
+      r->arrive[ROUTE_DEG * d + k] = (float)(live->wait[k] + route_send1(s, l) * live->dup[k] + s->f.latency[l] + g);
     }
   }
-}
-/* split token `tok` at (v, S) from its draw's quantities: its features (phi, if given) and w . phi; returns whether every
-   destination's lane is valid */
-static inline int route_split_pre(const struct route_pre *pre, int deg, double unit, uint32_t S, uint32_t tok, const float *w, double *dot, float *phi) {
-  int valid = 1, cnt = 0; uint32_t used = 0; double most = 0, sum = 0, a = 0;
-  if (phi) for (int f = 0; f < ROUTE_FS; f++) phi[f] = 0;
-  for (int d = 0; d < ROUTE_N; d++) {
-    if (!(S >> d & 1)) continue;
-    const int k = (int)(tok % (uint32_t)deg); tok /= (uint32_t)deg;
-    valid = valid && pre->valid[d][k];
-    const double arrive = pre->arrive[d][k];
-    if (arrive > most) most = arrive;
-    sum += arrive; cnt++; used |= 1u << k;
-    a += w ? w[d * ROUTE_DEG + k] : 0;
-    if (phi) phi[d * ROUTE_DEG + k] = 1;
-  }
-  const double f35 = most / unit, f36 = sum / (cnt ? cnt : 1) / unit, f37 = (double)__builtin_popcount(used) / (cnt ? cnt : 1);
-  for (int k = 0; k < ROUTE_DEG; k++) if (used >> k & 1) { if (w) a += w[30 + k]; if (phi) phi[30 + k] = 1; }
-  if (w) a += w[35] * f35 + w[36] * f36 + w[37] * f37;
-  if (phi) { phi[35] = (float)f35; phi[36] = (float)f36; phi[37] = (float)f37; }
-  if (dot) *dot = a;
-  return valid;
-}
-/* split token `tok` at (v, S): its features (v's own lanes at the draw's instant, `live`; beyond them the refresh's
-   cost-to-go); returns whether every destination's lane leads to it without coming back to v */
-static inline int route_split_features(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
-                                       uint32_t tok, const struct route_live *live, float *phi) {
-  const int deg = t->deg[v]; const double u = s->unit;
-  for (int f = 0; f < ROUTE_FS; f++) phi[f] = 0;
-  int valid = 1, cnt = 0; uint32_t used = 0; double most = 0, sum = 0;
-  for (int d = 0; d < ROUTE_N; d++) {
-    if (!(S >> d & 1)) continue;
-    const int k = (int)(tok % (uint32_t)deg); tok /= (uint32_t)deg;
-    const int l = t->out[v][k], h = s->f.to[l];
-    valid = valid && (h == d || route_reaches(t, h, 1u << v, 1u << d));
-    phi[d * ROUTE_DEG + k] = 1; used |= 1u << k;
-    double g = h == d ? 0 : st->togo[h][d]; if (g > 1e3 * u) g = 1e3 * u;
-    const double arrive = live->wait[k] + route_send1(s, l) * live->dup[k] + s->f.latency[l] + g;
-    if (arrive > most) most = arrive;
-    sum += arrive; cnt++;
-  }
-  for (int k = 0; k < ROUTE_DEG; k++) if (used >> k & 1) phi[30 + k] = 1;
-  phi[35] = (float)(most / u); phi[36] = (float)(sum / (cnt ? cnt : 1) / u); phi[37] = (float)__builtin_popcount(used) / (cnt ? cnt : 1);
-  return valid;
 }
 #endif
 #endif

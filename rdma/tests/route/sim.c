@@ -120,21 +120,6 @@ int route_contexts(const struct route_stream *s, const struct route_topology *t,
 }
 
 /* ---- tables and draws ---- */
-static void build_table(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, const struct route_live *live,
-                        const float *w, double *cdf) {
-  const int n = route_tokens(t, v, S), deg = t->deg[v]; double most = -INFINITY;
-  struct route_pre pre; route_pre_make(s, st, t, v, S, live, &pre);
-  for (int k = 0; k < n; k++) {
-    double a;
-    const int valid = route_split_pre(&pre, deg, s->unit, S, (uint32_t)k, w, &a, NULL);
-    cdf[k] = valid ? ROUTE_CLIP * tanh(a / sqrt((double)ROUTE_FS)) : -INFINITY;
-    if (cdf[k] > most) most = cdf[k];
-  }
-  double sum = 0, acc = 0;
-  for (int k = 0; k < n; k++) sum += isfinite(cdf[k]) ? exp(cdf[k] - most) : 0;
-  for (int k = 0; k < n; k++) { acc += isfinite(cdf[k]) ? exp(cdf[k] - most) / sum : 0; cdf[k] = acc; }
-  cdf[n - 1] = 1;
-}
 uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited) {
   const uint32_t avoid = visited | 1u << v; uint32_t mask = 0;
   for (int d = 0; d < ROUTE_N; d++) {
@@ -146,41 +131,48 @@ uint32_t route_allowed(const struct route_stream *s, const struct route_topology
   }
   return mask;
 }
-static int fits(uint32_t tok, uint32_t S, uint32_t mask, int deg) {
-  for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) { if (!(mask >> (ROUTE_DEG * d + (int)(tok % (uint32_t)deg)) & 1)) return 0; tok /= (uint32_t)deg; }
-  return 1;
-}
 int route_argmax;   /* route.h: draws take the table's most probable allowed split (a deterministic trajectory, for comparing runs) */
-static uint32_t sample(const double *cdf, int n, uint32_t S, uint32_t mask, int deg, uint32_t seed) {   /* the masked table, exactly */
-  if (route_argmax) {
-    double best = -1; uint32_t tok = 0;
-    for (int q = 0; q < n; q++) if (fits((uint32_t)q, S, mask, deg)) { const double p = cdf[q] - (q ? cdf[q - 1] : 0); if (p > best) { best = p; tok = (uint32_t)q; } }
-    return tok;
+/* a draw from its table: the softmax of its valid, allowed splits' logits (written to lg, ntok floats), inverse CDF at u;
+   with route_argmax the most probable. No split in the table: split 0 */
+static uint32_t draw_split(const struct route_draw *d, const float *w, double u, float *lg) {
+  float most = -INFINITY; uint32_t best = 0;
+  for (uint32_t k = 0; k < d->ntok; k++) {
+    const struct split sp = split_of(d, k);
+    lg[k] = sp.ok ? split_logit(split_tanh(split_dot(&sp, w))) : -INFINITY;
+    if (lg[k] > most) { most = lg[k]; best = k; }
   }
-  for (uint32_t attempt = 0; attempt < 64; attempt++) {
-    const double u = unit01(seed ^ attempt * 0x9e3779b1u);
-    int lo = 0, hi = n - 1;
-    while (lo < hi) { const int mid = (lo + hi) / 2; if (cdf[mid] > u) hi = mid; else lo = mid + 1; }
-    if (fits((uint32_t)lo, S, mask, deg)) return (uint32_t)lo;
-  }
-  double total = 0;
-  for (int q = 0; q < n; q++) if (fits((uint32_t)q, S, mask, deg)) total += cdf[q] - (q ? cdf[q - 1] : 0);
-  const double u = unit01(seed ^ 0x27d4eb2du) * total; double acc = 0; uint32_t tok = 0;
-  for (int q = 0; q < n; q++) if (fits((uint32_t)q, S, mask, deg)) { tok = (uint32_t)q; acc += cdf[q] - (q ? cdf[q - 1] : 0); if (acc > u) break; }
-  return tok;
+  if (route_argmax || most == -INFINITY) return best;
+  double total = 0; for (uint32_t k = 0; k < d->ntok; k++) total += lg[k] > -INFINITY ? exp(lg[k] - most) : 0;
+  const double at = u * total; double acc = 0;
+  for (uint32_t k = 0; k < d->ntok; k++) if (lg[k] > -INFINITY) { acc += exp(lg[k] - most); if (acc > at) return k; }
+  return best;
 }
 uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
-                     const struct route_live *live, const float *w, double u, double *cdf) {
-  build_table(s, st, t, v, S, live, w, cdf);
-  return sample(cdf, route_tokens(t, v, S), S, route_allowed(s, t, v, S, visited), t->deg[v], (uint32_t)(u * 4294967296.0));
+                     const struct route_live *live, const float *w, double u, float *logits) {
+  struct route_draw d; route_draw_make(s, st, t, v, S, live, route_allowed(s, t, v, S, visited), &d);
+  return draw_split(&d, w, u, logits);
+}
+float route_draw_score(const struct route_draw *d, const float *w, float *score) {
+  struct split_lse a; split_lse_init(&a);
+  float lgtok = -INFINITY;
+  for (int f = 0; f < ROUTE_FS; f++) score[f] = 0;
+  for (uint32_t k = 0; k < d->ntok; k++) {
+    const struct split sp = split_of(d, k);
+    if (!sp.ok) continue;
+    const float th = split_tanh(split_dot(&sp, w)), lg = split_logit(th), sl = split_slope(th);
+    if (k == d->token) { lgtok = lg; split_add(&sp, sl, score); }
+    split_lse_add(&a, lg, sl, &sp);
+  }
+  for (int f = 0; f < ROUTE_FS; f++) score[f] -= a.e[f] / a.s;
+  return lgtok - (a.m + logf(a.s));
 }
 
 /* ---- one run ---- */
 enum { EV_ARRIVE, EV_POST, EV_OP, EV_ACTIVATE, EV_BURST };
 struct event { double t; int type, a; uint32_t node, owed, visited; };
 struct flow { int op, pattern, src, np, base, head, tail, phase2, idle; uint32_t dest; uint32_t delivered[ROUTE_N]; };
-struct draw { uint32_t token, piece; struct route_live live; };
-struct group { uint32_t point, context, mask, count, room; struct draw *draws; };
+struct draw { struct route_draw r; uint32_t context, piece; };
+struct drawlog { struct draw *d; uint32_t count, room; };   /* a refresh's draws, in the order made */
 struct route_sim {
   struct route_stream s; struct route_window win; struct route_topology t;
   int mode, nc, point, active, stopped; double tend;
@@ -195,8 +187,8 @@ struct route_sim {
   double opend[ROUTE_OPS]; int opleft[ROUTE_OPS], opstarted[ROUTE_OPS];
   struct route_state state[ROUTE_POINTS];
   float *w;                                           /* [POINTS][CONTEXTS][FS], refresh k at k % POINTS */
-  double cdf[3125];                                  /* a draw's table */
-  struct group *groups; uint32_t ngroups, groupsroom, *hash, hashroom;
+  float logits[3125];                                 /* a draw's table */
+  struct drawlog log[ROUTE_POINTS];
   uint64_t count[4];
   double lastarrival;                                 /* the latest delivery of a piece posted in the window */
   struct { int f, i; double t; } *burst; int bursts, burstat, burstroom;   /* the policy's burst posts, in release order */
@@ -227,13 +219,12 @@ struct route_sim *route_sim_new(void) {
   if (!x) abort();
   x->w = calloc((size_t)ROUTE_POINTS * ROUTE_CONTEXTS * ROUTE_FS, sizeof(float));
   x->partial = calloc((size_t)ROUTE_OPS * ROUTE_N * ROUTE_PAGE_PIECES, sizeof(int));
-  x->hashroom = 1u << 14; x->hash = calloc(x->hashroom, sizeof(uint32_t));
-  if (!x->w || !x->partial || !x->hash) abort();
+  if (!x->w || !x->partial) abort();
   return x;
 }
 void route_sim_free(struct route_sim *x) {
-  for (uint32_t g = 0; g < x->groupsroom; g++) free(x->groups[g].draws);
-  free(x->groups); free(x->hash); free(x->heap); free(x->w); free(x->partial); free(x->flows); free(x->ready);
+  for (int k = 0; k < ROUTE_POINTS; k++) free(x->log[k].d);
+  free(x->heap); free(x->w); free(x->partial); free(x->flows); free(x->ready);
   free(x->bytes); free(x->release); free(x->latency); free(x->queued); free(x->flowof); free(x->postpoint); free(x->burst); free(x);
 }
 int route_sim_points(const struct route_sim *x) { return x->point + 1; }
@@ -327,34 +318,10 @@ static void op_start(struct route_sim *x, int o, double t) {   /* a collective's
   }
 }
 
-static void log_draw(struct route_sim *x, uint32_t c, uint32_t mask, uint32_t token, uint32_t piece, const struct route_live *live) {
-  const uint64_t key = (uint64_t)x->active << 40 | (uint64_t)c << 30 | mask;
-  if (2 * (x->ngroups + 1) > x->hashroom) {
-    free(x->hash); x->hashroom *= 2; x->hash = calloc(x->hashroom, sizeof(uint32_t)); if (!x->hash) abort();
-    for (uint32_t g = 0; g < x->ngroups; g++) {
-      const uint64_t k = (uint64_t)x->groups[g].point << 40 | (uint64_t)x->groups[g].context << 30 | x->groups[g].mask;
-      uint32_t h = mix((uint32_t)k ^ mix((uint32_t)(k >> 32))) & (x->hashroom - 1);
-      while (x->hash[h]) h = (h + 1) & (x->hashroom - 1);
-      x->hash[h] = g + 1;
-    }
-  }
-  uint32_t h = mix((uint32_t)key ^ mix((uint32_t)(key >> 32))) & (x->hashroom - 1), g;
-  for (;;) {
-    const uint32_t e = x->hash[h];
-    if (!e) {
-      g = x->ngroups++;
-      if (g == x->groupsroom) { x->groupsroom = x->groupsroom ? 2 * x->groupsroom : 256; x->groups = realloc(x->groups, x->groupsroom * sizeof *x->groups); if (!x->groups) abort(); for (uint32_t k = g; k < x->groupsroom; k++) { x->groups[k].draws = NULL; x->groups[k].room = 0; } }
-      x->groups[g].point = (uint32_t)x->active; x->groups[g].context = c; x->groups[g].mask = mask; x->groups[g].count = 0;
-      x->hash[h] = g + 1;
-      break;
-    }
-    const struct group *q = &x->groups[e - 1];
-    if (q->point == (uint32_t)x->active && q->context == c && q->mask == mask) { g = e - 1; break; }
-    h = (h + 1) & (x->hashroom - 1);
-  }
-  struct group *q = &x->groups[g];
-  if (q->count == q->room) { q->room = q->room ? 2 * q->room : 16; q->draws = realloc(q->draws, q->room * sizeof *q->draws); if (!q->draws) abort(); }
-  q->draws[q->count++] = (struct draw){token, piece, *live};
+static void log_draw(struct route_sim *x, uint32_t c, uint32_t piece, const struct route_draw *r) {
+  struct drawlog *g = &x->log[x->active % ROUTE_POINTS];
+  if (g->count == g->room) { g->room = g->room ? 2 * g->room : 256; g->d = realloc(g->d, g->room * sizeof *g->d); if (!g->d) abort(); }
+  g->d[g->count++] = (struct draw){*r, c, piece};
 }
 
 /* piece p at node v at time t, owing S, its path through `visited`: its split, drawn and sent. Returns the earliest
@@ -388,10 +355,10 @@ static double split_send(struct route_sim *x, double t, int v, uint32_t S, uint3
       tok += (uint32_t)k * place; place *= (uint32_t)deg;
     }
   } else {   /* a draw from the active table */
-    const int c = x->ctx[j][v][S], n = route_tokens(&x->t, v, S);
-    build_table(&x->s, &x->state[x->active % ROUTE_POINTS], &x->t, v, S, &live, route_sim_w(x, x->active) + (size_t)c * ROUTE_FS, x->cdf);
-    tok = sample(x->cdf, n, S, mask, deg, seed);
-    log_draw(x, (uint32_t)c, mask, tok, (uint32_t)p, &live); x->count[1]++; x->count[2] += (uint64_t)n;
+    const int c = x->ctx[j][v][S];
+    struct route_draw r; route_draw_make(&x->s, &x->state[x->active % ROUTE_POINTS], &x->t, v, S, &live, mask, &r);
+    tok = r.token = draw_split(&r, route_sim_w(x, x->active) + (size_t)c * ROUTE_FS, unit01(seed), x->logits);
+    log_draw(x, (uint32_t)c, (uint32_t)p, &r); x->count[1]++; x->count[2] += r.ntok;
   }
   uint32_t share[ROUTE_DEG] = {0}, y = tok;
   for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) { share[y % (uint32_t)deg] |= 1u << d; y /= (uint32_t)deg; }
@@ -463,8 +430,7 @@ void route_sim_begin(struct route_sim *x, const struct route_stream *s, const st
   x->nc = route_contexts(s, &x->t, pj, pv, pS);
   if (x->nc < 0) abort();
   for (int c = 0; c < x->nc; c++) { x->cj[c] = pj[c]; x->cv[c] = pv[c]; x->cS[c] = pS[c]; x->ctx[pj[c]][pv[c]][pS[c]] = c; }
-  for (uint32_t g = 0; g < x->ngroups; g++) x->groups[g].count = 0;
-  x->ngroups = 0; memset(x->hash, 0, x->hashroom * sizeof(uint32_t));
+  for (int k = 0; k < ROUTE_POINTS; k++) x->log[k].count = 0;
   x->events = 0; x->nflows = 0; x->npieces = 0; x->point = -1; x->active = -1; memset(x->count, 0, sizeof x->count); x->lastarrival = 0; x->bursts = x->burstat = 0;
   x->tend = w->points > 0 ? w->t0 + w->points * w->dt : INFINITY; x->stopped = w->points > 0 && mode == 0;
   for (int l = 0; l < ROUTE_L; l++) for (int c = 0; c < ROUTE_CABLES; c++) x->free_at[l][c] = l < s->f.lanes ? s->background[l] / s->f.rate[l] : 0;
@@ -545,78 +511,11 @@ void route_sim_costs(const struct route_sim *x, struct route_costs *c) {
   if (c->pieces) { c->latency /= c->pieces; c->queueing /= c->pieces; }
 }
 
-/* refresh `point`'s credit: for each of its groups, E psi over the masked table once, then each draw's advantage times
-   (psi - E psi), psi = CLIP (1 - tanh^2) phi / sqrt(FS). Advantages: throughput 1 (the caller scales); latency and
-   queueing the piece's against the mean of the other pieces of its flow posted under the same refresh, over the pieces */
-void route_sim_credit(struct route_sim *x, int point, float *dw, double *loglik) {
-  const int nc = x->nc;
-  memset(dw, 0, (size_t)ROUTE_TASKS * nc * ROUTE_FS * sizeof(float));
-  *loglik = 0;
-  int n = 0, top = -1;
-  for (int p = 0; p < x->npieces; p++) { n += x->postpoint[p] >= 0; if (x->postpoint[p] > top) top = x->postpoint[p]; }
-  if (!n) n = 1;
-  /* each (flow, refresh posted at)'s latency and queueing sums and count (posted before any refresh, -1: a cohort of its
-     own), a draw's leave-one-out baseline in O(1) */
-  const int width = top + 2;
-  double *sums = width > 0 ? calloc((size_t)x->nflows * width * 3, sizeof(double)) : 0;
-  if (width > 0 && !sums) abort();
-  for (int p = 0; p < x->npieces; p++) {
-    const int q = x->postpoint[p];
-    if (q < -1) continue;
-    double *e = sums + ((size_t)x->flowof[p] * width + q + 1) * 3;
-    e[0] += x->latency[p]; e[1] += x->queued[p]; e[2] += 1;
-  }
-  const struct route_state *st = &x->state[point % ROUTE_POINTS];
-  const float *wp = route_sim_w(x, point);
-  const double root = sqrt((double)ROUTE_FS);
-  for (uint32_t g = 0; g < x->ngroups; g++) {
-    const struct group *q = &x->groups[g];
-    if (q->point != (uint32_t)point || !q->count) continue;
-    const int c = (int)q->context, v = x->cv[c], deg = x->t.deg[v], ntok = route_tokens(&x->t, v, x->cS[c]); const uint32_t S = x->cS[c];
-    const float *w = wp + (size_t)c * ROUTE_FS;
-    for (uint32_t m = 0; m < q->count; m++) {   /* each draw: its own table (its lanes then), masked as it was */
-      const uint32_t tok = q->draws[m].token; const int p = (int)q->draws[m].piece; const struct route_live *live = &q->draws[m].live;
-      struct route_pre pre; route_pre_make(&x->s, st, &x->t, v, S, live, &pre);
-      /* one pass over the table: the log-sum-exp of its allowed logits (online: the sums rescaled as the maximum
-         grows), E[psi] alongside, psi of the drawn token; psi = d log p / d logit's input: CLIP (1 - tanh^2) phi / sqrt(FS) */
-      double most = -INFINITY, sum = 0, epsi[ROUTE_FS] = {0}, psi[ROUTE_FS] = {0}, lgtok = -INFINITY;
-      for (int k = 0; k < ntok; k++) {
-        float phi[ROUTE_FS]; double a;
-        const int ok = route_split_pre(&pre, deg, x->s.unit, S, (uint32_t)k, w, &a, phi) && fits((uint32_t)k, S, q->mask, deg);
-        if (!ok && k != (int)tok) continue;
-        const double th = tanh(a / root), lg = ROUTE_CLIP * th, d = ROUTE_CLIP * (1 - th * th) / root;
-        if (k == (int)tok) { lgtok = ok ? lg : -INFINITY; for (int i = 0; i < ROUTE_FS; i++) psi[i] = d * phi[i]; }
-        if (!ok) continue;
-        if (lg > most) { const double r = sum > 0 ? exp(most - lg) : 0; sum *= r; for (int i = 0; i < ROUTE_FS; i++) epsi[i] *= r; most = lg; }
-        const double e = exp(lg - most);
-        sum += e; for (int i = 0; i < ROUTE_FS; i++) epsi[i] += e * d * phi[i];
-      }
-      for (int i = 0; i < ROUTE_FS; i++) epsi[i] /= sum;
-      const double lse = most + log(sum);
-      double A[ROUTE_TASKS] = {1, 0, 0};
-      const int q0 = x->postpoint[p];
-      if (q0 >= -1) {
-        const double *e = sums + ((size_t)x->flowof[p] * width + q0 + 1) * 3;
-        if (e[2] > 1) {
-          const double fl0 = x->s.op[x->flows[x->flowof[p]].op].floor;
-          A[1] = (x->latency[p] - (e[0] - x->latency[p]) / (e[2] - 1)) / n;
-          A[2] = (x->queued[p] - (e[1] - x->queued[p]) / (e[2] - 1)) / fl0 / n;
-        }
-      }
-      for (int t = 0; t < ROUTE_TASKS; t++) for (int k = 0; k < ROUTE_FS; k++) dw[((size_t)t * nc + c) * ROUTE_FS + k] += (float)(A[t] * (psi[k] - epsi[k]));
-      *loglik += lgtok - lse;
-    }
-  }
-  free(sums);
-}
-
 int route_sim_draw_count(const struct route_sim *x, int point) {
-  int n = 0;
-  for (uint32_t g = 0; g < x->ngroups; g++) if (x->groups[g].point == (uint32_t)point) n += (int)x->groups[g].count;
-  return n;
+  return (int)x->log[point % ROUTE_POINTS].count;
 }
-static int by_context(void *x, const void *a, const void *b) {   /* BSD qsort_r: the context first */
-  const struct group *g = x;
+static int by_context(void *x, const void *a, const void *b) {   /* BSD qsort_r: the context, then the order made */
+  const struct draw *g = x;
   const uint32_t ca = g[*(const uint32_t *)a].context, cb = g[*(const uint32_t *)b].context;
   return ca < cb ? -1 : ca > cb ? 1 : (*(const uint32_t *)a < *(const uint32_t *)b ? -1 : 1);
 }
@@ -626,7 +525,8 @@ int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int 
   if (!n) n = 1;
   const int width = top + 2;   /* each (flow, refresh posted at)'s sums, as route_sim_credit's */
   double *sums = calloc((size_t)x->nflows * width * 3 + 1, sizeof(double));
-  uint32_t *order = malloc((x->ngroups + 1) * sizeof(uint32_t));
+  const struct drawlog *g = &x->log[point % ROUTE_POINTS];
+  uint32_t *order = malloc((g->count + 1) * sizeof(uint32_t));
   if (!sums || !order) abort();
   for (int p = 0; p < x->npieces; p++) {
     const int q = x->postpoint[p];
@@ -634,31 +534,22 @@ int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int 
     double *e = sums + ((size_t)x->flowof[p] * width + q + 1) * 3;
     e[0] += x->latency[p]; e[1] += x->queued[p]; e[2] += 1;
   }
-  uint32_t ng = 0;
-  for (uint32_t g = 0; g < x->ngroups; g++) if (x->groups[g].point == (uint32_t)point && x->groups[g].count) order[ng++] = g;
-  qsort_r(order, ng, sizeof *order, x->groups, by_context);
-  const struct route_state *st = &x->state[point % ROUTE_POINTS];
+  for (uint32_t i = 0; i < g->count; i++) order[i] = i;
+  qsort_r(order, g->count, sizeof *order, g->d, by_context);
   int at = 0, rows = 0;
-  for (uint32_t i = 0; i < ng; i++) {
-    const struct group *q = &x->groups[order[i]];
-    const int c = (int)q->context, v = x->cv[c];
+  for (uint32_t i = 0; i < g->count; i++) {
+    const struct draw *d = &g->d[order[i]];
+    const int c = (int)d->context;
     if (!rows || ctx[rows - 1] != c) { ctx[rows] = c; first[rows] = at; rows++; }
-    for (uint32_t m = 0; m < q->count; m++) {
-      const struct draw *d = &q->draws[m];
-      struct route_pre pre; route_pre_make(&x->s, st, &x->t, v, x->cS[c], &d->live, &pre);
-      struct route_draw *r = &out[at++];
-      memset(r, 0, sizeof *r);
-      for (int a = 0; a < ROUTE_N; a++) for (int k = 0; k < ROUTE_DEG; k++) { r->arrive[a][k] = (float)pre.arrive[a][k]; if (pre.valid[a][k]) r->valid |= 1u << (ROUTE_DEG * a + k); }
-      r->mask = q->mask; r->S = x->cS[c]; r->token = d->token; r->deg = (uint32_t)x->t.deg[v]; r->ntok = (uint32_t)route_tokens(&x->t, v, x->cS[c]);
-      r->row = (uint32_t)(rows - 1); r->unit = (float)x->s.unit;
-      const int p = (int)d->piece, q0 = x->postpoint[p];
-      if (q0 >= -1) {
-        const double *e = sums + ((size_t)x->flowof[p] * width + q0 + 1) * 3;
-        if (e[2] > 1) {
-          const double fl0 = x->s.op[x->flows[x->flowof[p]].op].floor;
-          r->a1 = (float)((x->latency[p] - (e[0] - x->latency[p]) / (e[2] - 1)) / n);
-          r->a2 = (float)((x->queued[p] - (e[1] - x->queued[p]) / (e[2] - 1)) / fl0 / n);
-        }
+    struct route_draw *r = &out[at++];
+    *r = d->r; r->row = (uint32_t)(rows - 1);
+    const int p = (int)d->piece, q0 = x->postpoint[p];
+    if (q0 >= -1) {
+      const double *e = sums + ((size_t)x->flowof[p] * width + q0 + 1) * 3;
+      if (e[2] > 1) {
+        const double fl0 = x->s.op[x->flows[x->flowof[p]].op].floor;
+        r->a1 = (float)((x->latency[p] - (e[0] - x->latency[p]) / (e[2] - 1)) / n);
+        r->a2 = (float)((x->queued[p] - (e[1] - x->queued[p]) / (e[2] - 1)) / fl0 / n);
       }
     }
   }

@@ -47,7 +47,7 @@ def _header(name):
 
 ffi = cffi.FFI()
 CONSTANTS = {}
-for _h in ('telemetry.h', 'route.h', 'trainer.h'):
+for _h in ('split.h', 'telemetry.h', 'route.h', 'kernels.h'):
     _d, _ = _header(_h)
     ffi.cdef(_d, override=True)
 for _name, _value in re.findall(r'#define\s+(ROUTE_\w+)\s+(-?\d+\.\d*)', open(os.path.join(ROUTE, 'route.h')).read()):

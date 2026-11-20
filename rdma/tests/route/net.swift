@@ -126,13 +126,14 @@ final class Net {
   }
   let runs: Int, refreshes: Int, laneCap: Int, ctxCap: Int, cap: Int
   // parameters, optimizer state
-  let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer, matsBuf: MTLBuffer, pinRows: MTLBuffer, pinCount: Int
+  let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer, alphaBuf: MTLBuffer, matsBuf: MTLBuffer, pinRows: MTLBuffer, pinCount: Int
   var step = 0, seed: UInt32 = 1
   // each matrix: fp32 W, its forward codes (rows quantized along its columns) and its dgrad codes (columns, along its rows)
   var W: [String: MTLBuffer] = [:], wf: [String: MTLBuffer] = [:], wfs: [String: MTLBuffer] = [:], wb: [String: MTLBuffer] = [:], wbs: [String: MTLBuffer] = [:], dW: [String: MTLBuffer] = [:]
   // activations (fp32), the backward's (tasks stacked), the codes' scratch
   let T: MTLBuffer, X: [MTLBuffer], ZC: [MTLBuffer], H: [MTLBuffer], XM: [MTLBuffer], U: [MTLBuffer], Nn: MTLBuffer, inv: MTLBuffer, nextScratch: MTLBuffer
-  let dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, inj: MTLBuffer, segBuf: MTLBuffer
+  let dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, inj: MTLBuffer
+  var segBuf: MTLBuffer   // the learning batch's segments (its own buffer, set by encodeLearn)
   let cA: Codes, cB: Codes, qx: MTLBuffer, sx: MTLBuffer, qy: MTLBuffer, sy: MTLBuffer, partial: MTLBuffer
   // the call being encoded: one command buffer, its compute encoder (profiling: one encoder a kernel, timestamps at each
   // encoder's start and end, so a kernel's GPU time; the labels "phase kernel")
@@ -186,7 +187,7 @@ final class Net {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
     self.library = lib
-    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_pairs", "copy_floats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
+    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_pairs", "copy_floats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam", "upgrad_weights"] {
       pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
     }
     let laneCap = runs * refreshes * L, cap = laneCap + contexts
@@ -196,7 +197,7 @@ final class Net {
     func b8(_ n: Int) -> MTLBuffer { device.makeBuffer(length: max(16, n), options: .storageModePrivate)! }
     let P = lay.count
     theta = device.makeBuffer(bytes: initial, length: P * 4, options: .storageModeShared)!
-    m = p(P); v = p(P); grads = f(3 * P); gram = f(9)
+    m = p(P); v = p(P); grads = f(3 * P); gram = f(9); alphaBuf = f(4)
     var mats: [UInt32] = [], rows: [UInt32] = []
     for (i, mt) in lay.mats.enumerated() {
       mats += [UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]
@@ -369,37 +370,29 @@ final class Net {
     if R > 0 { product("out", forward: true, M: R, src: xc, flags: 0, out: (w, ident(), FS)) }
   }
   // the same, committed and not waited for: `done` runs when it completes, with its GPU time (s)
-  func forwardAsync(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer, done: @escaping (Double) -> Void) {
+  // a forward, committed (the caller waits on the returned command buffer where it reads w and next)
+  func forwardCommit(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) -> MTLCommandBuffer {
     begin(); phase = "forward"
     encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next, keep: false)
-    e.endEncoding()
-    cb.addCompletedHandler { c in
-      if let err = c.error { fatalError("forward: \(err)") }
-      done(c.gpuEndTime - c.gpuStartTime)
-    }
-    cb.commit()
-  }
-  func forward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) {
-    begin(); phase = "forward"
-    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next, keep: false)
-    finish("forward")
+    e.endEncoding(); cb.commit()
+    return cb
   }
 
   // a learning batch: the forward again, then the three tasks' gradients of sum(w . dw_t) (dw [3][R][FS]) into grads
   // [3][P], and their Gram matrix. seg [B K] (as pairs): each refresh's context rows (contiguous)
   // a learning batch's credit (route.h route_draw records; each row's draws first[row] .. first[row + 1], its behaviour
   // w, its task-0 scale (its run's throughput advantage over the batch), the tasks' common scale)
-  struct Credit { let draws: MTLBuffer, count: Int, first: MTLBuffer, wrows: MTLBuffer, scale0: MTLBuffer, scale: Float }
-  var dwBuf: MTLBuffer? = nil, diffBuf: MTLBuffer? = nil, llBuf: MTLBuffer? = nil
+  struct Credit { let draws: MTLBuffer, count: Int, first: MTLBuffer, wrows: MTLBuffer, scale0: MTLBuffer, scale: Float, ll: MTLBuffer }
+  var dwBuf: MTLBuffer? = nil, diffBuf: MTLBuffer? = nil
   func room(_ b: inout MTLBuffer?, _ bytes: Int, shared: Bool) -> MTLBuffer {   // grown when a batch needs more
     if b == nil || b!.length < bytes { b = device.makeBuffer(length: max(16, bytes), options: shared ? .storageModeShared : .storageModePrivate)! }
     return b!
   }
-  func learn(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, seg: [UInt32], B: Int, K: Int, R: Int, credit c: Credit, w: MTLBuffer) {
-    let dw = room(&dwBuf, 3 * R * FS * 4, shared: true), diff = room(&diffBuf, c.count * FS * 4, shared: false), ll = room(&llBuf, c.count * 4, shared: true)
+  // encoded into the open command buffer (route_net_step's): the gradients into grads [3][P]
+  func encodeLearn(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, seg: MTLBuffer, B: Int, K: Int, R: Int, credit c: Credit, w: MTLBuffer) {
+    let dw = room(&dwBuf, 3 * R * FS * 4, shared: true), diff = room(&diffBuf, c.count * FS * 4, shared: false), ll = c.ll
     let LR = B * K * L, N = LR + R, P = lay.count
-    seg.withUnsafeBytes { memcpy(segBuf.contents(), $0.baseAddress!, $0.count) }
-    begin()
+    segBuf = seg
     phase = "learn forward"
     blit { $0.fill(buffer: self.dXM, range: 0..<(3 * N * D * 4), value: 0); $0.fill(buffer: self.grads, range: 0..<(3 * P * 4), value: 0) }
     encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch, keep: true)
@@ -441,9 +434,6 @@ final class Net {
       set("chain", [(dW[mt.name]!, 0), (theta, 0), (grads, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)], [UInt32(P), mt.bias ? 1 : 0, 3]])
       threads(3 * mt.rows)
     }
-    phase = "back params"
-    set("gram", [(grads, 0), (gram, 0)], [[UInt32(P)]]); e.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
-    finish("learn")
   }
   // a layer's recurrence and gates, backward: dXM [3][N] (its context rows' gradients; its lanes' too if upstreamDX, the
   // local path) -> dZC [3][N] (stored, and its codes into `codes`) -> out = dXM + dZC zh (dX, [3][N]; its codes into
@@ -467,25 +457,28 @@ final class Net {
   }
 
   // ---- the optimizer: UPGrad's weights from the Gram matrix (learn.swift's upgrad), Adam, V back to unit rows, codes ----
-  func apply(rate: Double) -> [Double] {
-    let gp = gram.contents().bindMemory(to: Float.self, capacity: 9)
-    let alpha = upgrad((0..<3).map { a in (0..<3).map { b in Double(gp[3 * a + b]) } })
+  // the optimizer's step, encoded after the learning call (and the exchange): the Gram matrix of grads (the ranks'
+  // summed, `inv` their count's inverse), UPGrad's weights (upgrad.h), Adam, V pinned, the codes rebuilt; nothing read back
+  func encodeApply(rate: Double, inv: Float) {
     step += 1
-    var a = SIMD4<Float>(Float(alpha[0]), Float(alpha[1]), Float(alpha[2]), Float(rate))
-    var c = SIMD4<Float>(Float(1 - pow(0.9, Double(step))), Float(1 - pow(0.999, Double(step))), 0, 0), n = UInt32(lay.count), pc = UInt32(pinCount)
-    begin(); phase = "optimizer"
+    let P = lay.count
+    var r = Float(rate), iv = inv, c = SIMD4<Float>(Float(1 - pow(0.9, Double(step))), Float(1 - pow(0.999, Double(step))), 0, 0), n = UInt32(P), pc = UInt32(pinCount)
+    phase = "optimizer"
+    set("gram", [(grads, 0), (gram, 0)], [[UInt32(P)]]); e.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
+    mark("upgrad")
+    current = pipes["upgrad_weights"]!; e.setComputePipelineState(current!)
+    e.setBuffer(gram, offset: 0, index: 0); e.setBuffer(alphaBuf, offset: 0, index: 1); e.setBytes(&r, length: 4, index: 2); e.setBytes(&iv, length: 4, index: 3)
+    threads(1)
     mark("adam")
     current = pipes["adam"]!; e.setComputePipelineState(current!)
-    for (i, b) in [theta, m, v, grads].enumerated() { e.setBuffer(b, offset: 0, index: i) }
-    e.setBytes(&a, length: 16, index: 4); e.setBytes(&c, length: 16, index: 5); e.setBytes(&n, length: 4, index: 6)
-    threads(lay.count)
+    for (i, b) in [theta, m, v, grads, alphaBuf].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+    e.setBytes(&c, length: 16, index: 5); e.setBytes(&n, length: 4, index: 6)
+    threads(P)
     mark("pin")
     current = pipes["pin"]!; e.setComputePipelineState(current!)
     e.setBuffer(theta, offset: 0, index: 0); e.setBuffer(matsBuf, offset: 0, index: 1); e.setBuffer(pinRows, offset: 0, index: 2); e.setBytes(&pc, length: 4, index: 3)
     threads(pinCount)
     encodeWeights()
-    finish("optimizer")
-    return alpha
   }
   // the weights as stored for deployment (int8mm.h's format): the codes and scales the forward reads, as they are on the
   // GPU (copied out, not computed again), each matrix's bias
@@ -511,11 +504,4 @@ final class Net {
   }
   // after theta was written from the CPU
   func refresh() { begin(); phase = "weights"; encodeWeights(); finish("weights") }
-  // theta from `staging` (shared, P floats), in this network's queue's order (after the forwards already committed),
-  // then the codes rebuilt
-  func refresh(from staging: MTLBuffer) {
-    begin(); phase = "weights"
-    blit { $0.copy(from: staging, sourceOffset: 0, to: self.theta, destinationOffset: 0, size: self.lay.count * 4) }
-    encodeWeights(); finish("weights")
-  }
 }

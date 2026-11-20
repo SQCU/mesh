@@ -37,6 +37,7 @@ int route_exchange_open(int rank, int world, const char *id, size_t n, void *com
   return 0;
 }
 float *route_exchange_buffer(void) { return buf; }
+void *route_exchange_metal(size_t *offset) { *offset = lease.offset; return lease.buffer; }
 /* the step encoded into `commandBuffer` (the caller commits it and waits for it, then calls route_exchange_status) */
 int route_exchange_encode(void *commandBuffer) {
   ncclMeshStream st; memset(&st, 0, sizeof st); st.commandBuffer = commandBuffer;

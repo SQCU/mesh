@@ -42,24 +42,3 @@ final class Learn {
   }
 }
 
-// UPGrad's weights from the Gram matrix G = J J^T: for each task i, u_i = argmin_(u >= e_i) u^T G u (the dual of projecting
-// g_i onto {x : J x >= 0}, whose projection is J^T u_i); the aggregate J^T (sum_i u_i) / 3. A 3-variable box QP, by
-// projected gradient (step 1 / (3 max |G|), a bound on G's largest eigenvalue)
-func upgrad(_ G: [[Double]]) -> [Double] {
-  var top = 0.0
-  for a in 0..<3 { for b in 0..<3 { top = max(top, abs(G[a][b])) } }
-  let step = 1 / max(3 * top, 1e-300)
-  var total: [Double] = [0, 0, 0]
-  for i in 0..<3 {
-    var u: [Double] = [0, 0, 0]; u[i] = 1
-    for _ in 0..<500 {
-      for t in 0..<3 {
-        var gt = 0.0
-        for s in 0..<3 { gt += G[t][s] * u[s] }
-        u[t] = max(u[t] - step * 2 * gt, t == i ? 1 : 0)
-      }
-    }
-    for t in 0..<3 { total[t] += u[t] / 3 }
-  }
-  return total
-}

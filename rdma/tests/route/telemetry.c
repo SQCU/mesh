@@ -25,3 +25,7 @@ int route_tel_open(const char *path, int rank, int world) {
   route_tel = t;
   return 0;
 }
+void route_tel_inc(int k, uint64_t n) { route_tel_add(k, n); }
+void route_tel_put(int k, uint64_t n) { route_tel_set(k, n); }
+void route_tel_top(int k, uint64_t n) { route_tel_max(k, n); }
+void route_tel_reach(int k) { route_tel_phase(k); }
