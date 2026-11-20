@@ -1,7 +1,7 @@
 // The parameters' kernels: the weights' codes from theta, the gradients from the wgrad products' partial sums (the
 // chain rule of W = diag(g) V / |V|), and the optimizer's step (the three gradients' Gram matrix, UPGrad's weights,
 // Adam, V pinned to unit rows) in one threadgroup: theta is 72,872 floats, a few passes of 1,024 threads.
-#include "tile.h"
+#include "sg.h"
 
 // a work item: (matrix, row or column)
 struct Item { uint m, i; };
@@ -18,11 +18,17 @@ kernel void weights_rows(device const float *theta [[buffer(0)]], device int8_t 
   for (uint k = 0; k < 8; k++) { const uint j = 8 * lane + k; v[k] = live && j < m.cols ? theta[m.v + r * m.cols + j] : 0.0f; s = fma(v[k], v[k], s); }
   s = simd_sum(s);
   const float gain = live ? i8_weight_gain(theta[m.g + r], s) : 0.0f;
-  for (uint k = 0; k < 8; k++) { v[k] *= gain; const uint j = 8 * lane + k; if (j < m.np) Wf[wfoff[it.m] + r * m.np + j] = v[k]; }
+  float m0 = 0;
+  for (uint k = 0; k < 8; k++) { v[k] *= gain; const uint j = 8 * lane + k; if (j < m.np) Wf[wfoff[it.m] + r * m.np + j] = v[k]; m0 = max(m0, abs(v[k])); }
+  m0 = simd_max(m0);   // int8mm.h's weight row: one grid, one scale
+  const float gi = i8_grid_inverse(m0);
+  float mx = 0;
+  for (uint k = 0; k < 8; k++) v[k] = i8_grid(v[k], gi);
   i8_fwht64_lanes(v, ushort(lane % 8));
-  const float mx = simd_max(i8_absmax_lanes(v)), inv = i8_inverse(mx);
+  for (uint k = 0; k < 8; k++) mx = max(mx, abs(v[k]));
+  mx = simd_max(mx); const float inv = i8_inverse(mx);
   if (8 * lane < m.kf) *(device uint2 *)(wq + m.wf + r * m.kf + 8 * lane) = i8_pack8(v, inv, 0, 0);
-  if (lane == 0) { wsc[m.wfs + r] = i8_scale(mx); wsc[m.b + r] = live && it.m != M_OUT ? theta[m.g + m.rows + r] : 0.0f; }
+  if (lane == 0) { wsc[m.wfs + r] = i8_scale(mx, m0, 8.0f); wsc[m.b + r] = live && it.m != M_OUT ? theta[m.g + m.rows + r] : 0.0f; }
 }
 // a SIMD group a matrix column (columns padded to 64): its dgrad codes along the rows (padded to 64), one scale
 kernel void weights_cols(device int8_t *wq [[buffer(1)]], device float *wsc [[buffer(2)]], device const float *Wf [[buffer(3)]], constant Net &nw [[buffer(4)]],
@@ -30,11 +36,17 @@ kernel void weights_cols(device int8_t *wq [[buffer(1)]], device float *wsc [[bu
   if (gid / 32 >= n) return;
   const Item it = items[gid / 32]; const MatW m = nw.m[it.m]; const uint col = it.i, lane = gid % 32;
   float v[8];
-  for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; v[k] = r < m.kb ? Wf[wfoff[it.m] + r * m.np + col] : 0.0f; }
+  float m0 = 0;
+  for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; v[k] = r < m.kb ? Wf[wfoff[it.m] + r * m.np + col] : 0.0f; m0 = max(m0, abs(v[k])); }
+  m0 = simd_max(m0);
+  const float gi = i8_grid_inverse(m0);
+  float mx = 0;
+  for (uint k = 0; k < 8; k++) v[k] = i8_grid(v[k], gi);
   i8_fwht64_lanes(v, ushort(lane % 8));
-  const float mx = simd_max(i8_absmax_lanes(v)), inv = i8_inverse(mx);
+  for (uint k = 0; k < 8; k++) mx = max(mx, abs(v[k]));
+  mx = simd_max(mx); const float inv = i8_inverse(mx);
   for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; if (r < m.kb) wq[m.wb + col * m.kb + r] = i8_code(v[k], inv, 0, 0); }
-  if (lane == 0) wsc[m.wbs + col] = i8_scale(mx);
+  if (lane == 0) wsc[m.wbs + col] = i8_scale(mx, m0, 8.0f);
 }
 
 // a SIMD group a (task, matrix, row): dW's row summed over the wgrad product's partial sums [z][3 rows][kf], db over
