@@ -77,6 +77,29 @@ struct Layers {
         gz = g.reshape(g.sigmoid(with: dense(flat, "z\(l)", "bz\(l)"), name: nil), shape: dims([B, L, D]), name: nil)
         gc = g.reshape(g.tanh(with: dense(flat, "h\(l)", "bh\(l)"), name: nil), shape: dims([B, L, D]), name: nil)
       }
+      if !lay.full {
+        // minGRU's recurrence in its parallel form: with a_t = 1 - m_t z_t and b_t = m_t z_t h~_t (a padded lane: a = 1, b = 0),
+        // h_t = exp(C_t) h_0 + sum_(s<=t) exp(C_t - C_s) b_s, C_t = sum_(r<=t) log a_r: a lower-triangular decay matrix a
+        // channel times b, every exponent <= 0
+        let m = g.reshape(mask, shape: dims([B, L, 1]), name: nil)
+        let a = g.subtraction(one, g.multiplication(m, gz!, name: nil), name: nil), b = g.multiplication(g.multiplication(m, gz!, name: nil), gc!, name: nil)
+        var ones = [Float](repeating: 0, count: L * L); for t in 0..<L { for q in 0...t { ones[t * L + q] = 1 } }   // the running sum as a product (MPSGraph has no cumulativeSum gradient)
+        let lower = g.constant(Data(bytes: ones, count: L * L * 4), shape: dims([1, L, L]), dataType: .float32)
+        let C = g.matrixMultiplication(primary: lower, secondary: g.logarithm(with: g.maximum(a, g.constant(1e-30, dataType: .float32), name: nil), name: nil), name: nil)   // [B, L, D]
+        let Ct = g.transposeTensor(C, dimension: 1, withDimension: 2, name: nil)   // [B, D, L]
+        let diff = g.subtraction(g.reshape(Ct, shape: dims([B, D, L, 1]), name: nil), g.reshape(Ct, shape: dims([B, D, 1, L]), name: nil), name: nil)   // C_t - C_s
+        var tri = [Float](repeating: -Float.infinity, count: L * L); for t in 0..<L { for q in 0...t { tri[t * L + q] = 0 } }
+        let causal = g.constant(Data(bytes: tri, count: L * L * 4), shape: dims([1, 1, L, L]), dataType: .float32)
+        let M = g.exponent(with: g.addition(g.minimum(diff, g.constant(0, dataType: .float32), name: nil), causal, name: nil), name: nil)   // [B, D, L, L]
+        let bt = g.reshape(g.transposeTensor(b, dimension: 1, withDimension: 2, name: nil), shape: dims([B, D, L, 1]), name: nil)
+        let hs = g.reshape(g.matrixMultiplication(primary: M, secondary: bt, name: nil), shape: dims([B, D, L]), name: nil)
+        let all = g.addition(g.transposeTensor(hs, dimension: 1, withDimension: 2, name: nil),
+                             g.multiplication(g.exponent(with: C, name: nil), g.reshape(h0[l], shape: dims([B, 1, D]), name: nil), name: nil), name: nil)   // [B, L, D]
+        final.append(g.reshape(g.sliceTensor(all, dimension: 1, start: L - 1, length: 1, name: nil), shape: dims([B, D]), name: nil))
+        let xm = g.addition(x, all, name: nil)
+        x = g.reshape(ffn(g.reshape(xm, shape: dims([B * L, D]), name: nil), l), shape: dims([B, L, D]), name: nil)
+        continue
+      }
       var h = h0[l], outs: [MPSGraphTensor] = []
       for t in 0..<L {
         func at(_ y: MPSGraphTensor) -> MPSGraphTensor { g.reshape(g.sliceTensor(y, dimension: 1, start: t, length: 1, name: nil), shape: dims([B, D]), name: nil) }
