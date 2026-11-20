@@ -698,6 +698,32 @@ RULES = {
 }
 
 
+def partition_rows(node, shapes):
+    if node.target is VIEW:
+        out = shape(node)
+        return [intact(shapes[0], out)], out
+    rule = aligned if torch.Tag.pointwise in getattr(node.target, "tags", ()) else RULES.get(node.target, replicated)
+    return ruled(node, rule, shapes)
+
+
+def output_shardings(node, processors, shares):
+    """Output layout statements carried by the operand dimension rules of this operation."""
+    value = node.meta.get("val")
+    if len(processors) < 2 or not isinstance(value, torch.Tensor):
+        return
+    if node.op in ("placeholder", "get_attr"):
+        axes = range(value.ndim)
+    elif node.op == "call_function" and all(isinstance(n.meta.get("val"), torch.Tensor) for n in operands(node)):
+        rows, _ = partition_rows(node, read_shapes(node))
+        axes = sorted({d for row in rows for d in row if d is not None and d >= 0})
+    else:
+        return
+    for dimension in axes:
+        if value.shape[dimension] > 1:
+            for units in shares:
+                yield dimension, processors, units
+
+
 def viewed(value, whole, new):
     dimension, sizes, processors, nodes = value
     stride = math.prod(whole[dimension + 1:])
@@ -809,7 +835,7 @@ def meshed(graph, node, held, replaced):
     dims, extents, grid, nodes = value
     leaves, shapes = flat(grid), read_shapes(node)
     pointwise = torch.Tag.pointwise in getattr(node.target, "tags", ()) or RULES.get(node.target) is aligned
-    ruling, out = ruled(node, aligned if pointwise else RULES.get(node.target, replicated), shapes)
+    ruling, out = partition_rows(node, shapes)
     index = list(itertools.product(*(range(n) for n in spans(grid, len(dims)))))
     found = windows(node) if RULES.get(node.target) is windowed else {}
 
@@ -872,9 +898,10 @@ def meshed(graph, node, held, replaced):
 
 # Rejection filters are not part of even temporary integration validation.
 # A partition-rule miss retains the operation; transfer() reshards its result to the requested placement.
-def partitioned(graph, node, held, want, replaced, whole, statement=None):
+def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fixed_sites=False):
     target = None
-    if any(several(v) for v in held):
+    distribute = not (fixed_sites and isinstance(want, str))
+    if distribute and any(several(v) for v in held):
         made = meshed(graph, node, held, replaced) if node.op == "call_function" else None
         if made is not None:
             return made
@@ -887,7 +914,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
         if several(v) and (u, one) not in whole:
             whole[u, one] = reshard(graph, v, None, None, (one,))[0]
     held = [(None, None, (one,), [whole[u, one]]) if several(v) else v for u, v in zip(operands(node), held)]
-    if node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
+    if distribute and node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
         if node.target is ADDMM:
             product = graph.call_function(MM, node.args[1:])
             product.meta = dict(node.meta)
@@ -895,16 +922,10 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
             held = [partitioned(graph, product, held[1:], first, replaced, whole), held[0]]
             node.target, node.args = ADD, (product, node.args[0])
         shapes = read_shapes(node)
-        if node.target is VIEW:
-            out = shape(node)
-            rows = [intact(shapes[0], out)]
-            if held[0][0] is not None:
-                rows[0][held[0][0]], value = viewed(held[0], shapes[0], out) or (None, held[0])
-                held = [value]
-        elif torch.Tag.pointwise in getattr(node.target, "tags", ()):
-            rows, out = ruled(node, aligned, shapes)
-        else:
-            rows, out = ruled(node, RULES.get(node.target, replicated), shapes)
+        rows, out = partition_rows(node, shapes)
+        if node.target is VIEW and held[0][0] is not None:
+            rows[0][held[0][0]], value = viewed(held[0], shapes[0], out) or (None, held[0])
+            held = [value]
         # a multi-result value's statements (transfer: one per result): the operation's partition the correspondence
         # of every result's own stated dimension where each states one dimension, all over the same processors at the
         # same sizes (each measured at its own result's shape: one partition of the operation) and some operand
@@ -1095,7 +1116,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
-def partition(graph_module: torch.fx.GraphModule, placement) -> torch.fx.GraphModule:
+def partition(graph_module: torch.fx.GraphModule, placement, *, fixed_sites=False) -> torch.fx.GraphModule:
     original = graph_module
     graph_module, copied = derived_graph(original)
     graph = graph_module.graph
@@ -1186,7 +1207,7 @@ def partition(graph_module: torch.fx.GraphModule, placement) -> torch.fx.GraphMo
             replaced.append(node)
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
             value = (held[0] if taken else (None, None, (None,), [node]) if node.op == "placeholder" else
-                     partitioned(graph, node, held, want, replaced, whole, statement))
+                     partitioned(graph, node, held, want, replaced, whole, statement, fixed_sites=fixed_sites))
         if resharded is not None and not isinstance(resharded, str) and value[:3] != resharded:
             with graph.inserting_before(placed[0] if node.op == "placeholder" else node.next):
                 value = *resharded, reshard(graph, plainly(graph, value), *resharded)
@@ -1275,8 +1296,8 @@ def partition(graph_module: torch.fx.GraphModule, placement) -> torch.fx.GraphMo
     return graph_module
 
 
-def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None) -> torch.fx.GraphModule:
-    graph_module = partition(graph_module, placement)
+def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None, fixed_sites=False) -> torch.fx.GraphModule:
+    graph_module = partition(graph_module, placement, fixed_sites=fixed_sites)
     graph = graph_module.graph
     placed = [n for n in graph.nodes if n.op != "placeholder"]
     transfers, instances = {}, {}
