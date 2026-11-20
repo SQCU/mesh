@@ -51,7 +51,7 @@ def declarations(text):
     text = '\n'.join(out)
 
     def enum(match):
-        return match.group(1) + re.sub(rf'=\s*(?!{LITERAL}\s*[,}}])[^,}}]+', '= ...', match.group(2)) + match.group(3)
+        return match.group(1) + re.sub(rf'=(?!\s*{LITERAL}\s*(?:[,}}]|$))[^,}}]+', '= ...', match.group(2)) + match.group(3)
     return re.sub(r'(enum\s*\w*\s*\{)([^}]*)(\})', enum, text, flags=re.S)
 
 

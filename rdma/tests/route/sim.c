@@ -26,72 +26,8 @@ uint64_t route_next(struct route_rng *g) {
   z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull; z = (z ^ (z >> 27)) * 0x94d049bb133111ebull; return z ^ (z >> 31);
 }
 double route_uniform(struct route_rng *g) { return (double)(route_next(g) >> 11) / 9007199254740992.0; }
-static double normal(struct route_rng *g) { const double u = route_uniform(g), v = route_uniform(g); return sqrt(-2 * log(u > 1e-300 ? u : 1e-300)) * cos(2 * M_PI * v); }
 static uint32_t mix(uint32_t h) { h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16; return h; }
 static double unit01(uint32_t h) { return (double)(mix(h) >> 8) / 16777216.0; }
-
-/* ---- fabrics ---- */
-int route_fabric_load(const char *path, struct route_fabric *f) {   /* node NAME compute|relay; link FROM TO GBps us cables; duplex SHARE */
-  FILE *in = fopen(path, "r");
-  if (!in) return -1;
-  char line[256], names[ROUTE_N][16]; memset(f, 0, sizeof *f); f->duplex = 1;
-  while (fgets(line, sizeof line, in)) {
-    char a[16], b[16]; double r, us; int c;
-    if (line[0] == '#') continue;
-    if (sscanf(line, "duplex %lf", &r) == 1) f->duplex = r;
-    else if (sscanf(line, "node %15s %15s", a, b) == 2) { if (f->nodes == ROUTE_N) { fclose(in); return -1; } strcpy(names[f->nodes], a); if (!strcmp(b, "compute")) f->compute[f->ncompute++] = f->nodes; f->nodes++; }
-    else if (sscanf(line, "link %15s %15s %lf %lf %d", a, b, &r, &us, &c) == 5) {
-      int u = -1, v = -1;
-      for (int k = 0; k < f->nodes; k++) { if (!strcmp(names[k], a)) u = k; if (!strcmp(names[k], b)) v = k; }
-      if (u < 0 || v < 0 || f->lanes == ROUTE_L) { fclose(in); return -1; }
-      f->from[f->lanes] = u; f->to[f->lanes] = v; f->rate[f->lanes] = r; f->latency[f->lanes] = us * 1e3; f->cables[f->lanes] = c; f->lanes++;
-    }
-  }
-  fclose(in);
-  return 0;
-}
-static void cabled(struct route_fabric *f, int n, const int *compute, int nc, const int (*pairs)[2], int np, struct route_rng *g) {
-  memset(f, 0, sizeof *f);
-  f->nodes = n; f->ncompute = nc; for (int k = 0; k < nc; k++) f->compute[k] = compute[k];
-  f->duplex = 0.85 + 0.15 * route_uniform(g);
-  for (int k = 0; k < np; k++) {
-    const int c = 1 + (int)(route_uniform(g) * 4); const double each = 4 + 8 * route_uniform(g);
-    for (int dir = 0; dir < 2; dir++) {
-      const int l = f->lanes++;
-      f->from[l] = pairs[k][dir]; f->to[l] = pairs[k][1 - dir]; f->rate[l] = c * each; f->latency[l] = 2e3 + 11e3 * route_uniform(g); f->cables[l] = c;
-    }
-  }
-}
-void route_network(struct route_rng *g, const struct route_fabric *measured, struct route_fabric *f) {
-  const int kind = (int)(route_uniform(g) * 6); int n = 3 + (int)(route_uniform(g) * 4);
-  int pairs[16][2], np = 0, compute[ROUTE_N], nc = 0;
-  switch (kind) {
-  case 0: {   /* a random connected graph, degree at most 4, up to two relays */
-    int degree[ROUTE_N] = {0}, joined[ROUTE_N][ROUTE_N] = {{0}};
-    for (int v = 1; v < n; v++) { const int u = (int)(route_uniform(g) * v); pairs[np][0] = u; pairs[np][1] = v; np++; joined[u][v] = 1; degree[u]++; degree[v]++; }
-    for (int u = 0; u < n; u++) for (int v = u + 1; v < n; v++)
-      if (!joined[u][v] && degree[u] < 4 && degree[v] < 4 && route_uniform(g) < 0.35) { pairs[np][0] = u; pairs[np][1] = v; np++; degree[u]++; degree[v]++; }
-    int relays = (int)(route_uniform(g) * 3); if (relays > n - 2) relays = n - 2;
-    for (int v = 0; v < n - relays; v++) compute[nc++] = v;
-    break;
-  }
-  case 1: for (int v = 0; v < n; v++) { pairs[np][0] = v; pairs[np][1] = (v + 1) % n; np++; } if (n == 3) np--; for (int v = 0; v < n; v++) compute[nc++] = v; break;
-  case 2: { for (int v = 1; v < n; v++) { pairs[np][0] = 0; pairs[np][1] = v; np++; } const int hub = route_uniform(g) < 0.5; for (int v = hub ? 1 : 0; v < n; v++) compute[nc++] = v; break; }
-  case 3: {   /* a ring of compute nodes and a relay hub */
-    int m = n - 1; if (m < 3) m = 3; if (m > ROUTE_N - 1) m = ROUTE_N - 1;
-    for (int v = 0; v < m; v++) { pairs[np][0] = v; pairs[np][1] = (v + 1) % m; np++; }
-    for (int v = 0; v < 3 && v < m; v++) { pairs[np][0] = m; pairs[np][1] = v; np++; }
-    n = m + 1; for (int v = 0; v < m; v++) compute[nc++] = v;
-    break;
-  }
-  case 4: for (int u = 0; u < n; u++) for (int v = u + 1; v < n; v++) { pairs[np][0] = u; pairs[np][1] = v; np++; } for (int v = 0; v < n; v++) compute[nc++] = v; break;
-  default:   /* the measured cluster, jittered */
-    *f = *measured;
-    for (int l = 0; l < f->lanes; l++) { f->rate[l] *= exp(0.3 * normal(g)); f->latency[l] *= exp(0.3 * normal(g)); }
-    return;
-  }
-  cabled(f, n, compute, nc, (const int (*)[2])pairs, np, g);
-}
 
 /* ---- streams ---- */
 static void delays(const struct route_fabric *f, double q, double (*dist)[ROUTE_N]) {   /* one q-byte piece's unloaded shortest delays */
@@ -102,7 +38,7 @@ static void delays(const struct route_fabric *f, double q, double (*dist)[ROUTE_
 /* a collective's floor: its cut bound (the most bytes a node must take in or put out, over its rate) and its slowest
    pair's shortest delay for one piece, at most a page, as tests/switch.c's (for an all-reduce, the slowest owner's slowest
    partial in plus its slowest reduced page out: every page goes both ways through its owner) */
-static double op_floor(const struct route_fabric *f, int kind, double S, int root) {
+double route_op_floor(const struct route_fabric *f, int kind, double S, int root) {
   double in[ROUTE_N] = {0}, out[ROUTE_N] = {0}, dist[ROUTE_N][ROUTE_N], cut = 0, reach = 0;
   for (int l = 0; l < f->lanes; l++) { in[f->to[l]] += f->rate[l]; out[f->from[l]] += f->rate[l]; }
   delays(f, S < ROUTE_PAGE ? S : ROUTE_PAGE, dist);
@@ -151,29 +87,18 @@ static void stream_base(const struct route_fabric *f, struct route_stream *s) {
     for (int v = 0; v < ROUTE_N; v++) s->spt[j][v] = keep[v] ? by[v] : -1;
   }
 }
-static double size_draw(struct route_rng *g) { return round(exp(log(6144.0) + route_uniform(g) * (log(12582912.0) - log(6144.0)))); }
-void route_stream_make(const struct route_fabric *f, struct route_rng *g, double duration, double load, int background, struct route_stream *s) {
+void route_op_floors(const struct route_fabric *fabrics, const int *fabric, int n, const int *kind, const double *size, const int *root, double *out) {
+  for (int i = 0; i < n; i++) out[i] = route_op_floor(&fabrics[fabric[i]], kind[i], size[i], root[i]);
+}
+void route_stream_build(const struct route_fabric *f, const double *background, int ops, const struct route_op *op, struct route_stream *s) {
   stream_base(f, s);
-  for (int l = 0; l < f->lanes; l++) s->background[l] = background && route_uniform(g) < 0.5 ? f->rate[l] * 200e3 * route_uniform(g) : 0;
-  double t = 0;
-  for (int k = (int)(route_uniform(g) * 4); k > 0 && s->ops < ROUTE_OPS; k--) {   /* collectives already under way at 0, some of their pages done */
-    struct route_op o;
-    o.kind = (int)(route_uniform(g) * ROUTE_KINDS) % ROUTE_KINDS; o.root = f->compute[(int)(route_uniform(g) * f->ncompute) % f->ncompute];
-    o.size = size_draw(g); o.floor = op_floor(f, o.kind, o.size, o.root); o.arrival = 0; o.done = 0.95 * route_uniform(g);
-    s->op[s->ops++] = o;
-  }
-  while (s->ops < ROUTE_OPS && t <= duration) {
-    struct route_op o;
-    o.kind = (int)(route_uniform(g) * ROUTE_KINDS); if (o.kind >= ROUTE_KINDS) o.kind = ROUTE_KINDS - 1;
-    o.root = f->compute[(int)(route_uniform(g) * f->ncompute) % f->ncompute]; o.size = size_draw(g);
-    o.floor = op_floor(f, o.kind, o.size, o.root); o.arrival = t; o.done = 0;
-    s->op[s->ops++] = o;
-    t += o.floor / load * -log(1 - route_uniform(g) * 0.999999);
-  }
+  for (int l = 0; l < f->lanes; l++) s->background[l] = background ? background[l] : 0;
+  s->ops = ops < ROUTE_OPS ? ops : ROUTE_OPS;
+  for (int k = 0; k < s->ops; k++) { s->op[k] = op[k]; s->op[k].floor = route_op_floor(f, op[k].kind, op[k].size, op[k].root); }
 }
 void route_stream_one(const struct route_fabric *f, int kind, double size, int root, struct route_stream *s) {
   stream_base(f, s);
-  s->op[0] = (struct route_op){kind, root, size, 0, op_floor(f, kind, size, root), 0}; s->ops = 1;
+  s->op[0] = (struct route_op){kind, root, size, 0, route_op_floor(f, kind, size, root), 0}; s->ops = 1;
 }
 void route_topology_make(const struct route_fabric *f, const struct route_stream *s, struct route_topology *t) {
   memset(t, 0, sizeof *t);

@@ -92,11 +92,13 @@ struct route_live { double wait[ROUTE_DEG], dup[ROUTE_DEG]; };
 struct route_costs { double throughput, latency, queueing; int ops, pieces; };
 struct route_rng { uint64_t s; };
 
-int route_fabric_load(const char *path, struct route_fabric *f);
-void route_network(struct route_rng *g, const struct route_fabric *measured, struct route_fabric *f);   /* one network of a random kind */
-/* a stream on f: collectives of random kinds and sizes arriving at random over `duration` ns at offered load `load`
-   (kind -1: random; size 0: random) */
-void route_stream_make(const struct route_fabric *f, struct route_rng *g, double duration, double load, int background, struct route_stream *s);
+/* A collective's floor on f: its cut bound and its slowest pair's one-piece delay (tests/switch.c's); route_op_floors the
+   same for n collectives, the i-th on fabrics[fabric[i]]. The training distribution (py/route/cases.py) draws arrivals
+   on them. */
+double route_op_floor(const struct route_fabric *f, int kind, double S, int root);
+void route_op_floors(const struct route_fabric *fabrics, const int *fabric, int n, const int *kind, const double *size, const int *root, double *out);
+/* a stream on f: `background` bytes queued on each lane at 0 (NULL none), and `ops` collectives (their floors filled) */
+void route_stream_build(const struct route_fabric *f, const double *background, int ops, const struct route_op *op, struct route_stream *s);
 /* a stream of one collective at t = 0 */
 void route_stream_one(const struct route_fabric *f, int kind, double size, int root, struct route_stream *s);
 uint64_t route_next(struct route_rng *g);
