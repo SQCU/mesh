@@ -918,8 +918,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
         if node.target is ADDMM:
             product = graph.call_function(MM, node.args[1:])
             product.meta = dict(node.meta)
-            first = want if isinstance(want, str) else want[2][0]
-            held = [partitioned(graph, product, held[1:], first, replaced, whole), held[0]]
+            held = [partitioned(graph, product, held[1:], want, replaced, whole), held[0]]
             node.target, node.args = ADD, (product, node.args[0])
         shapes = read_shapes(node)
         rows, out = partition_rows(node, shapes)
