@@ -162,7 +162,8 @@ final class Net {
       for r in 0..<mt.rows { pr += [UInt32(i), UInt32(r)] }
     }
     wq = pv(q); wsc = pv(f * 4); Wf = pv(wf * 4)
-    netTable = device.makeBuffer(bytes: mats.flatMap { $0 }, length: mats.count * 48, options: .storageModeShared)!
+    let nt: [UInt32] = Array(mats.joined())
+    netTable = device.makeBuffer(bytes: nt, length: nt.count * 4, options: .storageModeShared)!
     wfOff = device.makeBuffer(bytes: offs, length: offs.count * 4, options: .storageModeShared)!
     rowItems = device.makeBuffer(bytes: ri, length: ri.count * 4, options: .storageModeShared)!; rowCount = ri.count / 2
     colItems = device.makeBuffer(bytes: ci, length: ci.count * 4, options: .storageModeShared)!; colCount = ci.count / 2
@@ -182,7 +183,8 @@ final class Net {
       partialOff.append(pf); pf += Net.zMax(blocks) * M * kf
     }
     gq = pv(gb); gs = pv(gf * 4); partial = pv(pf * 4)
-    gradTable = device.makeBuffer(bytes: matg.flatMap { $0 } + [UInt32(RT), 0, 0, 0], length: (matg.count * 8 + 4) * 4, options: .storageModeShared)!
+    let table: [UInt32] = Array(matg.joined()) + [UInt32(RT), 0, 0, 0]
+    gradTable = device.makeBuffer(bytes: table, length: table.count * 4, options: .storageModeShared)!
     dhp = pv(3 * 2 * pad64(contexts) * D * 4)
     let c0 = queue.makeCommandBuffer()!, bl = c0.makeBlitCommandEncoder()!
     bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0); bl.endEncoding()
@@ -362,4 +364,10 @@ final class Net {
     try! bytes.write(to: URL(fileURLWithPath: path))
   }
   func probeReport() -> [String] { defer { probes = [] }; return probes }
+  // a buffer by its name (route_net_read)
+  func named(_ n: String) -> MTLBuffer? {
+    let all: [String: MTLBuffer?] = ["theta": theta, "grads": grads, "gram": gram, "wq": wq, "wsc": wsc, "st": st, "lzc": lzc, "lh": lh, "lu": lu, "czc": czc, "cu": cu,
+                                    "cn": cn, "cinv": cinv, "gq": gq, "gs": gs, "dhp": dhp, "partial": partial, "dw": dwBuf, "net": netTable, "grad": gradTable]
+    return all[n] ?? nil
+  }
 }

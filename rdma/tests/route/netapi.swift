@@ -197,4 +197,13 @@ func json(_ r: Any, _ out: UnsafeMutablePointer<CChar>, _ room: Int) -> Int32 {
     memcpy(gOut + t * P, g, P * 4)
   }
 }
+@_cdecl("route_net_read") public func route_net_read(_ p: UnsafeMutableRawPointer, _ name: UnsafePointer<CChar>, _ offset: Int, _ bytes: Int, _ out: UnsafeMutableRawPointer) -> Int32 {
+  let n = handle(p).net
+  guard let b = n.named(String(cString: name)), offset + bytes <= b.length else { return -1 }
+  let stage = n.device.makeBuffer(length: max(16, bytes), options: .storageModeShared)!
+  let cb = n.queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
+  bl.copy(from: b, sourceOffset: offset, to: stage, destinationOffset: 0, size: bytes); bl.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  memcpy(out, stage.contents(), bytes)
+  return 0
+}
 @_cdecl("route_net_free") public func route_net_free(_ p: UnsafeMutableRawPointer) { idle(handle(p).net); Unmanaged<Handle>.fromOpaque(p).release() }

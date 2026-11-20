@@ -82,7 +82,10 @@ void route_net_exchange(void *net);                                             
 /* the checks: the fp32 reference (learn.swift) on a learned batch: w [R][FS], grads [3][P]; each kernel's GPU time */
 void route_net_reference(void *net, struct route_batch *b, int B, int K, int R, float *w, float *grads);
 int route_net_profile(void *net, int on, char *out, size_t room);   /* on: from the next call; off: that call's, as JSON */
-int route_net_probes(void *net, int on, char *out, size_t room);    /* fused producers' codes against quant_rows (JSON) */
+int route_net_probes(void *net, int on, char *out, size_t room);    /* fused producers' codes against int8mm.h's (JSON) */
+/* the checks' view of the network's own buffers (model.swift's names: "gq", "gs", "partial", ...): bytes from offset,
+   copied into out once the queue is idle; 0, or -1 (no such buffer, or past its end) */
+int route_net_read(void *net, const char *buffer, size_t offset, size_t bytes, void *out);
 void route_net_free(void *net);
 
 /* ---- the exchange (exchange.c): world > 1 ---- */
