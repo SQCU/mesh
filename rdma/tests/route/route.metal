@@ -10,11 +10,12 @@
 //   as fp16 shares of its commodity's demand, in threadgroup memory with the rest of the rollout's state);
 // - each (commodity, destination) adds the area above its delivered fraction.
 // The objective is a smooth maximum over (commodity, destination) of that area over the floor; `done` is the first slot
-// every destination holds every byte, over the floor.
+// every destination holds every byte (interpolated within its slot), over the floor.
 //
 // The policy, a commodity at a time: a 64-wide stream from the commodity's context and its last weighting's expected
 // candidate embedding, through two layers of a GRU block (recurrent over refreshes) and a feed-forward block expanding
-// to 192; each candidate tree is its N node tokens (parent, in-lane queue level, in-lane one-page delay against the floor), embedded, rotated by node
+// to 192; each candidate tree is its N nodes, each its parent's embedding plus learned projections of its in-lane's queue and
+// one-page delay against the floor (as values, not bins), , rotated by node
 // position (RoPE at the embedding only), mean-pooled, and dotted with the stream. A matrix-vector product reads each
 // weight row once, coalesced along the row across a SIMD group's lanes, for every commodity at once.
 #include <metal_stdlib>
@@ -24,7 +25,7 @@
 using namespace metal;
 
 constant constexpr int N = 6, L = 32, J = 6, K = 8, H = 12, SLOTS = 64, REFRESH = 8;
-constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 8 * 16, T = 256, SG = T / 32;
+constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = N + 2, T = 256, SG = T / 32;
 constant constexpr int JK = J * K, JKN = J * K * N;
 constant constexpr float PAGE = 16384.0f;
 
@@ -41,7 +42,7 @@ struct Scenario {
 };
 
 struct Layer { float z[D][2 * D], r[D][2 * D], c[D][2 * D], bz[D], br[D], bc[D], up[E][D], bu[E], down[D][E], bd[D]; };
-struct Net { float inp[D][CTX + D], binp[D]; Layer layer[2]; float tok[VOCAB][D]; };
+struct Net { float inp[D][CTX + D], binp[D]; Layer layer[2]; float tok[VOCAB][D], queue[D], delay[D]; };
 
 static inline float sigmoid(float v) { return 1.0f / (1.0f + exp(-v)); }
 
@@ -94,7 +95,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
   threadgroup float assigned[JK], released[J], outcap[J], p[JK], area[J * N], frac[J * N], ctx[J][CTX];
   threadgroup float x[J][D], h[2][J][D], gz[J][D], gr[J][D], ex[J][E], last[J][D];
   threadgroup half emb[JK][D];
-  threadgroup int finished;
+  threadgroup float finished, before[J * N];   // the completion, continuous; each fraction a slot before
   const float dt = s.dt, fl = s.floor_ns;
   const int nl = int(s.lanes), nj = int(s.commodities), nn = int(s.nodes);
 
@@ -110,7 +111,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
     for (int l = 0; l < nl; l++) if (s.lsrc[l] == s.src[j]) o += s.rate[l] * dt;
     outcap[j] = o; released[j] = 0;
     for (int k = 0; k < K; k++) { assigned[j * K + k] = 0; p[j * K + k] = mode == 1 ? (k == 0 ? 1.0f : 0.0f) : 1.0f / K; }
-    for (int v = 0; v < N; v++) { area[j * N + v] = 0; frac[j * N + v] = 0; }
+    for (int v = 0; v < N; v++) { area[j * N + v] = 0; frac[j * N + v] = 0; before[j * N + v] = 0; }
   }
   if (tid == 0) finished = SLOTS;
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -166,14 +167,16 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
         for (int v = 0; v < N; v++) {
           const int lane = s.lane[j][k][v];
           const int parent = lane == 255 ? (v == s.src[j] ? N : N + 1) : s.lsrc[lane];
-          int level = 0, delay = 0;
+          // the in-lane's queue and its delay for one page (latency and the page's time), each against the floor, as
+          // they are: projected and added to the parent's embedding
+          float queue = 0, delay = 0;
           if (lane != 255) {
-            // the in-lane's queue, and its delay for one page (latency and the page's time), each against the floor
-            level = clamp(int(floor(log2(1 + 64 * want[lane] / max(s.rate[lane], 1e-6f) / fl))), 0, 7);
-            delay = clamp(int(floor(16 * (s.lat[lane] + PAGE / max(s.rate[lane], 1e-6f)) / fl)), 0, 15);
+            queue = log(1 + 64 * want[lane] / max(s.rate[lane], 1e-6f) / fl);
+            delay = (s.lat[lane] + PAGE / max(s.rate[lane], 1e-6f)) / fl;
           }
-          const int token = (parent * 8 + level) * 16 + delay;
-          const float u = read(P, &net.tok[token][2 * pair]), w2 = read(P, &net.tok[token][2 * pair + 1]), c = cos(v * theta), sn = sin(v * theta);
+          const float u = read(P, &net.tok[parent][2 * pair]) + queue * read(P, &net.queue[2 * pair]) + delay * read(P, &net.delay[2 * pair]);
+          const float w2 = read(P, &net.tok[parent][2 * pair + 1]) + queue * read(P, &net.queue[2 * pair + 1]) + delay * read(P, &net.delay[2 * pair + 1]);
+          const float c = cos(v * theta), sn = sin(v * theta);
           a += u * c - w2 * sn; b += u * sn + w2 * c;
         }
         emb[jk][2 * pair] = half(a / N); emb[jk][2 * pair + 1] = half(b / N);
@@ -250,9 +253,17 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0 && finished == SLOTS) {
+      // complete: the latest crossing of 0.999 among the fractions that crossed it in this slot, within the slot
       bool all = true; for (int i = 0; i < J * N; i++) all = all && frac[i] >= 0.999f;
-      if (all) finished = t + 1;
+      if (all) {
+        float within = 0;
+        for (int i = 0; i < J * N; i++)
+          if (before[i] < 0.999f) within = max(within, (0.999f - before[i]) / max(frac[i] - before[i], 1e-9f));
+        finished = t + within;
+      }
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < uint(J * N)) before[tid] = frac[tid];
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (tid == 0) {

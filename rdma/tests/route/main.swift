@@ -16,7 +16,7 @@
 import Foundation
 import Metal
 
-let N = 6, L = 32, J = 6, K = 8, H = 12, D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 8 * 16
+let N = 6, L = 32, J = 6, K = 8, H = 12, D = 64, E = 192, CTX = 12, VOCAB = N + 2
 let page = 16384.0, scenarioBytes = 1444
 
 struct Mix { var s: UInt64
@@ -159,7 +159,7 @@ func fill(_ count: Int, _ fan: Int) { for _ in 0..<count { net.append(Float(g.no
 func zero(_ count: Int) { net += [Float](repeating: 0, count: count) }
 fill(D * (CTX + D), CTX + D); zero(D)
 for _ in 0..<2 { fill(D * 2 * D, 2 * D); fill(D * 2 * D, 2 * D); fill(D * 2 * D, 2 * D); zero(3 * D); fill(E * D, D); zero(E); fill(D * E, E); zero(D) }
-fill(VOCAB * D, D)
+fill(VOCAB * D, D); fill(2 * D, D)
 let P = net.count
 
 let scenBuf = device.makeBuffer(bytes: scen, length: scen.count, options: .storageModeShared)!
