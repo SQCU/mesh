@@ -109,7 +109,7 @@ let args = CommandLine.arguments
 let device = MTLCreateSystemDefaultDevice()!
 let library = try device.makeLibrary(URL: URL(fileURLWithPath: args[1]))
 func pipe(_ name: String) -> MTLComputePipelineState { try! device.makeComputePipelineState(function: library.makeFunction(name: name)!) }
-let rollPipe = pipe("rollout"), backPipe = pipe("backward"), layoutPipe = pipe("layout")
+let rollPipe = pipe("rollout"), backPipe = pipe("backward"), reducePipe = pipe("reduce"), layoutPipe = pipe("layout")
 let queue = device.makeCommandQueue()!
 
 // the layout, from the kernel
@@ -120,7 +120,7 @@ let lay: [Int] = {
   enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
   enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
   let p = b.contents().bindMemory(to: Int32.self, capacity: 32)
-  return (0..<18).map { Int(p[$0]) }
+  return (0..<19).map { Int(p[$0]) }
 }()
 let full = lay[0] == 1, P = lay[1], REC = lay[12], SCRATCH = lay[13], LS = lay[14], RLS = lay[11]
 let L_IN = lay[2], L_DR = lay[3], L_RX = lay[4], L_DZ = lay[5], L_DHT = lay[6], L_XM = lay[7], L_DU = lay[8], L_U = lay[9], L_DY = lay[10]
@@ -167,25 +167,50 @@ for (name, at, count) in blocks where !name.hasPrefix("b") {   // weights at 1/s
 func buffer(_ bytes: Int, _ mode: MTLResourceOptions = .storageModeShared) -> MTLBuffer { device.makeBuffer(length: max(bytes, 16), options: mode)! }
 let scenBuf = device.makeBuffer(bytes: scen, length: scen.count, options: .storageModeShared)!
 let netBuf = device.makeBuffer(bytes: net, length: P * 4, options: .storageModeShared)!
-let whichBuf = buffer(R * 4), drawBuf = buffer(R * 4), doneBuf = buffer(R * 4), llBuf = buffer(R * 4)
-let tapeBuf = buffer(R * DEC * TAPE * 4, .storageModePrivate), phiBuf = buffer(R * EP * L * LF * 4, .storageModePrivate)
-let rsBuf = buffer(R * 2 * L * D * 4, .storageModePrivate), bsBuf = buffer(R * SCRATCH * 4, .storageModePrivate), ringBuf = buffer(R * H * JTN * 2, .storageModePrivate)
+let whichBuf = buffer(R * 4), drawBuf = buffer(R * 4), doneBuf = buffer(R * 4), llBuf = buffer(R * 4), rllBuf = buffer(R * 4)
+let tapeBuf = buffer(R * DEC * TAPE * 4), phiBuf = buffer(R * EP * L * LF * 4)
+let rsBuf = buffer(R * lay[18] * 4, .storageModePrivate), bsBuf = buffer(R * SCRATCH * 4, .storageModePrivate), ringBuf = buffer(R * H * JTN * 2, .storageModePrivate)
 let recBuf = buffer(R * DEC * REC * 4, .storageModePrivate), krecBuf = buffer(R * EP * L * KREC * 4, .storageModePrivate)
 let rec2Buf = buffer(R * DEC * REC * 4, .storageModePrivate), krec2Buf = buffer(R * EP * L * KREC * 4, .storageModePrivate)
 let onesBuf = device.makeBuffer(bytes: [Float](repeating: 1, count: R * DEC), length: R * DEC * 4, options: .storageModeShared)!
-let wBuf = buffer(R * 8), gBuf = buffer(2 * P * 4)
+var SPLIT = 64; let wBuf = buffer(R * 8), gBuf = buffer(2 * P * 4), partBuf = buffer(SPLIT * 2 * P * 4, .storageModePrivate)
 let which = whichBuf.contents().bindMemory(to: UInt32.self, capacity: R), draw = drawBuf.contents().bindMemory(to: UInt32.self, capacity: R)
 let done = doneBuf.contents().bindMemory(to: Float.self, capacity: R), ll = llBuf.contents().bindMemory(to: Float.self, capacity: R)
 let w = wBuf.contents().bindMemory(to: Float.self, capacity: 2 * R), grad = gBuf.contents().bindMemory(to: Float.self, capacity: 2 * P)
 let theta = netBuf.contents().bindMemory(to: Float.self, capacity: P)
 
+// the GEMMs for `count` rollouts, made once: (batches, [(kernel, deltas, inputs, partial gradient)])
+// each (task, job)'s partials, nb of them, contiguous at `base`, summed into the gradient at task P + its offset
+var plans: [Int: (Int, [(MPSMatrixMultiplication, MPSMatrix, MPSMatrix, MPSMatrix, Int, Int, Int)])] = [:]
+func plan(_ count: Int) -> (Int, [(MPSMatrixMultiplication, MPSMatrix, MPSMatrix, MPSMatrix, Int, Int, Int)]) {
+  var nb = min(SPLIT, count); while count % nb != 0 { nb -= 1 }
+  if let p = plans[count * 1000 + nb] { return p }
+  var gemms: [(MPSMatrixMultiplication, MPSMatrix, MPSMatrix, MPSMatrix, Int, Int, Int)] = []
+  var base = 0
+  for task in 0..<2 {
+    for (kind, dOff, xOff, rows, cols, gOff) in jobs {
+      let per = (kind == 0 ? DEC : EP * L) * (count / nb), stride = (kind == 0 ? REC : KREC) * 4
+      let deltas = task == 0 ? (kind == 0 ? recBuf : krecBuf) : (kind == 0 ? rec2Buf : krec2Buf), inputs = kind == 0 ? recBuf : krecBuf
+      let A = MPSMatrix(buffer: deltas, offset: dOff * 4, descriptor: MPSMatrixDescriptor(rows: per, columns: rows, matrices: nb, rowBytes: stride, matrixBytes: per * stride, dataType: .float32))
+      let X = xOff < 0 ? MPSMatrix(buffer: onesBuf, offset: 0, descriptor: MPSMatrixDescriptor(rows: per, columns: 1, matrices: nb, rowBytes: 4, matrixBytes: per * 4, dataType: .float32))
+                       : MPSMatrix(buffer: inputs, offset: xOff * 4, descriptor: MPSMatrixDescriptor(rows: per, columns: cols, matrices: nb, rowBytes: stride, matrixBytes: per * stride, dataType: .float32))
+      let C = MPSMatrix(buffer: partBuf, offset: base * 4, descriptor: MPSMatrixDescriptor(rows: rows, columns: cols, matrices: nb, rowBytes: cols * 4, matrixBytes: rows * cols * 4, dataType: .float32))
+      let mm = MPSMatrixMultiplication(device: device, transposeLeft: true, transposeRight: false, resultRows: rows, resultColumns: cols, interiorColumns: per, alpha: 1, beta: 0)
+      mm.batchStart = 0; mm.batchSize = nb
+      gemms.append((mm, A, X, C, base, rows * cols, task * P + gOff)); base += nb * rows * cols
+    }
+  }
+  plans[count * 1000 + nb] = (nb, gemms)
+  return (nb, gemms)
+}
+var gpuTime = 0.0
 func run(_ count: Int, rollout mode: UInt32?, backward: Bool, gradient: Bool) {
   let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
   let tg = MTLSize(width: 256, height: 1, depth: 1), grid = MTLSize(width: count, height: 1, depth: 1)
   if var m = mode {
     enc.setComputePipelineState(rollPipe)
     for (i, b) in [scenBuf, netBuf, whichBuf, drawBuf, doneBuf, tapeBuf, phiBuf, rsBuf, ringBuf].enumerated() { enc.setBuffer(b, offset: 0, index: i) }
-    enc.setBytes(&m, length: 4, index: 9)
+    enc.setBytes(&m, length: 4, index: 9); enc.setBuffer(rllBuf, offset: 0, index: 10)
     enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
   }
   if backward {
@@ -194,37 +219,72 @@ func run(_ count: Int, rollout mode: UInt32?, backward: Bool, gradient: Bool) {
     enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
   }
   enc.endEncoding()
-  if gradient {   // each weight block, each task: G = delta^T input over every record, a GEMM
-    for task in 0..<2 {
-      for (kind, dOff, xOff, rows, cols, gOff) in jobs {
-        let n = count * (kind == 0 ? DEC : EP * L), stride = (kind == 0 ? REC : KREC) * 4
-        let deltas = task == 0 ? (kind == 0 ? recBuf : krecBuf) : (kind == 0 ? rec2Buf : krec2Buf), inputs = kind == 0 ? recBuf : krecBuf
-        let A = MPSMatrix(buffer: deltas, offset: dOff * 4, descriptor: MPSMatrixDescriptor(rows: n, columns: rows, rowBytes: stride, dataType: .float32))
-        let X = xOff < 0 ? MPSMatrix(buffer: onesBuf, offset: 0, descriptor: MPSMatrixDescriptor(rows: n, columns: 1, rowBytes: 4, dataType: .float32))
-                         : MPSMatrix(buffer: inputs, offset: xOff * 4, descriptor: MPSMatrixDescriptor(rows: n, columns: cols, rowBytes: stride, dataType: .float32))
-        let C = MPSMatrix(buffer: gBuf, offset: (task * P + gOff) * 4, descriptor: MPSMatrixDescriptor(rows: rows, columns: cols, rowBytes: cols * 4, dataType: .float32))
-        MPSMatrixMultiplication(device: device, transposeLeft: true, transposeRight: false, resultRows: rows, resultColumns: cols, interiorColumns: n, alpha: 1, beta: 0)
-          .encode(commandBuffer: cb, leftMatrix: A, rightMatrix: X, resultMatrix: C)
-      }
+  if gradient {   // each weight block, each task: G = delta^T input over every record, a GEMM split over batches of rollouts
+    let (nb, gemms) = plan(count)
+    for (mm, A, X, C, _, _, _) in gemms { mm.encode(commandBuffer: cb, leftMatrix: A, rightMatrix: X, resultMatrix: C) }
+    let red = cb.makeComputeCommandEncoder()!
+    red.setComputePipelineState(reducePipe); red.setBuffer(partBuf, offset: 0, index: 0); red.setBuffer(gBuf, offset: 0, index: 1)
+    for (_, _, _, _, base, size, at) in gemms {
+      var q = SIMD4<UInt32>(UInt32(base), UInt32(size), UInt32(nb), UInt32(at)); red.setBytes(&q, length: 16, index: 2)
+      red.dispatchThreads(MTLSize(width: size, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
+    red.endEncoding()
   }
-  cb.commit(); cb.waitUntilCompleted()
+  cb.commit(); cb.waitUntilCompleted(); gpuTime = cb.gpuEndTime - cb.gpuStartTime
   if let e = cb.error { print("error: \(e)"); exit(1) }
 }
 let arm = full ? "GRU" : "minGRU"
 
+if let path = ProcessInfo.processInfo.environment["REPLAY"] {   // REPLAY=weights SCEN=n DRAW=k: one rollout's decisions
+  let d = try! Data(contentsOf: URL(fileURLWithPath: path)); d.withUnsafeBytes { memcpy(theta, $0.baseAddress!, P * 4) }
+  which[0] = UInt32(ProcessInfo.processInfo.environment["SCEN"]!)!; draw[0] = UInt32(ProcessInfo.processInfo.environment["DRAW"]!)!
+  run(1, rollout: 0, backward: false, gradient: false)
+  let ph = phiBuf.contents().bindMemory(to: Float.self, capacity: EP * L * LF)
+  for ep in 0..<EP { print("decision point \(ep) lane features: " + (0..<8).map { l in "[" + (0..<LF).map { String(format: "%.3g", ph[(ep * L + l) * LF + $0]) }.joined(separator: " ") + "]" }.joined(separator: " ")) }
+  let t = tapeBuf.contents().bindMemory(to: Float.self, capacity: DEC * TAPE)
+  for n in 0..<DEC {
+    let f = t + n * TAPE, legal = f.advanced(by: IN + 2 * D).withMemoryRebound(to: UInt32.self, capacity: 2) { ($0[0], Int32(bitPattern: $0[1])) }
+    let hmax = (0..<(2 * D)).map { abs(f[IN + $0]) }.max()!, inmax = (0..<IN).map { abs(f[$0]) }.max()!
+    let badIn = (0..<IN).filter { !f[$0].isFinite }, badH = (0..<(2 * D)).filter { !f[IN + $0].isFinite }.count
+    if !f[TAPE - 2].isFinite || !badIn.isEmpty || badH > 0 { print("  non-finite: input entries \(badIn.prefix(8)) (of \(badIn.count)), state entries \(badH)") }
+    if legal.0 != 0 || !f[TAPE - 2].isFinite { print(String(format: "decision %3d (ep %d step %d row %2d): legal %08x chose %2d, log p %9.4f sum %9.4g, |in| %.3g |h| %.3g", n, n / (TMAX * 18), n / 18 % TMAX, n % 18, legal.0, legal.1, f[TAPE - 2], f[TAPE - 1], inmax, hmax)) }
+  }
+  exit(0)
+}
+if let c = ProcessInfo.processInfo.environment["LATENCY"] {   // the rollout's time against how many run at once
+  for n in c.split(separator: ",").map({ Int($0)! }) {
+    for i in 0..<n { which[i] = UInt32(i % pool); draw[i] = UInt32(i + 1) }
+    run(n, rollout: 0, backward: false, gradient: false)
+    var ms = 0.0; for _ in 0..<5 { run(n, rollout: 0, backward: false, gradient: false); ms += gpuTime * 200 }
+    print(String(format: "%@ %5d rollouts at once: %.2f ms, %.0f rollouts/s", arm, n, ms, Double(n) / ms * 1000))
+  }
+  exit(0)
+}
 if ProcessInfo.processInfo.environment["PROFILE"] != nil {   // each kernel's GPU time, one step's worth
   let B = args.count > 4 ? Int(args[4])! : 64
   for i in 0..<(4 * B) { which[i] = UInt32(i / 4); draw[i] = UInt32(i + 1) }
   for i in 0..<(8 * B) { w[i] = 1e-3 }
   for (name, m, b, gr) in [("rollout", UInt32(0) as UInt32?, false, false), ("backward", nil, true, false), ("backward+GEMM", nil, true, true)] {
-    let t0 = Date(); run(4 * B, rollout: m, backward: b, gradient: gr); run(4 * B, rollout: m, backward: b, gradient: gr)
-    print(String(format: "%@ %@: %.1f ms for %d rollouts", arm, name, Date().timeIntervalSince(t0) * 500, 4 * B))
+    let t0 = Date(); run(4 * B, rollout: m, backward: b, gradient: gr); let g1 = gpuTime; run(4 * B, rollout: m, backward: b, gradient: gr)
+    print(String(format: "%@ %@: %.1f ms wall, %.1f ms GPU, for %d rollouts", arm, name, Date().timeIntervalSince(t0) * 500, (g1 + gpuTime) * 500, 4 * B))
   }
   exit(0)
 }
 
 if ProcessInfo.processInfo.environment["CHECK"] != nil {
+  do {   // the rollout's log-likelihood of its own choices (matrix units) against the backward pass's (rows), 64 rollouts
+    for i in 0..<64 { which[i] = UInt32(i * 97 % pool); draw[i] = UInt32(i + 9) }
+    run(64, rollout: 0, backward: true, gradient: false)
+    let rl = rllBuf.contents().bindMemory(to: Float.self, capacity: R)
+    let worst = (0..<64).map { abs(Double(rl[$0] - ll[$0])) / max(1, abs(Double(ll[$0]))) }.max()!
+    for i in 0..<64 { w[2 * i] = Float(g.normal()); w[2 * i + 1] = Float(g.normal()) }
+    run(64, rollout: nil, backward: true, gradient: true); let split = (0..<(2 * P)).map { Double(grad[$0]) }
+    SPLIT = 1; run(64, rollout: nil, backward: true, gradient: true); SPLIT = 64
+    let whole = (0..<(2 * P)).map { Double(grad[$0]) }
+    let diff = zip(split, whole).map { abs($0 - $1) }.max()!, size = whole.map { abs($0) }.max()!
+    print(String(format: "gradient split over 64 batches against one GEMM: largest difference %.2e of %.2e", diff, size))
+    print(String(format: "rollout vs backward log-likelihood: largest relative difference %.1e over 64 rollouts (rollout 0: %.4f vs %.4f)", worst, rl[0], ll[0]))
+  }
   // d(-sum log p of rollout 0's recorded choices)/d theta, the backward pass against central differences
   which[0] = UInt32(pool - 1); draw[0] = 12345
   for i in 0..<(2 * R) { w[i] = 0 }; w[0] = 1
@@ -261,6 +321,7 @@ func measure() -> String {
 
 print("\(arm), \(P) parameters; \(B) scenarios x 4 rollouts a step; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes a rank")
 print("start: " + measure())
+let meanOnly = ProcessInfo.processInfo.environment["MEAN_ONLY"] != nil   // the completion task alone (a diagnosis)
 var m1 = [Double](repeating: 0, count: P), m2 = [Double](repeating: 0, count: P)
 var elapsed = 0.0, since = 0
 let wall = Date()
@@ -268,6 +329,18 @@ for k in 0..<steps {
   let t0 = Date()
   for s in 0..<B { let sc = UInt32(Int(g.uniform() * Double(pool))); for q in 0..<4 { which[4 * s + q] = sc; draw[4 * s + q] = UInt32(truncatingIfNeeded: g.next()) } }
   run(4 * B, rollout: 0, backward: false, gradient: false)
+  if ProcessInfo.processInfo.environment["TRACE"] != nil {   // a rollout whose own log-likelihood is not finite: its scenario
+    let rl = rllBuf.contents().bindMemory(to: Float.self, capacity: R)
+    for i in 0..<(4 * B) where !rl[i].isFinite {
+      let at = Int(which[i]) * scenarioBytes
+      func f(_ o: Int) -> Float { scen.withUnsafeBytes { $0.load(fromByteOffset: at + o, as: Float.self) } }
+      func u(_ o: Int) -> UInt32 { scen.withUnsafeBytes { $0.load(fromByteOffset: at + o, as: UInt32.self) } }
+      let rates = (0..<Int(u(536))).map { f(4 * $0) }, lats = (0..<Int(u(536))).map { f(128 + 4 * $0) }
+      print(String(format: "  step %d rollout %d scenario %d draw %u: log-likelihood %f, T %f, size %.0f floor %.1f dt %.1f, %d commodities %d lanes %d nodes, rates %.2f..%.2f lat %.0f..%.0f",
+                   k + 1, i, which[i], draw[i], rl[i], done[i], f(528), f(520), f(524), u(532), u(536), u(540), rates.min()!, rates.max()!, lats.min()!, lats.max()!))
+      if ProcessInfo.processInfo.environment["SAVE"] != nil { netBuf.contents().withMemoryRebound(to: UInt8.self, capacity: P * 4) { try! Data(bytes: $0, count: P * 4).write(to: URL(fileURLWithPath: ProcessInfo.processInfo.environment["SAVE"]!)) }; exit(0) }
+    }
+  }
   // Buy 4: each rollout's baseline the mean of its scenario's other three; d c / d theta = -sum (c - b) d(-log p)
   for s in 0..<B {
     let c = (0..<4).map { Double(done[4 * s + $0]) }, mu = c.reduce(0, +) / 4, v = c.map { ($0 - mu) * ($0 - mu) }
@@ -279,7 +352,7 @@ for k in 0..<steps {
   run(4 * B, rollout: nil, backward: true, gradient: true)
   var g11 = 0.0, g22 = 0.0, g12 = 0.0
   for i in 0..<P { let x = Double(grad[i]), y = Double(grad[P + i]); g11 += x * x; g22 += y * y; g12 += x * y }
-  let den = g11 - 2 * g12 + g22, lambda = den > 0 ? min(max((g22 - g12) / den, 0), 1) : 0.5
+  let den = g11 - 2 * g12 + g22, lambda = meanOnly ? 1 : den > 0 ? min(max((g22 - g12) / den, 0), 1) : 0.5
   let c1 = 1 - pow(0.9, Double(k + 1)), c2 = 1 - pow(0.999, Double(k + 1))
   for i in 0..<P {
     let d = lambda * Double(grad[i]) + (1 - lambda) * Double(grad[P + i])
@@ -287,6 +360,12 @@ for k in 0..<steps {
     theta[i] -= Float(rate * (m1[i] / c1) / (sqrt(m2[i] / c2) + 1e-8))
   }
   elapsed += Date().timeIntervalSince(t0); since += 1
+  if ProcessInfo.processInfo.environment["TRACE"] != nil && k < 60 {
+    let nan = (0..<P).filter { !theta[$0].isFinite }.count, cs = (0..<(4 * B)).map { Double(done[$0]) }
+    let lls = (0..<(4 * B)).map { Double(rllBuf.contents().bindMemory(to: Float.self, capacity: R)[$0]) }
+    print(String(format: "  step %d: |g1| %.3e |g2| %.3e lambda %.2f, non-finite weights %d, T mean %.2f max %.2f, log-likelihood of choices mean %.1f", k + 1, sqrt(g11), sqrt(g22), lambda, nan,
+                 cs.reduce(0, +) / Double(cs.count), cs.max()!, lls.reduce(0, +) / Double(lls.count)))
+  }
   if k < 3 || (k + 1) % 50 == 0 || k + 1 == steps {
     let mean = (0..<(4 * B)).map { done[$0] }.reduce(0, +) / Float(4 * B)
     print(String(format: "step %d (%.0fs): train %.3f, lambda %.2f, %.1f steps/s | ", k + 1, Date().timeIntervalSince(wall), mean, lambda, Double(since) / elapsed) + measure())
