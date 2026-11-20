@@ -3,7 +3,7 @@
 
    sims (sims.c): n simulators and their arena, held from route_sims_new: each slot's refreshes as made (lanes,
    tokens), which a forward reads packed and a learning batch reads by the contexts drawn; its run's costs.
-   net (net.swift): the int8 network on the GPU; batches are its input and output buffers in shared memory (the
+   net (model.swift): the int8 network on the GPU; batches are its input and output buffers in shared memory (the
    driver's numpy views); forward, learn and the optimizer's step are committed, never waited on, except by
    route_net_wait (a batch's results, where the driver reads them). */
 #ifndef ROUTE_KERNELS_H

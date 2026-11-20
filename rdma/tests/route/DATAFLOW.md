@@ -27,8 +27,8 @@ Two waits, both on data the next line reads. Everything else is committed in the
 
 Headers, each one definition included by every user (as int8mm.h for the products):
 - split.h: a draw's record (struct route_draw), a split's features, logit, slope and the table's online log-sum-exp.
-  It was written three times: sim.c's build_table, route.h's split features, and net.metal's credit, which had a
-  ±20 clamp the C side lacked. It is now included by sim.c's sampler, net.metal's credit and route_draw_score.
+  It was written three times: sim.c's build_table, route.h's split features, and the earlier net.metal's credit,
+  which had a ±20 clamp the C side lacked. It is now included by sim.c's sampler, credit.metal and route_draw_score.
 - upgrad.h: UPGrad's task weights, run on the GPU from the Gram matrix it makes. It was learn.swift's CPU function,
   which forced a read-back and a CPU wait every optimizer step.
 
@@ -39,15 +39,34 @@ Deleted, with their closures:
   fallback (now one inverse-CDF pass over the masked table); route_sim_credit, the CPU credit (route_draw_score over
   the same records replaces it for the checks); route.h's route_pre, route_split_pre and route_split_features (that
   last one unused).
-- net.swift: learn and apply each waited on the CPU; now encodeLearn and encodeApply, one command buffer.
-  refresh(from:) waited behind the forwards; route_net_publish replaces it.
+- net.swift: learn and apply each waited on the CPU; then encodeLearn and encodeApply, one command buffer (now
+  model.swift's). refresh(from:) waited behind the forwards; route_net_publish replaces it.
 
 Native code left is array kernels: sims.c (begin, step, pack, sizes, export: each a parallel pass), netapi.swift
 (batch buffers; forward, step, publish committed; wait), exchange.c, forward.c, sim.c, the Metal kernels.
+
+## The network on the GPU (644892e6 -> now: the backend rebuilt)
+
+The earlier backend (net.metal, int8.metal, net.swift: ~60 kernels a learning step, fp32/bf16 intermediates through
+memory between them) is deleted except its int8 x int8 -> int32 matmul2d products (mm.metal: gemm_nt, gemm_nn,
+gemm_tn retiled, and gemm_wg, wgrad over operands stored transposed). On them, a call is a few dispatches:
+
+- forward: lanes_fwd (a run's lanes, the recurrence's state carried tile to tile; one refresh: two runs a tile),
+  ctx_fwd (a 64-row tile of contexts through both layers and the readout, on chip: tile.h);
+- learning step: the forward storing what the backward reads and every X's wgrad codes; credit (credit.metal);
+  ctx_bwd and lanes_bwd (a task a threadgroup: each dgrad's codes, each gradient's wgrad codes and column sums, the
+  contexts' state gradients summed a refresh); gemm_wg a matrix; grads (the partial sums, the chain rule);
+  optimizer (one threadgroup: Gram, UPGrad, Adam, pin); weights_rows, weights_cols (the codes).
+
+Every 2D product is int8 x int8 -> int32 (int8mm.h; wgrad blocks of 64 rows, the producers' tile); act.h is the
+gates' and the rms's numerics, shared with forward.c (deploy: bit for bit). stages.swift measures the products
+against the roofline and the forward's build-up stage by stage.
 
 ## Checks (python -m route ...)
 
 - simcheck: the switch.c fixed router's table on the measured cluster.
 - deploy: forward.c against the GPU forward on the first refresh.
-- check --graph: the GPU's credit against split.h's on the CPU; scores against central differences; the fused codes;
-  the int8 network against the fp32 reference.
+- check --graph: the GPU's credit against split.h's on the CPU; scores against central differences; the fused wgrad
+  codes against int8mm.h's CPU definition (probes); the int8 network against the fp32 reference.
+- ./stages route.metallib: the kept products bit for bit against a CPU mirror, their rates against the roofline,
+  the forward's stages.

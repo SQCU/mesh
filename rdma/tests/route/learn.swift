@@ -1,4 +1,4 @@
-// The fp32 reference's backward (CHECK=1 GRAPH=1 compares net.swift's int8 network against it), and UPGrad's weights. For a batch of B windows, each K refreshes from its initial
+// The fp32 reference's backward (CHECK=1 GRAPH=1 compares model.swift's int8 network against it), and UPGrad's weights. For a batch of B windows, each K refreshes from its initial
 // state: the forward again (policy.swift's layers), refresh by refresh with the state carried, the drawn-from contexts'
 // w from their refresh's state; each task's surrogate sum(w . dw_t) (dw from the environment's credit, already scaled
 // by the advantages); each one's gradient in theta by the graph's autodiff, back through the window's refreshes; and

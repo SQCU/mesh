@@ -1,4 +1,4 @@
-/* A split's numerics, defined once: the simulator's draws (sim.c, CPU), the credit (net.metal, GPU) and tests/switch.c's
+/* A split's numerics, defined once: the simulator's draws (sim.c, CPU), the credit (credit.metal, GPU) and tests/switch.c's
    router include this header rather than restating them (as int8mm.h for the products).
 
    A draw: a piece at node v still owing destinations S chooses, for each d in S, one of v's deg out-lanes; token
@@ -33,7 +33,7 @@ enum { SPLIT_N = 6, SPLIT_DEG = 5, SPLIT_FS = 40 };   /* route.h's ROUTE_N, ROUT
 #define SPLIT_CLIP 10.0f
 #define SPLIT_ROOT 6.32455532f                         /* sqrt(SPLIT_FS) */
 
-/* a draw as made (sim.c) and as credited (net.metal): 160 bytes, no padding. row: the learning row (the caller's);
+/* a draw as made (sim.c) and as credited (credit.metal): 160 bytes, no padding. row: the learning row (the caller's);
    a1, a2: the piece's latency and queueing advantages (the loader's) */
 struct route_draw { float arrive[SPLIT_N * SPLIT_DEG]; uint32_t valid, mask, S, token, deg, ntok, row; float unit, a1, a2; };
 

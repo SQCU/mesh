@@ -119,7 +119,7 @@ int route_sim_decide(struct route_sim *x, struct route_decision *d, float *token
 void route_sim_answer(struct route_sim *x, const float *w);
 void route_sim_costs(const struct route_sim *x, struct route_costs *c);
 /* a draw's log-probability under w (its context's) and its score psi(token) - E psi into score [FS] (split.h's table;
-   the GPU's credit computes the same, net.metal credit_draws) */
+   the GPU's credit computes the same, credit.metal) */
 float route_draw_score(const struct route_draw *d, const float *w, float *score);
 int route_sim_points(const struct route_sim *x);
 int route_sim_contexts(const struct route_sim *x);
@@ -143,7 +143,7 @@ uint32_t route_split(const struct route_stream *s, const struct route_state *st,
 extern int route_argmax;   /* sim.c: set, every draw is its table's most probable allowed split */
 uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
 
-/* The policy's forward on a CPU (forward.c): net.swift's int8 network (minGRU), its weights as stored, int8 codes
+/* The policy's forward on a CPU (forward.c): model.swift's int8 network (minGRU), its weights as stored, int8 codes
    (int8mm.h's format, written by the trainer's THETA_INT8): route_params_read loads them (0, or -1 on a bad file). One
    refresh: lanes [nl][IN], tokens [nc][IN], the carried state [2][D] (read and advanced), w [nc][FS] out; scratch
    route_forward_scratch(nc) floats. A matrix: its codes [rows][k] (k its columns padded to 64), a scale a row, its bias */
