@@ -47,6 +47,7 @@ struct route_decision {
 /* row pools, `rows` rows each: token [rows][IN]; w [rows][FS]; dw [TASKS][rows][FS] */
 
 #ifndef __METAL_VERSION__
+#include <stddef.h>
 #include <stdint.h>
 
 /* a fabric: nodes (the compute ones the transaction's ranks), and lanes, each a direction of a cabled pair */
@@ -93,6 +94,23 @@ void route_sim_costs(const struct route_sim *x, struct route_costs *c);
    the caller scaling it by the transaction's), and the log-likelihood of that point's draws. */
 void route_sim_credit(struct route_sim *x, int point, float *dw, double *loglik);
 int route_sim_points(const struct route_sim *x);
+int route_sim_contexts(const struct route_sim *x);
+/* what a transaction did: events, draws, table entries built, sends */
+void route_sim_counts(const struct route_sim *x, uint64_t out[4]);
+/* decision point `point`'s stored w ([contexts][FS]), which the credit reads: the gradient check perturbs it */
+float *route_sim_w(struct route_sim *x, int point);
+
+/* The policy's forward on a CPU (forward.c), for deployment beside the bridge: theta in policy.swift's layout; one
+   decision point: lanes [nl][IN], tokens [nc][IN], the carried state [2][D] (read and advanced), w [nc][FS] out;
+   scratch route_forward_scratch(nc) floats */
+struct route_params {
+  int full;
+  const float *inp, *binp, *z[2], *bz[2], *r[2], *br[2], *h[2], *bh[2], *up[2], *bu[2], *down[2], *bd[2], *out;
+};
+int route_params_count(int full);
+void route_params_bind(struct route_params *p, const float *theta, int full);
+size_t route_forward_scratch(int nc);
+void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
 
 /* ---- the features: what the policy reads, defined once ---- */
 static inline double route_send1(const struct route_scenario *s, int l) {   /* one piece's time on one cable */

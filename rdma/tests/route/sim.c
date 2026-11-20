@@ -145,6 +145,7 @@ struct route_sim {
   float *w;                     /* [POINTS][CONTEXTS][FS] */
   struct table tables[ROUTE_CONTEXTS];
   struct group *groups; uint32_t ngroups, groomroom, *hash; uint32_t hashroom;
+  uint64_t count[4];   /* events, draws, table entries built, sends */
 };
 
 static void push(struct route_sim *x, struct event e) {   /* tests/switch.c's heap */
@@ -182,6 +183,9 @@ void route_sim_free(struct route_sim *x) {
   free(x->groups); free(x->hash); free(x->heap); free(x->w); free(x->latency); free(x->queued); free(x);
 }
 int route_sim_points(const struct route_sim *x) { return x->nb; }
+void route_sim_counts(const struct route_sim *x, uint64_t out[4]) { memcpy(out, x->count, sizeof x->count); }
+int route_sim_contexts(const struct route_sim *x) { return x->nc; }
+float *route_sim_w(struct route_sim *x, int point) { return x->w + (size_t)point * ROUTE_CONTEXTS * ROUTE_FS; }
 
 void route_sim_begin(struct route_sim *x, const struct route_scenario *sc, int mode, uint32_t key) {
   x->s = *sc; x->mode = mode; x->key = key;
@@ -192,7 +196,7 @@ void route_sim_begin(struct route_sim *x, const struct route_scenario *sc, int m
   for (int j = 0; j < x->s.commodities; j++) x->t.srcmask |= 1u << x->s.source[j];
   x->np = (int)ceil(x->s.size / ROUTE_PAGE); if (x->np < 1) x->np = 1;
   x->nb = (x->np + ROUTE_GROUP - 1) / ROUTE_GROUP;
-  x->point = -1; x->posted = 0; x->T = 0; x->events = 0;
+  x->point = -1; x->posted = 0; x->T = 0; x->events = 0; memset(x->count, 0, sizeof x->count);
   for (int l = 0; l < ROUTE_L; l++) for (int c = 0; c < ROUTE_CABLES; c++) x->free_at[l][c] = l < f->lanes ? x->s.background[l] / f->rate[l] : 0;
   memset(x->laststart, 0, sizeof x->laststart); memset(x->recv, 0, sizeof x->recv);
   memset(x->latency, 0, ROUTE_J * ROUTE_PIECES * sizeof(double)); memset(x->queued, 0, ROUTE_J * ROUTE_PIECES * sizeof(double));
@@ -229,7 +233,7 @@ static const double *table(struct route_sim *x, int c) {
   double acc = 0;
   for (int k = 0; k < x->tokens[c]; k++) { acc += isfinite(tb->cdf[k]) ? exp(tb->cdf[k] - most) / sum : 0; tb->cdf[k] = acc; }
   tb->cdf[x->tokens[c] - 1] = 1;
-  tb->point = x->point;
+  tb->point = x->point; x->count[2] += (uint64_t)x->tokens[c];
   return tb->cdf;
 }
 static void log_draw(struct route_sim *x, uint32_t c, uint32_t mask, uint32_t token, uint32_t piece) {
@@ -317,7 +321,7 @@ static void split_send(struct route_sim *x, double t, int j, int v, uint32_t S, 
       const double u = unit(x->key ^ piece * 0x27d4eb2du ^ S) * total; double acc = 0;
       for (int q = 0; q < n; q++) if (fits((uint32_t)q, S, mask, deg)) { tok = (uint32_t)q; acc += cdf[q] - (q ? cdf[q - 1] : 0); if (acc > u) break; }
     }
-    log_draw(x, (uint32_t)c, mask, tok, piece);
+    log_draw(x, (uint32_t)c, mask, tok, piece); x->count[1]++;
   }
   uint32_t share[ROUTE_DEG] = {0}, y = tok;   /* the sends: one a lane given a share */
   for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) { share[y % (uint32_t)deg] |= 1u << d; y /= (uint32_t)deg; }
@@ -332,12 +336,12 @@ static void split_send(struct route_sim *x, double t, int j, int v, uint32_t S, 
     const double time = bytes / (f->rate[l] / f->cables[l] * (both ? f->duplex : 1));
     x->free_at[l][cb] = start + time; x->queued[piece] += start - t;
     if (v == x->s.source[j] && start > x->laststart[j]) x->laststart[j] = start;
-    push(x, (struct event){start + time + f->latency[l], piece, (uint32_t)h, share[k], visited | 1u << v});
+    push(x, (struct event){start + time + f->latency[l], piece, (uint32_t)h, share[k], visited | 1u << v}); x->count[3]++;
   }
 }
 static void advance(struct route_sim *x, double until) {   /* every event up to `until`, in time order */
   while (x->events && x->heap[0].t <= until) {
-    const struct event e = pop(x);
+    const struct event e = pop(x); x->count[0]++;
     const int j = (int)(e.piece / ROUTE_PIECES), i = (int)(e.piece % ROUTE_PIECES);
     uint32_t S = e.owed;
     if (S >> e.node & 1) {
