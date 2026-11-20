@@ -12,7 +12,7 @@ struct Mix { var s: UInt64
   mutating func normal() -> Double { sqrt(-2 * log(max(uniform(), 1e-300))) * cos(2 * Double.pi * uniform()) }
 }
 
-// one scenario, laid out as route.metal's Scenario (800 bytes)
+// one scenario, laid out as route.metal's Scenario (1444 bytes)
 func scenario(_ g: inout Mix) -> [UInt8] {
   let n = 3 + Int(g.uniform() * 4)
   var joined = Array(repeating: Array(repeating: false, count: n), count: n), degree = Array(repeating: 0, count: n)
@@ -57,7 +57,7 @@ func scenario(_ g: inout Mix) -> [UInt8] {
       for v in 0..<n where v != s && by[v] >= 0 { lane[s][k][v] = UInt8(by[v]) }
     }
   }
-  var b = [UInt8](repeating: 0, count: 800)
+  var b = [UInt8](repeating: 0, count: 1444)
   func f32(_ at: Int, _ v: Double) { var x = Float(v); withUnsafeBytes(of: &x) { for i in 0..<4 { b[at + i] = $0[i] } } }
   func u32(_ at: Int, _ v: Int) { var x = UInt32(v); withUnsafeBytes(of: &x) { for i in 0..<4 { b[at + i] = $0[i] } } }
   for l in 0..<nl { f32(4 * l, rate[l]); f32(128 + 4 * l, lat[l]); f32(256 + 4 * l, bg[l]); b[384 + l] = UInt8(src[l]); b[416 + l] = UInt8(dst[l]) }
@@ -67,6 +67,13 @@ func scenario(_ g: inout Mix) -> [UInt8] {
     f32(748 + 4 * j, S)
   }
   f32(772, floor); f32(776, dt); f32(780, S); u32(784, n); u32(788, nl); u32(792, n)
+  // each lane's tree edges, an edge (commodity, candidate, head node) as its index in lane[J][K][N]
+  var edges: [[Int]] = Array(repeating: [], count: L)
+  for j in 0..<J { for k in 0..<K { for v in 0..<N where lane[j][k][v] != 255 { edges[Int(lane[j][k][v])].append((j * K + k) * N + v) } } }
+  func u16(_ at: Int, _ v: Int) { b[at] = UInt8(v & 255); b[at + 1] = UInt8(v >> 8) }
+  var at = 0
+  for l in 0..<L { u16(800 + 2 * l, at); for e in edges[l] { u16(866 + 2 * at, e); at += 1 } }
+  u16(800 + 2 * L, at)
   return b
 }
 
@@ -78,7 +85,7 @@ let rollouts = args.count > 2 ? Int(args[2])! : 1024, per = args.count > 3 ? Int
 
 var g = Mix(s: 20261119)
 let pool = 4096
-var scen = [UInt8](); scen.reserveCapacity(pool * 800)
+var scen = [UInt8](); scen.reserveCapacity(pool * 1444)
 for _ in 0..<pool { scen += scenario(&g) }
 // the network: Gaussian weights scaled by fan-in, biases zero (route.metal's Net)
 var net = [Float]()

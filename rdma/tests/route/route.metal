@@ -1,23 +1,25 @@
 // The routing policy's training rollout (design/switched-multipath-dma.md), fused: one threadgroup a rollout. v0: the
 // forward pass, all-gather transactions, fp32.
 //
-// A rollout is one scenario's transaction in the fluid model, SLOTS slots long, each slot SCEN.dt ns:
+// A rollout is one scenario's transaction in the fluid model, SLOTS slots long, each slot `dt` ns. Each slot:
+// - at a refresh (every REFRESH slots), the policy's weighting of each commodity's K candidate trees;
+// - each source releases its commodity's bytes into its trees at its out-lanes' rate, split by the weighting;
 // - every lane serves the bytes waiting on it (its tree edges' and its background's) by processor sharing at its rate;
 // - bytes sent reach the lane's head after its latency and one page time (a ring of the last H slots' sends);
-// - each source releases its commodity's bytes into its K candidate trees at its out-lanes' rate, split by the
-//   policy's weighting, refreshed every REFRESH slots;
-// - the objective is a smooth maximum over (commodity, destination) of the area above its delivered fraction, over the
-//   floor; `done` is the first slot every destination holds every byte, over the floor.
+// - each (commodity, destination) adds the area above its delivered fraction.
+// The objective is a smooth maximum over (commodity, destination) of that area over the floor; `done` is the first slot
+// every destination holds every byte, over the floor.
 //
-// The policy, refreshed per commodity: a 64-wide stream from the commodity's context and its last weighting's expected
+// The policy, a commodity at a time: a 64-wide stream from the commodity's context and its last weighting's expected
 // candidate embedding, through two layers of a GRU block (recurrent over refreshes) and a feed-forward block expanding
-// to 192; each candidate tree is its N node tokens (parent, in-lane queue level, rate band), embedded, rotated by
-// node position (RoPE at the embedding only), mean-pooled, and dotted with the stream.
+// to 192; each candidate tree is its N node tokens (parent, in-lane queue level, rate band), embedded, rotated by node
+// position (RoPE at the embedding only), mean-pooled, and dotted with the stream. A matrix-vector product reads each
+// weight row once, coalesced along the row across a SIMD group's lanes, for every commodity at once.
 #include <metal_stdlib>
 using namespace metal;
 
 constant constexpr int N = 6, L = 32, J = 6, K = 8, H = 16, SLOTS = 64, REFRESH = 8;
-constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64, T = 256;
+constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64, T = 256, SG = T / 32;
 constant constexpr int JK = J * K, JKN = J * K * N;
 constant constexpr float PAGE = 16384.0f;
 
@@ -29,6 +31,8 @@ struct Scenario {
   float demand[J];
   float floor_ns, dt, size;          // the floor, the slot width, a rank's bytes
   uint commodities, lanes, nodes, pad;
+  ushort lane_start[L + 1];          // each lane's tree edges (an edge is (commodity, candidate, head node)),
+  ushort lane_edges[JKN];            // lane_edges[lane_start[l] .. lane_start[l + 1] - 1]
 };
 
 struct Layer { float z[D][2 * D], r[D][2 * D], c[D][2 * D], bz[D], br[D], bc[D], up[E][D], bu[E], down[D][E], bd[D]; };
@@ -36,26 +40,44 @@ struct Net { float inp[D][CTX + D], binp[D]; Layer layer[2]; float tok[VOCAB][D]
 
 static inline float sigmoid(float v) { return 1.0f / (1.0f + exp(-v)); }
 
+// out[j][row] = (add ? out[j][row] : bias[row] or 0) + sum over q < cols of W[row][q] in[j][q], for every row and every
+// commodity j < nj; W's rows `stride` apart. SIMD group sg takes rows sg, sg + SG, ...; its lanes stride along the row.
+static void product(device const float *W, int stride, int rows, int cols, threadgroup const float *in, int istride,
+                    threadgroup float *out, int ostride, device const float *bias, bool add, int nj, uint sg, uint ln) {
+  for (int row = sg; row < rows; row += SG) {
+    float acc[J] = {0, 0, 0, 0, 0, 0};
+    for (int q = ln; q < cols; q += 32) {
+      const float w = W[row * stride + q];
+      for (int j = 0; j < J; j++) acc[j] += w * in[j * istride + q];
+    }
+    for (int j = 0; j < J; j++) {
+      const float v = simd_sum(acc[j]);
+      if (ln == 0 && j < nj) out[j * ostride + row] = (add ? out[j * ostride + row] : (bias ? bias[row] : 0.0f)) + v;
+    }
+  }
+}
+
 kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net &net [[buffer(1)]],
                     device const uint *which [[buffer(2)]], device float *objective [[buffer(3)]],
                     device float *done_out [[buffer(4)]], device float *rings [[buffer(5)]],
-                    uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {
+                    uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
+                    uint sg [[simdgroup_index_in_threadgroup]], uint ln [[thread_index_in_simdgroup]]) {
   device const Scenario &s = scen[which[r]];
-  threadgroup float arrived[JKN], sent[JKN];
   device float (*ring)[JKN] = (device float (*)[JKN])(rings + size_t(r) * H * JKN);   // this rollout's last H slots' sends
+  threadgroup float arrived[JKN], sent[JKN];
   threadgroup float share[L], bgq[L], cap[L], want[L];
   threadgroup int lag[L];
-  threadgroup float assigned[JK], released[J], outcap[J], p[JK], area[J * N], frac[J * N];
+  threadgroup float assigned[JK], released[J], outcap[J], p[JK], area[J * N], frac[J * N], ctx[J][CTX];
   threadgroup float x[J][D], h[2][J][D], gz[J][D], gr[J][D], ex[J][E], last[J][D], emb[JK][D];
   threadgroup int finished;
   const float dt = s.dt, fl = s.floor_ns;
   const int nl = int(s.lanes), nj = int(s.commodities), nn = int(s.nodes);
 
   for (int e = tid; e < JKN; e += T) { arrived[e] = 0; sent[e] = 0; for (int q = 0; q < H; q++) ring[q][e] = 0; }
-  for (int i = tid; i < J * D; i += T) { x[i / D][i % D] = 0; h[0][i / D][i % D] = 0; h[1][i / D][i % D] = 0; last[i / D][i % D] = 0; }
+  for (int i = tid; i < J * D; i += T) { h[0][i / D][i % D] = 0; h[1][i / D][i % D] = 0; last[i / D][i % D] = 0; }
   if (tid < uint(L)) {
     const int l = tid;
-    cap[l] = l < nl ? s.rate[l] * dt : 0; bgq[l] = l < nl ? s.bg[l] : 0;
+    cap[l] = l < nl ? s.rate[l] * dt : 0; bgq[l] = l < nl ? s.bg[l] : 0; want[l] = bgq[l];
     lag[l] = l < nl ? min(int(ceil((s.lat[l] + PAGE / max(s.rate[l], 1e-6f)) / dt)), H - 1) : 1;
   }
   if (tid < uint(J)) {
@@ -69,61 +91,46 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int t = 0; t < SLOTS; t++) {
-    // each lane's demand: its edges' bytes not yet sent on, plus its background
-    if (tid < uint(L)) want[tid] = bgq[tid];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid < uint(L) && int(tid) < nl) {
-      const int l = tid; float w = bgq[l];
-      for (int j = 0; j < nj; j++) for (int k = 0; k < K; k++) for (int v = 0; v < nn; v++)
-        if (s.lane[j][k][v] == l) w += max(arrived[(j * K + k) * N + s.lsrc[l]] - sent[(j * K + k) * N + v], 0.0f);
-      want[l] = w;
-      const float sh = min(1.0f, cap[l] / max(w, 1e-3f));
-      share[l] = sh; bgq[l] -= bgq[l] * sh;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
     if (t % REFRESH == 0) {
-      // the policy: the stream for each commodity
-      for (int i = tid; i < J * D; i += T) {
-        const int j = i / D, d = i % D;
-        float a = net.binp[d];
-        const float ctx[CTX] = {log(1.0f + s.size / PAGE), float(t) / SLOTS, released[j] / max(s.demand[j], 1.0f), outcap[j] / max(s.demand[j], 1.0f),
-                                float(nn) / 8, float(nl) / 32, float(K) / 8, float(popcount(uint(s.dest[j]))) / 8, 0, 0, 0, 0};
-        for (int q = 0; q < CTX; q++) a += net.inp[d][q] * ctx[q];
-        for (int q = 0; q < D; q++) a += net.inp[d][CTX + q] * last[j][q];
-        x[j][d] = a;
+      // the stream: context and last expected embedding, then two layers of GRU and feed-forward
+      if (tid < uint(J)) {
+        const int j = tid;
+        ctx[j][0] = log(1.0f + s.size / PAGE); ctx[j][1] = float(t) / SLOTS; ctx[j][2] = released[j] / max(s.demand[j], 1.0f);
+        ctx[j][3] = outcap[j] / max(s.demand[j], 1.0f); ctx[j][4] = float(nn) / 8; ctx[j][5] = float(nl) / 32; ctx[j][6] = float(K) / 8;
+        ctx[j][7] = float(popcount(uint(s.dest[j]))) / 8; ctx[j][8] = 0; ctx[j][9] = 0; ctx[j][10] = 0; ctx[j][11] = 0;
       }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      product(&net.inp[0][0], CTX + D, D, CTX, &ctx[0][0], CTX, &x[0][0], D, net.binp, false, nj, sg, ln);
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      product(&net.inp[0][CTX], CTX + D, D, D, &last[0][0], D, &x[0][0], D, nullptr, true, nj, sg, ln);
       threadgroup_barrier(mem_flags::mem_threadgroup);
       for (int layer = 0; layer < 2; layer++) {
         device const Layer &w = net.layer[layer];
-        for (int i = tid; i < J * D; i += T) {
-          const int j = i / D, d = i % D; float az = w.bz[d], ar = w.br[d];
-          for (int q = 0; q < D; q++) { az += w.z[d][q] * h[layer][j][q] + w.z[d][D + q] * x[j][q]; ar += w.r[d][q] * h[layer][j][q] + w.r[d][D + q] * x[j][q]; }
-          gz[j][d] = sigmoid(az); gr[j][d] = sigmoid(ar);
-        }
+        product(&w.z[0][0], 2 * D, D, D, &h[layer][0][0], D, &gz[0][0], D, w.bz, false, nj, sg, ln);
+        product(&w.r[0][0], 2 * D, D, D, &h[layer][0][0], D, &gr[0][0], D, w.br, false, nj, sg, ln);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        product(&w.z[0][D], 2 * D, D, D, &x[0][0], D, &gz[0][0], D, nullptr, true, nj, sg, ln);
+        product(&w.r[0][D], 2 * D, D, D, &x[0][0], D, &gr[0][0], D, nullptr, true, nj, sg, ln);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = tid; i < J * D; i += T) { gz[i / D][i % D] = sigmoid(gz[i / D][i % D]); gr[i / D][i % D] = sigmoid(gr[i / D][i % D]) * h[layer][i / D][i % D]; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        product(&w.c[0][0], 2 * D, D, D, &gr[0][0], D, &ex[0][0], E, w.bc, false, nj, sg, ln);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        product(&w.c[0][D], 2 * D, D, D, &x[0][0], D, &ex[0][0], E, nullptr, true, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int i = tid; i < J * D; i += T) {
-          const int j = i / D, d = i % D; float ac = w.bc[d];
-          for (int q = 0; q < D; q++) ac += w.c[d][q] * gr[j][q] * h[layer][j][q] + w.c[d][D + q] * x[j][q];
-          const float hn = (1 - gz[j][d]) * h[layer][j][d] + gz[j][d] * tanh(ac);
-          ex[j][d] = hn;   // the new state, held here until every thread has read the old
+          const int j = i / D, d = i % D;
+          const float hn = (1 - gz[j][d]) * h[layer][j][d] + gz[j][d] * tanh(ex[j][d]);
+          h[layer][j][d] = hn; x[j][d] += hn;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (int i = tid; i < J * D; i += T) { const int j = i / D, d = i % D; h[layer][j][d] = ex[j][d]; x[j][d] += ex[j][d]; }
+        product(&w.up[0][0], D, E, D, &x[0][0], D, &ex[0][0], E, w.bu, false, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (int i = tid; i < J * E; i += T) {
-          const int j = i / E, e = i % E; float a = w.bu[e];
-          for (int q = 0; q < D; q++) a += w.up[e][q] * x[j][q];
-          ex[j][e] = max(a, 0.0f);
-        }
+        for (int i = tid; i < J * E; i += T) ex[i / E][i % E] = max(ex[i / E][i % E], 0.0f);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (int i = tid; i < J * D; i += T) {
-          const int j = i / D, d = i % D; float a = w.bd[d];
-          for (int q = 0; q < E; q++) a += w.down[d][q] * ex[j][q];
-          gz[j][d] = a;
-        }
+        product(&w.down[0][0], E, D, E, &ex[0][0], E, &x[0][0], D, nullptr, true, nj, sg, ln);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (int i = tid; i < J * D; i += T) x[i / D][i % D] += gz[i / D][i % D];
+        for (int i = tid; i < J * D; i += T) x[i / D][i % D] += w.bd[i % D];
         threadgroup_barrier(mem_flags::mem_threadgroup);
       }
       // each candidate: its node tokens, embedded, rotated by node position, pooled
@@ -132,11 +139,12 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
         const float theta = pow(10000.0f, -2.0f * pair / D);
         float a = 0, b = 0;
         for (int v = 0; v < N; v++) {
-          const int ln = s.lane[j][k][v];
-          int parent = ln == 255 ? (v == s.src[j] ? N : N + 1) : s.lsrc[ln], level = 0, band = 0;
-          if (ln != 255) {
-            level = clamp(int(floor(log2(1 + 64 * want[ln] / max(s.rate[ln], 1e-6f) / fl))), 0, 15);
-            band = clamp(int(floor(log2(max(s.rate[ln], 1.0f)))) - 2, 0, 3);
+          const int lane = s.lane[j][k][v];
+          const int parent = lane == 255 ? (v == s.src[j] ? N : N + 1) : s.lsrc[lane];
+          int level = 0, band = 0;
+          if (lane != 255) {
+            level = clamp(int(floor(log2(1 + 64 * want[lane] / max(s.rate[lane], 1e-6f) / fl))), 0, 15);
+            band = clamp(int(floor(log2(max(s.rate[lane], 1.0f)))) - 2, 0, 3);
           }
           const int token = parent * 64 + level * 4 + band;
           const float u = net.tok[token][2 * pair], w2 = net.tok[token][2 * pair + 1], c = cos(v * theta), sn = sin(v * theta);
@@ -145,10 +153,11 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
         emb[jk][2 * pair] = a / N; emb[jk][2 * pair + 1] = b / N;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
-      if (tid < uint(JK)) {
-        const int j = tid / K; float a = 0;
-        for (int q = 0; q < D; q++) a += emb[tid][q] * x[j][q];
-        p[tid] = a / 8;
+      // each candidate's logit: its embedding dotted with the stream, a SIMD group's lanes along the embedding
+      for (int jk = sg; jk < JK; jk += SG) {
+        const int j = jk / K;
+        const float v = simd_sum(emb[jk][ln] * x[j][ln] + emb[jk][ln + 32] * x[j][ln + 32]);
+        if (ln == 0) p[jk] = v / 8;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
       if (tid < uint(J)) {
@@ -165,7 +174,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
       }
     }
 
-    // release at the sources
+    // release at the sources, before any lane's share is taken
     if (tid < uint(J) && int(tid) < nj) {
       const int j = tid;
       const float rr = min(max(s.demand[j] - released[j], 0.0f), outcap[j]);
@@ -173,21 +182,33 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
       for (int k = 0; k < K; k++) { assigned[j * K + k] += rr * p[j * K + k]; arrived[(j * K + k) * N + s.src[j]] = assigned[j * K + k]; }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    // each lane's share: its demand (its edges' bytes not yet sent on, and its background) against its rate
+    if (tid < uint(L) && int(tid) < nl) {
+      const int l = tid; float w = bgq[l];
+      for (int i = s.lane_start[l]; i < s.lane_start[l + 1]; i++) {
+        const int e = s.lane_edges[i];
+        w += max(arrived[(e / N) * N + s.lsrc[l]] - sent[e], 0.0f);
+      }
+      want[l] = w;
+      const float sh = min(1.0f, cap[l] / max(w, 1e-3f));
+      share[l] = sh; bgq[l] -= bgq[l] * sh;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     // sends: every edge's waiting bytes times its lane's share, into the ring
     const int slot = t % H;
     for (int e = tid; e < JKN; e += T) {
       const int jk = e / N, v = e % N, j = jk / K, k = jk % K;
-      const int ln = (j < nj && v < nn) ? s.lane[j][k][v] : 255;
+      const int lane = (j < nj && v < nn) ? s.lane[j][k][v] : 255;
       float inc = 0;
-      if (ln != 255) inc = max(arrived[jk * N + s.lsrc[ln]] - sent[e], 0.0f) * share[ln];
+      if (lane != 255) inc = max(arrived[jk * N + s.lsrc[lane]] - sent[e], 0.0f) * share[lane];
       sent[e] += inc; ring[slot][e] = inc;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
     // landings: what was sent lag slots ago
     for (int e = tid; e < JKN; e += T) {
       const int jk = e / N, v = e % N, j = jk / K, k = jk % K;
-      const int ln = (j < nj && v < nn) ? s.lane[j][k][v] : 255;
-      if (ln != 255 && t >= lag[ln]) arrived[e] += ring[(t - lag[ln]) % H][e];
+      const int lane = (j < nj && v < nn) ? s.lane[j][k][v] : 255;
+      if (lane != 255 && t >= lag[lane]) arrived[e] += ring[(t - lag[lane]) % H][e];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // delivered fractions and the area above them
