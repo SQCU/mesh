@@ -468,10 +468,10 @@ _Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,d
    enumerated and no hull taken for a conflict. The relation keeps each edge's
    causes (design/compilation-composition-change-request.md, "Retain the value/effect/transfer cause of an edge", item
    6.4): one record {from, to} a distinct (from, to, cause, witness), sorted by from, to, kind, key, given, from_view,
-   to_view, `from` < `to`; a conflict's cause its key and hazard (the `from` access before the `to` access:
+   to_view. A conflict's cause is its key and hazard (the `from` access before the `to` access:
    READ_AFTER_WRITE, WRITE_AFTER_READ, WRITE_AFTER_WRITE), its witness the two meeting views, from_view `from`'s and
-   to_view `to`'s, indices into `view` as given; supplied edge g's (supplied_from[g] < supplied_to[g], EINVAL
-   otherwise) GIVEN with `given` g and both witnesses SIZE_MAX. *conflict holds *count records, the caller's, released
+   to_view `to`'s, indices into `view` as given; supplied edge g retains its directed endpoints, GIVEN with `given` g
+   and both witnesses SIZE_MAX. Its endpoints name distinct vertices. *conflict holds *count records, the caller's, released
    with free (NULL and 0 on failure). A pair of views of one vertex (mesh_graph_conflicts_views) is one record per
    hazard, READ_AFTER_WRITE's from_view the written view and WRITE_AFTER_READ's the read one. The pure relation is its
    distinct (from, to) */

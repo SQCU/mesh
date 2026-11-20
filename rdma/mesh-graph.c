@@ -4314,7 +4314,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
   struct mesh_graph_relation **answered = NULL;
   const uint32_t **answered_map = NULL;
   size_t answers = 0, answer_room = 0;
-  for (size_t e = 0; e < supplied; e++) if (supplied_from[e] >= supplied_to[e]) return EINVAL;
+  for (size_t e = 0; e < supplied; e++) if (supplied_from[e] == supplied_to[e]) return EINVAL;
   if (supplied >= SIZE_MAX / sizeof(struct mesh_graph_conflict) - 64 || views >= SIZE_MAX / sizeof(struct view_hull)) return ENOMEM;
   struct view_hull *hull = malloc((views + 1) * sizeof *hull);
   size_t made = supplied, held = supplied + 64, count = 0, decideds = 0, room = 0;
