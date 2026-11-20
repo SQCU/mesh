@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define ENTRIES 4   /* view lines a name carries, 64 bytes each */
 #define LEARN 40    /* executions the sampled router learns its lines over */
@@ -98,7 +99,7 @@ static struct event pop(void){
 
 static struct mesh_switch_fabric fabric;
 static const double unit=64;   /* ns, the lines' time unit */
-enum { FIXED, SAMPLED, TREES };
+enum { FIXED, SAMPLED, TREES, POLICY };
 static int mode;
 static uint32_t execution;
 static double free_at[256][CABLES],busy[256];
@@ -109,6 +110,85 @@ static struct piece *pieces;static uint32_t npieces;
 /* the trees a piece is sampled from: commodity j's candidates at tree_first[j] .. tree_first[j + 1] - 1 */
 static struct mesh_switch_tree trees[16384];static uint32_t tree_first[65],ncommodities,csrc[64];static uint64_t cto[64];
 static double tdemand[64],tree_fluid;
+
+#ifdef ROUTE_POLICY
+/* policy: the trained routing policy (route/route.h) as this run's router. Every `policy_dt` ns it reads the fabric
+   (each lane's earliest-cable wait, the duplex share, the bytes in flight, the cost-to-go, each pattern's delivered
+   fraction) and route/forward.c computes every context's w from its recurrent state, carried from refresh to refresh
+   and from execution to execution, as a bridge's would be; the table is active `policy_lag` ns after its refresh (the
+   first at once). A piece at node v owing S draws its split from its pattern's context (v, S), masked to the lanes that
+   leave its path and reach their share without coming back (route_split). Built with -DROUTE_POLICY; ROUTE_THETA names
+   the parameters (minGRU's, or the GRU's with ROUTE_GRU=1). */
+#include "route/route.h"
+static struct route_stream policy_stream;static struct route_topology policy_topology;static struct route_params policy_params;
+static float *policy_theta,*policy_w,*policy_next,*policy_tokens,*policy_scratch,policy_state[2*ROUTE_D],policy_lanes[ROUTE_L][ROUTE_IN];
+static int policy_pattern[ROUTE_CONTEXTS],policy_node[ROUTE_CONTEXTS],policy_nc,policy_ctx[ROUTE_J][ROUTE_N][ROUTE_SETS];static uint32_t policy_owed[ROUTE_CONTEXTS];
+static struct route_state policy_st,policy_stnext;
+static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3125],policy_us;
+static uint64_t policy_refreshes,policy_draws;
+static void policy_load(const char *path,int full){
+  const int n=route_params_count(full);
+  FILE *f=fopen(path,"rb");if(!f){perror(path);exit(2);}
+  policy_theta=malloc((size_t)n*sizeof(float));assert(policy_theta && fread(policy_theta,sizeof(float),(size_t)n,f)==(size_t)n);fclose(f);
+  route_params_bind(&policy_params,policy_theta,full);
+  policy_w=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));policy_next=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));
+  policy_tokens=malloc((size_t)ROUTE_CONTEXTS*ROUTE_IN*sizeof(float));policy_scratch=malloc(route_forward_scratch(ROUTE_CONTEXTS)*sizeof(float));
+  assert(policy_w && policy_next && policy_tokens && policy_scratch);
+}
+static void policy_setup(int kind,double S){   /* this run's fabric and collective, as the policy reads them */
+  struct route_fabric f;memset(&f,0,sizeof f);
+  f.nodes=(int)nodes;f.ncompute=(int)ncompute;f.lanes=(int)links;f.duplex=duplex;
+  for(uint32_t c=0;c<ncompute;c++)f.compute[c]=(int)compute[c];
+  for(uint32_t l=0;l<links;l++){f.from[l]=(int)wire[l].from;f.to[l]=(int)wire[l].to;f.rate[l]=wire[l].rate;f.latency[l]=wire[l].latency;f.cables[l]=(int)cables[l];}
+  route_stream_one(&f,kind?ROUTE_ALLREDUCE:ROUTE_ALLGATHER,S,(int)compute[0],&policy_stream);
+  route_topology_make(&policy_stream.f,&policy_stream,&policy_topology);
+  memset(policy_ctx,0xff,sizeof policy_ctx);
+  policy_nc=route_contexts(&policy_stream,&policy_topology,policy_pattern,policy_node,policy_owed);assert(policy_nc>0);
+  for(int c=0;c<policy_nc;c++)policy_ctx[policy_pattern[c]][policy_node[c]][policy_owed[c]]=c;
+  memset(policy_state,0,sizeof policy_state);policy_refreshes=policy_draws=0;policy_us=0;
+}
+static int pattern_of_piece(uint32_t k){
+  for(int j=0;j<policy_stream.patterns;j++)if((uint32_t)policy_stream.source[j]==pieces[k].source && policy_stream.dest[j]==(uint32_t)pieces[k].need)return j;
+  abort();
+}
+static void policy_refresh(double t,int now){   /* the fabric at t, the forward, the table it makes (active now or after the lag) */
+  struct route_state *st=&policy_stnext;memset(st,0,sizeof *st);st->tau=t;
+  for(uint32_t l=0;l<links;l++){
+    double w=INFINITY;int busy=0;
+    for(uint32_t c=0;c<cables[l];c++){const double q=free_at[l][c]>t?free_at[l][c]-t:0;if(q<w)w=q;}
+    if(reverse[l]!=UINT32_MAX)for(uint32_t c=0;c<cables[reverse[l]];c++)busy=busy||free_at[reverse[l]][c]>t;
+    st->wait[l]=w;st->dup[l]=busy?duplex:1;
+  }
+  for(size_t e=0;e<events;e++){st->inflight[heap[e].node]+=pieces[heap[e].piece].bytes;st->posted+=pieces[heap[e].piece].bytes;}
+  for(int a=0;a<ROUTE_N;a++)for(int b=0;b<ROUTE_N;b++)st->togo[a][b]=a==b?0:INFINITY;
+  for(uint32_t l=0;l<links;l++){const double h=route_hop(&policy_stream,st,(int)l);if(h<st->togo[wire[l].from][wire[l].to])st->togo[wire[l].from][wire[l].to]=h;}
+  for(int m=0;m<ROUTE_N;m++)for(int a=0;a<ROUTE_N;a++)for(int b=0;b<ROUTE_N;b++)if(st->togo[a][m]+st->togo[m][b]<st->togo[a][b])st->togo[a][b]=st->togo[a][m]+st->togo[m][b];
+  double total[ROUTE_J]={0},got[ROUTE_J][ROUTE_N]={{0}};
+  for(uint32_t k=0;k<npieces;k++){const int j=pattern_of_piece(k);total[j]++;for(int d=0;d<ROUTE_N;d++)if(pieces[k].got>>d&1)got[j][d]++;}
+  for(int j=0;j<policy_stream.patterns;j++)for(int d=0;d<ROUTE_N;d++)st->recv[j][d]=total[j]>0?got[j][d]/total[j]:0;
+  st->ops=1;
+  for(int l=0;l<ROUTE_L;l++)route_lane_token(&policy_stream,st,&policy_topology,l,policy_lanes[l]);
+  for(int c=0;c<policy_nc;c++)route_context_token(&policy_stream,st,&policy_topology,policy_pattern[c],policy_node[c],policy_owed[c],(int)(policy_refreshes%ROUTE_POINTS),policy_tokens+(size_t)c*ROUTE_IN);
+  struct timespec a,b;clock_gettime(CLOCK_MONOTONIC,&a);
+  route_forward(&policy_params,&policy_lanes[0][0],(int)links,policy_tokens,policy_nc,policy_state,policy_next,policy_scratch);
+  clock_gettime(CLOCK_MONOTONIC,&b);policy_us+=(b.tv_sec-a.tv_sec)*1e6+(b.tv_nsec-a.tv_nsec)/1e3;
+  policy_refreshes++;
+  policy_at=now?t:t+policy_lag;
+  if(now){float *x=policy_w;policy_w=policy_next;policy_next=x;policy_st=policy_stnext;policy_at=INFINITY;}
+}
+static uint32_t policy_route(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,uint32_t *lane,uint64_t *subset){
+  if(t>=policy_at){float *x=policy_w;policy_w=policy_next;policy_next=x;policy_st=policy_stnext;policy_at=INFINITY;}   /* the newer table, now active */
+  const int j=pattern_of_piece(k),c=policy_ctx[j][from][to];assert(c>=0);
+  const double u=((mesh_switch_mix(((uint64_t)execution<<32)^k^((uint64_t)from<<56))>>11)+0.5)/9007199254740992.0;
+  uint32_t tok=route_split(&policy_stream,&policy_st,&policy_topology,(int)from,(uint32_t)to,(uint32_t)visited,policy_w+(size_t)c*ROUTE_FS,u,policy_cdf);
+  policy_draws++;
+  const int deg=policy_topology.deg[from];uint64_t share[ROUTE_DEG]={0};
+  for(int d=0;d<ROUTE_N;d++)if(to>>d&1){share[tok%(uint32_t)deg]|=UINT64_C(1)<<d;tok/=(uint32_t)deg;}
+  uint32_t used=0;
+  for(int q=0;q<deg;q++)if(share[q]){lane[used]=(uint32_t)policy_topology.out[from][q];subset[used]=share[q];used++;}
+  return used;
+}
+#endif
 
 static uint32_t earliest_cable(uint32_t l){
   uint32_t c=0;for(uint32_t k=1;k<cables[l];k++)if(free_at[l][k]<free_at[l][c])c=k;
@@ -135,7 +215,11 @@ static void forward(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visit
       for(uint32_t d=0;d<nodes;d++)if(to>>d&1){uint32_t at=d;while(at!=v && tr->parent[at]!=UINT32_MAX)at=tr->parent[at];if(at==v)below|=UINT64_C(1)<<d;}
       if(below){lane[used]=tr->lane[v];subset[used]=below;used++;}
     }
-  }else used=mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,key,ahead,mode==SAMPLED?view[from]:NULL,unit,mode==SAMPLED,lane,subset);
+  }
+#ifdef ROUTE_POLICY
+  else if(mode==POLICY)used=policy_route(t,from,k,to,visited,lane,subset);
+#endif
+  else used=mesh_switch_route(&fabric,from,t,to,visited,pieces[k].bytes,key,ahead,mode==SAMPLED?view[from]:NULL,unit,mode==SAMPLED,lane,subset);
   assert(used!=UINT32_MAX && used>0);
   uint64_t covered=0;
   for(uint32_t u=0;u<used;u++){
@@ -185,10 +269,16 @@ static double execute(int kind,double S,double page){
     const uint32_t owner=compute[p%ncompute];
     pieces[npieces++]=(struct piece){owner,p,p+1<P?page:S-page*(P-1),all&~(UINT64_C(1)<<owner),0,2,{{0},{0},0}};
   }
+#ifdef ROUTE_POLICY
+  if(mode==POLICY){policy_refresh(0,1);policy_due=policy_dt;}
+#endif
   for(uint32_t k=0;k<first;k++)forward(0,pieces[k].source,k,pieces[k].need,0,0);
   if(kind==1)for(uint32_t p=0;p<P;p++)if(!left[p])forward(0,pieces[first+p].source,first+p,pieces[first+p].need,0,0);
   double T=0;size_t steps=0;
   while(events){
+#ifdef ROUTE_POLICY
+    if(mode==POLICY)while(policy_due<=heap[0].t){policy_refresh(policy_due,0);policy_due+=policy_dt;}
+#endif
     const struct event e=pop();
     assert(++steps<100000000 && e.hops<=nodes);
     for(uint32_t c=0;c<e.carried;c++)   /* this node's view: the newest line of each lane */
@@ -288,6 +378,10 @@ int main(int argc,char **argv){
   const double page=argc>2?atof(argv[2]):16384;
   assert(!mesh_switch_fabric_make(&fabric,nodes,wire,links,page));
   static const double rows[]={2,8,32,128,1024,4096};
+#ifdef ROUTE_POLICY
+  const char *theta=getenv("ROUTE_THETA");
+  if(theta)policy_load(theta,getenv("ROUTE_GRU")!=NULL);
+#endif
   printf("%-10s %9s %9s %18s %18s %9s %9s\n","","S bytes","fixed","sampled","trees","fluid","floor");
   for(int kind=0;kind<2;kind++)for(size_t i=0;i<sizeof rows/sizeof *rows;i++){
     const double S=rows[i]*1536*2;
@@ -296,7 +390,15 @@ int main(int argc,char **argv){
     reset(TREES);optimum(kind,S,page);const struct stats tr=measure(kind,S,page,MEASURE);
     const double floor=floor_of(kind,S,page);
     printf("%-10s %9.0f %7.2fus %8.2f+-%6.2fus %8.2f+-%6.2fus ",kind?"all-reduce":"all-gather",S,fixed/1e3,sampled.mean/1e3,sampled.sd/1e3,tr.mean/1e3,tr.sd/1e3);
-    printf("%7.2fus %7.2fus\n",tree_fluid/1e3,floor/1e3);
+    printf("%7.2fus %7.2fus",tree_fluid/1e3,floor/1e3);
+#ifdef ROUTE_POLICY
+    if(theta){
+      reset(POLICY);policy_setup(kind,S);const struct stats pol=measure(kind,S,page,MEASURE);
+      printf("   policy %8.2f+-%6.2fus (%llu refreshes at %.0f us each, %llu draws)",pol.mean/1e3,pol.sd/1e3,(unsigned long long)policy_refreshes,policy_us/(double)policy_refreshes,(unsigned long long)policy_draws);
+      assert(kind || pol.mean>=floor*(1-1e-9));
+    }
+#endif
+    printf("\n");
     assert(kind || (sampled.mean>=floor*(1-1e-9) && tr.mean>=floor*(1-1e-9)));
   }
   printf("switch: every page to every destination exactly once, every path simple: passed\n");

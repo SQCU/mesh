@@ -94,17 +94,17 @@ void route_network(struct route_rng *g, const struct route_fabric *measured, str
 }
 
 /* ---- streams ---- */
-static void delays(const struct route_fabric *f, double (*dist)[ROUTE_N]) {   /* one page's unloaded shortest delays */
+static void delays(const struct route_fabric *f, double q, double (*dist)[ROUTE_N]) {   /* one q-byte piece's unloaded shortest delays */
   for (int a = 0; a < ROUTE_N; a++) for (int b = 0; b < ROUTE_N; b++) dist[a][b] = a == b ? 0 : INFINITY;
-  for (int l = 0; l < f->lanes; l++) { const double w = f->latency[l] + ROUTE_PAGE / (f->rate[l] / f->cables[l]); if (w < dist[f->from[l]][f->to[l]]) dist[f->from[l]][f->to[l]] = w; }
+  for (int l = 0; l < f->lanes; l++) { const double w = f->latency[l] + q / (f->rate[l] / f->cables[l]); if (w < dist[f->from[l]][f->to[l]]) dist[f->from[l]][f->to[l]] = w; }
   for (int m = 0; m < ROUTE_N; m++) for (int a = 0; a < ROUTE_N; a++) for (int b = 0; b < ROUTE_N; b++) if (dist[a][m] + dist[m][b] < dist[a][b]) dist[a][b] = dist[a][m] + dist[m][b];
 }
 /* a collective's floor: its cut bound (the most bytes a node must take in or put out, over its rate) and its slowest
-   pair's shortest delay for one piece (twice, for an all-reduce's two phases) */
+   pair's shortest delay for one piece, at most a page (twice, for an all-reduce's two phases), as tests/switch.c's */
 static double op_floor(const struct route_fabric *f, int kind, double S, int root) {
   double in[ROUTE_N] = {0}, out[ROUTE_N] = {0}, dist[ROUTE_N][ROUTE_N], cut = 0, reach = 0;
   for (int l = 0; l < f->lanes; l++) { in[f->to[l]] += f->rate[l]; out[f->from[l]] += f->rate[l]; }
-  delays(f, dist);
+  delays(f, S < ROUTE_PAGE ? S : ROUTE_PAGE, dist);
   const int n = f->ncompute;
   for (int k = 0; k < n; k++) {
     const int v = f->compute[k]; double a = 0, b = 0;
@@ -121,7 +121,7 @@ static double op_floor(const struct route_fabric *f, int kind, double S, int roo
 static void stream_base(const struct route_fabric *f, struct route_stream *s) {
   memset(s, 0, sizeof *s);
   s->f = *f;
-  double dist[ROUTE_N][ROUTE_N]; delays(f, dist);
+  double dist[ROUTE_N][ROUTE_N]; delays(f, ROUTE_PAGE, dist);
   for (int a = 0; a < f->ncompute; a++) for (int b = 0; b < f->ncompute; b++) if (a != b && dist[f->compute[a]][f->compute[b]] > s->unit) s->unit = dist[f->compute[a]][f->compute[b]];
   const int n = f->ncompute, nl = f->lanes;
   for (int a = 0; a < n; a++) {   /* the patterns: every rank to every other, and every rank to all others */
