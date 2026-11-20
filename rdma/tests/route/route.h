@@ -1,35 +1,39 @@
-/* The routing policy's shared definitions (design/switched-multipath-dma.md). Four parts share them, each its own file
+/* The routing policy's shared definitions (design/switched-multipath-dma.md). The parts that share them, each its own file
    and its own hardware:
-     sim.c           the environment: the fabric's max-plus FIFO recursion over pieces, the features, the draws, each
-                     draw's credit (CPU threads, many transactions each)
-     policy.metal    the forward: two recurrent layers over every pending decision point's tokens, w for each context
-                     (a GPU queue)
-     gradient.metal  the backward: dw back through the same layers, the weights' gradients (another GPU queue)
-     train.m         the optimizer, and the runtime that keeps the other three busy (a CPU thread and the network)
+     sim.c         the environment: streams of collectives on a fabric, the max-plus FIFO recursion over pieces, the
+                   features, the draws, each draw's credit (CPU threads)
+     policy.swift  the forward: two recurrent layers over every pending decision point's tokens, from each stream's
+                   carried state, w for each context (GPU)
+     learn.swift   the backward through each window's decision points, the weights' gradients, the optimizer (GPU)
+     main.swift    the runtime that keeps the three busy
+     forward.c     the same forward on a CPU, for deployment beside the bridge (tests/switch.c's policy router uses it)
 
-   The action. A piece of commodity j standing at node v and still owing destinations S draws a split: each d in S
-   assigned one of v's out-lanes; the lanes given a nonempty share are sent on. A context is (j, v, S) and its
-   vocabulary out_lanes(v)^|S|. At each decision point the policy reads the lane tokens in turn, then each context's
-   token as one more step from that state, and returns w_c; a split's logit is CLIP tanh(w_c . phi(split) / sqrt(FS)),
-   phi the split's features. Pieces draw from those distributions as they move, every piece its own tree.
+   The action. A piece of pattern j (a source and a destination set) standing at node v and still owing destinations S
+   draws a split: each d in S assigned one of v's out-lanes; the lanes given a nonempty share are sent on. A context is
+   (j, v, S), its vocabulary out_lanes(v)^|S|. At each refresh the policy reads the lane tokens in turn from its carried
+   state, then each context's token as one more step, and returns w_c; a split's logit is CLIP tanh(w_c . phi / sqrt(FS)),
+   phi the split's features. Pieces draw from the active table as they move, every piece its own tree.
 
-   The gradient. For each task, dw_c = sum over the context's draws of advantage x (psi(split) - E psi), psi the
-   gradient of the split's logit in w_c and the expectation over the context's table masked as the draw was; the
-   environment computes it (it holds the draws and the masks), the backward carries it through the layers. */
+   Collectives as patterns: an all-gather's rank r sends its pages to all others (r -> all - r); an all-reduce's rank r
+   sends page p's partial to its owner o = p mod n (r -> {o}), then o sends the reduced page to all others (o -> all - o)
+   once its n - 1 partials have landed; a scatter's root sends each destination its own bytes (root -> {d}).
+
+   The gradient. For each task, dw_c = sum over the context's draws of advantage x (psi(split) - E psi), psi the gradient
+   of the split's logit in w_c and the expectation over the table masked as the draw was; the environment computes it,
+   the backward carries it through the layers and back through the window's refreshes. */
 #ifndef ROUTE_H
 #define ROUTE_H
 
 enum {
   ROUTE_N = 6,                    /* nodes */
   ROUTE_L = 32,                   /* lanes */
-  ROUTE_J = 6,                    /* commodities */
+  ROUTE_J = 36,                   /* patterns: n (n - 1) unicast and n multicast, n <= 6 compute nodes */
   ROUTE_DEG = 5,                  /* out-lanes a node */
   ROUTE_SETS = 64,                /* destination sets, as bit masks over the nodes */
-  ROUTE_GROUP = 64,               /* pieces a commodity posts at a decision point */
-  ROUTE_POINTS = 12,              /* decision points a transaction, at most */
-  ROUTE_PIECES = ROUTE_POINTS * ROUTE_GROUP,
+  ROUTE_PAGE_PIECES = 768,        /* pieces a flow, at most (12.6 MB) */
+  ROUTE_POINTS = 8,               /* refreshes a training window, at most */
   ROUTE_CABLES = 4,
-  ROUTE_CONTEXTS = ROUTE_J * ROUTE_N * 31,   /* (j, v, S): S a nonempty subset of j's at most 5 destinations */
+  ROUTE_CONTEXTS = 1024,          /* contexts a fabric, at most (a 6-node mesh of 6 ranks has 786) */
   ROUTE_D = 64, ROUTE_E = 192,    /* the residual stream, the feed-forward block */
   ROUTE_IN = 48,                  /* a token: a lane's or a context's */
   ROUTE_FS = 40,                  /* a split's features */
@@ -38,71 +42,91 @@ enum {
 #define ROUTE_PAGE 16384.0
 #define ROUTE_CLIP 10.0
 
-/* What passes between the parts, in memory both CPU and GPU see. A decision point of a transaction: its lane tokens and,
-   in the row pools from `row`, its contexts' tokens (in), their w (the policy's answer) and their dw (each task's). */
+/* What passes between the parts, in memory both CPU and GPU see: a refresh's lane tokens (its contexts' tokens beside) */
 struct route_decision {
-  unsigned transaction, point, lanes, contexts, row, pad[3];
+  unsigned window, point, lanes, contexts;
   float lane[ROUTE_L][ROUTE_IN];
 };
-/* row pools, `rows` rows each: token [rows][IN]; w [rows][FS]; dw [TASKS][rows][FS] */
 
 #ifndef __METAL_VERSION__
 #include <stddef.h>
 #include <stdint.h>
 
-/* a fabric: nodes (the compute ones the transaction's ranks), and lanes, each a direction of a cabled pair */
+/* a fabric: nodes (the compute ones the collectives' ranks), and lanes, each a direction of a cabled pair */
 struct route_fabric {
   int nodes, ncompute, lanes;
   int compute[ROUTE_N], from[ROUTE_L], to[ROUTE_L], cables[ROUTE_L];
   double rate[ROUTE_L], latency[ROUTE_L], duplex;   /* rate: all the lane's cables, bytes a ns; latency ns */
 };
-/* a transaction on a fabric: an all-gather of `size` bytes a rank; `background` bytes queued on each lane at the start;
-   the floor's two bounds (the cut bound; the slowest pair's shortest delay for one piece) */
-struct route_scenario {
+enum { ROUTE_ALLGATHER, ROUTE_ALLREDUCE, ROUTE_SCATTER, ROUTE_KINDS };
+struct route_op { int kind, root; double size, arrival, floor; };   /* size: bytes a rank (scatter: a destination) */
+#define ROUTE_OPS 256
+/* a stream of collectives on a fabric, with `background` bytes queued on each lane at its start; its patterns; `unit`,
+   the slowest compute pair's shortest delay for one piece, the time the features are in */
+struct route_stream {
   struct route_fabric f;
-  double size, background[ROUTE_L], cut, reach, floor;
-  int commodities, source[ROUTE_J], spt[ROUTE_J][ROUTE_N];   /* spt: the unloaded shortest-path tree's in-lane at each node, -1 none */
+  double background[ROUTE_L], unit;
+  int patterns, source[ROUTE_J], spt[ROUTE_J][ROUTE_N];   /* spt: the unloaded shortest-path tree's in-lane at each node, -1 none */
   uint32_t dest[ROUTE_J];
+  int ops; struct route_op op[ROUTE_OPS];
 };
-/* the fabric at a decision point, as the policy reads it (times in ns) */
+/* the refreshes a run asks the policy for: `points` of them, from t0, `dt` apart, each table active `lag` after its
+   refresh (points 0: one every dt until the stream is over). Before the first active table, `warm` routes (2 the
+   shortest-path tree, 3 uniform). */
+struct route_window { double t0, dt, lag; int points, warm; };
+/* the fabric at a refresh, as the policy reads it (times in ns) */
 struct route_state {
-  double tau, wait[ROUTE_L], dup[ROUTE_L], togo[ROUTE_N][ROUTE_N], recv[ROUTE_J][ROUTE_N], inflight[ROUTE_N], left[ROUTE_J], progress;
+  double tau, wait[ROUTE_L], dup[ROUTE_L], togo[ROUTE_N][ROUTE_N], recv[ROUTE_J][ROUTE_N], inflight[ROUTE_N], left[ROUTE_J], posted, ops;
 };
 struct route_topology { uint32_t adj[ROUTE_N], srcmask; int deg[ROUTE_N], out[ROUTE_N][ROUTE_DEG], rev[ROUTE_L]; };
-struct route_costs { double throughput, latency, queueing; };   /* completion / floor; per piece, mean, over the floor */
+/* over the run's collectives that finished: completion over the floor; per piece: latency, queueing, over the floor */
+struct route_costs { double throughput, latency, queueing; int ops, pieces; };
 struct route_rng { uint64_t s; };
 
 int route_fabric_load(const char *path, struct route_fabric *f);
 void route_network(struct route_rng *g, const struct route_fabric *measured, struct route_fabric *f);   /* one network of a random kind */
-void route_scenario_make(const struct route_fabric *f, double size, struct route_rng *g, int background, struct route_scenario *x);
+/* a stream on f: collectives of random kinds and sizes arriving at random over `duration` ns at offered load `load`
+   (kind -1: random; size 0: random) */
+void route_stream_make(const struct route_fabric *f, struct route_rng *g, double duration, double load, int background, struct route_stream *s);
+/* a stream of one collective at t = 0 */
+void route_stream_one(const struct route_fabric *f, int kind, double size, int root, struct route_stream *s);
 uint64_t route_next(struct route_rng *g);
 double route_uniform(struct route_rng *g);
 
-/* One transaction. mode: 0 the policy's tables, 2 every piece on the shortest-path tree, 3 each destination's lane
-   uniform among the allowed, 4 the shortest-path tree with every group posted at 0 (tests/switch.c's fixed router). */
+/* One run of a stream. mode: 0 the policy's tables in the window, 2 every piece on the shortest-path tree, 3 each
+   destination's lane uniform among the allowed, 4 the shortest-path tree, every piece posted at its release (tests/
+   switch.c's fixed router). key0 draws the run before the window, key the window's. */
 struct route_sim;
 struct route_sim *route_sim_new(void);
 void route_sim_free(struct route_sim *x);
-void route_sim_begin(struct route_sim *x, const struct route_scenario *sc, int mode, uint32_t key);
-/* Runs to the next decision point. Returns 1 with d's header and lane tokens filled and its contexts' tokens written to
-   `tokens` ([d->contexts][IN]); 0 once the transaction is over. */
+void route_sim_begin(struct route_sim *x, const struct route_stream *s, const struct route_window *w, int mode, uint32_t key0, uint32_t key);
+/* Runs to the next refresh. Returns 1 with d's header and lane tokens filled and its contexts' tokens written to
+   `tokens` ([d->contexts][IN]); 0 once the run is over. */
 int route_sim_decide(struct route_sim *x, struct route_decision *d, float *tokens);
-/* The policy's answer for the decision point just returned ([contexts][FS]; NULL in modes 2-4): posts its group. */
+/* the policy's answer for the refresh just returned ([contexts][FS]; NULL outside mode 0) */
 void route_sim_answer(struct route_sim *x, const float *w);
 void route_sim_costs(const struct route_sim *x, struct route_costs *c);
-/* After the transaction: decision point `point`'s dw ([TASKS][contexts][FS], the throughput channel at unit advantage,
-   the caller scaling it by the transaction's), and the log-likelihood of that point's draws. */
+/* after the run: refresh `point`'s dw ([TASKS][contexts][FS], the throughput channel at unit advantage, the caller
+   scaling it), and the log-likelihood of the draws from its table */
 void route_sim_credit(struct route_sim *x, int point, float *dw, double *loglik);
 int route_sim_points(const struct route_sim *x);
 int route_sim_contexts(const struct route_sim *x);
-/* what a transaction did: events, draws, table entries built, sends */
-void route_sim_counts(const struct route_sim *x, uint64_t out[4]);
-/* decision point `point`'s stored w ([contexts][FS]), which the credit reads: the gradient check perturbs it */
-float *route_sim_w(struct route_sim *x, int point);
+float *route_sim_w(struct route_sim *x, int point);   /* refresh `point`'s stored w, which the credit reads */
+void route_sim_counts(const struct route_sim *x, uint64_t out[4]);   /* events, draws, table entries built, sends */
 
-/* The policy's forward on a CPU (forward.c), for deployment beside the bridge: theta in policy.swift's layout; one
-   decision point: lanes [nl][IN], tokens [nc][IN], the carried state [2][D] (read and advanced), w [nc][FS] out;
-   scratch route_forward_scratch(nc) floats */
+/* The contexts of a stream's fabric, in the order the tokens and w are: (pattern, node, owed set) */
+int route_contexts(const struct route_stream *s, const struct route_topology *t, int *pattern, int *node, uint32_t *owed);
+void route_topology_make(const struct route_fabric *f, const struct route_stream *s, struct route_topology *t);
+/* A split drawn from context (v, S)'s table (w its policy vector), masked to the lanes that leave `visited` and reach
+   their share without coming back; u in [0, 1). Returns the token; the table is built into `cdf` (route_tokens(t, v, S)
+   doubles). */
+int route_tokens(const struct route_topology *t, int v, uint32_t S);
+uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
+                     const float *w, double u, double *cdf);
+uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
+
+/* The policy's forward on a CPU (forward.c): theta in policy.swift's layout; one refresh: lanes [nl][IN], tokens
+   [nc][IN], the carried state [2][D] (read and advanced), w [nc][FS] out; scratch route_forward_scratch(nc) floats */
 struct route_params {
   int full;
   const float *inp, *binp, *z[2], *bz[2], *r[2], *br[2], *h[2], *bh[2], *up[2], *bu[2], *down[2], *bd[2], *out;
@@ -113,11 +137,8 @@ size_t route_forward_scratch(int nc);
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
 
 /* ---- the features: what the policy reads, defined once ---- */
-static inline double route_send1(const struct route_scenario *s, int l) {   /* one piece's time on one cable */
-  const double b = s->size < ROUTE_PAGE ? s->size : ROUTE_PAGE;
-  return b * s->f.cables[l] / s->f.rate[l];
-}
-static inline double route_hop(const struct route_scenario *s, const struct route_state *st, int l) {
+static inline double route_send1(const struct route_stream *s, int l) { return ROUTE_PAGE * s->f.cables[l] / s->f.rate[l]; }   /* one page, one cable */
+static inline double route_hop(const struct route_stream *s, const struct route_state *st, int l) {
   return st->wait[l] + route_send1(s, l) * st->dup[l] + s->f.latency[l];
 }
 /* can node `from` reach a node in `want` without entering `avoid`? */
@@ -134,36 +155,35 @@ static inline int route_reaches(const struct route_topology *t, int from, uint32
   }
   return 0;
 }
-static inline void route_lane_token(const struct route_scenario *s, const struct route_state *st, const struct route_topology *t, int l, float *o) {
+static inline void route_lane_token(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int l, float *o) {
   for (int c = 0; c < ROUTE_IN; c++) o[c] = 0;
   if (l >= s->f.lanes) return;
-  const double fl = s->floor, sz = s->size > 1 ? s->size : 1;
+  const double u = s->unit;
   const int a = s->f.from[l], b = s->f.to[l];
-  o[a] = 1; o[6 + b] = 1; o[12] = s->f.cables[l] / 4.0f; o[13] = (float)(route_send1(s, l) / fl); o[14] = (float)(s->f.latency[l] / fl);
-  o[15] = (float)(st->wait[l] / fl); o[16] = (float)st->dup[l];
-  const double rr = s->f.rate[l] * fl / sz;
-  o[17] = (float)(__builtin_log(rr > 1e-6 ? rr : 1e-6) / 8); o[18] = (float)(st->inflight[a] / sz); o[19] = (float)(st->inflight[b] / sz);
+  o[a] = 1; o[6 + b] = 1; o[12] = s->f.cables[l] / 4.0f; o[13] = (float)(route_send1(s, l) / u); o[14] = (float)(s->f.latency[l] / u);
+  o[15] = (float)(st->wait[l] / u); o[16] = (float)st->dup[l];
+  o[17] = (float)(__builtin_log(s->f.rate[l] * u / ROUTE_PAGE) / 8); o[18] = (float)(st->inflight[a] / ROUTE_PAGE / 64); o[19] = (float)(st->inflight[b] / ROUTE_PAGE / 64);
   o[20] = (t->srcmask >> a & 1) ? 0 : 1; o[21] = (t->srcmask >> b & 1) ? 0 : 1; o[22] = 1;
 }
-static inline void route_context_token(const struct route_scenario *s, const struct route_state *st, const struct route_topology *t, int j, int v, uint32_t S,
+static inline void route_context_token(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int j, int v, uint32_t S,
                                        int point, float *o) {
   for (int c = 0; c < ROUTE_IN; c++) o[c] = 0;
-  const double fl = s->floor;
+  const double u = s->unit;
   o[v] = 1; o[18 + s->source[j]] = 1; o[24] = (t->srcmask >> v & 1) ? 0 : 1;
-  o[25] = (float)(__builtin_log(1 + s->size / ROUTE_PAGE) / 8); o[26] = (float)st->left[j]; o[27] = (float)(s->reach / fl); o[28] = (float)(s->cut / fl);
+  o[25] = (float)(__builtin_log(1 + st->posted / ROUTE_PAGE) / 8); o[26] = (float)st->left[j]; o[27] = (float)(st->ops / 8); o[28] = __builtin_popcount(s->dest[j]) == 1 ? 1 : 0;
   double most = 0;
   for (int d = 0; d < ROUTE_N; d++) {
-    if (S >> d & 1) { double g = st->togo[v][d] / fl; if (g > 1e3) g = 1e3; o[6 + d] = 1; o[29 + d] = (float)g; if (g > most) most = g; }
+    if (S >> d & 1) { double g = st->togo[v][d] / u; if (g > 1e3) g = 1e3; o[6 + d] = 1; o[29 + d] = (float)g; if (g > most) most = g; }
     if (s->dest[j] >> d & 1) o[12 + d] = 1;
     o[35 + d] = (float)st->recv[j][d];
   }
-  o[41] = (float)(st->tau / fl); o[42] = (float)point / ROUTE_POINTS; o[43] = (float)st->progress; o[44] = (float)most; o[45] = 1; o[46] = 1;
+  o[41] = (float)(__builtin_log(1 + st->tau / u) / 8); o[42] = (float)point / ROUTE_POINTS; o[43] = 0; o[44] = (float)most; o[45] = 1; o[46] = 1;
 }
 /* split token `tok` at (v, S): its features; returns whether every destination's lane leads to it without coming back
    to v */
-static inline int route_split_features(const struct route_scenario *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
+static inline int route_split_features(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
                                        uint32_t tok, float *phi) {
-  const int deg = t->deg[v]; const double fl = s->floor;
+  const int deg = t->deg[v]; const double u = s->unit;
   for (int f = 0; f < ROUTE_FS; f++) phi[f] = 0;
   int valid = 1, cnt = 0; uint32_t used = 0; double most = 0, sum = 0;
   for (int d = 0; d < ROUTE_N; d++) {
@@ -172,13 +192,13 @@ static inline int route_split_features(const struct route_scenario *s, const str
     const int l = t->out[v][k], h = s->f.to[l];
     valid = valid && (h == d || route_reaches(t, h, 1u << v, 1u << d));
     phi[d * ROUTE_DEG + k] = 1; used |= 1u << k;
-    double g = h == d ? 0 : st->togo[h][d]; if (g > 1e3 * fl) g = 1e3 * fl;
+    double g = h == d ? 0 : st->togo[h][d]; if (g > 1e3 * u) g = 1e3 * u;
     const double arrive = route_hop(s, st, l) + g;
     if (arrive > most) most = arrive;
     sum += arrive; cnt++;
   }
   for (int k = 0; k < ROUTE_DEG; k++) if (used >> k & 1) phi[30 + k] = 1;
-  phi[35] = (float)(most / fl); phi[36] = (float)(sum / (cnt ? cnt : 1) / fl); phi[37] = (float)__builtin_popcount(used) / (cnt ? cnt : 1);
+  phi[35] = (float)(most / u); phi[36] = (float)(sum / (cnt ? cnt : 1) / u); phi[37] = (float)__builtin_popcount(used) / (cnt ? cnt : 1);
   return valid;
 }
 #endif
