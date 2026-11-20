@@ -124,13 +124,17 @@ static struct route_stream policy_stream;static struct route_topology policy_top
 static float *policy_w,*policy_next,*policy_tokens,*policy_scratch,policy_state[2*ROUTE_D],policy_lanes[ROUTE_L][ROUTE_IN];
 static int policy_pattern[ROUTE_CONTEXTS],policy_node[ROUTE_CONTEXTS],policy_nc,policy_ctx[ROUTE_J][ROUTE_N][ROUTE_SETS];static uint32_t policy_owed[ROUTE_CONTEXTS];
 static struct route_state policy_st,policy_stnext;
-static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3125],policy_us;
+static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3125],policy_us,policy_ctx_us;
+/* the refresh's state and the contexts' tokens, next and active; a context's w computed when the router first reads it
+   under the active refresh (its generation), not at the refresh */
+static float policy_hnext[2*ROUTE_D],policy_hact[2*ROUTE_D],*policy_tokact;static uint32_t policy_gen=1,*policy_wgen;static uint64_t policy_ctxs;
 static uint64_t policy_refreshes,policy_draws;static uint8_t *policy_sent;static uint32_t policy_sentroom;
 static void policy_load(const char *path){   /* the trainer's stored int8 weights (THETA_INT8) */
   if(route_params_read(&policy_params,path)){fprintf(stderr,"%s: not int8 policy weights\n",path);exit(2);}
   policy_w=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));policy_next=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));
   policy_tokens=malloc((size_t)ROUTE_CONTEXTS*ROUTE_IN*sizeof(float));policy_scratch=malloc(route_forward_scratch(ROUTE_CONTEXTS)*sizeof(float));
-  assert(policy_w && policy_next && policy_tokens && policy_scratch);
+  policy_tokact=malloc((size_t)ROUTE_CONTEXTS*ROUTE_IN*sizeof(float));policy_wgen=calloc(ROUTE_CONTEXTS,sizeof(uint32_t));
+  assert(policy_w && policy_next && policy_tokens && policy_scratch && policy_tokact && policy_wgen);
 }
 static void policy_setup(int kind,double S){   /* this run's fabric and collective, as the policy reads them */
   struct route_fabric f;memset(&f,0,sizeof f);
@@ -142,11 +146,15 @@ static void policy_setup(int kind,double S){   /* this run's fabric and collecti
   memset(policy_ctx,0xff,sizeof policy_ctx);
   policy_nc=route_contexts(&policy_stream,&policy_topology,policy_pattern,policy_node,policy_owed);assert(policy_nc>0);
   for(int c=0;c<policy_nc;c++)policy_ctx[policy_pattern[c]][policy_node[c]][policy_owed[c]]=c;
-  memset(policy_state,0,sizeof policy_state);policy_refreshes=policy_draws=0;policy_us=0;
+  memset(policy_state,0,sizeof policy_state);policy_refreshes=policy_draws=0;policy_us=0;policy_ctx_us=0;policy_ctxs=0;policy_gen++;
 }
 static int pattern_of_piece(uint32_t k){
   for(int j=0;j<policy_stream.patterns;j++)if((uint32_t)policy_stream.source[j]==pieces[k].source && policy_stream.dest[j]==(uint32_t)pieces[k].need)return j;
   abort();
+}
+static void policy_activate(void){   /* the next refresh's state, tokens and route state active; every context's w stale */
+  memcpy(policy_hact,policy_hnext,sizeof policy_hact);float *x=policy_tokact;policy_tokact=policy_tokens;policy_tokens=x;
+  policy_st=policy_stnext;policy_at=INFINITY;policy_gen++;
 }
 static void policy_refresh(double t,int now){   /* the fabric at t, the forward, the table it makes (active now or after the lag) */
   struct route_state *st=&policy_stnext;memset(st,0,sizeof *st);st->tau=t;
@@ -175,15 +183,22 @@ static void policy_refresh(double t,int now){   /* the fabric at t, the forward,
   for(int l=0;l<ROUTE_L;l++)route_lane_token(&policy_stream,st,&policy_topology,l,policy_lanes[l]);
   for(int c=0;c<policy_nc;c++)route_context_token(&policy_stream,st,&policy_topology,policy_pattern[c],policy_node[c],policy_owed[c],(int)(policy_refreshes%ROUTE_POINTS),policy_tokens+(size_t)c*ROUTE_IN);
   struct timespec a,b;clock_gettime(CLOCK_MONOTONIC,&a);
-  route_forward(&policy_params,&policy_lanes[0][0],(int)links,policy_tokens,policy_nc,policy_state,policy_next,policy_scratch);
+  route_forward_lanes(&policy_params,&policy_lanes[0][0],(int)links,policy_state,policy_scratch);
+  memcpy(policy_hnext,policy_state,sizeof policy_hnext);
   clock_gettime(CLOCK_MONOTONIC,&b);policy_us+=(b.tv_sec-a.tv_sec)*1e6+(b.tv_nsec-a.tv_nsec)/1e3;
   policy_refreshes++;
   policy_at=now?t:t+policy_lag;
-  if(now){float *x=policy_w;policy_w=policy_next;policy_next=x;policy_st=policy_stnext;policy_at=INFINITY;}
+  if(now)policy_activate();
 }
 static uint32_t policy_route(double t,uint32_t from,uint32_t k,uint64_t to,uint64_t visited,uint32_t *lane,uint64_t *subset){
-  if(t>=policy_at){float *x=policy_w;policy_w=policy_next;policy_next=x;policy_st=policy_stnext;policy_at=INFINITY;}   /* the newer table, now active */
+  if(t>=policy_at)policy_activate();   /* the newer refresh, now active */
   const int j=pattern_of_piece(k),c=policy_ctx[j][from][to];assert(c>=0);
+  if(policy_wgen[c]!=policy_gen){   /* its w under the active refresh: computed now, where it is read */
+    struct timespec a,b;clock_gettime(CLOCK_MONOTONIC,&a);
+    route_forward_context(&policy_params,policy_tokact+(size_t)c*ROUTE_IN,policy_hact,policy_w+(size_t)c*ROUTE_FS);
+    clock_gettime(CLOCK_MONOTONIC,&b);policy_ctx_us+=(b.tv_sec-a.tv_sec)*1e6+(b.tv_nsec-a.tv_nsec)/1e3;
+    policy_wgen[c]=policy_gen;policy_ctxs++;
+  }
   const double u=((mesh_switch_mix(((uint64_t)execution<<32)^k^((uint64_t)from<<56))>>11)+0.5)/9007199254740992.0;
   struct route_live live;   /* this node's own lanes now */
   for(int q=0;q<policy_topology.deg[from];q++){
@@ -407,7 +422,8 @@ int main(int argc,char **argv){
 #ifdef ROUTE_POLICY
     if(theta){
       reset(POLICY);policy_setup(kind,S);const struct stats pol=measure(kind,S,page,MEASURE);
-      printf("   policy %8.2f+-%6.2fus (%llu refreshes at %.0f us each, %llu draws)",pol.mean/1e3,pol.sd/1e3,(unsigned long long)policy_refreshes,policy_us/(double)policy_refreshes,(unsigned long long)policy_draws);
+      printf("   policy %8.2f+-%6.2fus (%llu refreshes at %.1f us each; %.1f contexts a refresh used, at %.2f us each where read; %llu draws)",pol.mean/1e3,pol.sd/1e3,(unsigned long long)policy_refreshes,policy_us/(double)policy_refreshes,
+             (double)policy_ctxs/(double)policy_refreshes,policy_ctxs?policy_ctx_us/(double)policy_ctxs:0,(unsigned long long)policy_draws);
       assert(kind || pol.mean>=floor*(1-1e-9));
     }
 #endif

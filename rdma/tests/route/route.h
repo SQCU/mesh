@@ -154,6 +154,10 @@ struct route_params { struct route_mat inp, zh[2], up[2], down[2], out; };
 int route_params_read(struct route_params *p, const char *path);
 size_t route_forward_scratch(int nc);
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
+/* the same in parts, for a router computing a context's w where it is used: the lanes (the refresh's state, `state`
+   advanced; scratch route_forward_scratch(0)), then any context from that state */
+void route_forward_lanes(const struct route_params *p, const float *lanes, int nl, float *state, float *scratch);
+void route_forward_context(const struct route_params *p, const float *token, const float *state, float *w);
 
 /* The trainer's gradient exchange (exchange.c): libnccl-mesh's Metal path over the nodes' bridges. open: this rank's
    communicator (NCCL's bootstrap at id, the root's host:port), a lease of n floats in the node's region, the declared
