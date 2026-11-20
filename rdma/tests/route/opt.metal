@@ -112,3 +112,55 @@ kernel void optimizer(device float *theta [[buffer(0)]], device float *mo [[buff
     for (uint j = 0; j < m.cols; j++) theta[m.v + r * m.cols + j] *= k;
   }
 }
+
+// ---- the step's gradient accumulated over microbatches, and its statistics (route_net_gradient, route_net_apply) ----
+// a gradient's squared norm on the matrix units: g (NPAD floats, zero past P; NPAD a multiple of 64 32) read as
+// X [NPAD / 64][64], |g|^2 = trace(X^T X), X^T X accumulated over 32-row blocks (fp32 x fp32 -> fp32); a SIMD group
+typedef tensor<device float, dextents<int32_t, 2>, tensor_inline> DevF2;
+static inline float sqnorm(device const float *g, uint npad) {
+  constexpr auto d = matmul2d_descriptor(64, 64, 32, true, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+  matmul2d<d, execution_simdgroup> op;
+  DevF2 x0((device float *)g, dextents<int32_t, 2>(64, 32));
+  auto y = op.get_destination_cooperative_tensor<DevF2, DevF2, float>();
+  for (ushort i = 0; i < y.get_capacity(); i++) y[i] = 0;
+  for (uint r = 0; r < npad / 64; r += 32) { DevF2 x((device float *)g + size_t(r) * 64, dextents<int32_t, 2>(64, 32)); op.run(x, x, y); }
+  float t = 0;
+  for (ushort i = 0; i < y.get_capacity(); i++) { auto at = y.get_multidimensional_index(i); if (at[0] == at[1]) t += y[i]; }
+  return simd_sum(t);
+}
+// gm, gsum: [3][NPAD] (a task's gradient, zero past P); gsum's exchanged tail (after its 3 NPAD floats): [rows, the
+// microbatches' squared norms' sum (3 tasks), their count, 0, 0, 0]. The CPU's statistics st (route_net_stats): [0..7]
+// the last microbatch (its rows, its squared norms (3), the accumulator's rows), [8..16] after apply, identical at every
+// rank (total rows, the mean microbatch squared norm (3), the microbatches counted, their mean rows, the rows-weighted
+// mean's squared norms (3))
+struct AP { uint npad, accumulate, P, pad; float rows, pad1, pad2, pad3; };
+// one microbatch: gm (its gradient, as the caller's scale makes it: its rows' mean) -> gsum = (accumulate ? gsum : 0)
+// + rows gm, its squared norms counted. One threadgroup of 1,024 threads
+kernel void accumulate(device const float *gm [[buffer(0)]], device float *gsum [[buffer(1)]], device float *st [[buffer(2)]], constant AP &p [[buffer(3)]],
+                       uint l [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float nrm[3];
+  if (sg < 3) { const float n = sqnorm(gm + size_t(sg) * p.npad, p.npad); if (lane == 0) nrm[sg] = n; }
+  for (uint i = l; i < 3 * p.npad; i += 1024) gsum[i] = p.accumulate ? fma(p.rows, gm[i], gsum[i]) : p.rows * gm[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+  device float *tail = gsum + 3 * size_t(p.npad);
+  if (l == 0) {
+    const bool any = p.rows > 0;
+    tail[0] = (p.accumulate ? tail[0] : 0.0f) + p.rows;
+    for (uint t = 0; t < 3; t++) { const float n = any ? nrm[t] : 0.0f; tail[1 + t] = (p.accumulate ? tail[1 + t] : 0.0f) + n; st[1 + t] = n; }
+    tail[4] = (p.accumulate ? tail[4] : 0.0f) + (any ? 1.0f : 0.0f); tail[5] = 0; tail[6] = 0; tail[7] = 0;
+    st[0] = p.rows; st[4] = tail[0];
+  }
+}
+// after the exchange (gsum summed over the ranks): grads [3][P] = gsum / total rows, the mean's squared norms (the
+// sum's times 1 / rows^2), the statistics
+kernel void finish(device const float *gsum [[buffer(0)]], device float *grads [[buffer(1)]], device float *st [[buffer(2)]], constant AP &p [[buffer(3)]],
+                   uint l [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  device const float *tail = gsum + 3 * size_t(p.npad);
+  const float rows = tail[0], k = rows > 0 ? 1.0f / rows : 0.0f;
+  for (uint i = l; i < 3 * p.P; i += 1024) grads[i] = gsum[size_t(i / p.P) * p.npad + i % p.P] * k;
+  if (sg < 3) {
+    const float n = sqnorm(gsum + size_t(sg) * p.npad, p.npad) * k * k;
+    if (lane == 0) { st[9 + sg] = tail[4] > 0 ? tail[1 + sg] / tail[4] : 0.0f; st[14 + sg] = n; }
+  }
+  if (l == 0) { st[8] = rows; st[12] = tail[4]; st[13] = tail[4] > 0 ? rows / tail[4] : 0.0f; }
+}

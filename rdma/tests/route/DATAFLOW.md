@@ -52,13 +52,17 @@ memory between them) is deleted except its int8 x int8 -> int32 matmul2d product
 gemm_tn retiled, and gemm_wg, wgrad over operands stored transposed). On them, a call is a few dispatches:
 
 - forward: lanes_fwd (a run's lanes, the recurrence's state carried tile to tile; one refresh: two runs a tile),
-  ctx_fwd (a 64-row tile of contexts through both layers and the readout, on chip: tile.h);
+  ctx_fwd (a SIMD group's 32-row tile of contexts through both layers and the readout, in registers: sg.h);
 - learning step: the forward storing what the backward reads and every X's wgrad codes; credit (credit.metal);
   ctx_bwd and lanes_bwd (a task a threadgroup: each dgrad's codes, each gradient's wgrad codes and column sums, the
   contexts' state gradients summed a refresh); gemm_wg a matrix; grads (the partial sums, the chain rule);
   optimizer (one threadgroup: Gram, UPGrad, Adam, pin); weights_rows, weights_cols (the codes).
+- the step split for microbatches (kernels.h): route_net_gradient (learn one microbatch, its gradient times its rows
+  into the step's sum: opt.metal's accumulate, its squared norms by trace(X^T X) on the matrix units) and
+  route_net_apply (the exchange of the sum, the rows and the norms' sums; finish: the rows-weighted mean and its norms;
+  then the optimizer), both committed without a CPU wait; route_net_stats the CPU's view; route_net_step both at once.
 
-Every 2D product is int8 x int8 -> int32 (int8mm.h; wgrad blocks of 64 rows, the producers' tile); act.h is the
+Every 2D product is int8 x int8 -> int32 (int8mm.h: a 12-bit power-of-two grid, the Walsh-Hadamard rotation on the matrix units, a scale a 64-block; wgrad blocks of 32 rows, a SIMD group's tile); act.h is the
 gates' and the rms's numerics, shared with forward.c (deploy: bit for bit). stages.swift measures the products
 against the roofline and the forward's build-up stage by stage.
 

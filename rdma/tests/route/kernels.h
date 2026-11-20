@@ -67,7 +67,17 @@ int route_net_done(void *net, struct route_batch *b);                           
 /* the forward again, the credit (draws' score times importance ratio), the backward: grads; then (world > 1) the
    grads summed across the ranks through the mesh's lease, the Gram matrix, UPGrad, Adam, V pinned, the codes: one
    command buffer. ndraws: the draws; scale: the tasks' scale */
-void route_net_step(void *net, struct route_batch *b, int B, int K, int R, int ndraws, float scale, double rate, int world);
+void route_net_step(void *net, struct route_batch *b, int B, int K, int R, int ndraws, float scale, double rate, int world);   /* gradient(0), apply */
+/* one microbatch's gradient (as the scale makes it: its rows' mean) added into the step's sum, times its R rows
+   (accumulate 0: a new sum; B = R = 0: nothing); then the step on the sum: the exchange (world > 1: the sum, the rows,
+   the microbatches' squared norms and count summed over the ranks), the rows-weighted mean, UPGrad, Adam, pin, codes.
+   Both committed without a CPU wait. route_net_stats: [0] the microbatch's rows, [1..3] its squared norms (a task
+   each), [4] the accumulated rows; after apply, identical at every rank: [8] total rows, [9..11] the mean microbatch
+   squared norm, [12] the microbatches, [13] their mean rows, [14..16] the mean's squared norms (norms on the matrix
+   units: trace(X^T X)) */
+void route_net_gradient(void *net, struct route_batch *b, int B, int K, int R, int ndraws, float scale, int accumulate);
+void route_net_apply(void *net, double rate, int world);
+float *route_net_stats(void *net);
 /* theta from `from` into `to`, in their queues' order (a shared event between them), the codes rebuilt */
 void route_net_publish(void *from, void *to);
 int route_net_steps(void *net);

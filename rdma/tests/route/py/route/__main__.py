@@ -271,6 +271,12 @@ def check(cfg, lib, graph):
         pairs.append({'feature': int(f), 'score': float(total[f]), 'central_difference': float((logp(up) - logp(down)) / (2 * eps))})
     rec = {'record': 'check', 'cases_tried': tried, 'runs': m, 'rows': R, 'draws': ND, 'gpu_credit_vs_cpu': {'largest_difference': float(np.abs(gpu - cpu).max()), 'largest': float(np.abs(cpu).max())},
            'score_vs_central_difference': pairs, 'fused_codes_vs_quant_rows': json.loads(ffi.string(buf).decode())}
+    # the step's statistics (route_net_stats) against numpy's: the mean's squared norms (matrix units) and the rows
+    Pn = ffi.new('int *'); lib.route_net_theta(net, Pn)
+    g3 = np.frombuffer(ffi.buffer(lib.route_net_grads(net), 3 * Pn[0] * 4), np.float32).reshape(3, Pn[0]).astype(np.float64)
+    stv = np.frombuffer(ffi.buffer(lib.route_net_stats(net), 17 * 4), np.float32)
+    rec['stats_vs_numpy'] = {'rows': [float(stv[8]), R], 'mean_sq_norms': [float(x) for x in stv[14:17]], 'numpy': [float(x) for x in (g3 ** 2).sum(1)],
+                             'microbatch_sq_norms': [float(x) for x in stv[9:12]]}
     if graph:
         P = ffi.new('int *'); lib.route_net_theta(net, P); P = P[0]
         wref, gref = np.zeros((R, loop.FS), np.float32), np.zeros(3 * P, np.float32)

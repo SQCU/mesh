@@ -125,6 +125,9 @@ final class Net {
   }
   let runs: Int, refreshes: Int, ctxCap: Int, klpCap: Int, RT: Int
   let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer
+  // a microbatch's gradient gmicro [3][npad] (zero past P), the step's accumulated sum gsum [3][npad] and its exchanged
+  // tail (8 floats: rows, the microbatches' squared norms (3), their count), the CPU's statistics (opt.metal's finish)
+  let npad: Int, gmicro: MTLBuffer, gsum: MTLBuffer, stats: MTLBuffer
   var step = 0, seed: UInt32 = 1
   // the weights' codes (wq: bytes) and scales and biases (wsc: floats), their table (Net in tile.h), W's fp32 scratch
   let wq: MTLBuffer, wsc: MTLBuffer, Wf: MTLBuffer, netTable: MTLBuffer, wfOff: MTLBuffer, rowItems: MTLBuffer, colItems: MTLBuffer, rowCount: Int, colCount: Int
@@ -152,6 +155,8 @@ final class Net {
     let P = lay.count
     theta = device.makeBuffer(bytes: initial, length: P * 4, options: .storageModeShared)!
     m = pv(P * 4); v = pv(P * 4); grads = sh(3 * P * 4); gram = sh(9 * 4)
+    npad = (P + 2047) / 2048 * 2048
+    gmicro = pv(3 * npad * 4); gsum = sh((3 * npad + 8) * 4); stats = sh(32 * 4)
     // the weights' layout: a matrix's forward codes [pad64(rows)][pad64(cols)], dgrad codes [pad64(rows)][pad64(cols)]
     var q = 0, f = 0, wf = 0, offs: [UInt32] = [], ri: [UInt32] = [], ci: [UInt32] = [], pr: [UInt32] = []
     for (i, mt) in lay.mats.enumerated() {
@@ -192,7 +197,8 @@ final class Net {
     for i in 0..<64 { for j in 0..<64 { h[i * 64 + j] = (i & j).nonzeroBitCount % 2 == 1 ? Float16(-1).bitPattern : Float16(1).bitPattern } }
     hadamard = device.makeBuffer(bytes: h, length: h.count * 2, options: .storageModeShared)!
     let c0 = queue.makeCommandBuffer()!, bl = c0.makeBlitCommandEncoder()!
-    bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0); bl.endEncoding()
+    bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0)
+    bl.fill(buffer: gmicro, range: 0..<(3 * npad * 4), value: 0); bl.fill(buffer: gsum, range: 0..<((3 * npad + 8) * 4), value: 0); bl.endEncoding()
     c0.commit(); c0.waitUntilCompleted()
     refresh()
   }
@@ -342,8 +348,21 @@ final class Net {
     }
     phase = "grads"
     let gi = device.makeBuffer(bytes: gitems, length: gitems.count * 4, options: .storageModeShared)!
-    set(pipe("grads"), "grads", [0: (theta, 0), 1: (partial, 0), 2: (gs, 0), 3: (grads, 0), 4: (netTable, 0), 5: (gi, 0)], [6: [UInt32(gitems.count / 8), UInt32(lay.count)]])
+    set(pipe("grads"), "grads", [0: (theta, 0), 1: (partial, 0), 2: (gs, 0), 3: (gmicro, 0), 4: (netTable, 0), 5: (gi, 0)], [6: [UInt32(gitems.count / 8), UInt32(npad)]])
     groups((gitems.count / 8 + 7) / 8, threads: 256)
+  }
+  // a microbatch's gradient (gmicro, its rows' mean) into the step's sum (accumulate false: a new sum), its norms
+  func encodeAccumulate(rows: Int, accumulate: Bool) {
+    phase = "accumulate"
+    set(pipe("accumulate"), "accumulate", [0: (gmicro, 0), 1: (gsum, 0), 2: (stats, 0)],
+        [3: [UInt32(npad), accumulate ? 1 : 0, UInt32(lay.count), 0, Float(rows).bitPattern, 0, 0, 0]])
+    groups(1, threads: 1024)
+  }
+  // after the exchange: grads = the rows-weighted mean, its norms, the statistics
+  func encodeFinish() {
+    phase = "finish"
+    set(pipe("finish"), "finish", [0: (gsum, 0), 1: (grads, 0), 2: (stats, 0)], [3: [UInt32(npad), 0, UInt32(lay.count), 0, 0, 0, 0, 0]])
+    groups(1, threads: 1024)
   }
   // the optimizer's step after the learning call (and the exchange): one threadgroup (opt.metal), then the codes
   func encodeApply(rate: Double, inv: Float) {
