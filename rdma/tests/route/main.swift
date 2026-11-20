@@ -172,12 +172,25 @@ func gradients(_ B: Int, _ K: Int, _ R: Int, _ packed: MTLBuffer) {
 }
 
 // ---- a window: a random fabric's random stream, its start, refreshes, lag, warm router, starting state ----
+// the deployment's distribution (ONLINE=1): the measured cluster, one collective at a time of a random kind and size,
+// every page posted at its release (tests/switch.c's), refreshed every 100 us and active 100 us late, the state carried
+// from the transactions before
+let online = env["ONLINE"] != nil
+func deploymentWindow() -> (route_stream, route_window, [Float]) {
+  var s = route_stream()
+  let kind = Int32(Int(route_uniform(&rng) * 2) % 2), size = exp(log(6144.0) + route_uniform(&rng) * (log(12582912.0) - log(6144.0))).rounded()
+  route_stream_one(&measured, kind, size, measured.compute.0, &s)
+  let w = route_window(t0: 0, dt: 100e3, lag: 100e3, points: Int32(KMAX), warm: 2, burst: 1)
+  return (s, w, pool.isEmpty ? [Float](repeating: 0, count: 2 * D) : pool[Int(route_uniform(&rng) * Double(pool.count)) % pool.count])
+}
 func newWindow() -> (route_stream, route_window, [Float]) {
+  if online { return deploymentWindow() }
   var f = fabrics[Int(route_uniform(&rng) * Double(fabrics.count))], s = route_stream()
   let duration = 1e6 * (1 + 4 * route_uniform(&rng)), load = 0.3 + 1.2 * route_uniform(&rng)
   route_stream_make(&f, &rng, duration, load, 1, &s)
   let dt = exp(log(20e3) + route_uniform(&rng) * (log(300e3) - log(20e3)))
-  let w = route_window(t0: route_uniform(&rng) * 0.6 * duration, dt: dt, lag: route_uniform(&rng) * dt, points: Int32(1 + Int(route_uniform(&rng) * Double(KMAX)) % KMAX), warm: route_uniform(&rng) < 0.5 ? 2 : 3)
+  let w = route_window(t0: route_uniform(&rng) * 0.6 * duration, dt: dt, lag: route_uniform(&rng) * dt, points: Int32(1 + Int(route_uniform(&rng) * Double(KMAX)) % KMAX),
+                       warm: route_uniform(&rng) < 0.5 ? 2 : 3, burst: route_uniform(&rng) < 0.5 ? 1 : 0)
   var h = [Float](repeating: 0, count: 2 * D)
   let pick = route_uniform(&rng)
   if pick < 1.0 / 3 { let sigma = route_uniform(&rng); for i in 0..<(2 * D) { h[i] = Float(sigma * normal()) } }
@@ -188,19 +201,19 @@ func newWindow() -> (route_stream, route_window, [Float]) {
 // ---- evaluation on the measured cluster: one collective at a time, the policy refreshed every 100 us and active 100 us
 // after (forward.c's measured refresh on one core), against the shortest-path tree, uniform splits, and switch.c's fixed
 // router ----
-let deployed = route_window(t0: 0, dt: 100e3, lag: 100e3, points: 0, warm: 2)
+let deployed = route_window(t0: 0, dt: 100e3, lag: 100e3, points: 0, warm: 2, burst: 0), deployedBurst = route_window(t0: 0, dt: 100e3, lag: 100e3, points: 0, warm: 2, burst: 1)
 func measure() -> String {
   var out: [String] = []
   let cases = kinds.indices.flatMap { k in sizes.map { (k, $0) } }
   for t in 0..<(cases.count * 4) { route_stream_one(&measured, Int32(cases[t / 4].0), cases[t / 4].1, measured.compute.0, &streams[t]); states[t] = [Float](repeating: 0, count: 2 * D) }
   var rows: [String: [Double]] = [:]
-  for (mode, name) in [(Int32(0), "policy"), (2, "spt"), (3, "uniform"), (4, "switch.c fixed")] {
-    rollout(Array(0..<(cases.count * 4)), window: { _ in deployed }, mode: mode, key0: { UInt32(77 + $0 % 4) }, key: { UInt32(91 + $0 % 4) }, keep: false)
+  for (mode, name, w) in [(Int32(0), "policy", deployed), (0, "policy (burst)", deployedBurst), (2, "spt", deployed), (3, "uniform", deployed), (4, "switch.c fixed", deployed)] {
+    rollout(Array(0..<(cases.count * 4)), window: { _ in w }, mode: mode, key0: { UInt32(77 + $0 % 4) }, key: { UInt32(91 + $0 % 4) }, keep: false)
     rows[name] = (0..<cases.count).map { c in (0..<4).map { costs(c * 4 + $0).throughput }.reduce(0, +) / 4 }
   }
   for (k, kind) in kinds.enumerated() {
     var line = "\(kind):"
-    for name in ["policy", "spt", "uniform", "switch.c fixed"] { line += " \(name) " + (0..<sizes.count).map { String(format: "%.2f", rows[name]![k * sizes.count + $0]) }.joined(separator: " ") + ";" }
+    for name in ["policy", "policy (burst)", "spt", "uniform", "switch.c fixed"] { line += " \(name) " + (0..<sizes.count).map { String(format: "%.2f", rows[name]![k * sizes.count + $0]) }.joined(separator: " ") + ";" }
     out.append(line)
   }
   return out.joined(separator: " | ")
@@ -291,6 +304,11 @@ if env["DEPLOY"] != nil {   // the C forward against the graph's, and its time a
   exit(0)
 }
 
+if let path = env["THETA_IN"] {   // continue from these parameters
+  let d = try! Data(contentsOf: URL(fileURLWithPath: path)); precondition(d.count == lay.count * 4, "parameters of another layout")
+  d.withUnsafeBytes { memcpy(opt.theta.contents(), $0.baseAddress!, lay.count * 4) }
+}
+print(online ? "online: continuing on the deployment's distribution" : "offline: random fabrics, streams, windows")
 print("\(arm), \(lay.count) parameters; \(windows) windows x 4 rollouts a step, up to \(KMAX) refreshes a window; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes, refreshed every 100 us, 100 us late")
 print("start: " + measure())
 let wall = Date()

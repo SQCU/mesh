@@ -125,7 +125,7 @@ static float *policy_theta,*policy_w,*policy_next,*policy_tokens,*policy_scratch
 static int policy_pattern[ROUTE_CONTEXTS],policy_node[ROUTE_CONTEXTS],policy_nc,policy_ctx[ROUTE_J][ROUTE_N][ROUTE_SETS];static uint32_t policy_owed[ROUTE_CONTEXTS];
 static struct route_state policy_st,policy_stnext;
 static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3125],policy_us;
-static uint64_t policy_refreshes,policy_draws;
+static uint64_t policy_refreshes,policy_draws;static uint8_t *policy_sent;static uint32_t policy_sentroom;
 static void policy_load(const char *path,int full){
   const int n=route_params_count(full);
   FILE *f=fopen(path,"rb");if(!f){perror(path);exit(2);}
@@ -163,9 +163,17 @@ static void policy_refresh(double t,int now){   /* the fabric at t, the forward,
   for(int a=0;a<ROUTE_N;a++)for(int b=0;b<ROUTE_N;b++)st->togo[a][b]=a==b?0:INFINITY;
   for(uint32_t l=0;l<links;l++){const double h=route_hop(&policy_stream,st,(int)l);if(h<st->togo[wire[l].from][wire[l].to])st->togo[wire[l].from][wire[l].to]=h;}
   for(int m=0;m<ROUTE_N;m++)for(int a=0;a<ROUTE_N;a++)for(int b=0;b<ROUTE_N;b++)if(st->togo[a][m]+st->togo[m][b]<st->togo[a][b])st->togo[a][b]=st->togo[a][m]+st->togo[m][b];
-  double total[ROUTE_J]={0},got[ROUTE_J][ROUTE_N]={{0}};
-  for(uint32_t k=0;k<npieces;k++){const int j=pattern_of_piece(k);total[j]++;for(int d=0;d<ROUTE_N;d++)if(pieces[k].got>>d&1)got[j][d]++;}
-  for(int j=0;j<policy_stream.patterns;j++)for(int d=0;d<ROUTE_N;d++)st->recv[j][d]=total[j]>0?got[j][d]/total[j]:0;
+  /* each pattern: what each destination has, what is not yet sent from its source, what of that is released (every page
+     but a reduced one whose partials are still out), and all its bytes */
+  if(policy_sentroom<npieces){policy_sentroom=npieces;policy_sent=realloc(policy_sent,npieces);assert(policy_sent);}
+  if(t==0)memset(policy_sent,0,npieces);
+  double total[ROUTE_J]={0},unsent[ROUTE_J]={0},got[ROUTE_J][ROUTE_N]={{0}};
+  for(uint32_t k=0;k<npieces;k++){
+    const int j=pattern_of_piece(k);total[j]++;st->demand[j]+=pieces[k].bytes;
+    if(!policy_sent[k]){unsent[j]++;if(pieces[k].phase!=2)st->pending[j]+=pieces[k].bytes;}
+    for(int d=0;d<ROUTE_N;d++)if(pieces[k].got>>d&1)got[j][d]++;
+  }
+  for(int j=0;j<policy_stream.patterns;j++){st->left[j]=total[j]>0?unsent[j]/total[j]:0;for(int d=0;d<ROUTE_N;d++)st->recv[j][d]=total[j]>0?got[j][d]/total[j]:0;}
   st->ops=1;
   for(int l=0;l<ROUTE_L;l++)route_lane_token(&policy_stream,st,&policy_topology,l,policy_lanes[l]);
   for(int c=0;c<policy_nc;c++)route_context_token(&policy_stream,st,&policy_topology,policy_pattern[c],policy_node[c],policy_owed[c],(int)(policy_refreshes%ROUTE_POINTS),policy_tokens+(size_t)c*ROUTE_IN);
@@ -180,7 +188,15 @@ static uint32_t policy_route(double t,uint32_t from,uint32_t k,uint64_t to,uint6
   if(t>=policy_at){float *x=policy_w;policy_w=policy_next;policy_next=x;policy_st=policy_stnext;policy_at=INFINITY;}   /* the newer table, now active */
   const int j=pattern_of_piece(k),c=policy_ctx[j][from][to];assert(c>=0);
   const double u=((mesh_switch_mix(((uint64_t)execution<<32)^k^((uint64_t)from<<56))>>11)+0.5)/9007199254740992.0;
-  uint32_t tok=route_split(&policy_stream,&policy_st,&policy_topology,(int)from,(uint32_t)to,(uint32_t)visited,policy_w+(size_t)c*ROUTE_FS,u,policy_cdf);
+  struct route_live live;   /* this node's own lanes now */
+  for(int q=0;q<policy_topology.deg[from];q++){
+    const uint32_t l=(uint32_t)policy_topology.out[from][q];double w=INFINITY;int busy=0;
+    for(uint32_t c2=0;c2<cables[l];c2++){const double x=free_at[l][c2]>t?free_at[l][c2]-t:0;if(x<w)w=x;}
+    if(reverse[l]!=UINT32_MAX)for(uint32_t c2=0;c2<cables[reverse[l]];c2++)busy=busy||free_at[reverse[l]][c2]>t;
+    live.wait[q]=w;live.dup[q]=busy?duplex:1;
+  }
+  if(!visited && from==pieces[k].source)policy_sent[k]=1;
+  uint32_t tok=route_split(&policy_stream,&policy_st,&policy_topology,(int)from,(uint32_t)to,(uint32_t)visited,&live,policy_w+(size_t)c*ROUTE_FS,u,policy_cdf);
   policy_draws++;
   const int deg=policy_topology.deg[from];uint64_t share[ROUTE_DEG]={0};
   for(int d=0;d<ROUTE_N;d++)if(to>>d&1){share[tok%(uint32_t)deg]|=UINT64_C(1)<<d;tok/=(uint32_t)deg;}

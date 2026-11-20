@@ -72,13 +72,19 @@ struct route_stream {
 };
 /* the refreshes a run asks the policy for: `points` of them, from t0, `dt` apart, each table active `lag` after its
    refresh (points 0: one every dt until the stream is over). Before the first active table, `warm` routes (2 the
-   shortest-path tree, 3 uniform). */
-struct route_window { double t0, dt, lag; int points, warm; };
+   shortest-path tree, 3 uniform). Posting: `burst` 1, a flow posts every piece the moment it is released (as tests/
+   switch.c does); 0, its next the moment its last has started on the wire. */
+struct route_window { double t0, dt, lag; int points, warm, burst; };
 /* the fabric at a refresh, as the policy reads it (times in ns) */
+/* per pattern: recv, each destination's delivered fraction; left, the fraction not yet posted; pending, the bytes released
+   and waiting to post; demand, the live flows' bytes */
 struct route_state {
-  double tau, wait[ROUTE_L], dup[ROUTE_L], togo[ROUTE_N][ROUTE_N], recv[ROUTE_J][ROUTE_N], inflight[ROUTE_N], left[ROUTE_J], posted, ops;
+  double tau, wait[ROUTE_L], dup[ROUTE_L], togo[ROUTE_N][ROUTE_N], recv[ROUTE_J][ROUTE_N], inflight[ROUTE_N], left[ROUTE_J], pending[ROUTE_J], demand[ROUTE_J], posted, ops;
 };
 struct route_topology { uint32_t adj[ROUTE_N], srcmask; int deg[ROUTE_N], out[ROUTE_N][ROUTE_DEG], rev[ROUTE_L]; };
+/* a node's out-lanes at the instant of a draw: each one's earliest-cable wait and duplex share (the node's bridge knows
+   its own lanes exactly, at every draw, so a burst's draws see the queue the ones before them built) */
+struct route_live { double wait[ROUTE_DEG], dup[ROUTE_DEG]; };
 /* over the run's collectives that finished: completion over the floor; per piece: latency, queueing, over the floor */
 struct route_costs { double throughput, latency, queueing; int ops, pieces; };
 struct route_rng { uint64_t s; };
@@ -122,7 +128,7 @@ void route_topology_make(const struct route_fabric *f, const struct route_stream
    doubles). */
 int route_tokens(const struct route_topology *t, int v, uint32_t S);
 uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
-                     const float *w, double u, double *cdf);
+                     const struct route_live *live, const float *w, double u, double *cdf);
 uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
 
 /* The policy's forward on a CPU (forward.c): theta in policy.swift's layout; one refresh: lanes [nl][IN], tokens
@@ -177,12 +183,15 @@ static inline void route_context_token(const struct route_stream *s, const struc
     if (s->dest[j] >> d & 1) o[12 + d] = 1;
     o[35 + d] = (float)st->recv[j][d];
   }
-  o[41] = (float)(__builtin_log(1 + st->tau / u) / 8); o[42] = (float)point / ROUTE_POINTS; o[43] = 0; o[44] = (float)most; o[45] = 1; o[46] = 1;
+  double out = 0; for (int l = 0; l < s->f.lanes; l++) if (s->f.from[l] == s->source[j]) out += s->f.rate[l];
+  o[41] = (float)(__builtin_log(1 + st->tau / u) / 8); o[42] = (float)point / ROUTE_POINTS;
+  o[43] = (float)(__builtin_log(1 + st->pending[j] / out / u));   /* the burst waiting to post, as time on the source's lanes */
+  o[44] = (float)most; o[45] = 1; o[46] = 1; o[47] = (float)(__builtin_log(1 + st->demand[j] / ROUTE_PAGE) / 8);
 }
-/* split token `tok` at (v, S): its features; returns whether every destination's lane leads to it without coming back
-   to v */
+/* split token `tok` at (v, S): its features (v's own lanes at the draw's instant, `live`; beyond them the refresh's
+   cost-to-go); returns whether every destination's lane leads to it without coming back to v */
 static inline int route_split_features(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
-                                       uint32_t tok, float *phi) {
+                                       uint32_t tok, const struct route_live *live, float *phi) {
   const int deg = t->deg[v]; const double u = s->unit;
   for (int f = 0; f < ROUTE_FS; f++) phi[f] = 0;
   int valid = 1, cnt = 0; uint32_t used = 0; double most = 0, sum = 0;
@@ -193,7 +202,7 @@ static inline int route_split_features(const struct route_stream *s, const struc
     valid = valid && (h == d || route_reaches(t, h, 1u << v, 1u << d));
     phi[d * ROUTE_DEG + k] = 1; used |= 1u << k;
     double g = h == d ? 0 : st->togo[h][d]; if (g > 1e3 * u) g = 1e3 * u;
-    const double arrive = route_hop(s, st, l) + g;
+    const double arrive = live->wait[k] + route_send1(s, l) * live->dup[k] + s->f.latency[l] + g;
     if (arrive > most) most = arrive;
     sum += arrive; cnt++;
   }
