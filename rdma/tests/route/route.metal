@@ -5,7 +5,8 @@
 // - at a refresh (every REFRESH slots), the policy's weighting of each commodity's K candidate trees;
 // - each source releases its commodity's bytes into its trees at its out-lanes' rate, split by the weighting;
 // - every lane serves the bytes waiting on it (its tree edges' and its background's) by processor sharing at its rate;
-// - bytes sent reach the lane's head after its latency and one page time (a ring of the last H slots' sends);
+// - bytes sent reach the lane's head after its latency and one page time (a ring of the last H slots' sends, each
+//   as fp16 shares of its commodity's demand, in threadgroup memory with the rest of the rollout's state);
 // - each (commodity, destination) adds the area above its delivered fraction.
 // The objective is a smooth maximum over (commodity, destination) of that area over the floor; `done` is the first slot
 // every destination holds every byte, over the floor.
@@ -18,7 +19,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-constant constexpr int N = 6, L = 32, J = 6, K = 8, H = 16, SLOTS = 64, REFRESH = 8;
+constant constexpr int N = 6, L = 32, J = 6, K = 8, H = 12, SLOTS = 64, REFRESH = 8;
 constant constexpr int D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64, T = 256, SG = T / 32;
 constant constexpr int JK = J * K, JKN = J * K * N;
 constant constexpr float PAGE = 16384.0f;
@@ -59,16 +60,17 @@ static void product(device const float *W, int stride, int rows, int cols, threa
 
 kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net &net [[buffer(1)]],
                     device const uint *which [[buffer(2)]], device float *objective [[buffer(3)]],
-                    device float *done_out [[buffer(4)]], device float *rings [[buffer(5)]],
+                    device float *done_out [[buffer(4)]],
                     uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
                     uint sg [[simdgroup_index_in_threadgroup]], uint ln [[thread_index_in_simdgroup]]) {
   device const Scenario &s = scen[which[r]];
-  device float (*ring)[JKN] = (device float (*)[JKN])(rings + size_t(r) * H * JKN);   // this rollout's last H slots' sends
   threadgroup float arrived[JKN], sent[JKN];
+  threadgroup half ring[H][JKN];   // the last H slots' sends
   threadgroup float share[L], bgq[L], cap[L], want[L];
   threadgroup int lag[L];
   threadgroup float assigned[JK], released[J], outcap[J], p[JK], area[J * N], frac[J * N], ctx[J][CTX];
-  threadgroup float x[J][D], h[2][J][D], gz[J][D], gr[J][D], ex[J][E], last[J][D], emb[JK][D];
+  threadgroup float x[J][D], h[2][J][D], gz[J][D], gr[J][D], ex[J][E], last[J][D];
+  threadgroup half emb[JK][D];
   threadgroup int finished;
   const float dt = s.dt, fl = s.floor_ns;
   const int nl = int(s.lanes), nj = int(s.commodities), nn = int(s.nodes);
@@ -150,13 +152,13 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
           const float u = net.tok[token][2 * pair], w2 = net.tok[token][2 * pair + 1], c = cos(v * theta), sn = sin(v * theta);
           a += u * c - w2 * sn; b += u * sn + w2 * c;
         }
-        emb[jk][2 * pair] = a / N; emb[jk][2 * pair + 1] = b / N;
+        emb[jk][2 * pair] = half(a / N); emb[jk][2 * pair + 1] = half(b / N);
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
       // each candidate's logit: its embedding dotted with the stream, a SIMD group's lanes along the embedding
       for (int jk = sg; jk < JK; jk += SG) {
         const int j = jk / K;
-        const float v = simd_sum(emb[jk][ln] * x[j][ln] + emb[jk][ln + 32] * x[j][ln + 32]);
+        const float v = simd_sum(float(emb[jk][ln]) * x[j][ln] + float(emb[jk][ln + 32]) * x[j][ln + 32]);
         if (ln == 0) p[jk] = v / 8;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -169,7 +171,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
       threadgroup_barrier(mem_flags::mem_threadgroup);
       for (int i = tid; i < J * D; i += T) {
         const int j = i / D, d = i % D; float a = 0;
-        for (int k = 0; k < K; k++) a += p[j * K + k] * emb[j * K + k][d];
+        for (int k = 0; k < K; k++) a += p[j * K + k] * float(emb[j * K + k][d]);
         last[j][d] = a;
       }
     }
@@ -201,14 +203,16 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
       const int lane = (j < nj && v < nn) ? s.lane[j][k][v] : 255;
       float inc = 0;
       if (lane != 255) inc = max(arrived[jk * N + s.lsrc[lane]] - sent[e], 0.0f) * share[lane];
-      sent[e] += inc; ring[slot][e] = inc;
+      const float dem = max(s.demand[j < nj ? j : 0], 1.0f);
+      const half part = half(inc / dem);   // a send as a share of its commodity, in [0, 1]: what the ring holds
+      sent[e] += float(part) * dem; ring[slot][e] = part;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     // landings: what was sent lag slots ago
     for (int e = tid; e < JKN; e += T) {
       const int jk = e / N, v = e % N, j = jk / K, k = jk % K;
       const int lane = (j < nj && v < nn) ? s.lane[j][k][v] : 255;
-      if (lane != 255 && t >= lag[lane]) arrived[e] += ring[(t - lag[lane]) % H][e];
+      if (lane != 255 && t >= lag[lane]) arrived[e] += float(ring[(t - lag[lane]) % H][e]) * max(s.demand[j], 1.0f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // delivered fractions and the area above them

@@ -3,7 +3,7 @@
 import Foundation
 import Metal
 
-let N = 6, L = 32, J = 6, K = 8, H = 16, D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64
+let N = 6, L = 32, J = 6, K = 8, H = 12, D = 64, E = 192, CTX = 12, VOCAB = (N + 2) * 64
 let page = 16384.0
 
 struct Mix { var s: UInt64
@@ -101,7 +101,6 @@ let netBuf = device.makeBuffer(bytes: net, length: net.count * 4, options: .stor
 let whichBuf = device.makeBuffer(bytes: which, length: which.count * 4, options: .storageModeShared)!
 let objBuf = device.makeBuffer(length: rollouts * 4, options: .storageModeShared)!
 let doneBuf = device.makeBuffer(length: rollouts * 4, options: .storageModeShared)!
-let ringBuf = device.makeBuffer(length: rollouts * H * J * K * N * 4, options: .storageModePrivate)!
 let queue = device.makeCommandQueue()!
 print("network: \(net.count) parameters; \(rollouts) rollouts a dispatch, \(per) dispatches a command buffer; threadgroup memory \(pipeline.staticThreadgroupMemoryLength) bytes")
 
@@ -110,7 +109,7 @@ func run(_ dispatches: Int) -> Double {
   let enc = cb.makeComputeCommandEncoder()!
   enc.setComputePipelineState(pipeline)
   enc.setBuffer(scenBuf, offset: 0, index: 0); enc.setBuffer(netBuf, offset: 0, index: 1); enc.setBuffer(whichBuf, offset: 0, index: 2)
-  enc.setBuffer(objBuf, offset: 0, index: 3); enc.setBuffer(doneBuf, offset: 0, index: 4); enc.setBuffer(ringBuf, offset: 0, index: 5)
+  enc.setBuffer(objBuf, offset: 0, index: 3); enc.setBuffer(doneBuf, offset: 0, index: 4);
   for _ in 0..<dispatches { enc.dispatchThreadgroups(MTLSize(width: rollouts, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)) }
   enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
   if let e = cb.error { print("error: \(e)"); exit(1) }
