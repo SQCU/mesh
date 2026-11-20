@@ -260,7 +260,14 @@ final class Net {
   }
   func refresh() { begin(); phase = "weights"; encodeWeights(); finish("weights") }
 
-  func fp(B: Int, K: Int, R: Int, seed s: UInt32 = 0) -> [UInt32] { let klp = pad64(K * L); return [UInt32(B), UInt32(K), UInt32(klp), UInt32(R), UInt32(B * klp), s, UInt32(pad64(ctxCap)), 0] }
+  // the lanes' layout: a run's rows K L padded to the tile, or for one refresh 32 (a tile two runs: half a tile padded
+  // otherwise, the forward's lanes measured 2x slower); its threadgroups and their tiles
+  static func klp(_ K: Int) -> Int { K == 1 ? L : pad64(K * L) }
+  static func laneGroups(B: Int, K: Int) -> Int { K == 1 ? (B + 1) / 2 : B }
+  func fp(B: Int, K: Int, R: Int, seed s: UInt32 = 0) -> [UInt32] {
+    let k = Net.klp(K)
+    return [UInt32(B), UInt32(K), UInt32(k), UInt32(R), UInt32(pad64(B * k)), s, UInt32(pad64(ctxCap)), UInt32(K == 1 ? 1 : k / 64)]
+  }
   // the forward: B runs' K refreshes (lanes [B K][L][IN], mask, h0 [B][2][D]), R contexts (tokens [R][IN], pos):
   // w [R][FS], next [B][2][D]; store: what the backward reads, the wgrad codes of every X
   func encodeForward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, K: Int, R: Int, w: MTLBuffer, next: MTLBuffer, store: Bool, stage: UInt32 = 0) {
@@ -268,7 +275,7 @@ final class Net {
     let prm = fp(B: B, K: K, R: R)
     set(pipe("lanes_fwd", store: store, stage: stage), "lanes_fwd", [0: (lanes, 0), 1: (mask, 0), 2: (h0, 0), 3: (st, 0), 4: (next, 0), 5: (netTable, 0), 6: (wq, 0), 7: (wsc, 0),
         9: (gq, 0), 10: (gs, 0), 11: (gradTable, 0), 12: (lzc, 0), 13: (lh, 0), 14: (lu, 0)], [8: prm])
-    groups(B, threads: Net.tileThreads)
+    groups(Net.laneGroups(B: B, K: K), threads: Net.tileThreads)
     set(pipe("ctx_fwd", store: store, stage: stage), "ctx_fwd", [0: (tokens, 0), 1: (pos, 0), 2: (st, 0), 3: (w, 0), 5: (netTable, 0), 6: (wq, 0), 7: (wsc, 0),
         9: (gq, 0), 10: (gs, 0), 11: (gradTable, 0), 12: (czc, 0), 13: (cu, 0), 14: (cn, 0), 15: (cinv, 0)], [8: prm])
     groups((R + 63) / 64, threads: Net.tileThreads)
@@ -304,10 +311,10 @@ final class Net {
     groups((R + 63) / 64, 3, threads: Net.tileThreads)
     set(pipe("lanes_bwd"), "lanes_bwd", [0: (mask, 0), 1: (h0, 0), 2: (lzc, 0), 3: (lh, 0), 4: (lu, 0), 5: (netTable, 0), 6: (wq, 0), 7: (wsc, 0), 9: (gq, 0), 10: (gs, 0),
         11: (gradTable, 0), 12: (seg, 0), 13: (dhp, 0), 15: (pos, 0)], [8: prm])
-    groups(B, 3, threads: Net.tileThreads)
+    groups(Net.laneGroups(B: B, K: K), 3, threads: Net.tileThreads)
     // the wgrad products: a matrix's [3 rows] x [cols] over its blocks (lanes' and contexts', or the contexts' alone)
     phase = "wgrad"
-    let RL = B * pad64(K * L), lb = RL / 64, cbk = (R + 63) / 64
+    let RL = pad64(B * Net.klp(K)), lb = RL / 64, cbk = (R + 63) / 64
     let wgp = pipe("gemm_wg_64x64_4")
     var gitems: [UInt32] = []
     for (i, mt) in lay.mats.enumerated() {

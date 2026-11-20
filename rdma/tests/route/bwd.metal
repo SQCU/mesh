@@ -172,13 +172,14 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
 // gates' gradients (z: m D (h~ - h_{t-1}) z (1 - z); h~: m D z (1 - h~^2), D = u + e_{t+1} the state's own gradient)
 // written over S as bf16 pairs
 static inline void scan_back(threadgroup float *S, threadgroup float *carry, threadgroup const float (&inj)[2][D], bool local, Lanes c,
-                             device const float *mask, device const half *lzc, device const float *lh, device const float *h0, uint b, uint l, uint p0, constant FP &p) {
+                             device const float *mask, device const half *lzc, device const float *lh, device const float *h0, uint l, uint row0, constant FP &p) {
   for (uint cc = 0; cc < 8; cc++) {
     const uint ch = 8 * c.sg + cc;
     float ein = carry[ch];
     for (uint g = 2; g-- > 0;) {
-      const uint r = 32 * g + 31 - c.lane, pos = p0 + r, row = b * p.KLp + pos;
-      const bool valid = pos < p.K * L;
+      const uint r = 32 * g + 31 - c.lane, row = row0 + r; const LanePos lp = lane_pos(row, p), lg = lane_pos(row0 + 32 * g, p);
+      if (lg.pos + 32 == p.KLp) ein = 0;   // a run's last group: nothing later
+      const uint b = lp.b, pos = lp.pos; const bool valid = lp.valid;
       float u = local ? S[r * LD + ch] : 0.0f;
       if (r % L == L - 1 && valid) u += inj[g][ch];
       device const half *zc = lzc + (size_t(row) * 2 + l) * 2 * D;
@@ -188,7 +189,7 @@ static inline void scan_back(threadgroup float *S, threadgroup float *carry, thr
       scan_affine_simd(Aa, Bb, c.lane);
       const float e = fma(Aa, ein, Bb), later = simd_shuffle_up(e, ushort(1));
       const float Dh = u + (c.lane == 0 ? ein : later);
-      const float hprev = pos > 0 ? lh[(size_t(row - 1) * 2 + l) * D + ch] : h0[(b * 2 + l) * D + ch];
+      const float hprev = pos > 0 ? lh[(size_t(row - 1) * 2 + l) * D + ch] : b < p.B ? h0[(b * 2 + l) * D + ch] : 0.0f;
       const float dz = m * Dh * (h - hprev) * z * (1.0f - z), dc = m * Dh * z * (1.0f - h * h);
       ((threadgroup uint *)S)[r * LD + ch] = uint(as_type<ushort>(bfloat(dz))) | (uint(as_type<ushort>(bfloat(dc))) << 16);
       ein = simd_broadcast(e, 31);
@@ -204,7 +205,8 @@ static inline void unpack_dzc(threadgroup const float *S, Lanes c, uint row, thr
   }
 }
 
-// ---- the backward, lanes: a threadgroup a (run, task), its tiles latest first (the reverse recurrence's carry):
+// ---- the backward, lanes: a threadgroup a (run, task) (or for one refresh a (tile of two runs, task)), its tiles latest
+// first (the reverse recurrence's carry):
 // layer 1's states' gradients from the contexts (dhp, summed a refresh), its gates', then x1's (zh1's dgrad), layer 0's
 // feed-forward, its recurrence (xm0's own gradient at every position, the contexts' at a refresh's end), x0's ----
 kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float *h0 [[buffer(1)]], device const half *lzc [[buffer(2)]], device const float *lh [[buffer(3)]],
@@ -215,15 +217,15 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
   TILE_MEMORY
   threadgroup float carry[2][D], inj[2][2][D];   // [layer][channel]; [layer][the tile's refresh][channel]
   const Lanes c = lanes_of(t);
-  const uint b = tg.x, task = tg.y, RT = gr.RT;
+  const uint task = tg.y, RT = gr.RT;
   if (t < 2 * D) carry[t / D][t % D] = 0;
-  for (uint j = p.KLp / TM; j-- > 0;) {
-    const uint p0 = j * TM, row0 = b * p.KLp + p0;
+  for (uint j = p.LT; j-- > 0;) {
+    const uint row0 = (tg.x * p.LT + j) * TM;
     { // the tile's two refreshes' contexts' state gradients, a thread a (layer, refresh, channel)
-      const uint l = t / 128, kk = t / 64 % 2, ch = t % 64, k = p0 / L + kk;
+      const uint l = t / 128, kk = t / 64 % 2, ch = t % 64; const LanePos lg = lane_pos(row0 + 32 * kk, p);
       float acc = 0;
-      if (k < p.K) {
-        const uint i = b * p.K + k, x0 = seg[2 * i], x1 = seg[2 * i + 1];
+      if (lg.valid) {
+        const uint i = lg.b * p.K + lg.pos / L, x0 = seg[2 * i], x1 = seg[2 * i + 1];
         device const float *src = dhp + (size_t(task) * 2 + l) * p.Rp * D + ch;
         for (uint tt = x0 / TM; x1 > x0 && tt <= (x1 - 1) / TM; tt++) acc += src[size_t(tt == x0 / TM ? x0 : tt * TM) * D];
       }
@@ -231,7 +233,7 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     }
     tg_barrier();
     // layer 1: the recurrence back from the contexts' gradients alone
-    scan_back(S, carry[1], inj[1], false, c, mask, lzc, lh, h0, b, 1, p0, p);
+    scan_back(S, carry[1], inj[1], false, c, mask, lzc, lh, h0, 1, row0, p);
     tg_barrier();
     float dzc[2][2][8];
     for (uint s = 0; s < 2; s++) unpack_dzc(S, c, row_of(c, s), dzc[s][0], dzc[s][1]);
@@ -268,7 +270,7 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
       for (uint s = 0; s < 2; s++) { float y[8]; epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + mu.wbs, nullptr, 0, y); for (uint k = 0; k < 8; k++) x[s][0][k] += y[k]; } }
     // layer 0: the recurrence back from xm0's gradient (every position) and the contexts'
     tg_barrier(); for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s][0]); tg_barrier();
-    scan_back(S, carry[0], inj[0], true, c, mask, lzc, lh, h0, b, 0, p0, p);
+    scan_back(S, carry[0], inj[0], true, c, mask, lzc, lh, h0, 0, row0, p);
     tg_barrier();
     for (uint s = 0; s < 2; s++) unpack_dzc(S, c, row_of(c, s), dzc[s][0], dzc[s][1]);
     for (uint jj = 0; jj < 2; jj++) {
