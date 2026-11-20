@@ -91,13 +91,14 @@ def train(cfg, lib):
         evaluation(cfg, lib, learner, measured, 'start')
     table = telemetry.Table(r['telemetry']); table.sample()
     done = threading.Event()
-    last = {}
+    last, lastops = {}, {}
     def report():   # the telemetry table's records (the table is the store; this only reads it); the loop's phases, s/s
         while not done.wait(cfg['report']['interval']):
             rec = table.sample()
             if rec:
                 rec['pool'] = dist.pool.count
                 now = dict(loop.PHASES); rec['phases'] = {k: round((now[k] - last.get(k, 0.0)) / cfg['report']['interval'], 3) for k in now}; last.update(now)
+                ops = dict(loop.OPS); rec['int8_tops'] = {k: round((ops[k] - lastops.get(k, 0)) / cfg['report']['interval'] / 1e12, 4) for k in ops}; lastops.update(ops)
                 emit(rec)
     threading.Thread(target=report, daemon=True).start()
     loop.train(cfg, lib, dist, learner, actor, r['steps'], r['world'])

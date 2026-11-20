@@ -52,6 +52,13 @@ class Batch:
 
 
 PHASES = {}   # seconds spent in each part of the loop (wall clock, the driver's thread), read by the reporter
+OPS = {}      # int8 operations submitted (2 per multiply-add), by kind, read by the reporter
+E = const('ROUTE_E'); D = const('ROUTE_D')
+# a row's int8 multiply-adds through the network (net.swift's products): a lane row, the input projection (IN padded to 64),
+# layer 0's gates and feed-forward, layer 1's gates; a context row, all of them and the readout. A learning step's rows
+# go forward, then dgrad and wgrad: three times the forward's
+LANE_MACS = 64 * D + 2 * D * D + 2 * D * E + 2 * D * D
+CTX_MACS = 64 * D + 2 * (2 * D * D + 2 * D * E) + FS * D
 
 
 class phase:
@@ -112,6 +119,7 @@ class Rollouts:
                 self.lib.route_net_forward(self.net, F.p, len(runs), int(nc.sum()))
             self.inset[free[0]] = (runs, off, nc)
             self.waiting, self.waiting_nc = np.zeros(0, np.int32), np.zeros(0, np.int32)
+            OPS['forward'] = OPS.get('forward', 0) + 2 * (len(runs) * L * LANE_MACS + int(nc.sum()) * CTX_MACS)
             self.lib.route_tel_inc(self.lib.RT_FORWARDS, 1); self.lib.route_tel_inc(self.lib.RT_EVALUATIONS, len(runs)); self.lib.route_tel_inc(self.lib.RT_FORWARD_ROWS, int(nc.sum()))
         return done
 
@@ -183,6 +191,7 @@ def train(cfg, lib, dist, learner, actor, steps, world):
             taken, m, R, ND, scale = load(lib, ro, ready, LB[j])
         lag = lib.route_net_steps(learner) - ro.version[taken]
         lib.route_tel_inc(lib.RT_LAG_SUM, int(lag.sum())); lib.route_tel_inc(lib.RT_LAG_GROUPS, len(taken)); lib.route_tel_top(lib.RT_LAG_MAX, int(lag.max()))
+        OPS['learn'] = OPS.get('learn', 0) + 3 * 2 * (m * K * L * LANE_MACS + R * CTX_MACS)
         with phase('commit step'):
             lib.route_net_step(learner, LB[j].p, m, K, R, ND, scale, cfg['run']['rate'], world)
             lib.route_net_publish(learner, actor)
