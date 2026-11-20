@@ -148,8 +148,12 @@ kernel void scan_bwd(device const float *dXM [[buffer(0)]], device const float *
 // mats [i]: (V's offset, rows, columns, g's offset), b at g's offset + rows (if it has one)
 struct Mat { uint v, rows, cols, g; };
 // W [rows][cols] of matrix m (a thread a row)
-kernel void weff(device const float *theta [[buffer(0)]], device float *W [[buffer(1)]], constant Mat &m [[buffer(2)]], uint r [[thread_position_in_grid]]) {
-  if (r >= m.rows) return;
+// every matrix's W = g V / |V| a row, one dispatch: rows (matrix, row) as pin's, woff[matrix] its W's offset in the arena
+kernel void weff(device const float *theta [[buffer(0)]], device float *Wall [[buffer(1)]], device const Mat *mats [[buffer(2)]], device const uint2 *rows [[buffer(3)]],
+                 device const uint *woff [[buffer(4)]], constant uint &n [[buffer(5)]], uint i [[thread_position_in_grid]]) {
+  if (i >= n) return;
+  const Mat m = mats[rows[i].x]; const uint r = rows[i].y;
+  device float *W = Wall + woff[rows[i].x];
   float s = 0;
   for (uint j = 0; j < m.cols; j++) { const float v = theta[m.v + r * m.cols + j]; s = fma(v, v, s); }
   const float k = i8_weight_gain(theta[m.g + r], s);   // int8mm.h's: correctly rounded
@@ -166,12 +170,14 @@ kernel void pin(device float *theta [[buffer(0)]], device const Mat *mats [[buff
   for (uint j = 0; j < m.cols; j++) theta[m.v + r * m.cols + j] *= k;
 }
 // dW [tasks][rows][cols (+1: the bias's, if bias)] -> grads [task][P]: with u = V / |V| a row, dg = dW . u,
-// dV = g / |V| (dW - (dW . u) u), db = the extra column
-kernel void chain(device const float *dW [[buffer(0)]], device const float *theta [[buffer(1)]], device float *grads [[buffer(2)]], constant Mat &m [[buffer(3)]],
-                  constant uint3 &p [[buffer(4)]], uint i [[thread_position_in_grid]]) {   // p: (P, bias, tasks)
-  if (i >= p.z * m.rows) return;
-  const uint t = i / m.rows, r = i % m.rows, w = m.cols + p.y;
-  const device float *d = dW + (size_t(t) * m.rows + r) * w;
+// dV = g / |V| (dW - (dW . u) u), db = the extra column. Every matrix's rows in one dispatch: rows (matrix, row) as pin's,
+// info[matrix] = (its dW's offset in the arena, bias); p: (P, the rows, tasks)
+kernel void chain(device const float *dWall [[buffer(0)]], device const float *theta [[buffer(1)]], device float *grads [[buffer(2)]], device const Mat *mats [[buffer(3)]],
+                  device const uint2 *rows [[buffer(4)]], device const uint2 *info [[buffer(5)]], constant uint3 &p [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+  if (i >= p.z * p.y) return;
+  const uint t = i / p.y, mi = rows[i % p.y].x, r = rows[i % p.y].y;
+  const Mat m = mats[mi]; const uint bias = info[mi].y, w = m.cols + bias;
+  const device float *d = dWall + info[mi].x + (size_t(t) * m.rows + r) * w;
   float s = 0, dot = 0;
   for (uint j = 0; j < m.cols; j++) { const float v = theta[m.v + r * m.cols + j]; s = fma(v, v, s); dot = fma(d[j], v, dot); }
   const float k = rsqrt(max(s, 1e-30f)); dot *= k;
@@ -179,7 +185,7 @@ kernel void chain(device const float *dW [[buffer(0)]], device const float *thet
   const float gk = theta[m.g + r] * k;
   for (uint j = 0; j < m.cols; j++) g[m.v + r * m.cols + j] = gk * (d[j] - dot * k * theta[m.v + r * m.cols + j]);
   g[m.g + r] = dot;
-  if (p.y) g[m.g + m.rows + r] = d[m.cols];
+  if (bias) g[m.g + m.rows + r] = d[m.cols];
 }
 // the three gradients' Gram matrix: one threadgroup of 1024, fixed order
 kernel void gram(device const float *g [[buffer(0)]], device float *G [[buffer(1)]], constant uint &P [[buffer(2)]], uint l [[thread_position_in_threadgroup]]) {

@@ -74,9 +74,12 @@ QROWS(quant_rows_b, bfloat)
 // sub-block loaded coalesced into threadgroup memory, a column's 64 rows two a lane (rows l, l + 32, as quant_rows'
 // columns), rotated by shuffles and kept in registers; the block's maximum; the codes back through threadgroup memory.
 struct QC { uint rows, cols, ld, valid, block, rotate, seed, ones, off, xcols, p0, p1; };
-template <typename T> static inline void quant_cols_t(device const T *x, device int8_t *q, device float *s, constant QC &p, uint2 tg, uint tid, uint sg, uint lane,
+template <typename T> static inline void quant_cols_t(device const T *x, device int8_t *q, device float *s, constant QC &p, uint3 tg3, uint tid, uint sg, uint lane,
                                                       threadgroup float (&tile)[64][33], threadgroup int8_t (&codes)[256][32]) {
+  const uint2 tg = tg3.xy; const uint task = tg3.z;   // task: x's rows p.p0 apart; its codes and scales one task's size apart
   const uint nb = p.rows / p.block, b = tg.y, c0 = tg.x * 32, nsb = p.block / 64;
+  x += size_t(task) * p.p0 * p.ld; q += size_t(task) * p.rows * p.cols; s += size_t(task) * p.cols * nb;
+  const uint seed = p.seed ? (p.seed ^ task * 0x9e3779b1u) | 1u : 0u;
   float v[4][4][2];   // [sub-block][column][half]
   for (uint sb = 0; sb < nsb; sb++) {
     const uint r0 = b * p.block + sb * 64;
@@ -112,7 +115,7 @@ template <typename T> static inline void quant_cols_t(device const T *x, device 
     if (lane == 0 && col < p.cols) s[size_t(col) * nb + b] = i8_scale(m);
     for (uint sb = 0; sb < nsb; sb++) for (uint h = 0; h < 2; h++) {
       const uint r = sb * 64 + h * 32 + lane, row = b * p.block + r;
-      codes[r][cl] = quant(v[sb][j][h], inv, p.seed, row * p.cols + col);
+      codes[r][cl] = quant(v[sb][j][h], inv, seed, row * p.cols + col);
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -123,7 +126,7 @@ template <typename T> static inline void quant_cols_t(device const T *x, device 
 }
 
 #define QCOLS(name, T) kernel void name(device const T *x [[buffer(0)]], device int8_t *q [[buffer(1)]], device float *s [[buffer(2)]], \
-  constant QC &p [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
+  constant QC &p [[buffer(3)]], uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
   uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
   threadgroup float tile[64][33]; threadgroup int8_t codes[256][32]; quant_cols_t<T>(x, q, s, p, tg, tid, sg, lane, tile, codes); }
 QCOLS(quant_cols, float)
@@ -273,10 +276,12 @@ QFWD(gemmq_nn, false, (N, K), (n0, 0))
 
 // wgrad (TN: a [K][M] against b [K][N], K the rows): 256-row blocks, one scale a column a block; the blocks [z per,
 // (z + 1) per) of threadgroup z summed into partial [z][M][N] (per 1 in the trainer: a block a threadgroup); reduce_blocks adds them
-struct WP { uint M, N, K, per; };
+struct WP { uint M, N, K, per, nz; };   // nz: the block groups a task (grid z = task * nz + group)
 kernel void gemm_tn(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)]], device const float *sa [[buffer(2)]], device const float *sb [[buffer(3)]],
                     device float *partial [[buffer(4)]], constant WP &p [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]]) {
   const int M = p.M, N = p.N, K = p.K, nb = K / 256, m0 = tg.y * 64, n0 = tg.x * 32;
+  const uint task = tg.z / p.nz, zg = tg.z % p.nz;   // each task's codes and scales one task's size apart
+  a += size_t(task) * M * K; sa += size_t(task) * M * nb;
   auto A = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(a, dextents<int32_t, 2>(M, K));
   auto B = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(b, dextents<int32_t, 2>(N, K));
   constexpr auto d = matmul2d_descriptor(64, 32, 256, true, false);
@@ -289,7 +294,7 @@ kernel void gemm_tn(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)
     for (uint16_t i = 0; i < c.get_capacity() && i < 32; ++i) if (c.is_valid_element(i)) {
       auto at = c.get_multidimensional_index(i); ni[i] = n0 + at[0]; mi[i] = m0 + at[1]; if (mi[i] >= M || ni[i] >= N) mi[i] = -1;
     } }
-  const int kb0 = tg.z * p.per, kb1 = min(nb, kb0 + int(p.per));
+  const int kb0 = zg * p.per, kb1 = min(nb, kb0 + int(p.per));
   for (int kb = kb0; kb < kb1; kb++) {
     auto tA = A.slice(m0, kb * 256); auto tB = B.slice(n0, kb * 256);
     auto c = op.get_destination_cooperative_tensor<decltype(tA), decltype(tB), int32_t>();
@@ -297,16 +302,16 @@ kernel void gemm_tn(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)
     op.run(tA, tB, c);
     for (uint16_t i = 0; i < c.get_capacity() && i < 32; ++i) if (mi[i] >= 0) acc[i] = i8_acc(c[i], sa[size_t(mi[i]) * nb + kb], sb[size_t(ni[i]) * nb + kb], acc[i]);
   }
-  for (int i = 0; i < 32; ++i) if (mi[i] >= 0) partial[(size_t(tg.z) * M + mi[i]) * N + ni[i]] = acc[i];
+  for (int i = 0; i < 32; ++i) if (mi[i] >= 0) partial[(size_t(task * p.nz + zg) * M + mi[i]) * N + ni[i]] = acc[i];
 }
-// the blocks' partial sums [nb][MN], pairwise: partial[z] += partial[z + stride] for z a multiple of 2 stride, a thread
-// an (element, pair); log2(nb) passes leave the sum in partial[0], in the same order every time
 // a weight gradient's blocks [nb][mn] summed into out [mn], one dispatch: each element's blocks in the balanced pairwise
 // tree (left + right, power-of-two aligned; the leftover subtrees folded from the right) that log2(nb) passes of
 // partial[z] += partial[z + stride] made, so the sums are the same bits; a carry stack per thread, one read a block
-kernel void reduce_blocks(device const float *partial [[buffer(0)]], device float *out [[buffer(1)]], constant uint2 &p [[buffer(2)]], uint e [[thread_position_in_grid]]) {
-  const uint mn = p.x, nb = p.y;
-  if (e >= mn) return;
+kernel void reduce_blocks(device const float *partial [[buffer(0)]], device float *out [[buffer(1)]], constant uint3 &p [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+  const uint mn = p.x, nb = p.y;   // p.z tasks: task t's blocks at [t nb][mn], its sums at out + t mn
+  if (i >= mn * p.z) return;
+  const uint e = i % mn, task = i / mn;
+  partial += size_t(task) * nb * mn; out += size_t(task) * mn;
   float v[32]; uint level[32]; int top = -1;
   for (uint z = 0; z < nb; z++) {
     float x = partial[size_t(z) * mn + e]; uint l = 0;

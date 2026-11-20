@@ -129,7 +129,9 @@ final class Net {
   let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer, alphaBuf: MTLBuffer, matsBuf: MTLBuffer, pinRows: MTLBuffer, pinCount: Int
   var step = 0, seed: UInt32 = 1
   // each matrix: fp32 W, its forward codes (rows quantized along its columns) and its dgrad codes (columns, along its rows)
-  var W: [String: MTLBuffer] = [:], wf: [String: MTLBuffer] = [:], wfs: [String: MTLBuffer] = [:], wb: [String: MTLBuffer] = [:], wbs: [String: MTLBuffer] = [:], dW: [String: MTLBuffer] = [:]
+  var Woff: [String: Int] = [:], Wall: MTLBuffer! = nil, WoffBuf: MTLBuffer! = nil   // every matrix's W, one arena
+  var wf: [String: MTLBuffer] = [:], wfs: [String: MTLBuffer] = [:], wb: [String: MTLBuffer] = [:], wbs: [String: MTLBuffer] = [:]
+  var dWoff: [String: Int] = [:], dWall: MTLBuffer! = nil, dWinfo: MTLBuffer! = nil   // every matrix's weight gradient [3][rows][cols + 1], one arena; (offset, bias) a matrix
   // activations (fp32), the backward's (tasks stacked), the codes' scratch
   let T: MTLBuffer, X: [MTLBuffer], ZC: [MTLBuffer], H: [MTLBuffer], XM: [MTLBuffer], U: [MTLBuffer], Nn: MTLBuffer, inv: MTLBuffer, nextScratch: MTLBuffer
   let dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, inj: MTLBuffer
@@ -198,15 +200,16 @@ final class Net {
     let P = lay.count
     theta = device.makeBuffer(bytes: initial, length: P * 4, options: .storageModeShared)!
     m = p(P); v = p(P); grads = f(3 * P); gram = f(9); alphaBuf = f(4)
-    var mats: [UInt32] = [], rows: [UInt32] = []
+    var mats: [UInt32] = [], rows: [UInt32] = [], info: [UInt32] = [], dWsize = 0, woffs: [UInt32] = [], Wsize = 0
     for (i, mt) in lay.mats.enumerated() {
       mats += [UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]
       for r in 0..<mt.rows { rows += [UInt32(i), UInt32(r)] }
-      W[mt.name] = p(mt.rows * mt.cols)
+      Woff[mt.name] = Wsize; woffs.append(UInt32(Wsize)); Wsize += mt.rows * mt.cols
       wf[mt.name] = b8(mt.rows * pad64(mt.cols)); wfs[mt.name] = p(mt.rows)
       wb[mt.name] = b8(pad64(mt.rows) * mt.cols); wbs[mt.name] = p(mt.cols)
-      dW[mt.name] = p(3 * mt.rows * (mt.cols + 1))
+      dWoff[mt.name] = dWsize; info += [UInt32(dWsize), mt.bias ? 1 : 0]; dWsize += 3 * mt.rows * (mt.cols + 1)
     }
+    Wall = p(Wsize); WoffBuf = device.makeBuffer(bytes: woffs, length: woffs.count * 4, options: .storageModeShared)!; dWall = p(dWsize); dWinfo = device.makeBuffer(bytes: info, length: info.count * 4, options: .storageModeShared)!
     matsBuf = device.makeBuffer(bytes: mats, length: mats.count * 4, options: .storageModeShared)!
     pinRows = device.makeBuffer(bytes: rows, length: rows.count * 4, options: .storageModeShared)!; pinCount = rows.count / 2
     T = p(cap * IN); X = (0..<3).map { _ in p(cap * D) }; ZC = (0..<2).map { _ in p(cap * D) }   /* fp16 */; H = (0..<2).map { _ in p(laneCap * D) }
@@ -214,8 +217,8 @@ final class Net {
     dX2 = p(3 * contexts * D); dU = p(3 * cap * E / 2) /* bf16 */; dXM = p(3 * cap * D); dZC = p(3 * cap * D) /* bf16 */; dXa = p(3 * cap * D); dXb = p(3 * cap * D)
     dhp = p(3 * contexts * D); inj = p(3 * runs * refreshes * D); segBuf = f(runs * refreshes * 2)
     let rowsPad = (cap + 255) / 256 * 256
-    cA = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); cB = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); qx = b8(rowsPad * 256); sx = p(256 * rowsPad / 256); qy = b8(rowsPad * 256); sy = p(256 * rowsPad / 256)
-    partial = p((rowsPad / 256 + 1) * 2 * D * (E + 1))   // a 256-row block's partial sums each, the widest wgrad (M N <= 128 x 193)
+    cA = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); cB = Codes(q: b8(3 * cap * 256), s: p(3 * cap)); qx = b8(rowsPad * 256); sx = p(256 * rowsPad / 256); qy = b8(3 * rowsPad * 256); sy = p(3 * 256 * rowsPad / 256)
+    partial = p(3 * (rowsPad / 256 + 1) * 2 * D * (E + 1))   // a 256-row block's partial sums each, three tasks, the widest wgrad (M N <= 128 x 193)
     let cb = queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
     bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0); bl.endEncoding()
     cb.commit(); cb.waitUntilCompleted()
@@ -306,25 +309,29 @@ final class Net {
     if rows == 0 { return }
     set("quant_cols" + xType, [(x, 0), (qx, 0), (sx, 0)], [[UInt32(K), UInt32(Nw), UInt32(ldx), UInt32(rows), 256, 1, 0, mt.bias ? UInt32(mt.cols) : NONE, UInt32(xoff), UInt32(mt.cols), 0, 0]])
     e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    // a threadgroup a 256-row block (the exactness unit), its partial sum each; then the blocks' pairwise tree
-    for t in 0..<3 {
-      set("quant_cols" + dyType, [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(t * stride + yoff), UInt32(M), 0, 0]])
-      e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-      set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), 1]])
-      e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: nb), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-      set("reduce_blocks", [(partial, 0), (dW[w]!, t * M * Nw)], [[UInt32(M * Nw), UInt32(nb)]]); threads(M * Nw)   // the blocks' pairwise tree, one dispatch
-    }
+    // the three tasks in each dispatch: dy's columns quantized (task t's rows t stride apart), a threadgroup a 256-row
+    // block a task (the exactness unit, its partial sums), then the blocks' pairwise tree a task
+    set("quant_cols" + dyType, [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(yoff), UInt32(M), UInt32(stride), 0]])
+    e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 3), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), 1, UInt32(nb)]])
+    e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: 3 * nb), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    set("reduce_blocks", [(partial, 0), (dWall, dWoff[w]!)], [[UInt32(M * Nw), UInt32(nb), 3]]); threads(3 * M * Nw)
   }
   // each matrix's W, and its two sets of codes, from theta
   func encodeWeights() {
-    for mt in lay.mats {
-      set("weff", [(theta, 0), (W[mt.name]!, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]]); threads(mt.rows)
-      qrows(W[mt.name]!, 0, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, into: Codes(q: wf[mt.name]!, s: wfs[mt.name]!))
-      set("quant_cols", [(W[mt.name]!, 0), (wb[mt.name]!, 0), (wbs[mt.name]!, 0)],
+    var n = UInt32(pinCount)
+    mark("weff")   // every matrix's W, one dispatch
+    current = pipes["weff"]!; e.setComputePipelineState(current!)
+    for (i, b) in [theta, Wall, matsBuf, pinRows, WoffBuf].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+    e.setBytes(&n, length: 4, index: 5); threads(pinCount)
+    for mt in lay.mats {   // its two sets of codes (shapes differ by matrix)
+      qrows(Wall, Woff[mt.name]!, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, into: Codes(q: wf[mt.name]!, s: wfs[mt.name]!))
+      set("quant_cols", [(Wall, Woff[mt.name]!), (wb[mt.name]!, 0), (wbs[mt.name]!, 0)],
           [[UInt32(pad64(mt.rows)), UInt32(mt.cols), UInt32(mt.cols), UInt32(mt.rows), UInt32(pad64(mt.rows)), 1, 0, NONE, 0, UInt32(mt.cols), 0, 0]])
       e.dispatchThreadgroups(MTLSize(width: (mt.cols + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
   }
+
 
   // the forward: B runs' K refreshes (lane tokens [B K L][IN] and masks [B K L] in `lanes`, `mask`, their states h0
   // [B][2][D]), R contexts (tokens [R][IN], each its lane row pos[r]): w [R][FS] and each run's last states [B][2][D].
@@ -424,11 +431,9 @@ final class Net {
     phase = "back input"
     blit { b in b.copy(from: lanes, sourceOffset: 0, to: self.T, destinationOffset: 0, size: LR * IN * 4); if R > 0 { b.copy(from: tokens, sourceOffset: 0, to: self.T, destinationOffset: LR * IN * 4, size: R * IN * 4) } }
     wgrad("inp", dy: dXb, yoff: 0, stride: N, ldy: D, x: T, xoff: 0, ldx: IN, rows: N)
-    for mt in lay.mats {
-      phase = "back params"
-      set("chain", [(dW[mt.name]!, 0), (theta, 0), (grads, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)], [UInt32(P), mt.bias ? 1 : 0, 3]])
-      threads(3 * mt.rows)
-    }
+    phase = "back params"   // every matrix's chain rule, one dispatch
+    set("chain", [(dWall, 0), (theta, 0), (grads, 0), (matsBuf, 0), (pinRows, 0), (dWinfo, 0)], [[UInt32(P), UInt32(pinCount), 3]])
+    threads(3 * pinCount)
   }
   // a layer's recurrence and gates, backward: dXM [3][N] (its context rows' gradients; its lanes' too if upstreamDX, the
   // local path) -> dZC [3][N] (stored, and its codes into `codes`) -> out = dXM + dZC zh (dX, [3][N]; its codes into

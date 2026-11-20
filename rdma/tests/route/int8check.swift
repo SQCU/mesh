@@ -185,8 +185,8 @@ for outliers in [false, true] {
     let (qb, sb, _) = qcols(x, rows: Kp, cols: Nw, ld: Xc, valid: rows, block: 256, seed: 0, ones: ones ? Xc : -1, off: 0, xcols: Xc)
     // a threadgroup a 256-row block, then the pairwise tree (net.swift's)
     let partial = zeros(nb * Mw * Nw * 4), out = zeros(Mw * Nw * 4)
-    _ = run("gemm_tn", [buf(qa), buf(qb), buf(sa), buf(sb), partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
-    _ = run("reduce_blocks", [partial, out], [[UInt32(Mw * Nw), UInt32(nb)]], .threads(Mw * Nw, 256))
+    _ = run("gemm_tn", [buf(qa), buf(qb), buf(sa), buf(sb), partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1, UInt32(nb)]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
+    _ = run("reduce_blocks", [partial, out], [[UInt32(Mw * Nw), UInt32(nb), 1]], .threads(Mw * Nw, 256))
     let got = read(out, Mw * Nw, Float.self)
     var ref = [Float](repeating: 0, count: Mw * Nw), plain = [Float](repeating: 0, count: Mw * Nw)
     for m in 0..<Mw { for n in 0..<Nw {
@@ -264,8 +264,8 @@ for (M, N, K) in [(147456, 64, 64), (147456, 128, 64), (147456, 192, 64), (14745
 for (rows, Mw, Nw) in [(147456, 128, 65), (147456, 192, 65), (147456, 64, 193)] {
   let Kp = rows, nb = Kp / 256, a = zeros(Kp * Mw), b = zeros(Kp * Nw), sa = zeros(Mw * nb * 4), sb = zeros(Nw * nb * 4), partial = zeros(nb * Mw * Nw * 4)
   let t = median {
-    var total = run("gemm_tn", [a, b, sa, sb, partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
-    total += run("reduce_blocks", [partial, zeros(Mw * Nw * 4)], [[UInt32(Mw * Nw), UInt32(nb)]], .threads(Mw * Nw, 256))
+    var total = run("gemm_tn", [a, b, sa, sb, partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1, UInt32(nb)]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
+    total += run("reduce_blocks", [partial, zeros(Mw * Nw * 4)], [[UInt32(Mw * Nw), UInt32(nb), 1]], .threads(Mw * Nw, 256))
     return total
   }
   print(String(format: "wgrad %3dx%3d over %6d rows (%d blocks, tree): %7.1f us %5.1f TOP/s", Mw, Nw, rows, nb, t * 1e6, 2 * Double(Mw * Nw * rows) / t / 1e12))
