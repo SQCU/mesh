@@ -132,20 +132,23 @@ uint32_t route_allowed(const struct route_stream *s, const struct route_topology
   return mask;
 }
 int route_argmax;   /* route.h: draws take the table's most probable allowed split (a deterministic trajectory, for comparing runs) */
-/* a draw from its table: the softmax of its valid, allowed splits' logits (written to lg, ntok floats), inverse CDF at u;
-   with route_argmax the most probable. No split in the table: split 0 */
+/* a draw from its table: the softmax over its valid, allowed splits (split.h's set; their logits written to lg), inverse
+   CDF at u; with route_argmax the most probable. No split in the table: split 0 */
 static uint32_t draw_split(const struct route_draw *d, const float *w, double u, float *lg) {
+  const struct split_set a = split_set_of(d);
+  if (!a.n) return 0;
   float most = -INFINITY; uint32_t best = 0;
-  for (uint32_t k = 0; k < d->ntok; k++) {
-    const struct split sp = split_of(d, k);
-    lg[k] = sp.ok ? split_logit(split_tanh(split_dot(&sp, w))) : -INFINITY;
-    if (lg[k] > most) { most = lg[k]; best = k; }
+  struct split_walk k = split_walk_at(&a, 0, a.n);
+  for (uint32_t i = 0; k.left; i++, split_walk_next(&k)) {
+    const struct split sp = split_of(d, k.token);
+    lg[i] = split_logit(split_tanh(split_dot(&sp, w)));
+    if (lg[i] > most) { most = lg[i]; best = i; }
   }
-  if (route_argmax || most == -INFINITY) return best;
-  double total = 0; for (uint32_t k = 0; k < d->ntok; k++) total += lg[k] > -INFINITY ? exp(lg[k] - most) : 0;
+  if (route_argmax) return split_set_token(&a, best);
+  double total = 0; for (uint32_t i = 0; i < a.n; i++) total += exp(lg[i] - most);
   const double at = u * total; double acc = 0;
-  for (uint32_t k = 0; k < d->ntok; k++) if (lg[k] > -INFINITY) { acc += exp(lg[k] - most); if (acc > at) return k; }
-  return best;
+  for (uint32_t i = 0; i < a.n; i++) { acc += exp(lg[i] - most); if (acc > at) return split_set_token(&a, i); }
+  return split_set_token(&a, best);
 }
 uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
                      const struct route_live *live, const float *w, double u, float *logits) {
@@ -153,18 +156,21 @@ uint32_t route_split(const struct route_stream *s, const struct route_state *st,
   return draw_split(&d, w, u, logits);
 }
 float route_draw_score(const struct route_draw *d, const float *w, float *score) {
-  struct split_lse a; split_lse_init(&a);
-  float lgtok = -INFINITY;
+  const struct split_set a = split_set_of(d);
+  struct split_lse acc; split_lse_init(&acc);
   for (int f = 0; f < ROUTE_FS; f++) score[f] = 0;
-  for (uint32_t k = 0; k < d->ntok; k++) {
-    const struct split sp = split_of(d, k);
-    if (!sp.ok) continue;
-    const float th = split_tanh(split_dot(&sp, w)), lg = split_logit(th), sl = split_slope(th);
-    if (k == d->token) { lgtok = lg; split_add(&sp, sl, score); }
-    split_lse_add(&a, lg, sl, &sp);
+  const struct split tsp = split_of(d, d->token);
+  if (!tsp.ok) { for (int f = 0; f < ROUTE_FS; f++) score[f] = NAN; return -INFINITY; }
+  const float tth = split_tanh(split_dot(&tsp, w));
+  split_add(&tsp, split_slope(tth), score);
+  struct split_walk k = split_walk_at(&a, 0, a.n);
+  for (; k.left; split_walk_next(&k)) {
+    const struct split sp = split_of(d, k.token);
+    const float th = split_tanh(split_dot(&sp, w));
+    split_lse_add(&acc, split_logit(th), split_slope(th), &sp);
   }
-  for (int f = 0; f < ROUTE_FS; f++) score[f] -= a.e[f] / a.s;
-  return lgtok - (a.m + logf(a.s));
+  for (int f = 0; f < ROUTE_FS; f++) score[f] -= acc.e[f] / acc.s;
+  return split_logit(tth) - (acc.m + logf(acc.s));
 }
 
 /* ---- one run ---- */
@@ -358,7 +364,7 @@ static double split_send(struct route_sim *x, double t, int v, uint32_t S, uint3
     const int c = x->ctx[j][v][S];
     struct route_draw r; route_draw_make(&x->s, &x->state[x->active % ROUTE_POINTS], &x->t, v, S, &live, mask, &r);
     tok = r.token = draw_split(&r, route_sim_w(x, x->active) + (size_t)c * ROUTE_FS, unit01(seed), x->logits);
-    log_draw(x, (uint32_t)c, (uint32_t)p, &r); x->count[1]++; x->count[2] += r.ntok;
+    log_draw(x, (uint32_t)c, (uint32_t)p, &r); x->count[1]++; x->count[2] += split_set_of(&r).n;
   }
   uint32_t share[ROUTE_DEG] = {0}, y = tok;
   for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) { share[y % (uint32_t)deg] |= 1u << d; y /= (uint32_t)deg; }

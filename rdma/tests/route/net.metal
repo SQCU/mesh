@@ -237,19 +237,23 @@ kernel void credit_draws(device const route_draw *draws [[buffer(0)]], device co
   while (hi - lo > 1) { const uint mid = (lo + hi) / 2; if (first[mid] <= i) lo = mid; else hi = mid; }
   device const float *wb = wbRows + size_t(lo) * FS, *wc = wcRows + size_t(lo) * FS;
   split_lse cur; split_lse_init(&cur);
-  float mb = -INFINITY, sb = 0, lgTok = 0, lgbTok = 0, psi[SPLIT_FS];
+  float mb = -INFINITY, sb = 0, psi[SPLIT_FS];
   for (uint f = 0; f < FS; f++) psi[f] = 0;
-  for (uint k = lane; k < d.ntok; k += 32) {
-    const split sp = split_of(&d, k);
-    if (!sp.ok && k != d.token) continue;
+  const split_set a = split_set_of(&d);   // the table's splits only (split.h)
+  const uint chunk = (a.n + 31) / 32;   // a lane's contiguous chunk of the table, walked in registers
+  for (split_walk k = split_walk_at(&a, lane * chunk, chunk); k.left; split_walk_next(&k)) {
+    const split sp = split_of(&d, k.token);
     const float th = split_tanh(split_dot(&sp, wc)), lg = split_logit(th), lgb = split_logit(split_tanh(split_dot(&sp, wb)));
-    if (k == d.token) { lgTok = sp.ok ? lg : -INFINITY; lgbTok = sp.ok ? lgb : -INFINITY; split_add(&sp, split_slope(th), psi); }
-    if (!sp.ok) continue;
     if (lgb > mb) { sb *= sb > 0 ? exp(mb - lgb) : 0.0f; mb = lgb; }
     sb += exp(lgb - mb);
     split_lse_add(&cur, lg, split_slope(th), &sp);
   }
-  const bool owner = d.token % 32 == lane;
+  // the drawn split (lane 0's): its logits and psi
+  const split tsp = split_of(&d, d.token);
+  const float tth = split_tanh(split_dot(&tsp, wc));
+  const float lgTok = tsp.ok ? split_logit(tth) : -INFINITY, lgbTok = tsp.ok ? split_logit(split_tanh(split_dot(&tsp, wb))) : -INFINITY;
+  if (lane == 0) split_add(&tsp, split_slope(tth), psi);
+  const bool owner = lane == 0;
   const float M = simd_max(cur.m), scale = cur.s > 0 ? exp(cur.m - M) : 0.0f, S = simd_sum(cur.s * scale);
   const float Mb = simd_max(mb), Sb = simd_sum(sb > 0 ? sb * exp(mb - Mb) : 0.0f);
   const float lt = simd_sum(owner ? lgTok : 0.0f), lbt = simd_sum(owner ? lgbTok : 0.0f);

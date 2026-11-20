@@ -17,6 +17,7 @@
 #define SPLIT_TANH(x) metal::tanh(x)
 #define SPLIT_EXP(x) metal::exp(x)
 #define SPLIT_POPCOUNT(x) metal::popcount(x)
+#define SPLIT_CTZ(x) metal::ctz(x)
 #else
 #include <math.h>
 #include <stdint.h>
@@ -25,6 +26,7 @@
 #define SPLIT_TANH(x) tanhf(x)
 #define SPLIT_EXP(x) expf(x)
 #define SPLIT_POPCOUNT(x) __builtin_popcount(x)
+#define SPLIT_CTZ(x) __builtin_ctz(x)
 #endif
 
 enum { SPLIT_N = 6, SPLIT_DEG = 5, SPLIT_FS = 40 };   /* route.h's ROUTE_N, ROUTE_DEG, ROUTE_FS */
@@ -51,6 +53,52 @@ static inline struct split split_of(SPLIT_T const struct route_draw *d, uint32_t
   const float c = sp.n ? (float)sp.n : 1.0f;
   sp.most = most / d->unit; sp.mean = sum / c / d->unit; sp.share = (float)SPLIT_POPCOUNT(sp.used) / c;
   return sp;
+}
+/* the table's splits only: for each owed destination (in token order) its lanes both valid and allowed, packed in
+   registers (a 5-bit lane mask and a 3-bit count a destination); the i-th such split's token (i < n, the product of the
+   counts). Every split outside them has no place in the table. */
+struct split_set { uint32_t n, nd, deg, masks, counts; };
+static inline struct split_set split_set_of(SPLIT_T const struct route_draw *d) {
+  struct split_set a; a.n = 1; a.nd = 0; a.deg = d->deg; a.masks = 0; a.counts = 0;
+  const uint32_t ok = d->valid & d->mask;
+  for (uint32_t dd = 0; dd < SPLIT_N; dd++) {
+    if (!((d->S >> dd) & 1)) continue;
+    const uint32_t m = (ok >> (dd * SPLIT_DEG)) & ((1u << d->deg) - 1u), c = SPLIT_POPCOUNT(m);
+    a.masks |= m << (5 * a.nd); a.counts |= c << (3 * a.nd); a.nd++; a.n *= c;
+  }
+  return a;
+}
+static inline uint32_t split_set_token(SPLIT_T const struct split_set *a, uint32_t i) {
+  uint32_t tok = 0, place = 1;
+  for (uint32_t r = 0; r < a->nd; r++) {
+    const uint32_t m = (a->masks >> (5 * r)) & 31u, c = (a->counts >> (3 * r)) & 7u;
+    uint32_t j = i % c, k = 0; i /= c;
+    for (; k < SPLIT_DEG; k++) if ((m >> k) & 1u) { if (!j) break; j--; }   /* the j-th allowed lane */
+    tok += k * place; place *= a->deg;
+  }
+  return tok;
+}
+/* the same splits in the same order, from any one of them (i) on (a CPU's whole walk; a GPU lane's chunk), in
+   registers: each destination's current lane packed 3 bits a destination, the next allowed lane found by its mask's
+   trailing zeros, the token carried as the lanes turn. split_walk_at, then while (w.left) { use w.token; split_walk_next } */
+struct split_walk { uint32_t token, left, at, nd, deg, masks; };
+static inline struct split_walk split_walk_at(SPLIT_T const struct split_set *a, uint32_t i, uint32_t count) {
+  struct split_walk w; w.nd = a->nd; w.deg = a->deg; w.masks = a->masks; w.at = 0;
+  w.left = i < a->n ? (count < a->n - i ? count : a->n - i) : 0;
+  w.token = w.left ? split_set_token(a, i) : 0;
+  uint32_t t = w.token;
+  for (uint32_t r = 0; r < a->nd; r++) { w.at |= (t % a->deg) << (3 * r); t /= a->deg; }
+  return w;
+}
+static inline void split_walk_next(SPLIT_T struct split_walk *w) {
+  w->left--;
+  uint32_t place = 1;
+  for (uint32_t r = 0; r < w->nd; r++, place *= w->deg) {   /* the lowest destination's lane turns; past its last, back to its first and carry */
+    const uint32_t m = (w->masks >> (5 * r)) & 31u, k = (w->at >> (3 * r)) & 7u, later = m & ~((2u << k) - 1u);
+    const uint32_t k2 = later ? SPLIT_CTZ(later) : SPLIT_CTZ(m);
+    w->token = w->token - k * place + k2 * place; w->at = (w->at & ~(7u << (3 * r))) | (k2 << (3 * r));
+    if (later) return;
+  }
 }
 static inline float split_dot(SPLIT_T const struct split *sp, SPLIT_W const float *w) {   /* w . phi */
   float a = w[35] * sp->most + w[36] * sp->mean + w[37] * sp->share;
