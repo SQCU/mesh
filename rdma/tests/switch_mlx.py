@@ -153,7 +153,7 @@ def rollout(policy, a, mode):
     B, J = a['src'].shape
     rate, lat, dt, floor = a['rate'], a['lat'], a['dt'], a['floor']
     cap = rate * dt[:, None]                                                    # bytes a lane serves a slot
-    lag = mx.minimum(mx.ceil((lat + PAGE / mx.maximum(rate, 1e-6)) / dt[:, None]), H - 1).astype(mx.int32)  # [B, L]
+    lag = mx.stop_gradient(mx.minimum(mx.ceil((lat + PAGE / mx.maximum(rate, 1e-6)) / dt[:, None]), H - 1).astype(mx.int32))  # [B, L]
     laneg = mx.minimum(a['lane'], L - 1); edge = (a['lane'] < L).astype(mx.float32)   # [B, J, K, N]
     bidx = mx.arange(B)[:, None, None, None]
     elag = mx.take_along_axis(mx.broadcast_to(lag[:, None, None, :], (B, J, K, L)), laneg, -1)
@@ -182,7 +182,7 @@ def rollout(policy, a, mode):
             parent = mx.where(edge > 0, a['tail'], mx.where(nodes[None, None, None, :] == a['src'][:, :, None, None], N, N + 1))
             qlevel = mx.clip(mx.floor(mx.log2(1 + 64 * lq / floor[:, None, None, None])), 0, 15).astype(mx.int32)
             rband = mx.clip(mx.floor(mx.log2(mx.maximum(lr, 1.0))) - 2, 0, 3).astype(mx.int32) * (edge > 0)
-            tokens = (parent * 64 + qlevel * 4 + rband).astype(mx.int32)       # [B, J, K, N]
+            tokens = mx.stop_gradient((parent * 64 + qlevel * 4 + rband).astype(mx.int32))   # [B, J, K, N], discrete
             ownq = ((qtime[:, None, :] * (a['lsrc'][:, None, :] == a['src'][..., None])).sum(-1)) / floor[:, None]
             ctx = mx.stack([mx.broadcast_to(mx.log1p(a['S'] / PAGE)[:, None], (B, J)), mx.full((B, J), 1.0), mx.full((B, J), t / SLOTS * 1.0),
                             ownq, ownq, (a['lsrc'][:, None, :] == a['src'][..., None]).sum(-1) / 8.0, mx.full((B, J), K / 8.0),
