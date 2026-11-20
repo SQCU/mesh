@@ -209,43 +209,51 @@ kernel void adam(device float *theta [[buffer(0)]], device float *m [[buffer(1)]
 // log-likelihood; then each learning row's three tasks' dw: its draws' advantages times that, summed in order ----
 constant uint FS = 40;
 struct Draw { float arrive[30]; uint valid, mask, S, token, deg, ntok, row; float unit, a1, a2; };
-// a draw a SIMD group, its table's tokens across the lanes; each lane's running log-sum-exp (its sums rescaled as its
-// maximum grows), then the lanes' combined
-kernel void credit_draws(device const Draw *draws [[buffer(0)]], device const float *wrows [[buffer(1)]], device float *diff [[buffer(2)]], device float *ll [[buffer(3)]],
-                         constant uint &n [[buffer(4)]], uint gid [[thread_position_in_grid]]) {
+// a draw a SIMD group, its table's tokens across the lanes: under the current w (wc: the learning call's own forward)
+// psi(token) - E[psi], times the draw's importance ratio pi_current(token) / pi_behaviour(token) (wb: the w it was drawn
+// under); both log-sum-exps in one pass (each token's features once, two dot products), each lane's running sums
+// rescaled as its maximum grows, then the lanes' combined. ll: the log ratio
+kernel void credit_draws(device const Draw *draws [[buffer(0)]], device const float *wbRows [[buffer(1)]], device const float *wcRows [[buffer(2)]],
+                         device float *diff [[buffer(3)]], device float *ll [[buffer(4)]], device const uint *first [[buffer(5)]], constant uint2 &p [[buffer(6)]],
+                         uint gid [[thread_position_in_grid]]) {   // p: (draws, rows)
   const uint i = gid / 32, lane = gid % 32;
-  if (i >= n) return;
+  if (i >= p.x) return;
   const Draw d = draws[i];
-  const device float *w = wrows + size_t(d.row) * FS;
+  uint lo = 0, hi = p.y;   // the draw's row: the last row whose first draw is at or before it (first[] ascending)
+  while (hi - lo > 1) { const uint mid = (lo + hi) / 2; if (first[mid] <= i) lo = mid; else hi = mid; }
+  const device float *wb = wbRows + size_t(lo) * FS, *wc = wcRows + size_t(lo) * FS;
   const float root = sqrt(float(FS));
-  float m = -INFINITY, s = 0, lgTok = 0, e[40], psi[40];
+  float m = -INFINITY, s = 0, mb = -INFINITY, sb = 0, lgTok = 0, lgbTok = 0, e[40], psi[40];
   for (uint f = 0; f < FS; f++) { e[f] = 0; psi[f] = 0; }
   bool owner = false;
   for (uint k = lane; k < d.ntok; k += 32) {
     uint tok = k, used = 0, cnt = 0, at[6], nd = 0;
     bool valid = true, fits = true;
-    float most = 0, sum = 0, a = 0;
+    float most = 0, sum = 0, a = 0, ab = 0;
     for (uint dd = 0; dd < 6; dd++) {
       if (!((d.S >> dd) & 1)) continue;
       const uint kk = tok % d.deg; tok /= d.deg;
       const uint b = dd * 5 + kk;
       valid = valid && ((d.valid >> b) & 1); fits = fits && ((d.mask >> b) & 1);
       const float ar = d.arrive[b];
-      most = max(most, ar); sum += ar; cnt++; used |= 1u << kk; a += w[b]; at[nd++] = b;
+      most = max(most, ar); sum += ar; cnt++; used |= 1u << kk; a += wc[b]; ab += wb[b]; at[nd++] = b;
     }
-    for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) a += w[30 + kk];
+    for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) { a += wc[30 + kk]; ab += wb[30 + kk]; }
     const float c1 = float(max(cnt, 1u)), f35 = most / d.unit, f36 = sum / c1 / d.unit, f37 = float(popcount(used)) / c1;
-    a += w[35] * f35 + w[36] * f36 + w[37] * f37;
+    a += wc[35] * f35 + wc[36] * f36 + wc[37] * f37; ab += wb[35] * f35 + wb[36] * f36 + wb[37] * f37;
     const bool ok = valid && fits;
     if (!ok && k != d.token) continue;
     const float th = tanh(clamp(a / root, -20.0f, 20.0f)), lg = 10.0f * th, dv = 10.0f * (1.0f - th * th) / root;
+    const float lgb = 10.0f * tanh(clamp(ab / root, -20.0f, 20.0f));
     if (k == d.token) {
-      owner = true; lgTok = ok ? lg : -INFINITY;
+      owner = true; lgTok = ok ? lg : -INFINITY; lgbTok = ok ? lgb : -INFINITY;
       for (uint q = 0; q < nd; q++) psi[at[q]] = dv;
       for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) psi[30 + kk] = dv;
       psi[35] = dv * f35; psi[36] = dv * f36; psi[37] = dv * f37;
     }
     if (!ok) continue;
+    if (lgb > mb) { sb *= sb > 0 ? exp(mb - lgb) : 0.0f; mb = lgb; }
+    sb += exp(lgb - mb);
     if (lg > m) { const float r = s > 0 ? exp(m - lg) : 0.0f; s *= r; for (uint f = 0; f < FS; f++) e[f] *= r; m = lg; }
     const float x = exp(lg - m), xd = x * dv;
     s += x;
@@ -254,12 +262,14 @@ kernel void credit_draws(device const Draw *draws [[buffer(0)]], device const fl
     e[35] += xd * f35; e[36] += xd * f36; e[37] += xd * f37;
   }
   const float M = simd_max(m), scale = s > 0 ? exp(m - M) : 0.0f, S = simd_sum(s * scale);
+  const float Mb = simd_max(mb), Sb = simd_sum(sb > 0 ? sb * exp(mb - Mb) : 0.0f);
+  const float lt = simd_sum(owner ? lgTok : 0.0f), lbt = simd_sum(owner ? lgbTok : 0.0f);
+  const float logRatio = (lt - (M + log(S))) - (lbt - (Mb + log(Sb))), ratio = exp(logRatio);
   for (uint f = 0; f < FS; f++) {
     const float ef = simd_sum(e[f] * scale) / S, pf = simd_sum(psi[f]);
-    if (f % 32 == lane) diff[size_t(i) * FS + f] = pf - ef;
+    if (f % 32 == lane) diff[size_t(i) * FS + f] = ratio * (pf - ef);
   }
-  const float lt = simd_sum(owner ? lgTok : 0.0f);
-  if (lane == 0) ll[i] = lt - (M + log(S));
+  if (lane == 0) ll[i] = logRatio;
 }
 // dw [task][row][FS] = (task 0: scale0[row], else scale) sum over the row's draws (first[row] .. first[row + 1]) of its
 // advantage (task 0: 1, 1: a1, 2: a2) times diff, in order

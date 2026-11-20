@@ -225,7 +225,13 @@ static int fits(uint32_t tok, uint32_t S, uint32_t mask, int deg) {
   for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) { if (!(mask >> (ROUTE_DEG * d + (int)(tok % (uint32_t)deg)) & 1)) return 0; tok /= (uint32_t)deg; }
   return 1;
 }
+int route_argmax;   /* route.h: draws take the table's most probable allowed split (a deterministic trajectory, for comparing runs) */
 static uint32_t sample(const double *cdf, int n, uint32_t S, uint32_t mask, int deg, uint32_t seed) {   /* the masked table, exactly */
+  if (route_argmax) {
+    double best = -1; uint32_t tok = 0;
+    for (int q = 0; q < n; q++) if (fits((uint32_t)q, S, mask, deg)) { const double p = cdf[q] - (q ? cdf[q - 1] : 0); if (p > best) { best = p; tok = (uint32_t)q; } }
+    return tok;
+  }
   for (uint32_t attempt = 0; attempt < 64; attempt++) {
     const double u = unit01(seed ^ attempt * 0x9e3779b1u);
     int lo = 0, hi = n - 1;
@@ -245,7 +251,7 @@ uint32_t route_split(const struct route_stream *s, const struct route_state *st,
 }
 
 /* ---- one run ---- */
-enum { EV_ARRIVE, EV_POST, EV_OP, EV_ACTIVATE };
+enum { EV_ARRIVE, EV_POST, EV_OP, EV_ACTIVATE, EV_BURST };
 struct event { double t; int type, a; uint32_t node, owed, visited; };
 struct flow { int op, pattern, src, np, base, head, tail, phase2, idle; uint32_t dest; uint32_t delivered[ROUTE_N]; };
 struct draw { uint32_t token, piece; struct route_live live; };
@@ -268,6 +274,7 @@ struct route_sim {
   struct group *groups; uint32_t ngroups, groupsroom, *hash, hashroom;
   uint64_t count[4];
   double lastarrival;                                 /* the latest delivery of a piece posted in the window */
+  struct { int f, i; double t; } *burst; int bursts, burstat, burstroom;   /* the policy's burst posts, in release order */
 };
 
 static void push(struct route_sim *x, struct event e) {   /* tests/switch.c's heap */
@@ -302,7 +309,7 @@ struct route_sim *route_sim_new(void) {
 void route_sim_free(struct route_sim *x) {
   for (uint32_t g = 0; g < x->groupsroom; g++) free(x->groups[g].draws);
   free(x->groups); free(x->hash); free(x->heap); free(x->w); free(x->partial); free(x->flows); free(x->ready);
-  free(x->bytes); free(x->release); free(x->latency); free(x->queued); free(x->flowof); free(x->postpoint); free(x);
+  free(x->bytes); free(x->release); free(x->latency); free(x->queued); free(x->flowof); free(x->postpoint); free(x->burst); free(x);
 }
 int route_sim_points(const struct route_sim *x) { return x->point + 1; }
 int route_sim_contexts(const struct route_sim *x) { return x->nc; }
@@ -336,8 +343,14 @@ static void release(struct route_sim *x, int f, int i, double t) {   /* piece i 
   struct flow *q = &x->flows[f];
   if (x->stopped && t >= x->tend) return;   /* a training window posts nothing past its end */
   x->release[q->base + i] = t;
-  if (x->mode == 4 || (x->mode == 0 && x->win.burst)) {   /* posted the moment it is ready, as switch.c */
-    q->head++; x->postpoint[q->base + i] = x->mode == 0 && x->active >= 0 ? x->active : -1; split_send(x, t, q->src, q->dest, 0, q->base + i); return;
+  if (x->mode == 4) {   /* posted the moment it is ready, as switch.c */
+    q->head++; x->postpoint[q->base + i] = -1; split_send(x, t, q->src, q->dest, 0, q->base + i); return;
+  }
+  if (x->mode == 0 && x->win.burst) {   /* the same, after a refresh at that instant (as switch.c's): queued in release order, posted at t */
+    if (x->bursts == x->burstroom) { x->burstroom = x->burstroom ? 2 * x->burstroom : 1024; x->burst = realloc(x->burst, x->burstroom * sizeof *x->burst); if (!x->burst) abort(); }
+    if (x->bursts == x->burstat || x->burst[x->bursts - 1].t != t) push(x, (struct event){t, EV_BURST, 0, 0, 0, 0});
+    x->burst[x->bursts].f = f; x->burst[x->bursts].i = i; x->burst[x->bursts].t = t; x->bursts++;
+    return;
   }
   x->ready[q->base + q->tail++] = i;
   if (q->idle) { q->idle = 0; push(x, (struct event){t, EV_POST, f, 0, 0, 0}); }
@@ -471,12 +484,24 @@ static double split_send(struct route_sim *x, double t, int v, uint32_t S, uint3
   }
   return first;
 }
-static void advance(struct route_sim *x, double until) {   /* every event up to `until`, in time order */
+static void advance(struct route_sim *x, double until) {   /* every event before `until`, in time order (one at a refresh's
+                                                             own time follows the refresh, as in tests/switch.c) */
   const struct route_fabric *f = &x->s.f;
-  while (x->events && x->heap[0].t <= until) {
+  while (x->events && (x->heap[0].t < until || isinf(until) || (x->heap[0].t == until && (x->heap[0].type == EV_OP || x->heap[0].type == EV_ACTIVATE)))) {
+    /* at the refresh's own time: a collective issued then is known to it (its pieces post after it), and a table
+       activated then is active (neither changes what the refresh reads) */
     const struct event e = pop(x); x->count[0]++;
     if (e.type == EV_OP) { if (!x->stopped || x->s.op[e.a].arrival < x->tend) op_start(x, e.a, e.t); continue; }
     if (e.type == EV_ACTIVATE) { if (e.a > x->active) x->active = e.a; continue; }
+    if (e.type == EV_BURST) {   /* every queued burst post released by now, in release order */
+      while (x->burstat < x->bursts && x->burst[x->burstat].t <= e.t) {
+        const int fl = x->burst[x->burstat].f, i = x->burst[x->burstat].i; x->burstat++;
+        struct flow *q = &x->flows[fl];
+        q->head++; x->postpoint[q->base + i] = x->active >= 0 ? x->active : -1; split_send(x, e.t, q->src, q->dest, 0, q->base + i);
+      }
+      if (x->burstat == x->bursts) x->burstat = x->bursts = 0;
+      continue;
+    }
     if (e.type == EV_POST) {   /* the flow's next released piece leaves its source; the next once it has started */
       for (;;) {
         struct flow *q = &x->flows[e.a];
@@ -515,7 +540,7 @@ void route_sim_begin(struct route_sim *x, const struct route_stream *s, const st
   for (int c = 0; c < x->nc; c++) { x->cj[c] = pj[c]; x->cv[c] = pv[c]; x->cS[c] = pS[c]; x->ctx[pj[c]][pv[c]][pS[c]] = c; }
   for (uint32_t g = 0; g < x->ngroups; g++) x->groups[g].count = 0;
   x->ngroups = 0; memset(x->hash, 0, x->hashroom * sizeof(uint32_t));
-  x->events = 0; x->nflows = 0; x->npieces = 0; x->point = -1; x->active = -1; memset(x->count, 0, sizeof x->count); x->lastarrival = 0;
+  x->events = 0; x->nflows = 0; x->npieces = 0; x->point = -1; x->active = -1; memset(x->count, 0, sizeof x->count); x->lastarrival = 0; x->bursts = x->burstat = 0;
   x->tend = w->points > 0 ? w->t0 + w->points * w->dt : INFINITY; x->stopped = w->points > 0 && mode == 0;
   for (int l = 0; l < ROUTE_L; l++) for (int c = 0; c < ROUTE_CABLES; c++) x->free_at[l][c] = l < s->f.lanes ? s->background[l] / s->f.rate[l] : 0;
   for (int o = 0; o < s->ops; o++) { x->opstarted[o] = 0; x->opend[o] = INFINITY; push(x, (struct event){s->op[o].arrival, EV_OP, o, 0, 0, 0}); }
@@ -549,6 +574,7 @@ int route_sim_decide(struct route_sim *x, struct route_decision *d, float *token
     if (!isinf(x->opend[q->op])) continue;
     total[q->pattern] += q->np; unposted[q->pattern] += q->np - q->head;
     for (int r = q->head; r < q->tail; r++) st->pending[q->pattern] += x->bytes[q->base + x->ready[q->base + r]];
+    for (int b = x->burstat; b < x->bursts; b++) if (x->burst[b].f == fl) st->pending[q->pattern] += x->bytes[q->base + x->burst[b].i];   /* burst posts not yet made */
     for (int r = 0; r < q->np; r++) st->demand[q->pattern] += x->bytes[q->base + r];
     for (int dd = 0; dd < ROUTE_N; dd++) got[q->pattern][dd] += q->delivered[dd];
   }

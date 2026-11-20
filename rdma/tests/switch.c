@@ -130,13 +130,16 @@ static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3
 static float policy_hnext[2*ROUTE_D],policy_hact[2*ROUTE_D],*policy_tokact;static uint32_t policy_gen=1,*policy_wgen;static uint64_t policy_ctxs;
 static uint64_t policy_refreshes,policy_draws;static uint8_t *policy_sent;static uint32_t policy_sentroom;
 static void policy_load(const char *path){   /* the trainer's stored int8 weights (THETA_INT8) */
+  route_argmax=getenv("ROUTE_ARGMAX")!=NULL;
   if(route_params_read(&policy_params,path)){fprintf(stderr,"%s: not int8 policy weights\n",path);exit(2);}
   policy_w=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));policy_next=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));
   policy_tokens=malloc((size_t)ROUTE_CONTEXTS*ROUTE_IN*sizeof(float));policy_scratch=malloc(route_forward_scratch(ROUTE_CONTEXTS)*sizeof(float));
   policy_tokact=malloc((size_t)ROUTE_CONTEXTS*ROUTE_IN*sizeof(float));policy_wgen=calloc(ROUTE_CONTEXTS,sizeof(uint32_t));
   assert(policy_w && policy_next && policy_tokens && policy_scratch && policy_tokact && policy_wgen);
 }
+static int policy_dumped,policy_kind;static double policy_S;
 static void policy_setup(int kind,double S){   /* this run's fabric and collective, as the policy reads them */
+  policy_kind=kind;policy_S=S;
   struct route_fabric f;memset(&f,0,sizeof f);
   f.nodes=(int)nodes;f.ncompute=(int)ncompute;f.lanes=(int)links;f.duplex=duplex;
   for(uint32_t c=0;c<ncompute;c++)f.compute[c]=(int)compute[c];
@@ -183,6 +186,12 @@ static void policy_refresh(double t,int now){   /* the fabric at t, the forward,
   for(int l=0;l<ROUTE_L;l++)route_lane_token(&policy_stream,st,&policy_topology,l,policy_lanes[l]);
   for(int c=0;c<policy_nc;c++)route_context_token(&policy_stream,st,&policy_topology,policy_pattern[c],policy_node[c],policy_owed[c],(int)(policy_refreshes%ROUTE_POINTS),policy_tokens+(size_t)c*ROUTE_IN);
   struct timespec a,b;clock_gettime(CLOCK_MONOTONIC,&a);
+  if(getenv("ROUTE_DUMP") && policy_kind==1 && policy_S==12582912 && execution==0){   /* each refresh's tokens of the case's first execution, for the trainer's check */
+    FILE *f=fopen(getenv("ROUTE_DUMP"),policy_dumped?"ab":"wb");assert(f);const int nl=(int)links,nc=policy_nc;
+    fwrite(&nl,4,1,f);fwrite(&nc,4,1,f);fwrite(&policy_lanes[0][0],4,(size_t)ROUTE_L*ROUTE_IN,f);
+    for(int c=0;c<nc;c++){const int32_t t[3]={policy_pattern[c],policy_node[c],(int32_t)policy_owed[c]};fwrite(t,4,3,f);}
+    fwrite(policy_tokens,4,(size_t)nc*ROUTE_IN,f);fclose(f);policy_dumped++;
+  }
   route_forward_lanes(&policy_params,&policy_lanes[0][0],(int)links,policy_state,policy_scratch);
   memcpy(policy_hnext,policy_state,sizeof policy_hnext);
   clock_gettime(CLOCK_MONOTONIC,&b);policy_us+=(b.tv_sec-a.tv_sec)*1e6+(b.tv_nsec-a.tv_nsec)/1e3;

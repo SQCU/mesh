@@ -78,13 +78,26 @@ struct DoneRun {
 // refresh drew from (its draws in it), reading its refresh's state (lane row (b K + k) L + L - 1), contiguous a refresh
 // (seg); the rows' draws for the GPU's credit (Net.Credit). Returns (B, K, R, credit, seg)
 var learnTime = 0.0
+// the batch's credit buffers (shared, grown when a batch needs more): the draws copied whole a refresh (each run's
+// already in row order), each row's first draw, behaviour w and task-0 scale
+var creditDraws: MTLBuffer? = nil, creditFirst: MTLBuffer? = nil, creditW: MTLBuffer? = nil, creditScale0: MTLBuffer? = nil
+func grow(_ b: inout MTLBuffer?, _ bytes: Int) -> MTLBuffer {
+  if b == nil || b!.length < bytes { b = device.makeBuffer(length: max(16, bytes * 2), options: .storageModeShared)! }
+  return b!
+}
 func gather(_ runs: [DoneRun], _ adv: [Double]) -> (Int, Int, Int, Net.Credit, [UInt32]) {
   let t0 = Date()
   let B = runs.count, K = KMAX
   precondition(B <= BATCH, "a learning batch past its buffers")
   memset(laneP, 0, B * K * L * IN * 4); memset(maskP, 0, B * K * L * 4); memset(stateP, 0, B * 2 * D * 4)
-  var rows = 0, seg = [UInt32](repeating: 0, count: 2 * B * K)
-  var draws: [route_draw] = [], first: [UInt32] = [], wrows: [Float] = [], scale0: [Float] = []
+  var nrows = 0, ndraws = 0
+  for r in runs { for pd in r.draws { nrows += pd.ctx.count; ndraws += pd.draws.count } }
+  precondition(nrows <= ROWS, "learning rows past the buffers")
+  let dbuf = grow(&creditDraws, ndraws * MemoryLayout<route_draw>.stride), fbuf = grow(&creditFirst, (nrows + 1) * 4)
+  let wbuf = grow(&creditW, nrows * FS * 4), sbuf = grow(&creditScale0, nrows * 4)
+  let dp = dbuf.contents(), fp = fbuf.contents().bindMemory(to: UInt32.self, capacity: nrows + 1)
+  let wp = wbuf.contents().bindMemory(to: Float.self, capacity: nrows * FS), s0 = sbuf.contents().bindMemory(to: Float.self, capacity: nrows)
+  var rows = 0, at = 0, seg = [UInt32](repeating: 0, count: 2 * B * K)
   let scale = 1 / Double(B)
   for (b, r) in runs.enumerated() {
     precondition(r.kept.count <= K, "a window past the learning batch's refreshes")
@@ -95,23 +108,19 @@ func gather(_ runs: [DoneRun], _ adv: [Double]) -> (Int, Int, Int, Net.Credit, [
         let d = r.kept[k], pd = r.draws[k]
         memcpy(laneP + (b * K + k) * L * IN, d.lanes, L * IN * 4)
         for q in 0..<L { maskP[(b * K + k) * L + q] = q < d.lanesUsed ? 1 : 0 }
-        for (j, c) in pd.ctx.enumerated() {
-          precondition(rows < ROWS, "learning rows past the buffers")
-          for i in 0..<IN { tokP[rows * IN + i] = d.tokens[Int(c) * IN + i] }
-          idxP[rows] = Int32((b * K + k) * L + L - 1)
-          first.append(UInt32(draws.count))
-          for q in Int(pd.first[j])..<Int(pd.first[j + 1]) { var x = pd.draws[q]; x.row = UInt32(rows); draws.append(x) }
-          wrows += pd.w[(j * FS)..<((j + 1) * FS)]
-          scale0.append(Float(adv[b] * scale))
-          rows += 1
+        d.tokens.withUnsafeBufferPointer { tp in
+          for (j, c) in pd.ctx.enumerated() { memcpy(tokP + (rows + j) * IN, tp.baseAddress! + Int(c) * IN, IN * 4) }
         }
+        for j in 0..<pd.ctx.count { idxP[rows + j] = Int32((b * K + k) * L + L - 1); fp[rows + j] = UInt32(at + Int(pd.first[j])); s0[rows + j] = Float(adv[b] * scale) }
+        pd.draws.withUnsafeBytes { memcpy(dp + at * MemoryLayout<route_draw>.stride, $0.baseAddress!, $0.count) }
+        pd.w.withUnsafeBufferPointer { memcpy(wp + rows * FS, $0.baseAddress!, $0.count * 4) }
+        rows += pd.ctx.count; at += pd.draws.count
       }
       seg[2 * (b * K + k) + 1] = UInt32(rows)
     }
   }
-  first.append(UInt32(draws.count))
-  func buf<T>(_ a: [T]) -> MTLBuffer { a.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress ?? UnsafeRawPointer(bitPattern: 16)!, length: max(16, $0.count), options: .storageModeShared)! } }
-  let credit = Net.Credit(draws: buf(draws), count: draws.count, first: buf(first), wrows: buf(wrows), scale0: buf(scale0), scale: Float(scale))
+  fp[rows] = UInt32(at)
+  let credit = Net.Credit(draws: dbuf, count: at, first: fbuf, wrows: wbuf, scale0: sbuf, scale: Float(scale))
   learnTime += Date().timeIntervalSince(t0)
   return (B, K, rows, credit, seg)
 }
@@ -382,6 +391,45 @@ if env["CHECK"] != nil {
   exit(0)
 }
 
+route_argmax = env["ROUTE_ARGMAX"] != nil ? 1 : 0
+if let path = env["DUMPALL"] {   // every refresh of the simulated 12 MB all-reduce from a zero state (switch.c's ROUTE_DUMP's format, appended a refresh)
+  route_stream_one(&measured, 1, 12582912, measured.compute.0, &R0.slots[0].stream)
+  var w = env["DUMPBURST"] != nil ? deployedBurst : deployed; var s = R0.slots[0].stream
+  route_sim_begin(R0.sims[0], &s, &w, 0, 1, 1)
+  var topo = route_topology(); route_topology_make(&R0.slots[0].stream.f, &R0.slots[0].stream, &topo)
+  var pat = [Int32](repeating: 0, count: CONTEXTS), node = [Int32](repeating: 0, count: CONTEXTS), owed = [UInt32](repeating: 0, count: CONTEXTS)
+  _ = route_contexts(&R0.slots[0].stream, &topo, &pat, &node, &owed)
+  var d = Data(), h = [Float](repeating: 0, count: 2 * D), refreshes = 0
+  while route_sim_decide(R0.sims[0], R0.decisions, R0.tokens[0]) == 1 {
+    var nl = Int32(R0.decisions[0].lanes), nc = Int32(R0.decisions[0].contexts)
+    withUnsafeBytes(of: &nl) { d.append(contentsOf: $0) }; withUnsafeBytes(of: &nc) { d.append(contentsOf: $0) }
+    d.append(Data(bytes: R0.laneTokens(0), count: L * IN * 4))
+    for c in 0..<Int(nc) { for v in [pat[c], node[c], Int32(bitPattern: owed[c])] { var x = v; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } } }
+    d.append(Data(bytes: R0.tokens[0], count: Int(nc) * IN * 4))
+    memcpy(R0.laneP, R0.laneTokens(0), L * IN * 4); for q in 0..<L { R0.maskP[q] = q < Int(nl) ? 1 : 0 }
+    for i in 0..<(2 * D) { R0.stateP[i] = h[i] }
+    memcpy(R0.tokP, R0.tokens[0], Int(nc) * IN * 4); for c in 0..<Int(nc) { R0.idxP[c] = Int32(L - 1) }
+    R0.forward(1, Int(nc)); for i in 0..<(2 * D) { h[i] = R0.nextP[i] }
+    route_sim_answer(R0.sims[0], R0.wP); refreshes += 1
+  }
+  try! d.write(to: URL(fileURLWithPath: path)); print("\(refreshes) refreshes' tokens written to \(path); T / floor \(R0.costs(0).throughput)"); exit(0)
+}
+if let path = env["DUMPFIRST"] {   // the simulator's first refresh of the 12 MB all-reduce on the measured cluster: its tokens (switch.c's ROUTE_DUMP's format)
+  route_stream_one(&measured, 1, 12582912, measured.compute.0, &R0.slots[0].stream)
+  var w = deployed; var s = R0.slots[0].stream
+  route_sim_begin(R0.sims[0], &s, &w, 0, 1, 1); _ = route_sim_decide(R0.sims[0], R0.decisions, R0.tokens[0])
+  var nl = Int32(R0.decisions[0].lanes), nc = Int32(R0.decisions[0].contexts)
+  var topo = route_topology(); route_topology_make(&R0.slots[0].stream.f, &R0.slots[0].stream, &topo)
+  var pat = [Int32](repeating: 0, count: CONTEXTS), node = [Int32](repeating: 0, count: CONTEXTS), owed = [UInt32](repeating: 0, count: CONTEXTS)
+  let n = route_contexts(&R0.slots[0].stream, &topo, &pat, &node, &owed)
+  precondition(n == nc, "the contexts' count differs from the decision's")
+  var d = Data()
+  withUnsafeBytes(of: &nl) { d.append(contentsOf: $0) }; withUnsafeBytes(of: &nc) { d.append(contentsOf: $0) }
+  d.append(Data(bytes: R0.laneTokens(0), count: L * IN * 4))
+  for c in 0..<Int(nc) { for v in [pat[c], node[c], Int32(bitPattern: owed[c])] { var x = v; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } } }
+  d.append(Data(bytes: R0.tokens[0], count: Int(nc) * IN * 4))
+  try! d.write(to: URL(fileURLWithPath: path)); print("first refresh's tokens written to \(path)"); exit(0)
+}
 if env["DEPLOY"] != nil {   // the C forward (int8, forward.c) against the GPU's, and its time a refresh
   var params = route_params()
   let stored = NSTemporaryDirectory() + "route-deploy-\(getpid()).i8"   // the weights as deployed: written, then read by forward.c
@@ -513,6 +561,12 @@ func learnStep(_ batch: [(runs: [DoneRun], version: Int)]) {
   route_tel_add(tel(RT_TRANSACTIONS), UInt64(runs.count)); route_tel_add(tel(RT_GROUPS), UInt64(batch.count)); lastCosts = runs.map { $0.costs }
   let (B, K, R, credit, seg) = gather(runs, adv)
   gradients(B, K, R, credit, seg)
+  if credit.count > 0, let lr = net.llBuf {   // the draws' importance ratios (current over behaviour policy)
+    let p = lr.contents().bindMemory(to: Float.self, capacity: credit.count)
+    var sum = 0.0, most: Float = 0
+    for i in 0..<credit.count { sum += Double(exp(p[i])); most = max(most, abs(p[i])) }
+    route_tel_add(tel(RT_RATIO_DRAWS), UInt64(credit.count)); route_tel_add(tel(RT_RATIO_SUM_E6), UInt64(sum * 1e6)); route_tel_max(tel(RT_LOGRATIO_MAX_E3), UInt64(most * 1e3))
+  }
   if world == 1 { alpha = net.apply(rate: rate); route_tel_add(tel(RT_OPTIMIZER_STEPS), 1); return }
   exchange.add(floats(net.grads, TASKS * nlay.count))
   for (mean, gram) in exchange.ready() { apply(mean, gram) }
@@ -532,10 +586,13 @@ let learner = Thread {
     if learned >= steps { shareLock.lock(); finishedLearning = true; shareLock.broadcast(); shareLock.unlock(); R0.wake(); break }
   }
 }
+if steps == 0 { shareLock.lock(); finishedLearning = true; shareLock.unlock() }   // no learning: the measurements alone
 learner.qualityOfService = .userInitiated; learner.stackSize = 16 << 20
-R0.startWorkers()
-if world > 1 { exchange.start() }
-learner.start()
+if steps > 0 {
+  R0.startWorkers()
+  if world > 1 { exchange.start() }
+  learner.start()
+}
 while true {
   shareLock.lock(); let over = finishedLearning, version = published; shareLock.unlock()
   if over { break }

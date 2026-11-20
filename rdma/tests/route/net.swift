@@ -399,16 +399,17 @@ final class Net {
     let dw = room(&dwBuf, 3 * R * FS * 4, shared: true), diff = room(&diffBuf, c.count * FS * 4, shared: false), ll = room(&llBuf, c.count * 4, shared: true)
     let LR = B * K * L, N = LR + R, P = lay.count
     seg.withUnsafeBytes { memcpy(segBuf.contents(), $0.baseAddress!, $0.count) }
-    begin(); phase = "credit"
-    if c.count > 0 {   // each draw's score function, then each row's three tasks' dw
-      set("credit_draws", [(c.draws, 0), (c.wrows, 0), (diff, 0), (ll, 0)], [[UInt32(c.count)]]); threads(c.count * 32)
+    begin()
+    phase = "learn forward"
+    blit { $0.fill(buffer: self.dXM, range: 0..<(3 * N * D * 4), value: 0); $0.fill(buffer: self.grads, range: 0..<(3 * P * 4), value: 0) }
+    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch, keep: true)
+    phase = "credit"   // each draw's score function under this forward's w, times its importance ratio; each row's dw
+    if c.count > 0 {
+      set("credit_draws", [(c.draws, 0), (c.wrows, 0), (w, 0), (diff, 0), (ll, 0), (c.first, 0)], [[UInt32(c.count), UInt32(R)]]); threads(c.count * 32)
     }
     var sc = c.scale
     set("credit_rows", [(diff, 0), (c.draws, 0), (c.first, 0), (c.scale0, 0), (dw, 0)], [[UInt32(R)]]); withUnsafeBytes(of: &sc) { e.setBytes($0.baseAddress!, length: 4, index: 6) }
     threads(3 * R * FS)
-    phase = "learn forward"
-    blit { $0.fill(buffer: self.dXM, range: 0..<(3 * N * D * 4), value: 0); $0.fill(buffer: self.grads, range: 0..<(3 * P * 4), value: 0) }
-    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch, keep: true)
     // readout: dX2 = rms's backward of dw out (fused), its codes; out's wgrad
     phase = "back readout"
     qrows(dw, 0, rows: 3 * R, cols: 64, ld: FS, valid: FS, map: ident(), stochastic: true, into: cA)

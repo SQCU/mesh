@@ -8,14 +8,14 @@
 #include <stdint.h>
 
 #define ROUTE_TEL_MAGIC 0x4c455452u   /* "RTEL" */
-#define ROUTE_TEL_VERSION 1
+#define ROUTE_TEL_VERSION 2
 enum route_tel {
   /* counters */
   RT_STEPS, RT_OPTIMIZER_STEPS, RT_TRANSACTIONS, RT_GROUPS, RT_EVALUATIONS, RT_FORWARDS, RT_FORWARD_ROWS, RT_FORWARD_NS,
   RT_EVENTS, RT_SENDS, RT_DRAWS, RT_ENTRIES, RT_WORKER_NS, RT_CREDIT_NS, RT_LEARN_NS, RT_EXCHANGE_ROUNDS, RT_EXCHANGE_NS,
-  RT_LAG_SUM, RT_LAG_GROUPS,
+  RT_LAG_SUM, RT_LAG_GROUPS, RT_RATIO_DRAWS, RT_RATIO_SUM_E6,
   /* gauges */
-  RT_WORKERS, RT_RUNS_IN_FLIGHT, RT_EXCHANGE_IN_FLIGHT, RT_LAG_MAX,
+  RT_WORKERS, RT_RUNS_IN_FLIGHT, RT_EXCHANGE_IN_FLIGHT, RT_LAG_MAX, RT_LOGRATIO_MAX_E3,
   /* phases: the monotonic ns each was reached */
   RT_PHASE_START, RT_PHASE_NETWORKS, RT_PHASE_JOINED, RT_PHASE_FIRST_FORWARD, RT_PHASE_FIRST_STEP, RT_PHASE_DONE,
   RT_COUNT
@@ -23,8 +23,8 @@ enum route_tel {
 static const char *const route_tel_names[RT_COUNT] = {
   "steps", "optimizer_steps", "transactions", "groups", "evaluations", "forwards", "forward_rows", "forward_ns",
   "events", "sends", "draws", "entries", "worker_ns", "credit_ns", "learn_ns", "exchange_rounds", "exchange_ns",
-  "lag_sum", "lag_groups",
-  "workers", "runs_in_flight", "exchange_in_flight", "lag_max",
+  "lag_sum", "lag_groups", "ratio_draws", "ratio_sum_e6",
+  "workers", "runs_in_flight", "exchange_in_flight", "lag_max", "logratio_max_e3",
   "phase_start", "phase_networks", "phase_joined", "phase_first_forward", "phase_first_step", "phase_done",
 };
 #define RT_FIRST_GAUGE RT_WORKERS

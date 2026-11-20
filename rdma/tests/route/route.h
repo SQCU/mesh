@@ -143,6 +143,7 @@ void route_topology_make(const struct route_fabric *f, const struct route_stream
 int route_tokens(const struct route_topology *t, int v, uint32_t S);
 uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
                      const struct route_live *live, const float *w, double u, double *cdf);
+extern int route_argmax;   /* sim.c: set, every draw is its table's most probable allowed split */
 uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
 
 /* The policy's forward on a CPU (forward.c): net.swift's int8 network (minGRU), its weights as stored, int8 codes
