@@ -146,7 +146,7 @@ let rolloutPipeline = try device.makeComputePipelineState(function: library.make
 let gradientPipeline = try device.makeComputePipelineState(function: library.makeFunction(name: "gradient")!)
 let measured = load(args[2])
 let steps = args.count > 3 ? Int(args[3])! : 300, M = args.count > 4 ? Int(args[4])! : 2048
-let sigma: Float = 0.02, rate = 3e-3
+let sigma: Float = 0.02, rate = Double(ProcessInfo.processInfo.environment["RATE"] ?? "3e-3")!
 
 var g = Mix(s: 20261119)
 let pool = 16384
