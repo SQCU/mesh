@@ -251,6 +251,11 @@ final class Net {
   }
   var current: MTLComputePipelineState? = nil   // the pipeline set last: a dispatch's threadgroup its own widest
   func threads(_ n: Int) { if n > 0, let p = current { e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: p.maxTotalThreadsPerThreadgroup, height: 1, depth: 1)) } }
+  // the scans: a threadgroup a sequence (n of them), a thread a position (scan.h)
+  func sequences(_ n: Int, _ steps: Int) {
+    if n == 0 { return }
+    e.dispatchThreadgroups(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: (steps + 31) / 32 * 32, height: 1, depth: 1))
+  }
   func nextSeed() -> UInt32 { seed = seed &* 1664525 &+ 1013904223; return seed | 1 }
   // rows of x (map, ld, the first `valid` columns) -> codes (cols wide) into c from code row `at`; returns the seed
   @discardableResult
@@ -368,13 +373,12 @@ final class Net {
       product("zh\(l)", forward: true, M: N, src: xc, flags: 4 | 512, out: (ZC[l], ident(), 2 * D))   // the gates, fp16
       let r0 = l == 0 ? 0 : LR, n = N - r0   // layer 1's lanes: their states only
       set("scan_fwd", [(ZC[l], 0), (mask, 0), (h0, 0), (H[l], 0), (X[l], 0), (XM[l], 0), (next, 0)], [[UInt32(B), UInt32(K * L), UInt32(l), l == 0 ? 1 : 0]])
-      e.setBuffer(other.q, offset: 0, index: 8); e.setBuffer(other.s, offset: 0, index: 9)
-      threads(B * 32)
+      sequences(B * D, K * L)
       if R > 0 {
         set("ctx_fwd", [(ZC[l], LR * D) /* fp16: LR 2D halves */, (H[l], 0), (pos, 0), (X[l], LR * D), (XM[l], LR * D)], [[UInt32(R), UInt32(l == 0 ? LR : 0)]])
-        e.setBuffer(other.q, offset: 0, index: 6); e.setBuffer(other.s, offset: 0, index: 7)
         threads(R * 32)
       }
+      qrows(XM[l], r0 * D, rows: n, cols: 64, ld: D, valid: D, map: ident(), stochastic: false, into: other)   // every row's XM codes, one pass
       probe("scan/ctx -> XM\(l) codes", other, at: 0, rows: n, cols: 64, x: XM[l], xoff: r0 * D, ld: D, valid: D, seed: 0)
       let xm = other; other = xc
       product("up\(l)", forward: true, M: n, src: xm, flags: 2 | 512, out: keep ? (U[l], ident(r0), E) : nil, dst: other)   // U fp16
@@ -462,14 +466,13 @@ final class Net {
     let LR = B * K * L, N = LR + R, sd = nextSeed()
     if R > 0 {
       set("ctx_bwd", [(dXM, 0), (ZC[l], 0), (H[l], 0), (pos, 0), (dZC, 0), (dhp, 0)], [[UInt32(R), 3, UInt32(N), UInt32(LR), sd, 0, 0, 0]])
-      e.setBuffer(codes.q, offset: 0, index: 7); e.setBuffer(codes.s, offset: 0, index: 8)
       threads(3 * R * 32)
     }
     set("seg_sum", [(dhp, 0), (segBuf, 0), (inj, 0)], [[UInt32(B * K), 3, UInt32(R)]]); threads(3 * B * K * D)
-    set("scan_bwd", [(dXM, 0), (inj, 0), (segBuf, 0), (ZC[l], 0), (mask, 0), (H[l], 0), (h0, 0), (dZC, 0)],
+    set("scan_bwd", [(dXM, 0), (inj, 0), (ZC[l], 0), (mask, 0), (H[l], 0), (h0, 0), (dZC, 0)],
         [[UInt32(B), UInt32(K * L), UInt32(l), upstreamDX != nil ? 1 : 0, UInt32(K), UInt32(L), UInt32(N), 3, UInt32(R), sd, 0, 0]])
-    e.setBuffer(codes.q, offset: 0, index: 9); e.setBuffer(codes.s, offset: 0, index: 10)
-    threads(3 * B * 32)
+    sequences(3 * B * D, K * L)
+    qrows(dZC, 0, rows: 3 * N, cols: 128, ld: 2 * D, valid: 2 * D, map: ident(), stochastic: true, into: codes, seed: sd, type: "_b")   // every row's dZC codes, one pass
     probe("scan/ctx bwd -> dZC\(l) codes (dZC bf16)", codes, at: 0, rows: 3 * N, cols: 128, x: dZC, xoff: 0, ld: 2 * D, valid: 2 * D, seed: sd, type: "_b")
     let s2 = product("zh\(l)", forward: false, M: 3 * N, src: codes, flags: 16, out: (out, ident(), D), res: (dXM, ident(), D), dst: next, stochastic: true)
     if let nx = next { probe("zh\(l) dgrad -> dX codes", nx, at: 0, rows: 3 * N, cols: 64, x: out, xoff: 0, ld: D, valid: D, seed: s2) }

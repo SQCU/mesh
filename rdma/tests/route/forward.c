@@ -6,6 +6,7 @@
    code can differ where a value sits on a rounding boundary. Matrices in NetLayout's order: inp [D][IN], zh0 [2D][D],
    up0 [E][D], down0 [D][E], zh1, up1, down1, out [FS][D]. */
 #include "route.h"
+#include "scan.h"
 #include "int8mm.h"
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
@@ -75,10 +76,15 @@ void route_forward_lanes(const struct route_params *p, const float *lanes, int n
   for (int l = 0; l < 2; l++) {
     float *h = state + l * D;
     product(&p->zh[l], x, nl, D, zc, 0, 2);
-    for (int t = 0; t < nl; t++) for (int d = 0; d < D; d++) {   /* net.metal's scan_fwd, m = 1 */
-      const float mz = zc[t * 2 * D + d];
-      h[d] = fmaf(1.0f - mz, h[d], mz * zc[t * 2 * D + D + d]);
-      xm[t * D + d] = x[t * D + d] + h[d];
+    for (int d = 0; d < D; d++) {   /* net.metal's scan_fwd (m = 1): the positions' affine maps scanned in scan.h's order */
+      float A[L], B[L];   /* all L positions, the unused lanes masked (identity), as the GPU's: the state is position L - 1's */
+      for (int t = 0; t < L; t++) {
+        const float mz = t < nl ? zc[t * 2 * D + d] : 0.0f;
+        A[t] = 1.0f - mz; B[t] = mz * (t < nl ? zc[t * 2 * D + D + d] : 0.0f);
+      }
+      scan_affine(A, B, L);
+      for (int t = 0; t < nl; t++) xm[t * D + d] = x[t * D + d] + fmaf(A[t], h[d], B[t]);
+      h[d] = fmaf(A[L - 1], h[d], B[L - 1]);
     }
     if (l == 0) { product(&p->up[0], xm, nl, D, u, 0, 1); product(&p->down[0], u, nl, E, x, xm, 0); }
   }

@@ -4,55 +4,45 @@
 #include "int8mm.h"
 #include "split.h"
 #include "upgrad.h"
+#include "scan.h"
 using namespace metal;
 constant uint D = 64;
 
 // a 64-wide row held two values a lane (channels l, l + 32) -> its codes and scale, the transform in i8_fwht64's order
 // (strides 1..16 across lanes, then 32 inside the lane with the 1/8); several 64-blocks of a row share one scale
-static inline void codes2(thread float *v, uint nblocks, uint lane, uint seed, uint row, uint cols, device int8_t *q, device float *qs) {
-  float m = 0;
-  for (uint b = 0; b < nblocks; b++) {
-    for (ushort st = 1; st < 32; st <<= 1) for (uint h = 0; h < 2; h++) { const float o = simd_shuffle_xor(v[2 * b + h], st); v[2 * b + h] = (lane & st) ? o - v[2 * b + h] : v[2 * b + h] + o; }
-    const float a = v[2 * b], c = v[2 * b + 1]; v[2 * b] = (a + c) * 0.125f; v[2 * b + 1] = (a - c) * 0.125f;
-    m = max(m, max(abs(v[2 * b]), abs(v[2 * b + 1])));
-  }
-  m = simd_max(m);
-  const float inv = i8_inverse(m);
-  if (lane == 0) qs[row] = i8_scale(m);
-  for (uint b = 0; b < nblocks; b++) for (uint h = 0; h < 2; h++) { const uint j = b * 64 + h * 32 + lane; q[size_t(row) * cols + j] = i8_code(v[2 * b + h], inv, seed, row * cols + j); }
-}
 
 // zc (the gates) fp16, dzc (their gradients) bf16: narrower, read only elementwise and by wgrad's column codes.
 // minGRU's recurrence over each run's K L positions, a SIMD group a run (two channels a lane): h = (1 - m z) h + m z h~
 // (a padded lane, m = 0, leaves it), from h0 (the run's state at layer l); H every position's state; if xm, XM = X + H
 // and XM's codes (the feed-forward's input: row r, from code row 0); next the last state. zc [rows][2D]: z, then h~
 struct SP { uint runs, steps, layer, xm; };
+// the recurrence, forward: a threadgroup a (run, channel), a thread a position; the positions' affine maps scanned
+// (scan.h: within each SIMD group, then the groups' totals); H, XM = X + H, and the last state. XM's codes: quant_rows
+// after (one row-parallel pass over every row's stored XM)
 kernel void scan_fwd(device const half *zc [[buffer(0)]], device const float *mask [[buffer(1)]], device const float *h0 [[buffer(2)]],
                      device float *H [[buffer(3)]], device const float *X [[buffer(4)]], device float *XM [[buffer(5)]], device float *next [[buffer(6)]],
-                     constant SP &p [[buffer(7)]], device int8_t *q [[buffer(8)]], device float *qs [[buffer(9)]], uint gid [[thread_position_in_grid]]) {
-  const uint b = gid / 32, lane = gid % 32;
-  if (b >= p.runs) return;
-  float h[2] = {h0[(b * 2 + p.layer) * D + lane], h0[(b * 2 + p.layer) * D + 32 + lane]};
-  for (uint t = 0; t < p.steps; t++) {
-    const uint r = b * p.steps + t;
-    const float m = mask[r];
-    float v[2];
-    for (uint k = 0; k < 2; k++) {
-      const uint ch = lane + 32 * k;
-      const float mz = m * float(zc[r * 2 * D + ch]);
-      h[k] = fma(1.0f - mz, h[k], mz * float(zc[r * 2 * D + D + ch]));
-      H[r * D + ch] = h[k];
-      if (p.xm) { v[k] = X[r * D + ch] + h[k]; XM[r * D + ch] = v[k]; }
-    }
-    if (p.xm) codes2(v, 1, lane, 0, r, D, q, qs);
-  }
-  next[(b * 2 + p.layer) * D + lane] = h[0]; next[(b * 2 + p.layer) * D + 32 + lane] = h[1];
+                     constant SP &p [[buffer(7)]], uint w [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint nsg [[simdgroups_per_threadgroup]]) {
+  threadgroup float TA[32], TB[32];
+  const uint b = w / D, ch = w % D, S = p.steps, r = b * S + t;
+  float A = 1, B = 0;
+  if (t < S) { const float mz = mask[r] * float(zc[size_t(r) * 2 * D + ch]); A = 1.0f - mz; B = mz * float(zc[size_t(r) * 2 * D + D + ch]); }
+  scan_affine_simd(A, B, lane);
+  if (lane == 31) { TA[sg] = A; TB[sg] = B; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0) { float a = lane < nsg ? TA[lane] : 1.0f, c = lane < nsg ? TB[lane] : 0.0f; scan_affine_simd(a, c, lane); if (lane < nsg) { TA[lane] = a; TB[lane] = c; } }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg > 0) { B = fma(A, TB[sg - 1], B); A = A * TA[sg - 1]; }
+  if (t >= S) return;
+  const float h = fma(A, h0[(b * 2 + p.layer) * D + ch], B);
+  H[size_t(r) * D + ch] = h;
+  if (p.xm) XM[size_t(r) * D + ch] = X[size_t(r) * D + ch] + h;
+  if (t == S - 1) next[(b * 2 + p.layer) * D + ch] = h;
 }
 // a context row (a SIMD group): one step from its refresh's state H[pos[r]]: hn = (1 - z) hp + z h~, XM = X + hn, and
 // XM's codes at code row (qrow + r)
 kernel void ctx_fwd(device const half *zc [[buffer(0)]], device const float *H [[buffer(1)]], device const int *pos [[buffer(2)]],
-                    device const float *X [[buffer(3)]], device float *XM [[buffer(4)]], constant uint2 &p [[buffer(5)]],
-                    device int8_t *q [[buffer(6)]], device float *qs [[buffer(7)]], uint gid [[thread_position_in_grid]]) {   // p: (rows, qrow)
+                    device const float *X [[buffer(3)]], device float *XM [[buffer(4)]], constant uint2 &p [[buffer(5)]], uint gid [[thread_position_in_grid]]) {   // p: (rows, unused)
   const uint r = gid / 32, lane = gid % 32;
   if (r >= p.x) return;
   float v[2];
@@ -62,7 +52,6 @@ kernel void ctx_fwd(device const half *zc [[buffer(0)]], device const float *H [
     v[k] = X[r * D + ch] + fma(z, float(zc[r * 2 * D + D + ch]) - hp, hp);
     XM[r * D + ch] = v[k];
   }
-  codes2(v, 1, lane, 0, p.y + r, D, q, qs);
 }
 // n = y / rms(y), a SIMD group a row (two channels a lane); inv [rows] kept for the backward
 kernel void rms_fwd(device const float *y [[buffer(0)]], device float *n [[buffer(1)]], device float *inv [[buffer(2)]], constant uint &rows [[buffer(3)]],
@@ -91,7 +80,7 @@ kernel void rms_bwd(device const float *dn [[buffer(0)]], device const float *n 
 // [task][stride][..] from row off; dhp [task][rows][D]
 struct CP { uint rows, tasks, stride, off, seed, p0, p1, p2; };
 kernel void ctx_bwd(device const float *dXM [[buffer(0)]], device const half *zc [[buffer(1)]], device const float *H [[buffer(2)]], device const int *pos [[buffer(3)]],
-                    device bfloat *dzc [[buffer(4)]], device float *dhp [[buffer(5)]], constant CP &p [[buffer(6)]], device int8_t *q [[buffer(7)]], device float *qs [[buffer(8)]],
+                    device bfloat *dzc [[buffer(4)]], device float *dhp [[buffer(5)]], constant CP &p [[buffer(6)]],
                     uint gid [[thread_position_in_grid]]) {
   const uint w = gid / 32, lane = gid % 32;
   if (w >= p.tasks * p.rows) return;
@@ -104,7 +93,6 @@ kernel void ctx_bwd(device const float *dXM [[buffer(0)]], device const half *zc
     dzc[size_t(row) * 2 * D + ch] = bfloat(v[k]); dzc[size_t(row) * 2 * D + D + ch] = bfloat(v[2 + k]);
     dhp[(size_t(t) * p.rows + r) * D + ch] = g * (1.0f - z);
   }
-  codes2(v, 2, lane, p.seed, row, 2 * D, q, qs);
 }
 // each refresh's contexts' dhp summed (rows seg[s], contiguous), a thread a (task, refresh, channel): inj [task][refreshes][D]
 kernel void seg_sum(device const float *dhp [[buffer(0)]], device const uint2 *seg [[buffer(1)]], device float *inj [[buffer(2)]],
@@ -120,28 +108,37 @@ kernel void seg_sum(device const float *dhp [[buffer(0)]], device const uint2 *s
 // refresh's last lane, its contexts' dhp (summed by seg_sum: [task][run K + k][D]), and at every position its own (dXM, if local); each
 // position's gates' pre-activation gradients into dzc and their codes (stochastic); g carried back through (1 - m z)
 struct BP { uint runs, steps, layer, local, refreshes, L, stride, tasks, ctxRows, seed, p1, p2; };
-kernel void scan_bwd(device const float *dXM [[buffer(0)]], device const float *dhp [[buffer(1)]], device const uint2 *seg [[buffer(2)]],
-                     device const half *zc [[buffer(3)]], device const float *mask [[buffer(4)]], device const float *H [[buffer(5)]], device const float *h0 [[buffer(6)]],
-                     device bfloat *dzc [[buffer(7)]], constant BP &p [[buffer(8)]], device int8_t *q [[buffer(9)]], device float *qs [[buffer(10)]], uint gid [[thread_position_in_grid]]) {
-  const uint w = gid / 32, lane = gid % 32;
-  if (w >= p.tasks * p.runs) return;
-  const uint t = w / p.runs, b = w % p.runs;
-  float g[2] = {0, 0};
-  for (uint s = p.steps; s-- > 0;) {
-    const uint r = b * p.steps + s, row = t * p.stride + r;
-    float v[4];
-    for (uint k = 0; k < 2; k++) {
-      const uint ch = lane + 32 * k;
-      if (s % p.L == p.L - 1) g[k] += dhp[(size_t(t) * p.runs * p.refreshes + b * p.refreshes + s / p.L) * D + ch];   // seg_sum's: the refresh's contexts'
-      if (p.local) g[k] += dXM[size_t(row) * D + ch];
-      const float m = mask[r], z = float(zc[size_t(r) * 2 * D + ch]), c = float(zc[size_t(r) * 2 * D + D + ch]);
-      const float hprev = s > 0 ? H[size_t(r - 1) * D + ch] : h0[(b * 2 + p.layer) * D + ch];
-      v[k] = m * g[k] * (c - hprev) * z * (1.0f - z); v[2 + k] = m * z * g[k] * (1.0f - c * c);
-      dzc[size_t(row) * 2 * D + ch] = bfloat(v[k]); dzc[size_t(row) * 2 * D + D + ch] = bfloat(v[2 + k]);
-      g[k] *= 1.0f - m * z;
-    }
-    codes2(v, 2, lane, p.seed, row, 2 * D, q, qs);
+// the recurrence, backward: a threadgroup a (task, run, channel), a thread a position, the positions reversed (thread
+// i: position S - 1 - i). At a position g += u (u: its refresh's contexts' dhp at a refresh's last lane, and dXM if local),
+// its gates' gradients from g, then g *= a (a = 1 - m z): the affine map g -> a g + a u, scanned (scan.h) from g = 0; a
+// position's g is the scan before it plus its u. dzc's codes: quant_rows_b after (a row-parallel pass over the stored bf16)
+kernel void scan_bwd(device const float *dXM [[buffer(0)]], device const float *dhp [[buffer(1)]], device const half *zc [[buffer(2)]],
+                     device const float *mask [[buffer(3)]], device const float *H [[buffer(4)]], device const float *h0 [[buffer(5)]], device bfloat *dzc [[buffer(6)]],
+                     constant BP &p [[buffer(7)]], uint w [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]],
+                     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint nsg [[simdgroups_per_threadgroup]]) {
+  threadgroup float TA[32], TB[32], G[1024];
+  const uint ch = w % D, tb = w / D, t = tb / p.runs, b = tb % p.runs, S = p.steps;
+  const uint s = S - 1 - i, r = b * S + s, row = t * p.stride + r;
+  float u = 0, a = 1;
+  if (i < S) {
+    if (p.local) u = dXM[size_t(row) * D + ch];
+    if (s % p.L == p.L - 1) u += dhp[(size_t(t) * p.runs * p.refreshes + b * p.refreshes + s / p.L) * D + ch];   // seg_sum's: the refresh's contexts'
+    a = 1.0f - mask[r] * float(zc[size_t(r) * 2 * D + ch]);
   }
+  float A = a, B = a * u;
+  scan_affine_simd(A, B, lane);
+  if (lane == 31) { TA[sg] = A; TB[sg] = B; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0) { float x = lane < nsg ? TA[lane] : 1.0f, c = lane < nsg ? TB[lane] : 0.0f; scan_affine_simd(x, c, lane); if (lane < nsg) { TA[lane] = x; TB[lane] = c; } }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg > 0) { B = fma(A, TB[sg - 1], B); A = A * TA[sg - 1]; }
+  G[i] = B;   // g after this position, from 0
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (i >= S) return;
+  const float g = (i > 0 ? G[i - 1] : 0.0f) + u;
+  const float m = mask[r], z = float(zc[size_t(r) * 2 * D + ch]), cc = float(zc[size_t(r) * 2 * D + D + ch]);
+  const float hprev = s > 0 ? H[size_t(r - 1) * D + ch] : h0[(b * 2 + p.layer) * D + ch];
+  dzc[size_t(row) * 2 * D + ch] = bfloat(m * g * (cc - hprev) * z * (1.0f - z)); dzc[size_t(row) * 2 * D + D + ch] = bfloat(m * z * g * (1.0f - cc * cc));
 }
 
 // ---- the parameters: a matrix W = diag(g) V / |V| (rows), V pinned to unit rows; its bias b ----
