@@ -71,53 +71,49 @@ func td(_ b: MTLBuffer, _ shape: [Int], _ type: MPSDataType = .float32) -> MPSGr
 
 // a finished run as the learning batch reads it (copied out of its slot, which the pool then reuses)
 struct DoneRun {
-  let kept: [Kept], start: [Float], credit: [Float], costs: route_costs, counts: [UInt64]
-  init(_ s: Slot) { kept = s.kept; start = s.start; credit = s.credit; costs = s.costs; counts = s.counts }
+  let kept: [Kept], start: [Float], draws: [PointDraws], costs: route_costs, counts: [UInt64]
+  init(_ s: Slot) { kept = s.kept; start = s.start; draws = s.draws; costs = s.costs; counts = s.counts }
 }
-// the learning batch over finished runs, throughput advantages `adv`: lanes [run][refresh][lane]; drawn-from rows, each
-// reading its refresh's state (lane row (b K + k) L + L - 1), contiguous a refresh (seg); each task's dw packed
-// [TASKS][R][FS]. Returns (B, K, R, packed, seg)
+// the learning batch over finished runs, throughput advantages `adv`: lanes [run][refresh][lane]; a row each context a
+// refresh drew from (its draws in it), reading its refresh's state (lane row (b K + k) L + L - 1), contiguous a refresh
+// (seg); the rows' draws for the GPU's credit (Net.Credit). Returns (B, K, R, credit, seg)
 var learnTime = 0.0
-func gather(_ runs: [DoneRun], _ adv: [Double]) -> (Int, Int, Int, MTLBuffer, [UInt32]) {
+func gather(_ runs: [DoneRun], _ adv: [Double]) -> (Int, Int, Int, Net.Credit, [UInt32]) {
   let t0 = Date()
   let B = runs.count, K = KMAX
   precondition(B <= BATCH, "a learning batch past its buffers")
   memset(laneP, 0, B * K * L * IN * 4); memset(maskP, 0, B * K * L * 4); memset(stateP, 0, B * 2 * D * 4)
   var rows = 0, seg = [UInt32](repeating: 0, count: 2 * B * K)
+  var draws: [route_draw] = [], first: [UInt32] = [], wrows: [Float] = [], scale0: [Float] = []
   let scale = 1 / Double(B)
   for (b, r) in runs.enumerated() {
     precondition(r.kept.count <= K, "a window past the learning batch's refreshes")
     for i in 0..<(2 * D) { stateP[b * 2 * D + i] = r.start[i] }
-    var at = 0
     for k in 0..<K {
       seg[2 * (b * K + k)] = UInt32(rows)
       if k < r.kept.count {
-        let d = r.kept[k]
+        let d = r.kept[k], pd = r.draws[k]
         memcpy(laneP + (b * K + k) * L * IN, d.lanes, L * IN * 4)
         for q in 0..<L { maskP[(b * K + k) * L + q] = q < d.lanesUsed ? 1 : 0 }
-        for c in 0..<d.contexts {
-          var used = false
-          for task in 0..<TASKS { for f in 0..<FS where r.credit[at + (task * d.contexts + c) * FS + f] != 0 { used = true } }
-          if !used { continue }
+        for (j, c) in pd.ctx.enumerated() {
           precondition(rows < ROWS, "learning rows past the buffers")
-          for i in 0..<IN { tokP[rows * IN + i] = d.tokens[c * IN + i] }
+          for i in 0..<IN { tokP[rows * IN + i] = d.tokens[Int(c) * IN + i] }
           idxP[rows] = Int32((b * K + k) * L + L - 1)
-          for task in 0..<TASKS {
-            let s = Float((task == 0 ? adv[b] : 1) * scale)
-            for f in 0..<FS { dwP[(task * ROWS + rows) * FS + f] = r.credit[at + (task * d.contexts + c) * FS + f] * s }
-          }
+          first.append(UInt32(draws.count))
+          for q in Int(pd.first[j])..<Int(pd.first[j + 1]) { var x = pd.draws[q]; x.row = UInt32(rows); draws.append(x) }
+          wrows += pd.w[(j * FS)..<((j + 1) * FS)]
+          scale0.append(Float(adv[b] * scale))
           rows += 1
         }
-        at += TASKS * d.contexts * FS
       }
       seg[2 * (b * K + k) + 1] = UInt32(rows)
     }
   }
-  let R = rows
-  let packed = shared(TASKS * max(R, 1) * FS), pp = floats(packed, TASKS * max(R, 1) * FS)
-  for task in 0..<TASKS { memcpy(pp + task * R * FS, dwP + task * ROWS * FS, R * FS * 4) }
+  first.append(UInt32(draws.count))
+  func buf<T>(_ a: [T]) -> MTLBuffer { a.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress ?? UnsafeRawPointer(bitPattern: 16)!, length: max(16, $0.count), options: .storageModeShared)! } }
+  let credit = Net.Credit(draws: buf(draws), count: draws.count, first: buf(first), wrows: buf(wrows), scale0: buf(scale0), scale: Float(scale))
   learnTime += Date().timeIntervalSince(t0)
-  return (B, K, R, packed, seg)
+  return (B, K, rows, credit, seg)
 }
 // ---- the gradients' mean across machines: an all-reduce through the mesh (exchange.c: libnccl-mesh over the nodes'
 // bridges, the Thunderbolt fabric as the mesh routes it), on its own thread ----
@@ -211,9 +207,9 @@ if let n = env["XBENCH"].flatMap({ Int($0) }) {   // the exchange alone: n round
   exit(0)
 }
 
-func gradients(_ B: Int, _ K: Int, _ R: Int, _ packed: MTLBuffer, _ seg: [UInt32]) {
+func gradients(_ B: Int, _ K: Int, _ R: Int, _ credit: Net.Credit, _ seg: [UInt32]) {
   let t0 = Date()
-  net.learn(lanes: laneBuf, mask: maskBuf, h0: stateBuf, tokens: tokBuf, pos: idxBuf, seg: seg, B: B, K: K, R: R, dw: packed, w: wBuf)
+  net.learn(lanes: laneBuf, mask: maskBuf, h0: stateBuf, tokens: tokBuf, pos: idxBuf, seg: seg, B: B, K: K, R: R, credit: credit, w: wBuf)
   learnTime += Date().timeIntervalSince(t0); route_tel_add(tel(RT_LEARN_NS), UInt64(Date().timeIntervalSince(t0) * 1e9))
 }
 
@@ -334,10 +330,24 @@ if env["CHECK"] != nil {
   // the int8 network against the fp32 reference (policy.swift and learn.swift's graph: the same function, plain fp32
   // weights W = g V / |V|), through the window's refreshes: w, and each task's gradient (the reference's dW mapped to
   // (dV, dg, db) by the same chain rule)
-  let (B, K, R, packed, seg) = gather([DoneRun(R0.slots[0])], [1])
+  let (B, K, R, credit, seg) = gather([DoneRun(R0.slots[0])], [1])
   net.checking = true
-  gradients(B, K, R, packed, seg)
+  gradients(B, K, R, credit, seg)
   net.checking = false
+  let packed = net.dwBuf!
+  do {   // the GPU's credit (net.metal credit_draws, credit_rows) against the CPU's (sim.c route_sim_credit): each row's dw
+    var worst: Float = 0, size: Float = 0, row = 0
+    let dp = floats(packed, 3 * R * FS), nc = Int(route_sim_contexts(R0.sims[0]))
+    for (k, pd) in R0.slots[0].draws.enumerated() {
+      var part = [Float](repeating: 0, count: TASKS * nc * FS), ll = 0.0
+      route_sim_credit(R0.sims[0], Int32(k), &part, &ll)
+      for c in pd.ctx {
+        for t in 0..<TASKS { for f in 0..<FS { let a = dp[(t * R + row) * FS + f], b = part[(t * nc + Int(c)) * FS + f]; worst = max(worst, abs(a - b)); size = max(size, abs(b)) } }
+        row += 1
+      }
+    }
+    print(String(format: "credit on the GPU against the CPU's: %d rows, %d draws: largest difference %.2e of %.2e", R, credit.count, worst, size))
+  }
   print("fused producers' codes against quant_rows of what they stored (bit for bit):"); for line in net.probeReport() { print(line) }
   let P = nlay.count, wInt = Array(UnsafeBufferPointer(start: wP, count: R * FS)), gInt = Array(UnsafeBufferPointer(start: floats(net.grads, TASKS * P), count: TASKS * P))
   let old = nlay.toOld(Array(UnsafeBufferPointer(start: floats(net.theta, P), count: P)), lay), oldBuf = device.makeBuffer(bytes: old, length: old.count * 4, options: .storageModeShared)!
@@ -407,11 +417,15 @@ if env["BENCH"] != nil {   // each part's latency alone, beside the arithmetic i
     let ops = Double(B * L * laneOps + r * ctxOps)
     print(String(format: "forward call, %d runs x %6d rows: %7.0f us (one command buffer, int8 products); %.2f G int8 ops, %.1f TOP/s effective", B, r, t / 10 * 1e6, ops / 1e9, ops / (t / 10) / 1e12))
   }
-  let packed = shared(TASKS * 65536 * FS); memset(packed.contents(), 0, TASKS * 65536 * FS * 4)
+  func noCredit(_ r: Int) -> Net.Credit {   // r rows, no draws: dw 0 (the learning call's cost apart from credit)
+    func z(_ n: Int) -> MTLBuffer { let b = shared(max(n, 4)); memset(b.contents(), 0, max(n, 4) * 4); return b }
+    return Net.Credit(draws: z(40), count: 0, first: z(r + 1), wrows: z(r * FS), scale0: z(r), scale: 0)
+  }
   for r in [4096, 16384, 65536] {
     var seg = [UInt32](repeating: 0, count: 2 * B * KMAX)
     for i in 0..<r { idxP[i] = Int32((i * B * KMAX / r) * L + L - 1) }
     for s in 0..<(B * KMAX) { seg[2 * s] = UInt32(s * r / (B * KMAX)); seg[2 * s + 1] = UInt32((s + 1) * r / (B * KMAX)) }
+    let packed = noCredit(r)
     gradients(B, KMAX, r, packed, seg)   // first use apart
     var t = 0.0; for _ in 0..<5 { let t0 = Date(); gradients(B, KMAX, r, packed, seg); t += Date().timeIntervalSince(t0) }
     let ops = 3 * Double(B * KMAX * L * laneOps + r * ctxOps)
@@ -430,7 +444,7 @@ if env["BENCH"] != nil {   // each part's latency alone, beside the arithmetic i
     var seg = [UInt32](repeating: 0, count: 2 * B * KMAX)
     for i in 0..<65536 { idxP[i] = Int32((i * B * KMAX / 65536) * L + L - 1) }
     for s in 0..<(B * KMAX) { seg[2 * s] = UInt32(s * 65536 / (B * KMAX)); seg[2 * s + 1] = UInt32((s + 1) * 65536 / (B * KMAX)) }
-    gradients(B, KMAX, 65536, packed, seg); show("learning call, 65536 rows")
+    gradients(B, KMAX, 65536, noCredit(65536), seg); show("learning call, 65536 rows")
     _ = net.apply(rate: 0); show("optimizer step")
     net.profiling = false
   }
@@ -490,8 +504,8 @@ func learnStep(_ batch: [(runs: [DoneRun], version: Int)]) {
   route_tel_add(tel(RT_LAG_GROUPS), UInt64(batch.count))
   for r in runs { for (q, k) in [RT_EVENTS, RT_DRAWS, RT_ENTRIES, RT_SENDS].enumerated() { route_tel_add(tel(k), r.counts[q]) } }
   route_tel_add(tel(RT_TRANSACTIONS), UInt64(runs.count)); route_tel_add(tel(RT_GROUPS), UInt64(batch.count)); lastCosts = runs.map { $0.costs }
-  let (B, K, R, packed, seg) = gather(runs, adv)
-  gradients(B, K, R, packed, seg)
+  let (B, K, R, credit, seg) = gather(runs, adv)
+  gradients(B, K, R, credit, seg)
   if world == 1 { alpha = net.apply(rate: rate); route_tel_add(tel(RT_OPTIMIZER_STEPS), 1); return }
   exchange.add(floats(net.grads, TASKS * nlay.count))
   for (mean, gram) in exchange.ready() { apply(mean, gram) }

@@ -203,3 +203,72 @@ kernel void adam(device float *theta [[buffer(0)]], device float *m [[buffer(1)]
   m[i] = 0.9f * m[i] + 0.1f * d; v[i] = 0.999f * v[i] + 0.001f * d * d;
   theta[i] -= a.w * (m[i] / c.x) / (sqrt(v[i] / c.y) + 1e-8f);
 }
+
+// ---- credit (route.h route_draw; sim.c route_sim_credit is the CPU reference): each draw's score function,
+// psi(token) - E_p[psi] over its table (the softmax of CLIP tanh(w . phi / sqrt(FS)) over the allowed splits), and its
+// log-likelihood; then each learning row's three tasks' dw: its draws' advantages times that, summed in order ----
+constant uint FS = 40;
+struct Draw { float arrive[30]; uint valid, mask, S, token, deg, ntok, row; float unit, a1, a2; };
+// a draw a SIMD group, its table's tokens across the lanes; each lane's running log-sum-exp (its sums rescaled as its
+// maximum grows), then the lanes' combined
+kernel void credit_draws(device const Draw *draws [[buffer(0)]], device const float *wrows [[buffer(1)]], device float *diff [[buffer(2)]], device float *ll [[buffer(3)]],
+                         constant uint &n [[buffer(4)]], uint gid [[thread_position_in_grid]]) {
+  const uint i = gid / 32, lane = gid % 32;
+  if (i >= n) return;
+  const Draw d = draws[i];
+  const device float *w = wrows + size_t(d.row) * FS;
+  const float root = sqrt(float(FS));
+  float m = -INFINITY, s = 0, lgTok = 0, e[40], psi[40];
+  for (uint f = 0; f < FS; f++) { e[f] = 0; psi[f] = 0; }
+  bool owner = false;
+  for (uint k = lane; k < d.ntok; k += 32) {
+    uint tok = k, used = 0, cnt = 0, at[6], nd = 0;
+    bool valid = true, fits = true;
+    float most = 0, sum = 0, a = 0;
+    for (uint dd = 0; dd < 6; dd++) {
+      if (!((d.S >> dd) & 1)) continue;
+      const uint kk = tok % d.deg; tok /= d.deg;
+      const uint b = dd * 5 + kk;
+      valid = valid && ((d.valid >> b) & 1); fits = fits && ((d.mask >> b) & 1);
+      const float ar = d.arrive[b];
+      most = max(most, ar); sum += ar; cnt++; used |= 1u << kk; a += w[b]; at[nd++] = b;
+    }
+    for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) a += w[30 + kk];
+    const float c1 = float(max(cnt, 1u)), f35 = most / d.unit, f36 = sum / c1 / d.unit, f37 = float(popcount(used)) / c1;
+    a += w[35] * f35 + w[36] * f36 + w[37] * f37;
+    const bool ok = valid && fits;
+    if (!ok && k != d.token) continue;
+    const float th = tanh(clamp(a / root, -20.0f, 20.0f)), lg = 10.0f * th, dv = 10.0f * (1.0f - th * th) / root;
+    if (k == d.token) {
+      owner = true; lgTok = ok ? lg : -INFINITY;
+      for (uint q = 0; q < nd; q++) psi[at[q]] = dv;
+      for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) psi[30 + kk] = dv;
+      psi[35] = dv * f35; psi[36] = dv * f36; psi[37] = dv * f37;
+    }
+    if (!ok) continue;
+    if (lg > m) { const float r = s > 0 ? exp(m - lg) : 0.0f; s *= r; for (uint f = 0; f < FS; f++) e[f] *= r; m = lg; }
+    const float x = exp(lg - m), xd = x * dv;
+    s += x;
+    for (uint q = 0; q < nd; q++) e[at[q]] += xd;
+    for (uint kk = 0; kk < 5; kk++) if ((used >> kk) & 1) e[30 + kk] += xd;
+    e[35] += xd * f35; e[36] += xd * f36; e[37] += xd * f37;
+  }
+  const float M = simd_max(m), scale = s > 0 ? exp(m - M) : 0.0f, S = simd_sum(s * scale);
+  for (uint f = 0; f < FS; f++) {
+    const float ef = simd_sum(e[f] * scale) / S, pf = simd_sum(psi[f]);
+    if (f % 32 == lane) diff[size_t(i) * FS + f] = pf - ef;
+  }
+  const float lt = simd_sum(owner ? lgTok : 0.0f);
+  if (lane == 0) ll[i] = lt - (M + log(S));
+}
+// dw [task][row][FS] = (task 0: scale0[row], else scale) sum over the row's draws (first[row] .. first[row + 1]) of its
+// advantage (task 0: 1, 1: a1, 2: a2) times diff, in order
+kernel void credit_rows(device const float *diff [[buffer(0)]], device const Draw *draws [[buffer(1)]], device const uint *first [[buffer(2)]],
+                        device const float *scale0 [[buffer(3)]], device float *dw [[buffer(4)]], constant uint &R [[buffer(5)]], constant float &scale [[buffer(6)]],
+                        uint gid [[thread_position_in_grid]]) {
+  if (gid >= 3 * R * FS) return;
+  const uint t = gid / (R * FS), row = gid / FS % R, f = gid % FS;
+  float acc = 0;
+  for (uint i = first[row]; i < first[row + 1]; i++) acc = fma(t == 0 ? 1.0f : t == 1 ? draws[i].a1 : draws[i].a2, diff[size_t(i) * FS + f], acc);
+  dw[gid] = acc * (t == 0 ? scale0[row] : scale);
+}

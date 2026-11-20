@@ -1,15 +1,29 @@
 // The runs in flight (route.h): a Runner's slots, each one transaction's simulator, its decision and tokens, its carried
 // state, and what the learning batch keeps of it; its forward buffers and network. A tick advances every listed run to
-// its next refresh (or its end: a finished run's credit is computed in the same parallel pass), runs one forward for the
+// its next refresh (or its end: a finished run's draws exported for the GPU's credit, in the same parallel pass), runs one forward for the
 // runs at a refresh, and answers them. The trainer's pool ticks its window groups continuously; a batch rollout (the
 // measurement, the checks) is ticks until its runs end.
 import Foundation
 import Metal
 
 struct Kept { var lanes: [Float]; var lanesUsed: Int; var tokens: [Float]; var contexts: Int }
+// a kept refresh's draws as the GPU's credit reads them (route.h route_draw): the records ordered by context, the
+// distinct contexts drawn from, each one's first record (and the count), each one's w at the refresh (FS each)
+struct PointDraws { var draws: [route_draw]; var ctx: [Int32]; var first: [Int32]; var w: [Float] }
+func exportDraws(_ sim: OpaquePointer, _ points: Int) -> [PointDraws] {
+  (0..<points).map { p in
+    let n = Int(route_sim_draw_count(sim, Int32(p)))
+    var d = [route_draw](repeating: route_draw(), count: max(n, 1)), ctx = [Int32](repeating: 0, count: n + 1), first = [Int32](repeating: 0, count: n + 1)
+    let rows = Int(route_sim_draws(sim, Int32(p), &d, &ctx, &first))
+    let wp = route_sim_w(sim, Int32(p))!
+    var w = [Float](repeating: 0, count: rows * FS)
+    for r in 0..<rows { for f in 0..<FS { w[r * FS + f] = wp[Int(ctx[r]) * FS + f] } }
+    return PointDraws(draws: Array(d[0..<n]), ctx: Array(ctx[0..<rows]), first: Array(first[0...rows]), w: w)
+  }
+}
 // one slot: a class each, so the parallel pass writes each slot's own object
 final class Slot {
-  var stream = route_stream(), state = [Float](repeating: 0, count: 2 * D), start: [Float] = [], kept: [Kept] = [], credit: [Float] = []
+  var stream = route_stream(), state = [Float](repeating: 0, count: 2 * D), start: [Float] = [], kept: [Kept] = [], draws: [PointDraws] = []
   var costs = route_costs(), counts = [UInt64](repeating: 0, count: 4)
   var answer: [Float] = [], answered = false   // the streaming pool's: its refresh's w, copied out of the batch's
 }
@@ -47,7 +61,7 @@ final class Runner {
   func begin(_ t: Int, window: route_window, mode: Int32, key0: UInt32, key: UInt32) {
     var s = slots[t].stream, w = window
     route_sim_begin(sims[t], &s, &w, mode, key0, key)
-    slots[t].kept = []; slots[t].credit = []; slots[t].start = slots[t].state
+    slots[t].kept = []; slots[t].draws = []; slots[t].start = slots[t].state
   }
   // a forward for `bd` runs (lanes, masks, states in the buffers) and `rows` context rows: w and the next states
   func forward(_ bd: Int, _ rowsUsed: Int) {
@@ -72,11 +86,7 @@ final class Runner {
       if got[k] == 0 {   // ended: its costs and counts; its credit, each refresh's (what the learning batch reads)
         let c0 = Date(), s = slots[t]
         route_sim_costs(sims[t], &s.costs); route_sim_counts(sims[t], &s.counts)
-        if keep {
-          var all: [Float] = []
-          for (p, d) in s.kept.enumerated() { var part = [Float](repeating: 0, count: TASKS * d.contexts * FS), ll = 0.0; route_sim_credit(sims[t], Int32(p), &part, &ll); all += part }
-          s.credit = all
-        }
+        if keep { s.draws = exportDraws(sims[t], s.kept.count) }
         cred[k] = Date().timeIntervalSince(c0)
       }
       spent[k] = Date().timeIntervalSince(a)
@@ -118,7 +128,7 @@ final class Runner {
 
   // ---- the streaming pool: every run on its own. Workers (all hardware threads but two: the main thread's, the
   // exchange's) take runs from the queue: answer the run's last refresh (if it has one), simulate to its next refresh
-  // or its end (its costs, counts and credit then made); the run goes to `awaiting` (a refresh) or `finished`. The main
+  // or its end (its costs, counts and draws then exported); the run goes to `awaiting` (a refresh) or `finished`. The main
   // thread forwards whatever awaits as one batch and queues those runs again; no run waits on another run. ----
   let lock = NSCondition()
   var queue: [Int] = [], awaiting: [Int] = [], finished: [Int] = [], workers: [Thread] = [], workerBusy = 0.0, streamSince = Date(), woken = false
@@ -148,9 +158,7 @@ final class Runner {
       if got == 0 {
         let c0 = Date()
         route_sim_costs(sims[t], &s.costs); route_sim_counts(sims[t], &s.counts)
-        var all: [Float] = []
-        for (p, d) in s.kept.enumerated() { var part = [Float](repeating: 0, count: TASKS * d.contexts * FS), ll = 0.0; route_sim_credit(sims[t], Int32(p), &part, &ll); all += part }
-        s.credit = all
+        s.draws = exportDraws(sims[t], s.kept.count)   // credit's inputs; the GPU computes it (net.metal credit_draws)
         c = Date().timeIntervalSince(c0)
       }
       let spent = Date().timeIntervalSince(a)

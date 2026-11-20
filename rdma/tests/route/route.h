@@ -121,6 +121,17 @@ void route_sim_credit(struct route_sim *x, int point, float *dw, double *loglik)
 int route_sim_points(const struct route_sim *x);
 int route_sim_contexts(const struct route_sim *x);
 float *route_sim_w(struct route_sim *x, int point);   /* refresh `point`'s stored w, which the credit reads */
+/* A draw as credit reads it (the GPU's credit kernels, net.metal): its table's quantities at the draw (each owed
+   destination's lanes' arrival estimates and validity), its group's mask, S, the out-degree and the table's size, the
+   drawn token, its learning row (set by the caller), the stream's unit, and its latency and queueing advantages (each
+   the piece against the other pieces of its flow posted at the same refresh, over the window's posted pieces). 160 bytes,
+   no padding: net.metal declares the same. */
+struct route_draw { float arrive[ROUTE_N][ROUTE_DEG]; uint32_t valid, mask, S, token, deg, ntok, row; float unit, a1, a2; };
+/* refresh `point`'s draws: route_sim_draw_count records; route_sim_draws writes them ordered by context (each context's
+   in its groups' order, each group's in its draws'), ctx[i] the i-th distinct context (ascending) and first[i] its first
+   record (first[n] the count); returns n, the distinct contexts. A record's row is its context's index i. */
+int route_sim_draw_count(const struct route_sim *x, int point);
+int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int *ctx, int *first);
 void route_sim_counts(const struct route_sim *x, uint64_t out[4]);   /* events, draws, table entries built, sends */
 
 /* The contexts of a stream's fabric, in the order the tokens and w are: (pattern, node, owed set) */

@@ -186,7 +186,7 @@ final class Net {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
     self.library = lib
-    for n in ["seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_pairs", "copy_floats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
+    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_pairs", "copy_floats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
       pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
     }
     let laneCap = runs * refreshes * L, cap = laneCap + contexts
@@ -376,10 +376,26 @@ final class Net {
 
   // a learning batch: the forward again, then the three tasks' gradients of sum(w . dw_t) (dw [3][R][FS]) into grads
   // [3][P], and their Gram matrix. seg [B K] (as pairs): each refresh's context rows (contiguous)
-  func learn(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, seg: [UInt32], B: Int, K: Int, R: Int, dw: MTLBuffer, w: MTLBuffer) {
+  // a learning batch's credit (route.h route_draw records; each row's draws first[row] .. first[row + 1], its behaviour
+  // w, its task-0 scale (its run's throughput advantage over the batch), the tasks' common scale)
+  struct Credit { let draws: MTLBuffer, count: Int, first: MTLBuffer, wrows: MTLBuffer, scale0: MTLBuffer, scale: Float }
+  var dwBuf: MTLBuffer? = nil, diffBuf: MTLBuffer? = nil, llBuf: MTLBuffer? = nil
+  func room(_ b: inout MTLBuffer?, _ bytes: Int, shared: Bool) -> MTLBuffer {   // grown when a batch needs more
+    if b == nil || b!.length < bytes { b = device.makeBuffer(length: max(16, bytes), options: shared ? .storageModeShared : .storageModePrivate)! }
+    return b!
+  }
+  func learn(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, seg: [UInt32], B: Int, K: Int, R: Int, credit c: Credit, w: MTLBuffer) {
+    let dw = room(&dwBuf, 3 * R * FS * 4, shared: true), diff = room(&diffBuf, c.count * FS * 4, shared: false), ll = room(&llBuf, c.count * 4, shared: true)
     let LR = B * K * L, N = LR + R, P = lay.count
     seg.withUnsafeBytes { memcpy(segBuf.contents(), $0.baseAddress!, $0.count) }
-    begin(); phase = "learn forward"
+    begin(); phase = "credit"
+    if c.count > 0 {   // each draw's score function, then each row's three tasks' dw
+      set("credit_draws", [(c.draws, 0), (c.wrows, 0), (diff, 0), (ll, 0)], [[UInt32(c.count)]]); threads(c.count * 32)
+    }
+    var sc = c.scale
+    set("credit_rows", [(diff, 0), (c.draws, 0), (c.first, 0), (c.scale0, 0), (dw, 0)], [[UInt32(R)]]); withUnsafeBytes(of: &sc) { e.setBytes($0.baseAddress!, length: 4, index: 6) }
+    threads(3 * R * FS)
+    phase = "learn forward"
     blit { $0.fill(buffer: self.dXM, range: 0..<(3 * N * D * 4), value: 0); $0.fill(buffer: self.grads, range: 0..<(3 * P * 4), value: 0) }
     encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch, keep: true)
     // readout: dX2 = rms's backward of dw out (fused), its codes; out's wgrad

@@ -658,3 +658,60 @@ void route_sim_credit(struct route_sim *x, int point, float *dw, double *loglik)
   }
   free(sums);
 }
+
+int route_sim_draw_count(const struct route_sim *x, int point) {
+  int n = 0;
+  for (uint32_t g = 0; g < x->ngroups; g++) if (x->groups[g].point == (uint32_t)point) n += (int)x->groups[g].count;
+  return n;
+}
+static int by_context(void *x, const void *a, const void *b) {   /* BSD qsort_r: the context first */
+  const struct group *g = x;
+  const uint32_t ca = g[*(const uint32_t *)a].context, cb = g[*(const uint32_t *)b].context;
+  return ca < cb ? -1 : ca > cb ? 1 : (*(const uint32_t *)a < *(const uint32_t *)b ? -1 : 1);
+}
+int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int *ctx, int *first) {
+  int n = 0, top = -1;
+  for (int p = 0; p < x->npieces; p++) { n += x->postpoint[p] >= 0; if (x->postpoint[p] > top) top = x->postpoint[p]; }
+  if (!n) n = 1;
+  const int width = top + 2;   /* each (flow, refresh posted at)'s sums, as route_sim_credit's */
+  double *sums = calloc((size_t)x->nflows * width * 3 + 1, sizeof(double));
+  uint32_t *order = malloc((x->ngroups + 1) * sizeof(uint32_t));
+  if (!sums || !order) abort();
+  for (int p = 0; p < x->npieces; p++) {
+    const int q = x->postpoint[p];
+    if (q < -1) continue;
+    double *e = sums + ((size_t)x->flowof[p] * width + q + 1) * 3;
+    e[0] += x->latency[p]; e[1] += x->queued[p]; e[2] += 1;
+  }
+  uint32_t ng = 0;
+  for (uint32_t g = 0; g < x->ngroups; g++) if (x->groups[g].point == (uint32_t)point && x->groups[g].count) order[ng++] = g;
+  qsort_r(order, ng, sizeof *order, x->groups, by_context);
+  const struct route_state *st = &x->state[point % ROUTE_POINTS];
+  int at = 0, rows = 0;
+  for (uint32_t i = 0; i < ng; i++) {
+    const struct group *q = &x->groups[order[i]];
+    const int c = (int)q->context, v = x->cv[c];
+    if (!rows || ctx[rows - 1] != c) { ctx[rows] = c; first[rows] = at; rows++; }
+    for (uint32_t m = 0; m < q->count; m++) {
+      const struct draw *d = &q->draws[m];
+      struct route_pre pre; route_pre_make(&x->s, st, &x->t, v, x->cS[c], &d->live, &pre);
+      struct route_draw *r = &out[at++];
+      memset(r, 0, sizeof *r);
+      for (int a = 0; a < ROUTE_N; a++) for (int k = 0; k < ROUTE_DEG; k++) { r->arrive[a][k] = (float)pre.arrive[a][k]; if (pre.valid[a][k]) r->valid |= 1u << (ROUTE_DEG * a + k); }
+      r->mask = q->mask; r->S = x->cS[c]; r->token = d->token; r->deg = (uint32_t)x->t.deg[v]; r->ntok = (uint32_t)route_tokens(&x->t, v, x->cS[c]);
+      r->row = (uint32_t)(rows - 1); r->unit = (float)x->s.unit;
+      const int p = (int)d->piece, q0 = x->postpoint[p];
+      if (q0 >= -1) {
+        const double *e = sums + ((size_t)x->flowof[p] * width + q0 + 1) * 3;
+        if (e[2] > 1) {
+          const double fl0 = x->s.op[x->flows[x->flowof[p]].op].floor;
+          r->a1 = (float)((x->latency[p] - (e[0] - x->latency[p]) / (e[2] - 1)) / n);
+          r->a2 = (float)((x->queued[p] - (e[1] - x->queued[p]) / (e[2] - 1)) / fl0 / n);
+        }
+      }
+    }
+  }
+  first[rows] = at;
+  free(sums); free(order);
+  return rows;
+}
