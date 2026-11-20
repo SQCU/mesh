@@ -16,8 +16,10 @@
 # - the objective is a smooth maximum over (commodity, destination) of the area above its delivered fraction (the
 #   time it waits, on average, for its bytes), over the floor.
 #
-# The policy is the C model's architecture (mesh-switch.h): a 64-wide residual stream through two layers of a GRU block
-# and a feed-forward block expanding to 192, recurrent over refreshes, with a candidate tower dotted against it.
+# The policy: a 64-wide residual stream through two layers of a GRU block and a feed-forward block expanding to 192,
+# recurrent over refreshes. Each candidate tree reaches it as N low-bit node tokens (parent, in-lane queue level, rate
+# band), embedded with RoPE positions at the embedding only, pooled, and one feed-forward block; its logit is that
+# dotted with the stream.
 #
 # Reported each LOG steps, without gradients, on held-out scenarios: the true completion (the first slot at which every
 # destination holds every byte) over the floor, for the policy, for all traffic on the unloaded shortest-path tree, and
@@ -32,7 +34,8 @@ import mlx.optimizers as optim
 
 N, L, K, PAGE = 6, 30, 8, 16384.0   # nodes, lanes, candidates a commodity, page bytes
 SLOTS, REFRESH, H = 480, 8, 16      # slots a rollout, slots between refreshes, the latency ring's depth
-CTX, CAND, D, E = 12, 12, 64, 192
+CTX, D, E = 12, 64, 192
+VOCAB = (N + 2) * 16 * 4   # a node's token: its parent (a node, the source, or out), its in-lane's queue level, its rate band
 
 def scenario(rng, kind):
     n = int(rng.integers(3, 7)); relays = min(int(rng.integers(0, 3)), n - 2); compute = list(range(n - relays))
@@ -127,16 +130,22 @@ class Block(nn.Module):
         return x + self.down(nn.relu(self.up(x))), h
 
 class Policy(nn.Module):
+    """A candidate tree is its N node tokens, embedded, rotated by their node's position (RoPE, at the embedding only),
+    pooled, then one feed-forward block. The stream: the node's context and the embedding of its last weighting's
+    expected choice, through two layers of a GRU block (recurrent over refreshes) and a feed-forward block."""
     def __init__(self):
         super().__init__()
-        self.inp = nn.Linear(CTX + CAND, D); self.blocks = [Block(), Block()]
-        self.cin = nn.Linear(CAND, D); self.cup = nn.Linear(D, E); self.cdown = nn.Linear(E, D)
-    def __call__(self, context, last, cand, state):
+        self.inp = nn.Linear(CTX + D, D); self.blocks = [Block(), Block()]
+        self.tok = nn.Embedding(VOCAB, D); self.cup = nn.Linear(D, E); self.cdown = nn.Linear(E, D)
+    def __call__(self, context, last, tokens, state):
         x = self.inp(mx.concatenate([context, last], -1)); hs = []
         for blk, h in zip(self.blocks, state):
             x, h = blk(x, h); hs.append(h)
-        e = self.cin(cand); e = e + self.cdown(nn.relu(self.cup(e)))           # [M, K, D]
-        return (e @ x[:, :, None])[..., 0] / 8.0, hs                           # logits [M, K]
+        M = tokens.shape[0]
+        e = mx.fast.rope(self.tok(tokens).reshape(M * K, N, D), D, traditional=False, base=10000.0, scale=1.0, offset=0)
+        e = e.reshape(M, K, N, D).mean(-2)
+        e = e + self.cdown(nn.relu(self.cup(e)))                               # [M, K, D]
+        return (e @ x[:, :, None])[..., 0] / 8.0, hs, e                        # logits [M, K]
 
 def rollout(policy, a, mode):
     """the fluid model's rollout; mode 'policy', 'spt' (all on candidate 0) or 'uniform'. Returns the objective and
@@ -154,7 +163,7 @@ def rollout(policy, a, mode):
     outcap = (cap[:, None, :] * (a['lsrc'][:, None, :] == a['src'][..., None]) * a['lvalid'][:, None, :]).sum(-1)  # [B, J]
     arrived = mx.zeros((B, J, K, N)); sent = mx.zeros((B, J, K, N)); assigned = mx.zeros((B, J, K))
     released = mx.zeros((B, J)); bg = a['bg']; hist = [mx.zeros((B, J, K, N))] * H
-    p = mx.full((B, J, K), 1.0 / K); state = [mx.zeros((B * J, D)), mx.zeros((B * J, D))]; last = mx.zeros((B * J, CAND))
+    p = mx.full((B, J, K), 1.0 / K); state = [mx.zeros((B * J, D)), mx.zeros((B * J, D))]; last = mx.zeros((B * J, D))
     area = mx.zeros((B, J, N)); done = mx.full((B,), float(SLOTS)); total = mx.zeros((B, J, N))
     if mode == 'spt': p = mx.concatenate([mx.ones((B, J, 1)), mx.zeros((B, J, K - 1))], -1)
     # unloaded completion of each candidate: depth latency, a feature
@@ -166,28 +175,23 @@ def rollout(policy, a, mode):
         want = laneq + bg
         share = mx.minimum(1.0, cap / mx.maximum(want, 1e-3))
         if mode == 'policy' and t % REFRESH == 0:
-            # the policy's inputs, from the fluid state now
+            # the policy's inputs, from the fluid state now: each candidate's node tokens
             qtime = want / mx.maximum(rate, 1e-6)                                # ns of queue a lane
             lq = mx.take_along_axis(qtime[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1) * edge
             lr = mx.take_along_axis(rate[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1)
-            ll = mx.take_along_axis(lat[:, None, None, :].broadcast_to((B, J, K, L)), laneg, -1) * edge
-            unloaded = (ll + PAGE / mx.maximum(lr, 1e-6) * edge).sum(-1) / floor[:, None, None]
-            loaded = (ll + lq + PAGE / mx.maximum(lr, 1e-6) * edge).sum(-1) / floor[:, None, None]
-            sends = edge.sum(-1)
-            cand = mx.stack([unloaded, loaded, sends / 8, sends / 8, lq.sum(-1) / floor[:, None, None], lq.max(-1) / floor[:, None, None],
-                             mx.where(edge > 0, lr, 1e3).min(-1) / 10, lq.max(-1) / floor[:, None, None],
-                             mx.zeros_like(unloaded), mx.zeros_like(unloaded),
-                             (mx.arange(K) == 0)[None, None, :].broadcast_to(unloaded.shape).astype(mx.float32),
-                             (mx.arange(K) > 0)[None, None, :].broadcast_to(unloaded.shape).astype(mx.float32)], -1)  # [B, J, K, CAND]
+            parent = mx.where(edge > 0, a['tail'], mx.where(nodes[None, None, None, :] == a['src'][:, :, None, None], N, N + 1))
+            qlevel = mx.clip(mx.floor(mx.log2(1 + 64 * lq / floor[:, None, None, None])), 0, 15).astype(mx.int32)
+            rband = mx.clip(mx.floor(mx.log2(mx.maximum(lr, 1.0))) - 2, 0, 3).astype(mx.int32) * (edge > 0)
+            tokens = (parent * 64 + qlevel * 4 + rband).astype(mx.int32)       # [B, J, K, N]
             ownq = ((qtime[:, None, :] * (a['lsrc'][:, None, :] == a['src'][..., None])).sum(-1)) / floor[:, None]
             ctx = mx.stack([mx.log1p(a['S'] / PAGE)[:, None].broadcast_to((B, J)), mx.full((B, J), 1.0), mx.full((B, J), t / SLOTS * 1.0),
                             ownq, ownq, (a['lsrc'][:, None, :] == a['src'][..., None]).sum(-1) / 8.0, mx.full((B, J), K / 8.0),
                             dest.sum(-1) / 8, (rate.sum(-1) / mx.maximum(a['lvalid'].sum(-1), 1) / 10)[:, None].broadcast_to((B, J)),
                             (lat.sum(-1) / mx.maximum(a['lvalid'].sum(-1), 1) / 1e4)[:, None].broadcast_to((B, J)),
                             a['kind'][:, None].broadcast_to((B, J)), (a['phase'] == 2).astype(mx.float32)], -1)
-            logits, state = policy(ctx.reshape(B * J, CTX), last, cand.reshape(B * J, K, CAND), state)
+            logits, state, emb = policy(ctx.reshape(B * J, CTX), last, tokens.reshape(B * J, K, N), state)
             p = mx.softmax(logits, -1).reshape(B, J, K)
-            last = (p[..., None] * cand).sum(-2).reshape(B * J, CAND)
+            last = (p.reshape(B * J, K)[..., None] * emb).sum(-2)
         # release at sources: pool = demand (or an owner's reduced bytes) less released, at the out-lanes' rate
         if True:
             got = (arrived * dest[:, :, None, :]).sum(2)                        # [B, J, N] delivered
