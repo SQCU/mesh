@@ -2,12 +2,13 @@
    CPU forward, stages.swift's and model.swift's checks) rather than restating them.
    A product C = A B^T over a reduction of K terms, int8 x int8 -> int32:
    - quantizing a 64-block of values x (an activation row's 64 columns, or a weight row's): the block's 12-bit grid,
-     m0 = max|x|, xi = rint(x 2047 / m0) (integers |xi| <= 2047, exact in fp16); rotated by the Walsh-Hadamard matrix
-     H (64 x 64, entries +-1, unnormalized): y = H xi, integers |y| <= 64 2047 < 2^24, so any order of the sum gives the
+     m0 = max|x|, xi = rint(x gi), gi the power of two putting m0 gi in [1024, 2048) (integers |xi| <= 2048, exact in
+     fp16); rotated by the Walsh-Hadamard matrix H (64 x 64, entries +-1, unnormalized): y = H xi, integers
+     |y| <= 64 2048 < 2^24, so any order of the sum gives the
      same fp32 bits (the GPU multiplies by H on its matrix units, fp16 operands, fp32 accumulation; the CPU by the
      butterfly i8_fwht64); m = max|y|, codes q = y 127 / m to nearest (even) or stochastically (floor(x + u), u 16 bits
      of i8_mix of the element pair's index and a seed: unbiased below 2^-17 of a step), clamped to +-127 (i8_code);
-     the scale s = m m0 / (2047 127 k) (i8_scale), so q s ~ H x / k: k = 8 for a 64-block (H^T H = 64 I = 8 8);
+     the scale s = m step / (127 k) (i8_scale, step = 1 / gi), so q s ~ H x / k: k = 8 for a 64-block (H^T H = 64 I = 8 8);
    - activations: a scale a (row, 64-block): every block of a row its own grid and scale (i8_quantize_blocks), so a
      product over K > 64 is a sum of K / 64 exact int32 block sums, each scaled: out = addend, then for each block
      out = fma(float(sum_b) sa_b, sb, out) (i8_acc; one block: i8_out, addend the bias, or the residual plus the bias);
@@ -29,6 +30,7 @@
 #else
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 #define I8_RINT(x) rintf(x)
 #define I8_FLOOR(x) floorf(x)
 #define I8_FMA(a, b, c) fmaf(a, b, c)
@@ -39,10 +41,36 @@
 enum { I8_BLOCK = 64, I8_WBLOCK = 32, I8_GRID = 2047 };
 
 static inline uint32_t i8_mix(uint32_t h) { h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16; return h; }
-static inline float i8_grid_inverse(float m0) { return m0 > 0 ? I8_DIV(2047.0f, m0) : 0.0f; }   /* xi = rint(x i8_grid_inverse(m0)) */
+/* the grid: a power of two (no divide), gi = 2^(10 - e) for m0 in [2^e, 2^(e+1)), so m0 gi in [1024, 2048) and the
+   grid integers |xi| <= 2048 (exact in fp16; 64 of them sum below 2^24); its step 1 / gi */
+static inline uint32_t i8_bits(float x) {
+#ifdef __METAL_VERSION__
+  return as_type<uint32_t>(x);
+#else
+  uint32_t b; memcpy(&b, &x, 4); return b;
+#endif
+}
+static inline float i8_from_bits(uint32_t b) {
+#ifdef __METAL_VERSION__
+  return as_type<float>(b);
+#else
+  float x; memcpy(&x, &b, 4); return x;
+#endif
+}
+static inline uint32_t i8_grid_exponent(float m0) { const uint32_t e = (i8_bits(m0) >> 23) & 0xffu; return e < 11u ? 11u : e > 243u ? 243u : e; }
+static inline float i8_grid_inverse(float m0) { return m0 > 0 ? i8_from_bits((264u - i8_grid_exponent(m0)) << 23) : 0.0f; }   /* xi = rint(x gi) */
+static inline float i8_grid_step(float m0) { return i8_from_bits((i8_grid_exponent(m0) - 10u) << 23); }
 static inline float i8_grid(float x, float gi) { return I8_RINT(x * gi); }
-static inline float i8_inverse(float m) { return m > 0 ? I8_DIV(127.0f, m) : 0.0f; }   /* codes = y i8_inverse(max|y|) */
-static inline float i8_scale(float m, float m0, float k) { return I8_DIV(m * m0, 259969.0f * k); }   /* 259969 = 2047 127 */
+/* 1 / m for m >= 1 (the rotated grid's largest magnitude, an integer): the bit estimate and three Newton steps by fma
+   (act.h's reciprocal), the same operations on every platform */
+static inline float i8_recip(float y) {
+  float r = i8_from_bits(0x7ef311c7u - i8_bits(y));
+  for (int i = 0; i < 3; i++) r = I8_FMA(r, I8_FMA(-y, r, 1.0f), r);
+  return r;
+}
+static inline float i8_inverse(float m) { return m > 0 ? 127.0f * i8_recip(m) : 0.0f; }   /* codes = y i8_inverse(max|y|), clamped */
+/* the codes' scale: q s ~ H x / k, s = m step / (127 k) (two roundings, the constant 1 / (127 k) a float) */
+static inline float i8_scale(float m, float m0, float k) { return m * i8_grid_step(m0) * (1.0f / (127.0f * k)); }
 /* the stochastic uniform of element `at`: one hash a pair of elements (at, at ^ 1), its low 16 bits element 2j's, its
    high 16 bits 2j + 1's */
 static inline float i8_uniform(uint32_t seed, uint32_t at) {

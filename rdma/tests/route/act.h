@@ -53,10 +53,9 @@ static inline float act_tanh(float x) {
   if (x > -0.0625f && x < 0.0625f) { const float q = x * x; return ACT_FMA(x * q, ACT_FMA(q, 0.133333333f, -0.333333333f), x); }
   return 1.0f - 2.0f * act_recip(act_exp(2.0f * x) + 1.0f);
 }
-/* the readout's 1 / rms over D = 64 values from their grid (m0 their largest magnitude, isum the grid integers' squares'
-   exact sum): the grid's step u = m0 / 2047, mean square isum u^2 / 64 */
-static inline float act_rms_inverse(int isum, float m0) {
-  const float u = ACT_DIV(m0, 2047.0f);
+/* the readout's 1 / rms over D = 64 values from their grid (u the grid's step, int8mm.h's i8_grid_step; isum the grid
+   integers' squares' exact sum): mean square isum u^2 / 64 */
+static inline float act_rms_inverse(int isum, float u) {
   return ACT_DIV(1.0f, ACT_SQRT(ACT_FMA((float)isum * (u * u), 0.015625f, 1e-6f)));
 }
 #endif

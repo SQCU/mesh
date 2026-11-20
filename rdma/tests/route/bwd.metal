@@ -17,19 +17,18 @@ enum : uint { S_OUT = 1, S_DOWN1, S_UP1, S_ZH1, S_DOWN0, S_UP0, S_ZH0, S_INP, S_
 // a block's codes (in X's room) through a dgrad block: acc += (or =) codes . W's block (wb: its rows' 64-block jj)
 static inline void dgrad_block(thread CF &acc, thread const CF &v, MatW m, uint jj, bool first, threadgroup half *X, device const half *H, device const int8_t *wq,
                                device const float *wsc, Lay a, uint seed, uint row0, uint cols) {
-  float s[4]; CI c;
-  quant(v, (threadgroup int8_t *)X, 64, X, H, s, a, seed, row0, cols, 64 * jj, nullptr, nullptr);
-  product(c, (threadgroup int8_t *)X, 64, wq + m.wb + 64 * jj, m.kb); epi(acc, c, s, wsc + m.wbs, nullptr, a, !first);
-  simdgroup_barrier(mem_flags::mem_threadgroup);
+  float s[4]; CI c; LI A;
+  quant(v, A, H, s, a, seed, row0, cols, 64 * jj, nullptr, nullptr);
+  product(c, A, wq + m.wb + 64 * jj, m.kb); epi(acc, c, s, wsc + m.wbs, nullptr, a, !first);
 }
 // the feed-forward back: x = dL/dx' (its codes in A with sa) -> x + (relu' (x down)) up; up's dY codes, mask bits from
 // mw (row stride mstride; live rows only)
-static inline void ffn_back(thread CF &x, threadgroup int8_t *A, threadgroup half *X, threadgroup float *cm, thread const float *sa, MatW mu, MatW md,
+static inline void ffn_back(thread CF &x, thread LI &Ax, threadgroup half *X, threadgroup float *cm, thread const float *sa, MatW mu, MatW md,
                             device const int8_t *wq, device const float *wsc, device const half *H, Lay a, device const uint *mw, uint mstride, uint nv,
                             device int8_t *gq, device float *gs, MatG gu, uint task, uint RT, uint row0, uint seedc, uint seedr) {
   for (uint jj = 0; jj < 3; jj++) {
     CI c; CF du;
-    product(c, A, 64, wq + md.wb + 64 * jj * md.kb, md.kb); epi(du, c, sa, wsc + md.wbs + 64 * jj, nullptr, a, false);
+    product(c, Ax, wq + md.wb + 64 * jj * md.kb, md.kb); epi(du, c, sa, wsc + md.wbs + 64 * jj, nullptr, a, false);
     _Pragma("unroll") for (ushort i = 0; i < NE; i++) { const uint row = row_of(a, i); if (row >= nv || !mask_bit(mw + row * mstride, 64 * jj + col_of(a, i))) du[i] = 0; }
     ycodes(du, gq, gs, gu, E, task, jj, RT, row0, seedc, X, cm, H, a);
     dgrad_block(x, du, mu, jj, false, X, H, wq, wsc, a, seedr, row0, E);
@@ -51,18 +50,13 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
   const uint nv = min(TR, p.R - r0);
   int ref[4];
   for (uint s = 0; s < 4; s++) { const uint r = r0 + row_s(a, s); ref[s] = r < p.R ? pos[r] / int(L) : -1; }
-  CF x;
-  _Pragma("unroll") for (ushort i = 0; i < NE; i += 4) {
-    const uint col = col_of(a, i), r = r0 + row_of(a, i);
-    const float4 v = r < p.R && col < FS ? *(device const float4 *)(dw + (size_t(task) * p.R + r) * FS + col) : float4(0);
-    for (ushort q = 0; q < 4; q++) x[i + q] = v[q];
-  }
+  CF x; tile_load(x, dw + (size_t(task) * p.R + r0) * FS, FS, nv, FS);
   ycodes(x, gq, gs, gr.m[M_OUT], FS, task, 0, RT, g0, seed_of(p.seed, S_OUT + 64, task), X, cm, H, a);
-  float sa[4];
-  quant(x, A, 64, X, H, sa, a, seed_of(p.seed, S_OUT, task), g0, 64, 0, nullptr, nullptr);
+  float sa[4]; LI Ax;
+  quant(x, Ax, H, sa, a, seed_of(p.seed, S_OUT, task), g0, 64, 0, nullptr, nullptr);
   // the readout back: dn = dw out, then rms's backward dx2 = inv (dn - n mean(dn . n))
   { const MatW m = nw.m[M_OUT]; CI c;
-    product(c, A, 64, wq + m.wb, m.kb); epi(x, c, sa, wsc + m.wbs, nullptr, a, false);
+    product(c, Ax, wq + m.wb, m.kb); epi(x, c, sa, wsc + m.wbs, nullptr, a, false);
     CF nn, q;
     _Pragma("unroll") for (ushort i = 0; i < NE; i++) { const uint r = r0 + row_of(a, i); nn[i] = r < p.R ? cn[size_t(r) * D + col_of(a, i)] : 0.0f; q[i] = x[i] * nn[i]; }
     RF rs; reduce_rows(q, rs, reduction_operation::sum, 0.0f);
@@ -74,8 +68,8 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     const uint sd = l ? S_DOWN1 : S_DOWN0, su = l ? S_UP1 : S_UP0, sz = l ? S_ZH1 : S_ZH0;
     // x: dL/dx_{l+1}: down's dY; its codes; the feed-forward back: dxm
     ycodes(x, gq, gs, gr.m[down], D, task, 0, RT, g0, seed_of(p.seed, sd + 64, task), X, cm, H, a);
-    quant(x, A, 64, X, H, sa, a, seed_of(p.seed, sd, task), g0, 64, 0, nullptr, nullptr);
-    ffn_back(x, A, X, cm, sa, nw.m[up], nw.m[down], wq, wsc, H, a, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[up], task, RT, g0,
+    quant(x, Ax, H, sa, a, seed_of(p.seed, sd, task), g0, 64, 0, nullptr, nullptr);
+    ffn_back(x, Ax, X, cm, sa, nw.m[up], nw.m[down], wq, wsc, H, a, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[up], task, RT, g0,
              seed_of(p.seed, su + 64, task), seed_of(p.seed, su, task));
     // the step back through the context's state (h = hp + z (h~ - hp)): the gates' gradients and hp's
     CF dz, dc, dh;
@@ -204,9 +198,9 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
   dgrad_block(x, dc, nw.m[M_ZH1], 1, false, X, H, wq, wsc, a, seed_of(p.seed, S_LZH1, task), row0, 128);
   // x1's gradient: down0's dY; layer 0's feed-forward back
   ycodes(x, gq, gs, gr.m[M_DOWN0], D, task, 0, RT, row0, seed_of(p.seed, S_LDOWN0 + 64, task), X, cm, H, a);
-  float sa[4];
-  quant(x, A, 64, X, H, sa, a, seed_of(p.seed, S_LDOWN0, task), row0, 64, 0, nullptr, nullptr);
-  ffn_back(x, A, X, cm, sa, nw.m[M_UP0], nw.m[M_DOWN0], wq, wsc, H, a, lu + size_t(row0) * 6, 6, live ? TR : 0, gq, gs, gr.m[M_UP0], task, RT, row0,
+  float sa[4]; LI Ax;
+  quant(x, Ax, H, sa, a, seed_of(p.seed, S_LDOWN0, task), row0, 64, 0, nullptr, nullptr);
+  ffn_back(x, Ax, X, cm, sa, nw.m[M_UP0], nw.m[M_DOWN0], wq, wsc, H, a, lu + size_t(row0) * 6, 6, live ? TR : 0, gq, gs, gr.m[M_UP0], task, RT, row0,
            seed_of(p.seed, S_LUP0 + 64, task), seed_of(p.seed, S_LUP0, task));
   // layer 0: the recurrence back from xm0's gradient (every position) and the contexts'
   _Pragma("unroll") for (ushort i = 0; i < NE; i++) u[i] = (live ? x[i] : 0.0f) + (row_of(a, i) == L - 1 ? inj[0][cslot(i)] : 0.0f);

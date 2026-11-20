@@ -99,7 +99,7 @@ void route_forward_context(const struct route_params *p, const float *token, con
   for (int d = 0; d < D; d++) m0 = fmaxf(m0, fabsf(cx[d]));
   const float gi = i8_grid_inverse(m0);
   for (int d = 0; d < D; d++) { const int z = (int)i8_grid(cx[d], gi); isum += z * z; }
-  product_row_scaled(&p->out, cx, w, 0, 0, act_rms_inverse(isum, m0));
+  product_row_scaled(&p->out, cx, w, 0, 0, act_rms_inverse(isum, i8_grid_step(m0)));
 }
 /* one refresh, every context (the trainer's check, DEPLOY): the lanes, then each context */
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *s) {

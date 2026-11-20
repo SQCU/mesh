@@ -49,14 +49,18 @@ typedef tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline> TgH;
 typedef tensor<device half, dextents<int32_t, 2>, tensor_inline> DevH;
 typedef matmul2d<matmul2d_descriptor(TR, 64, 64, false, true), execution_simdgroup> Op;    // A [32][64] . W [64][64]^T
 typedef matmul2d<matmul2d_descriptor(64, TR, TR, true, false), execution_simdgroup> OpT;   // X^T [64][32] . H32 [32][32]
-typedef decltype(Op().get_destination_cooperative_tensor<TgI8, DevI8, int32_t>()) CI;
-typedef decltype(Op().get_destination_cooperative_tensor<TgI8, DevI8, float>()) CF;
+// a chain's operands in registers: the codes an int8 left input, the grid an fp16 left input (their layouts the
+// destination's, checked by stages), so a product's output feeds the next product with no memory between them
+typedef decltype(Op().get_left_input_cooperative_tensor<int8_t, int8_t, int32_t>()) LI;
+typedef decltype(Op().get_left_input_cooperative_tensor<half, half, float>()) LH;
+typedef decltype(Op().get_destination_cooperative_tensor<LI, DevI8, int32_t>()) CI;
+typedef decltype(Op().get_destination_cooperative_tensor<LI, DevI8, float>()) CF;
 typedef decltype(Op().get_destination_cooperative_tensor<TgI8, DevI8, half>()) CHh;
-typedef decltype(Op().get_destination_cooperative_tensor<TgH, DevH, float>()) CY;
-typedef decltype(Op().get_row_reduction_destination_cooperative_tensor<TgI8, DevI8, float>()) RF;
-typedef decltype(Op().get_row_reduction_destination_cooperative_tensor<TgI8, DevI8, int32_t>()) RI;
-typedef decltype(Op().get_row_reduction_destination_cooperative_tensor<TgH, DevH, float>()) RY;
-typedef decltype(Op().get_column_reduction_destination_cooperative_tensor<TgI8, DevI8, float>()) CR;
+typedef decltype(Op().get_destination_cooperative_tensor<LH, DevH, float>()) CY;
+typedef decltype(Op().get_row_reduction_destination_cooperative_tensor<LI, DevI8, float>()) RF;
+typedef decltype(Op().get_row_reduction_destination_cooperative_tensor<LI, DevI8, int32_t>()) RI;
+typedef decltype(Op().get_row_reduction_destination_cooperative_tensor<LH, DevH, float>()) RY;
+typedef decltype(Op().get_column_reduction_destination_cooperative_tensor<LI, DevI8, float>()) CR;
 typedef decltype(OpT().get_destination_cooperative_tensor<TgH, TgH, float>()) CT;
 typedef decltype(OpT().get_row_reduction_destination_cooperative_tensor<TgH, TgH, float>()) RT_;
 enum : ushort { NE = 64 };   // a thread's elements of a chunk
@@ -76,20 +80,34 @@ static inline uint col_j(Lay a, uint j) { return a.cb + (j & 3) + 16 * (j >> 2);
 // 16 ((i >> 3) & 1) (nb = cb), column m = r + 8 tslot(i)
 static inline uint tslot(ushort i) { return ((i >> 2) & 1) | ((i >> 4) << 1); }
 
-// one 64 x 64 block product into c: A [32][64 at lda] (threadgroup) . w's 64 rows of 64 codes (at ldw)
-static inline void product(thread CI &c, threadgroup int8_t *A, uint lda, device const int8_t *w, uint ldw) {
-  TgI8 tA(A, dextents<int32_t, 2>(64, TR), array<int32_t, 2>{1, int(lda)});
+// one 64 x 64 block product into c: codes A (32 x 64, registers) . w's 64 rows of 64 codes (at ldw)
+static inline void product(thread CI &c, thread LI &A, device const int8_t *w, uint ldw) {
   DevI8 tW((device int8_t *)w, dextents<int32_t, 2>(64, 64), array<int32_t, 2>{1, int(ldw)});
-  Op op; op.run(tA, tW, c);
+  Op op; op.run(A, tW, c);
+}
+typedef tensor<device float, dextents<int32_t, 2>, tensor_inline> DevF;
+typedef tensor<device half, dextents<int32_t, 2>, tensor_inline> DevHf;
+// a column vector (64 floats) broadcast over the tile's rows, by the cooperative tensor's own load (measured 4x the
+// per-element loads' rate: x/sgb b30 against b28)
+static inline void colvec(thread CF &v, device const float *p) { DevF t((device float *)p, dextents<int32_t, 2>(64, TR), array<int32_t, 2>{1, 0}); v.load(t); }
+// a tile's rows of a row-major matrix (64 columns at ld, `rows` live rows, `cols` live columns; the rest 0) in and out
+static inline void tile_load(thread CF &v, device const float *p, uint ld, uint rows, uint cols) {
+  _Pragma("unroll") for (ushort i = 0; i < NE; i++) v[i] = 0;
+  if (rows) { DevF t((device float *)p, dextents<int32_t, 2>(cols, rows), array<int32_t, 2>{1, int(ld)}); v.load(t); }
+}
+static inline void tile_store(thread const CF &v, device float *p, uint ld, uint rows, uint cols) {
+  if (rows) { DevF t(p, dextents<int32_t, 2>(cols, rows), array<int32_t, 2>{1, int(ld)}); v.store(t); }
+}
+static inline void tile_store_half(thread const CF &v, device half *p, uint ld, uint rows) {
+  CHh h; _Pragma("unroll") for (ushort i = 0; i < NE; i++) h[i] = half(v[i]);
+  if (rows) { DevHf t(p, dextents<int32_t, 2>(64, rows), array<int32_t, 2>{1, int(ld)}); h.store(t); }
 }
 // f = fma(float(sum) sa[row], sb[col], add): add a column vector (bias, or 0) or, with acc, f itself (i8_acc)
 static inline void epi(thread CF &f, thread const CI &c, thread const float *sa, device const float *sb, device const float *bias, Lay a, bool acc) {
-  _Pragma("unroll") for (ushort i = 0; i < NE; i += 4) {
-    const uint col = col_of(a, i);
-    const float4 s = *(device const float4 *)(sb + col);
-    const float4 b = acc ? float4(0) : bias ? *(device const float4 *)(bias + col) : float4(0);
-    _Pragma("unroll") for (ushort k = 0; k < 4; k++) f[i + k] = fma(float(c[i + k]) * sa[slot(i)], s[k], acc ? f[i + k] : b[k]);
-  }
+  CF s; colvec(s, sb);
+  if (acc) { _Pragma("unroll") for (ushort i = 0; i < NE; i++) f[i] = fma(float(c[i]) * sa[slot(i)], s[i], f[i]); }
+  else if (bias) { CF b; colvec(b, bias); _Pragma("unroll") for (ushort i = 0; i < NE; i++) f[i] = fma(float(c[i]) * sa[slot(i)], s[i], b[i]); }
+  else { _Pragma("unroll") for (ushort i = 0; i < NE; i++) f[i] = fma(float(c[i]) * sa[slot(i)], s[i], 0.0f); }
 }
 // rows' largest |v| (four: the thread's row slots)
 static inline void row_absmax(thread const CF &v, thread float *m) {
@@ -97,38 +115,38 @@ static inline void row_absmax(thread const CF &v, thread float *m) {
   RF rm; reduce_rows(g, rm, reduction_operation::max, 0.0f);
   _Pragma("unroll") for (ushort s = 0; s < 4; s++) m[s] = rm[s];
 }
-// a chunk's rows quantized (int8mm.h's 64-block): codes into A (at lda, columns 0..63), scales sa[4]; seed 0 to
-// nearest, else stochastic at index (row0 + row) cols + c0 + column. X: the SIMD group's fp16 scratch (A may alias it).
-// isum (if given): the grid integers' squares' sums a row (act.h's rms); m0 (if given): the rows' absmax
-static inline void quant(thread const CF &v, threadgroup int8_t *A, uint lda, threadgroup half *X, device const half *H, thread float *sa, Lay a,
+// a chunk's rows quantized (int8mm.h's 64-block): codes into A, scales sa[4]; seed 0 to nearest, else stochastic at
+// index (row0 + row) cols + c0 + column. isum (if given): the grid integers' squares' sums a row (act.h's rms); m0
+// (if given): the rows' absmax
+static inline void quant(thread const CF &v, thread LI &A, device const half *H, thread float *sa, Lay a,
                          uint seed, uint row0, uint cols, uint c0, thread int *isum, thread float *m0out) {
   float m0[4], gi[4];
   row_absmax(v, m0);
   _Pragma("unroll") for (ushort s = 0; s < 4; s++) { gi[s] = i8_grid_inverse(m0[s]); if (m0out) m0out[s] = m0[s]; }
-  CHh hx;
+  Op op; LH hx = op.get_left_input_cooperative_tensor<half, half, float>();
   _Pragma("unroll") for (ushort i = 0; i < NE; i++) hx[i] = half(i8_grid(v[i], gi[slot(i)]));
   if (isum) {
     CI q; _Pragma("unroll") for (ushort i = 0; i < NE; i++) { const int z = int(hx[i]); q[i] = z * z; }
     RI rs; reduce_rows(q, rs, reduction_operation::sum, 0);
     _Pragma("unroll") for (ushort s = 0; s < 4; s++) isum[s] = rs[s];
   }
-  TgH tX(X, dextents<int32_t, 2>(64, TR));
-  hx.store(tX);
-  simdgroup_barrier(mem_flags::mem_threadgroup);
   DevH tH((device half *)H, dextents<int32_t, 2>(64, 64));
-  Op op; CY y; op.run(tX, tH, y);
+  CY y; op.run(hx, tH, y);
   CY g; _Pragma("unroll") for (ushort i = 0; i < NE; i++) g[i] = abs(y[i]);
   RY rm; reduce_rows(g, rm, reduction_operation::max, 0.0f);
   float inv[4];
   _Pragma("unroll") for (ushort s = 0; s < 4; s++) { inv[s] = i8_inverse(rm[s]); sa[s] = i8_scale(rm[s], m0[s], 8.0f); }
-  simdgroup_barrier(mem_flags::mem_threadgroup);
-  _Pragma("unroll") for (ushort i = 0; i < NE; i += 4) {
-    const uint col = col_of(a, i), row = row_of(a, i), at = (row0 + row) * cols + c0 + col;
-    uint w = 0;
-    _Pragma("unroll") for (ushort k = 0; k < 4; k++) w |= uint(uchar(i8_code(y[i + k], inv[slot(i)], seed, at + k))) << (8 * k);
-    *(threadgroup uint *)(A + row * lda + col) = w;
+  if (seed) {
+    _Pragma("unroll") for (ushort i = 0; i < NE; i += 2) {   // a pair's hash shared (int8mm.h)
+      const uint at = (row0 + row_of(a, i)) * cols + c0 + col_of(a, i);
+      const uint h = i8_mix(seed ^ ((at >> 1) * 0x9e3779b1u));
+      const float x0 = y[i] * inv[slot(i)], x1 = y[i + 1] * inv[slot(i)];
+      A[i] = int8_t(clamp(floor(x0 + float(h & 0xffffu) * (1.0f / 65536.0f)), -127.0f, 127.0f));
+      A[i + 1] = int8_t(clamp(floor(x1 + float(h >> 16) * (1.0f / 65536.0f)), -127.0f, 127.0f));
+    }
+  } else {
+    _Pragma("unroll") for (ushort i = 0; i < NE; i++) A[i] = int8_t(rint(y[i] * inv[slot(i)]));   // |y inv| <= 127: no clamp needed
   }
-  simdgroup_barrier(mem_flags::mem_threadgroup);
 }
 // the wgrad codes of a chunk's columns (int8mm.h's 32-block, scale k: 4 X's, 8 dY's): into xt + column RT + row0
 // (the tile's global row; columns 0..valid-1), scales sc[column], column sums (if given) sums[column]; stochastic
@@ -157,15 +175,30 @@ static inline void colcodes(thread const CF &v, device int8_t *xt, uint RT, uint
     const uint m = a.r + 8 * s; inv[s] = i8_inverse(rm[s]);
     if ((a.lane & 0x9) == 0 && m < valid) sc[m] = i8_scale(rm[s], cm[m], k);
   }
-  const uint nb = a.cb;
+  // the codes staged in X (spent: the product has read it) as [column][32 rows], then each column's 32 bytes stored
+  // contiguously (two 16-byte stores a column), the stochastic hash a pair of rows
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  threadgroup uint *Q = (threadgroup uint *)X;
   _Pragma("unroll") for (ushort i = 0; i < NE; i += 4) {
-    const uint s = tslot(i), m = a.r + 8 * s, n = nb + 16 * ((i >> 3) & 1);
-    if (m < valid) {
-      const uint idx = m * RT + row0 + n;
-      uint w = 0;
-      _Pragma("unroll") for (ushort q = 0; q < 4; q++) w |= uint(uchar(i8_code(y[i + q], inv[s], seed, idx + q))) << (8 * q);
-      *(device uint *)(xt + size_t(m) * RT + row0 + n) = w;
+    const uint s = tslot(i), m = a.r + 8 * s, n = a.cb + 16 * ((i >> 3) & 1), idx = m * RT + row0 + n;
+    uint w = 0;
+    if (seed) {
+      _Pragma("unroll") for (ushort q = 0; q < 4; q += 2) {
+        const uint h = i8_mix(seed ^ (((idx + q) >> 1) * 0x9e3779b1u));
+        const float x0 = y[i + q] * inv[s], x1 = y[i + q + 1] * inv[s];
+        const float c0 = clamp(floor(x0 + float(h & 0xffffu) * (1.0f / 65536.0f)), -127.0f, 127.0f);
+        const float c1 = clamp(floor(x1 + float(h >> 16) * (1.0f / 65536.0f)), -127.0f, 127.0f);
+        w |= (uint(uchar(int8_t(c0))) | (uint(uchar(int8_t(c1))) << 8)) << (8 * q);
+      }
+    } else {
+      _Pragma("unroll") for (ushort q = 0; q < 4; q++) w |= uint(uchar(int8_t(rint(y[i + q] * inv[s])))) << (8 * q);
     }
+    Q[m * 8 + n / 4] = w;
+  }
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  _Pragma("unroll") for (ushort k = 0; k < 4; k++) {
+    const uint e = a.lane + 32 * k, m = e / 2, h = e % 2;
+    if (m < valid) *(device uint4 *)(xt + size_t(m) * RT + row0 + 16 * h) = ((threadgroup const uint4 *)Q)[e];
   }
   simdgroup_barrier(mem_flags::mem_threadgroup);
 }
