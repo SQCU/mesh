@@ -1,54 +1,7 @@
-// The learning step's credit and backward (tile.h's tiles): a task a threadgroup, each product's dgrad codes (row,
+// The learning step's backward (tile.h's tiles): a task a threadgroup, each product's dgrad codes (row,
 // stochastic) and the wgrad codes of every gradient it makes (column, stochastic; its column sums: the bias's
 // gradient), the contexts' state gradients summed a refresh for the lanes' recurrence.
 #include "tile.h"
-
-// ---- the credit: a SIMD group a learning row, its draws in order; each draw's score function under the learning
-// forward's w, psi(token) - E_p[psi] over its table (split.h, as the simulator's sampler and route_draw_score), times
-// its importance ratio pi_current(token) / pi_behaviour(token) (wb: the w it was drawn under); the row's dw [3][R][FS]
-// (task 0: scale0[row], tasks 1, 2: the draws' advantages a1, a2 and `scale`); ll [draw]: the log ratio ----
-struct CP { uint R, pad; float scale, pad2; };
-kernel void credit(device const route_draw *draws [[buffer(0)]], device const float *wb [[buffer(1)]], device const float *wc [[buffer(2)]],
-                   device const uint *first [[buffer(3)]], device const float *scale0 [[buffer(4)]], device float *dw [[buffer(5)]], device float *ll [[buffer(6)]],
-                   constant CP &p [[buffer(7)]], uint gid [[thread_position_in_grid]]) {
-  const uint row = gid / 32, lane = gid % 32;
-  if (row >= p.R) return;
-  device const float *wbr = wb + size_t(row) * FS, *wcr = wc + size_t(row) * FS;
-  float acc[3][2] = {{0, 0}, {0, 0}, {0, 0}};   // [task][features lane, lane + 32]
-  for (uint i = first[row]; i < first[row + 1]; i++) {
-    const route_draw d = draws[i];
-    split_lse cur; split_lse_init(&cur);
-    float mb = -INFINITY, sb = 0;
-    const split_set a = split_set_of(&d);
-    const uint chunk = (a.n + 31) / 32;   // a lane's contiguous chunk of the table, walked in registers
-    for (split_walk k = split_walk_at(&a, lane * chunk, chunk); k.left; split_walk_next(&k)) {
-      const split sp = split_of(&d, k.token);
-      const float th = split_tanh(split_dot(&sp, wcr)), lg = split_logit(th), lgb = split_logit(split_tanh(split_dot(&sp, wbr)));
-      if (lgb > mb) { sb *= sb > 0 ? exp(mb - lgb) : 0.0f; mb = lgb; }
-      sb += exp(lgb - mb);
-      split_lse_add(&cur, lg, split_slope(th), &sp);
-    }
-    const split tsp = split_of(&d, d.token);   // the drawn split: its logits and psi
-    const float tth = split_tanh(split_dot(&tsp, wcr));
-    const float lgTok = tsp.ok ? split_logit(tth) : -INFINITY, lgbTok = tsp.ok ? split_logit(split_tanh(split_dot(&tsp, wbr))) : -INFINITY;
-    float psi[SPLIT_FS];
-    for (uint f = 0; f < FS; f++) psi[f] = 0;
-    split_add(&tsp, split_slope(tth), psi);
-    const float M = simd_max(cur.m), sc = cur.s > 0 ? exp(cur.m - M) : 0.0f, Ssum = simd_sum(cur.s * sc);
-    const float Mb = simd_max(mb), Sb = simd_sum(sb > 0 ? sb * exp(mb - Mb) : 0.0f);
-    const float logRatio = (lgTok - (M + log(Ssum))) - (lgbTok - (Mb + log(Sb))), ratio = exp(logRatio);
-    const float adv[3] = {1.0f, d.a1, d.a2};
-    for (uint f = 0; f < FS; f++) {
-      const float diff = ratio * (psi[f] - simd_sum(cur.e[f] * sc) / Ssum);
-      if (f % 32 == lane) for (uint tk = 0; tk < 3; tk++) acc[tk][f / 32] = fma(adv[tk], diff, acc[tk][f / 32]);
-    }
-    if (lane == 0) ll[i] = logRatio;
-  }
-  for (uint h = 0; h < 2; h++) {
-    const uint f = lane + 32 * h;
-    if (f < FS) for (uint tk = 0; tk < 3; tk++) dw[(size_t(tk) * p.R + row) * FS + f] = acc[tk][h] * (tk == 0 ? scale0[row] : p.scale);
-  }
-}
 
 // a gradient's wgrad codes (the column pass over S's chunk j of a matrix's output, `rows` its outputs): task t's
 // columns at t rows + 64 j of the matrix's dY codes, its scales and column sums at the tile's block
@@ -96,7 +49,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
   for (uint s = 0; s < 2; s++) { const uint r = r0 + row_of(c, s); live[s] = r < p.R; ref[s] = live[s] ? refid[row_of(c, s)] : 0; }
   // the readout back: dn = dw out, then rms's backward dx2 = inv (dn - n mean(dn . n))
   { const MatW m = nw.m[M_OUT];
-    chunk_bwd<64>(A, wq + m.wb, m.np, S); tg_barrier();
+    chunk<64>(A, wq + m.wb, S); tg_barrier();
     for (uint s = 0; s < 2; s++) {
       const uint row = row_of(c, s), r = r0 + row;
       float dn[8]; epilogue(S, c, row, sA[row], wsc + m.wbs, nullptr, 0, dn);
@@ -117,7 +70,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     float du[2][3][8];
     { const MatW md = nw.m[down];
       for (uint jj = 0; jj < 3; jj++) {
-        chunk_bwd<64>(A, wq + md.wb + 64 * jj, md.np, S); tg_barrier();
+        chunk<64>(A, wq + md.wb + 64 * jj * md.kb, S); tg_barrier();
         for (uint s = 0; s < 2; s++) {
           const uint row = row_of(c, s), r = r0 + row;
           epilogue(S, c, row, sA[row], wsc + md.wbs, nullptr, jj, du[s][jj]);
@@ -131,7 +84,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     put_codes<3>(du, A, sA, c, seed_of(p.seed, su, task), g0); tg_barrier();
     // up's dgrad: dxm = dx + du up
     { const MatW mu = nw.m[up];
-      chunk_bwd<192>(A, wq + mu.wb, mu.np, S); tg_barrier();
+      chunk<192>(A, wq + mu.wb, S); tg_barrier();
       for (uint s = 0; s < 2; s++) { float y[8]; epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + mu.wbs, nullptr, 0, y); for (uint k = 0; k < 8; k++) x[s][0][k] += y[k]; } }
     // the step back: the gates' gradients (zh's dY: z, then h~) and the state's, summed a refresh
     float dzc[2][2][8], dh[2][8];
@@ -158,7 +111,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     tg_barrier(); put_codes<2>(dzc, A, sA, c, seed_of(p.seed, sz, task), g0); tg_barrier();
     // zh's dgrad: dx_l = dxm + dzc zh
     { const MatW mz = nw.m[zh];
-      chunk_bwd<128>(A, wq + mz.wb, mz.np, S); tg_barrier();
+      chunk<128>(A, wq + mz.wb, S); tg_barrier();
       for (uint s = 0; s < 2; s++) { float y[8]; epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + mz.wbs, nullptr, 0, y); for (uint k = 0; k < 8; k++) x[s][0][k] += y[k]; } }
   }
   // dx0: inp's dY
@@ -244,7 +197,7 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     tg_barrier(); put_codes<2>(dzc, A, sA, c, seed_of(p.seed, S_LZH1, task), row0); tg_barrier();
     float x[2][1][8];
     { const MatW mz = nw.m[M_ZH1];
-      chunk_bwd<128>(A, wq + mz.wb, mz.np, S); tg_barrier();
+      chunk<128>(A, wq + mz.wb, S); tg_barrier();
       for (uint s = 0; s < 2; s++) epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + mz.wbs, nullptr, 0, x[s][0]); }
     // x1's gradient: down0's dY; layer 0's feed-forward back
     tg_barrier(); for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s][0]); tg_barrier();
@@ -253,7 +206,7 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     float du[2][3][8];
     { const MatW md = nw.m[M_DOWN0];
       for (uint jj = 0; jj < 3; jj++) {
-        chunk_bwd<64>(A, wq + md.wb + 64 * jj, md.np, S); tg_barrier();
+        chunk<64>(A, wq + md.wb + 64 * jj * md.kb, S); tg_barrier();
         for (uint s = 0; s < 2; s++) {
           const uint row = row_of(c, s);
           epilogue(S, c, row, sA[row], wsc + md.wbs, nullptr, jj, du[s][jj]);
@@ -266,7 +219,7 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
       } }
     put_codes<3>(du, A, sA, c, seed_of(p.seed, S_LUP0, task), row0); tg_barrier();
     { const MatW mu = nw.m[M_UP0];
-      chunk_bwd<192>(A, wq + mu.wb, mu.np, S); tg_barrier();
+      chunk<192>(A, wq + mu.wb, S); tg_barrier();
       for (uint s = 0; s < 2; s++) { float y[8]; epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + mu.wbs, nullptr, 0, y); for (uint k = 0; k < 8; k++) x[s][0][k] += y[k]; } }
     // layer 0: the recurrence back from xm0's gradient (every position) and the contexts'
     tg_barrier(); for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s][0]); tg_barrier();
@@ -279,7 +232,7 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     }
     tg_barrier(); put_codes<2>(dzc, A, sA, c, seed_of(p.seed, S_LZH0, task), row0); tg_barrier();
     { const MatW mz = nw.m[M_ZH0];
-      chunk_bwd<128>(A, wq + mz.wb, mz.np, S); tg_barrier();
+      chunk<128>(A, wq + mz.wb, S); tg_barrier();
       for (uint s = 0; s < 2; s++) { float y[8]; epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + mz.wbs, nullptr, 0, y); for (uint k = 0; k < 8; k++) x[s][0][k] += y[k]; } }
     tg_barrier(); for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s][0]); tg_barrier();
     ycodes(S, c, gq, gs, gr.m[M_INP], D, task, 0, RT, row0, seed_of(p.seed, S_LINP + 64, task));

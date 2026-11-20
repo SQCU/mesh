@@ -138,6 +138,7 @@ final class Net {
   var cb: MTLCommandBuffer!, e: MTLComputeCommandEncoder!, phase = ""
   var profiling = false, samples: MTLCounterSampleBuffer? = nil, labels: [String] = [], tick = 1.0, lastGPU = 0.0
   var checking = false, probes: [String] = []
+  var last: (B: Int, K: Int, R: Int, seed: UInt32, lanes: MTLBuffer, tokens: MTLBuffer)? = nil   // the last learning call's
   // the forward's build-up stage (fwd.metal's STAGE; stages.swift's and the checks' view of a partial network): 0 whole
   var forwardStage: UInt32 = UInt32(ProcessInfo.processInfo.environment["ROUTE_STAGE"] ?? "0") ?? 0
 
@@ -308,6 +309,7 @@ final class Net {
     e.dispatchThreads(MTLSize(width: R * 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     phase = "backward"
     let prm = fp(B: B, K: K, R: R, seed: nextSeed())
+    last = (B, K, R, prm[5], lanes, tokens)
     set(pipe("ctx_bwd"), "ctx_bwd", [0: (dw, 0), 1: (pos, 0), 2: (st, 0), 3: (czc, 0), 4: (cu, 0), 5: (netTable, 0), 6: (wq, 0), 7: (wsc, 0), 9: (gq, 0), 10: (gs, 0),
         11: (gradTable, 0), 12: (cn, 0), 13: (cinv, 0), 14: (dhp, 0)], [8: prm])
     groups((R + 63) / 64, 3, threads: Net.tileThreads)
@@ -363,7 +365,54 @@ final class Net {
     }
     try! bytes.write(to: URL(fileURLWithPath: path))
   }
-  func probeReport() -> [String] { defer { probes = [] }; return probes }
+  // the probes (route_net_probes, after a learning call): tiles' fused wgrad codes against int8mm.h's CPU definition of
+  // the same column codes (i8_fwht64 along the rows, a scale a column, i8_code; the gradients' with their seeds): the
+  // tokens' (inp's X) of the first lane tile and the first context tile, dw's (out's dY, stochastic) of the first
+  // context tile, each task's
+  func probeReport() -> [String] {
+    guard let c = last else { return [] }
+    func read(_ b: MTLBuffer, _ off: Int, _ n: Int) -> UnsafeMutableRawPointer {
+      let st = device.makeBuffer(length: max(16, n), options: .storageModeShared)!, cb = queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
+      bl.copy(from: b, sourceOffset: off, to: st, destinationOffset: 0, size: n); bl.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+      let out = UnsafeMutableRawPointer.allocate(byteCount: max(16, n), alignment: 16); memcpy(out, st.contents(), n); return out
+    }
+    let RL = pad64(c.B * Net.klp(c.K)), blocks = RT / 64
+    // one tile's columns (x [64 rows][cols] at stride ld) against the GPU's codes (gq at qoff, stride RT) and scales
+    func compare(_ label: String, _ x: [Float], cols: Int, ld: Int, qoff: Int, soff: Int, row0: Int, seed: UInt32) -> String {
+      let q = read(gq, qoff, (cols - 1) * RT + row0 + 64).bindMemory(to: Int8.self, capacity: cols * RT), sc = read(gs, soff * 4, cols * 4).bindMemory(to: Float.self, capacity: cols)
+      var bad = 0, big = 0, badS = 0
+      for col in 0..<cols {
+        var v = (0..<64).map { x[$0 * ld + col] }
+        v.withUnsafeMutableBufferPointer { i8_fwht64($0.baseAddress!) }
+        let m = v.reduce(0) { max($0, abs($1)) }, inv = i8_inverse(m)
+        if i8_scale(m).bitPattern != sc[col].bitPattern { badS += 1 }
+        for r in 0..<64 {
+          let want = i8_code(v[r], inv, seed, UInt32(truncatingIfNeeded: col * RT + row0 + r)), got = q[col * RT + row0 + r]
+          if want != got { bad += 1; if abs(Int(want) - Int(got)) > 1 { big += 1 } }
+        }
+      }
+      return String(format: "  %-44@ codes differing %d of %d (by more than 1: %d), scales %d of %d", label, bad, 64 * cols, big, badS, cols)
+    }
+    var out: [String] = []
+    let IN = Int(ROUTE_IN), inp = matg[0]
+    let lanesP = read(c.lanes, 0, min(c.lanes.length, 64 * IN * 4)).bindMemory(to: Float.self, capacity: 64 * IN)
+    var xl = [Float](repeating: 0, count: 64 * 64)
+    for r in 0..<64 where r < c.K * L { for j in 0..<IN { xl[r * 64 + j] = lanesP[r * IN + j] } }
+    out.append(compare("lanes_fwd tokens -> inp's X codes", xl, cols: 64, ld: 64, qoff: Int(inp[1]), soff: Int(inp[3]), row0: 0, seed: 0))
+    let tokP = read(c.tokens, 0, min(c.tokens.length, 64 * IN * 4)).bindMemory(to: Float.self, capacity: 64 * IN)
+    var xc = [Float](repeating: 0, count: 64 * 64)
+    for r in 0..<min(64, c.R) { for j in 0..<IN { xc[r * 64 + j] = tokP[r * IN + j] } }
+    out.append(compare("ctx_fwd tokens -> inp's X codes", xc, cols: 64, ld: 64, qoff: Int(inp[1]), soff: Int(inp[3]) + (RL / 64) * 64, row0: RL, seed: 0))
+    let og = matg[7], dwP = dwBuf!.contents().bindMemory(to: Float.self, capacity: 3 * c.R * FS)
+    for t in 0..<3 {
+      var y = [Float](repeating: 0, count: 64 * FS)
+      for r in 0..<min(64, c.R) { for f in 0..<FS { y[r * FS + f] = dwP[(t * c.R + r) * FS + f] } }
+      let seed = c.seed == 0 ? 0 : (i8_mix(c.seed ^ (65 &* 0x9e3779b1) ^ (UInt32(t) &* 0x85ebca6b)) | 1)   // bwd.metal's seed_of(S_OUT + 64, task)
+      out.append(compare("ctx_bwd dw (task \(t)) -> out's dY codes", y, cols: FS, ld: FS, qoff: Int(og[0]) + t * FS * RT, soff: Int(og[2]) + (RL / 64) * 3 * FS + t * FS, row0: RL, seed: seed))
+    }
+    _ = blocks
+    return out
+  }
   // a buffer by its name (route_net_read)
   func named(_ n: String) -> MTLBuffer? {
     let all: [String: MTLBuffer?] = ["theta": theta, "grads": grads, "gram": gram, "wq": wq, "wsc": wsc, "st": st, "lzc": lzc, "lh": lh, "lu": lu, "czc": czc, "cu": cu,

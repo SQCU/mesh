@@ -62,6 +62,14 @@ static inline void i8_fwht64_lanes(thread float *v, ushort li) {
   _Pragma("unroll") for (ushort st = 1; st < 4; st <<= 1) for (ushort k = 0; k < 8; k++) { const float o = metal::simd_shuffle_xor(v[k], st); v[k] = (li & st) ? o - v[k] : v[k] + o; }
   _Pragma("unroll") for (ushort k = 0; k < 8; k++) { const float o = metal::simd_shuffle_xor(v[k], ushort(4)); v[k] = (li & 4) ? (o - v[k]) * 0.125f : (v[k] + o) * 0.125f; }
 }
+/* the same transform with the block held strided: lane li holds elements li + 8 k (v[k]): strides 1, 2, 4 across the
+   lanes, then 8, 16, 32 inside the lane (the 1/8 with the last): the same steps in the same order, so the same bits.
+   (A column pass reads a 64-row column this way: rows li + 8 k of a tile, every lane of a load on its own bank.) */
+static inline void i8_fwht64_strided(thread float *v, ushort li) {
+  _Pragma("unroll") for (ushort st = 1; st < 8; st <<= 1) _Pragma("unroll") for (ushort k = 0; k < 8; k++) { const float o = metal::simd_shuffle_xor(v[k], st); v[k] = (li & st) ? o - v[k] : v[k] + o; }
+  _Pragma("unroll") for (ushort st = 1; st < 4; st <<= 1) _Pragma("unroll") for (ushort k = 0; k < 8; k++) if (!(k & st)) { const float a = v[k], c = v[k | st]; v[k] = a + c; v[k | st] = a - c; }
+  _Pragma("unroll") for (ushort k = 0; k < 4; k++) { const float a = v[k], c = v[k + 4]; v[k] = (a + c) * 0.125f; v[k + 4] = (a - c) * 0.125f; }
+}
 /* the eight lanes' largest |v| */
 static inline float i8_absmax_lanes(thread const float *v) {
   float m = 0;

@@ -6,7 +6,7 @@
 //     (fwd.metal's STAGE: the input product with its fused codes, scales and bias; + the gates and a context's step
 //     (the next product's codes fused in, two products chained on chip); + the feed-forward (a whole layer, four
 //     products); + the second layer and the readout; the lanes' recurrence), then the learning step kernel by kernel.
-// swiftc -O -import-objc-header stages.h stages.swift -L . -lroute -o stages && ./stages route.metallib
+// swiftc -O -import-objc-header swift.h stages.swift -L . -lroute -o stages && ./stages route.metallib
 import Metal
 import Foundation
 

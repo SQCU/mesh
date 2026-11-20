@@ -39,7 +39,9 @@ enum : uint { D = 64, E = 192, IN = 48, FS = 40, L = 32, TM = 64, NSG = 8, NT = 
 // the matrices, in NetLayout's order
 enum : uint { M_INP = 0, M_ZH0 = 1, M_UP0 = 2, M_DOWN0 = 3, M_ZH1 = 4, M_UP1 = 5, M_DOWN1 = 6, M_OUT = 7 };
 // a matrix's codes: forward wf [pad64(rows)][kf] (rows rotated along the columns, a scale a row: wfs; bias b, padded),
-// dgrad wb [kb][np] (columns rotated along the rows, a scale a column: wbs); offsets in bytes (codes) or floats
+// dgrad wb [np][kb] (W's columns, each rotated along the rows, a scale a column: wbs; stored a column a row, so the
+// dgrad product reads its weights as the forward does, one chunk function for both: the NN form, wb [kb][np],
+// measured the same in the learning step, 20.1 ms either way); offsets in bytes (codes) or floats
 struct MatW { uint wf, wfs, b, wb, wbs, rows, cols, kf, kb, np, v, g; };
 struct Net { MatW m[8]; };
 // a matrix's wgrad operands: dY's codes transposed yt [pad64(3 rows)][RT] (task t's row c at t rows + c), their
@@ -53,9 +55,9 @@ static inline Lanes lanes_of(uint t) { Lanes c; c.t = t; c.sg = t / 32; c.lane =
 static inline uint row_of(Lanes c, uint s) { return 8 * c.sg + 4 * s + c.q; }   // a row pass's row, slot s (0, 1)
 static inline void tg_barrier() { threadgroup_barrier(mem_flags::mem_threadgroup); }
 
-// one 64-column chunk of a product into S (int32 sums): A [TM][K] (threadgroup) against the chunk of weights.
-// forward: wf rows [64 j, 64 j + 64), each K long (transposed); dgrad: wb's columns [64 j, ..), np apart
-template <uint K> static inline void chunk_fwd(threadgroup int8_t *A, device const int8_t *w, threadgroup float *S) {
+// one 64-column chunk of a product into S (int32 sums): A [TM][K] (threadgroup) against the chunk of weights, 64 rows
+// of K codes (transposed): forward wf's rows [64 j, 64 j + 64), dgrad wb's
+template <uint K> static inline void chunk(threadgroup int8_t *A, device const int8_t *w, threadgroup float *S) {
   auto tA = tensor<threadgroup int8_t, dextents<int32_t, 2>, tensor_inline>(A, dextents<int32_t, 2>(K, TM));
   auto tB = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>((device int8_t *)w, dextents<int32_t, 2>(K, 64));
   auto tS = tensor<threadgroup int32_t, dextents<int32_t, 2>, tensor_inline>((threadgroup int32_t *)S, dextents<int32_t, 2>(64, TM), array<int32_t, 2>{1, LD});
@@ -63,16 +65,6 @@ template <uint K> static inline void chunk_fwd(threadgroup int8_t *A, device con
   matmul2d<d, execution_simdgroups<NSG>> op;
   auto c = op.template get_destination_cooperative_tensor<decltype(tA), decltype(tB), int32_t>();
   op.run(tA, tB, c);   // multiply: the destination written whole
-  c.store(tS);
-}
-template <uint K> static inline void chunk_bwd(threadgroup int8_t *A, device const int8_t *w, uint np, threadgroup float *S) {
-  auto tA = tensor<threadgroup int8_t, dextents<int32_t, 2>, tensor_inline>(A, dextents<int32_t, 2>(K, TM));
-  auto tB = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>((device int8_t *)w, dextents<int32_t, 2>(64, K), array<int32_t, 2>{1, int(np)});
-  auto tS = tensor<threadgroup int32_t, dextents<int32_t, 2>, tensor_inline>((threadgroup int32_t *)S, dextents<int32_t, 2>(64, TM), array<int32_t, 2>{1, LD});
-  constexpr auto d = matmul2d_descriptor(TM, 64, K, false, false);
-  matmul2d<d, execution_simdgroups<NSG>> op;
-  auto c = op.template get_destination_cooperative_tensor<decltype(tA), decltype(tB), int32_t>();
-  op.run(tA, tB, c);
   c.store(tS);
 }
 // a row slot's eight values of chunk j through the epilogue: i8_out(sum, sa, sb[n], bias[n]) (n = 64 j + 8 li + k)
@@ -103,22 +95,26 @@ static inline void put_s(threadgroup float *S, Lanes c, uint row, thread const f
 }
 // the column pass over S's 64 columns (the tile's 64 rows): codes rotated along the rows, one scale a column, into
 // xt + column (stride RT) at the tile's rows (row0 global); the first `valid` columns; sums (if given) the columns'
-// unrotated sums. Stochastic index: column RT + row
+// unrotated sums. A column's rows strided over its eight lanes (lane li: rows li + 8 k, int8mm.h's i8_fwht64_strided):
+// rows 68 words apart then put a load's 32 lanes on 32 banks (eight consecutive rows a lane: eight lanes a bank).
+// Stochastic index: column RT + row
 static inline void col_codes(threadgroup const float *S, Lanes c, device int8_t *xt, uint RT, uint row0, device float *sc, device float *sums, uint valid, uint seed) {
   _Pragma("unroll") for (uint s = 0; s < 2; s++) {
     const uint col = 8 * c.sg + 4 * s + c.q;
     float v[8];
-    _Pragma("unroll") for (uint k = 0; k < 8; k++) v[k] = S[(8 * c.li + k) * LD + col];
+    _Pragma("unroll") for (uint k = 0; k < 8; k++) v[k] = S[(c.li + 8 * k) * LD + col];
     if (sums) {
-      float t = 0; for (uint k = 0; k < 8; k++) t += v[k];
-      _Pragma("unroll") for (ushort st = 1; st < 8; st <<= 1) t += simd_shuffle_xor(t, st);
+      float t = 0; _Pragma("unroll") for (uint k = 0; k < 8; k++) t += v[k];
+      for (ushort st = 1; st < 8; st <<= 1) t += simd_shuffle_xor(t, st);
       if (c.li == 0 && col < valid) sums[col] = t;
     }
-    i8_fwht64_lanes(v, c.li);
+    i8_fwht64_strided(v, c.li);
     const float m = i8_absmax_lanes(v), inv = i8_inverse(m);
     if (col < valid) {
       if (c.li == 0) sc[col] = i8_scale(m);
-      *(device uint2 *)(xt + size_t(col) * RT + row0 + 8 * c.li) = i8_pack8(v, inv, seed, col * RT + row0 + 8 * c.li);
+      device int8_t *o = xt + size_t(col) * RT + row0 + c.li;
+      const uint at = col * RT + row0 + c.li;
+      _Pragma("unroll") for (uint k = 0; k < 8; k++) o[8 * k] = i8_code(v[k], inv, seed, at + 8 * k);
     }
   }
 }

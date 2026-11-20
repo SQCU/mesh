@@ -33,7 +33,7 @@ kernel void weights_cols(device int8_t *wq [[buffer(1)]], device float *wsc [[bu
   for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; v[k] = r < m.kb ? Wf[wfoff[it.m] + r * m.np + col] : 0.0f; }
   i8_fwht64_lanes(v, ushort(lane % 8));
   const float mx = simd_max(i8_absmax_lanes(v)), inv = i8_inverse(mx);
-  for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; if (r < m.kb) wq[m.wb + r * m.np + col] = i8_code(v[k], inv, 0, 0); }
+  for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; if (r < m.kb) wq[m.wb + col * m.kb + r] = i8_code(v[k], inv, 0, 0); }
   if (lane == 0) wsc[m.wbs + col] = i8_scale(mx);
 }
 
