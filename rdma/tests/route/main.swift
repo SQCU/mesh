@@ -218,7 +218,7 @@ func rollout(_ count: Int, _ mode: UInt32) {
   enc.dispatchThreadgroups(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: tg)
   enc.endEncoding(); cb.commit(); cb.waitUntilCompleted(); gpuTime = cb.gpuEndTime - cb.gpuStartTime
   if let e = cb.error { print("error: \(e)"); exit(1) }
-  for r in 0..<count where cost[r].w < 0 { print("rollout \(r): a capacity (draws, groups or heap) overflowed; nothing was dropped silently, so this stops"); exit(1) }
+  for r in 0..<count where cost[r].w < 0 { let f = Int(-cost[r].w); print("rollout \(r): overflowed its capacity for" + (f & 1 != 0 ? " draws" : "") + (f & 2 != 0 ? " groups" : "") + (f & 4 != 0 ? " in-flight hops" : "") + "; this stops"); exit(1) }
 }
 // one task's gradient into grad[task P ...]: the backward pass, then the GEMMs over the rows it wrote
 func gradient(_ count: Int, _ task: UInt32) {

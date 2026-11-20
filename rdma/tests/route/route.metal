@@ -30,7 +30,9 @@ using namespace metal;
 
 constant constexpr int N = 6, L = 32, J = 6, DEG = 5, NS = 64, GROUP = 64, EPMAX = 12, NPMAX = EPMAX * GROUP, CB = 4;
 constant constexpr int D = 64, E = 192, IN = 48, FS = 40, T = 256, Q = 4, SG = T / 32, CH = 24;
-constant constexpr int CMAX = J * N * 31, TABN = J * N * 7776, UMAX = 24576, GMAX = 4096, GH = 8192, HEAPN = 24576, TOKMAX = 3125;
+// capacities at their bounds: a branch of a piece owes at least one destination and each destination's path has at most
+// N - 1 hops, so a piece makes at most (N - 1)^2 draws and hops (its branches may cross the same relay)
+constant constexpr int CMAX = J * N * 31, TABN = J * N * 7776, UMAX = J * NPMAX * (N - 1) * (N - 1), GMAX = 16384, GH = 32768, HEAPN = UMAX, TOKMAX = 3125;
 constant constexpr float PAGE = 16384.0f, CLIP = 10.0f;
 
 struct Scenario {
@@ -428,7 +430,7 @@ static void split_send(thread Fabric &f, float t, int j, int v, uint S, uint vis
       const uint e = sim[SB_HASH + hsh];
       if (e == 0) {
         g = sim[SB_HDR + H_GROUPS];
-        if (g >= uint(GMAX)) { sim[SB_HDR + H_OVER] = 1; break; }
+        if (g >= uint(GMAX)) { sim[SB_HDR + H_OVER] |= 2; break; }
         sim[SB_HDR + H_GROUPS] = g + 1; sim[SB_HASH + hsh] = g + 1;
         sim[SB_GRP + 4 * g] = k0; sim[SB_GRP + 4 * g + 1] = sig; sim[SB_GRP + 4 * g + 2] = 0; sim[SB_GRP + 4 * g + 3] = 0;
         break;
@@ -437,7 +439,7 @@ static void split_send(thread Fabric &f, float t, int j, int v, uint S, uint vis
       hsh = (hsh + 1) & uint(GH - 1);
     }
     const uint u = sim[SB_HDR + H_USES];
-    if (u >= uint(UMAX)) sim[SB_HDR + H_OVER] = 1;
+    if (u >= uint(UMAX)) sim[SB_HDR + H_OVER] |= 1;
     else if (!sim[SB_HDR + H_OVER]) {
       sim[SB_HDR + H_USES] = u + 1;
       sim[SB_USE + 4 * u] = g; sim[SB_USE + 4 * u + 1] = tok; sim[SB_USE + 4 * u + 2] = uint(pid); sim[SB_USE + 4 * u + 3] = sim[SB_GRP + 4 * g + 2];
@@ -459,7 +461,7 @@ static void split_send(thread Fabric &f, float t, int j, int v, uint S, uint vis
     const float time = bytes / (s.rate[l] / s.cables[l] * (both ? s.duplex : 1.0f));
     f.free[l][cb] = start + time; pwait[pid] += start - t;
     if (v == s.src[j]) f.laststart[j] = max(f.laststart[j], start);
-    if (f.n >= uint(HEAPN)) { sim[SB_HDR + H_OVER] = 1; continue; }
+    if (f.n >= uint(HEAPN)) { sim[SB_HDR + H_OVER] |= 4; continue; }
     push(sim + SB_HEAP, f.n, start + time + s.lat[l], uint(pid) << 15 | uint(h) << 12 | share[k] << 6 | (avoid & 63));
   }
 }
@@ -600,7 +602,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
     device const float *plat = (device const float *)(sim + SB_PIECE), *pwait = plat + J * NPMAX;
     float lat = 0, wait = 0;
     for (int j = 0; j < nj; j++) for (int i = 0; i < np; i++) { lat += plat[j * NPMAX + i]; wait += pwait[j * NPMAX + i]; }
-    cost[r] = float4(f.T / fl, lat / (nj * np), wait / (nj * np) / fl, sim[SB_HDR + H_OVER] ? -1.0f : 1.0f);
+    cost[r] = float4(f.T / fl, lat / (nj * np), wait / (nj * np) / fl, sim[SB_HDR + H_OVER] ? -float(sim[SB_HDR + H_OVER]) : 1.0f);
     loglik[r] = f.ll;
   }
 }
