@@ -1,0 +1,6 @@
+*.o
+*.air
+route.metallib
+train
+int8check
+switch-policy

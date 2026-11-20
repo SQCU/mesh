@@ -1,0 +1,414 @@
+// The policy (route.h) on the GPU, every 2D product int8 x int8 -> int32 (int8.metal), the rest net.metal's; the
+// optimizer's parameters (theta) and moments fp32. One command buffer a call: the forward of a refresh for the rollouts,
+// or a learning batch's forward again (its windows' K refreshes, the states carried) and its three tasks' backward.
+//
+// The network (minGRU): x = inp(token); two layers, each z, h~ = sigmoid, tanh of zh(x) (one product, 2D wide), the
+// recurrence h = (1 - m z) h + m z h~ along a run's lanes, refresh after refresh (a context: one step from its refresh's
+// state), xm = x + h, x' = xm + down(relu(up(xm))); then w = out(rms(x')) for each context. Layer 1's lanes need only
+// their states, so their feed-forward is not run.
+// A matrix's weights: W = diag(g) V / |V| (rows), V pinned to unit rows after each step (so W's scale is g's alone; its
+// int8 scale is a row's absmax, so g is exactly absorbed into it); a bias b beside it.
+// Rows: lane rows first ([run][refresh][lane]), then context rows; a context's state is the lane row pos[r] (its
+// refresh's last); the backward's buffers [task][rows][...], the three tasks stacked along the rows.
+import Foundation
+import Metal
+
+struct NetMat { let name: String, rows: Int, cols: Int, bias: Bool; var v = 0, g = 0 }   // b at g + rows
+struct NetLayout {
+  let mats: [NetMat], count: Int
+  init() {
+    var m = [NetMat(name: "inp", rows: D, cols: IN, bias: true)]
+    for l in 0..<2 { m += [NetMat(name: "zh\(l)", rows: 2 * D, cols: D, bias: true), NetMat(name: "up\(l)", rows: E, cols: D, bias: true), NetMat(name: "down\(l)", rows: D, cols: E, bias: true)] }
+    m.append(NetMat(name: "out", rows: FS, cols: D, bias: false))
+    var n = 0
+    for i in m.indices { m[i].v = n; n += m[i].rows * m[i].cols; m[i].g = n; n += m[i].rows * (m[i].bias ? 2 : 1) }
+    mats = m; count = n
+  }
+  func mat(_ name: String) -> NetMat { mats.first { $0.name == name }! }
+  // V's rows Gaussian, normalized; g 1 (the earlier layout's 1 / sqrt(fan-in) weights had rows of norm ~1); b 0
+  func initial(_ r: inout route_rng) -> [Float] {
+    var t = [Float](repeating: 0, count: count)
+    for m in mats {
+      for i in 0..<m.rows {
+        var s = 0.0, row = [Double](repeating: 0, count: m.cols)
+        for j in 0..<m.cols { let u = max(route_uniform(&r), 1e-300), v = route_uniform(&r); row[j] = sqrt(-2 * log(u)) * cos(2 * Double.pi * v); s += row[j] * row[j] }
+        for j in 0..<m.cols { t[m.v + i * m.cols + j] = Float(row[j] / s.squareRoot()) }
+        t[m.g + i] = 1
+      }
+    }
+    return t
+  }
+  // policy.swift's fp32 layout (Layout(full: false): plain W and b) to this one, exactly (V = W / |W|, g = |W|), and back
+  func from(old o: [Float], _ lay: Layout) -> [Float] {
+    var t = [Float](repeating: 0, count: count)
+    func block(_ n: String) -> (Int, [Int]) { let b = lay.blocks.first { $0.name == n }!; return (b.offset, b.shape) }
+    func put(_ m: NetMat, _ rows: [(String, String?)]) {   // the old blocks stacked as this matrix's rows
+      var r = 0
+      for (w, b) in rows {
+        let (wo, shape) = block(w)
+        for i in 0..<shape[0] {
+          var s = 0.0; for j in 0..<shape[1] { s += Double(o[wo + i * shape[1] + j]) * Double(o[wo + i * shape[1] + j]) }
+          let n = max(s.squareRoot(), 1e-30)
+          for j in 0..<shape[1] { t[m.v + (r + i) * m.cols + j] = Float(Double(o[wo + i * shape[1] + j]) / n) }
+          t[m.g + r + i] = Float(n)
+          if let b = b { t[m.g + m.rows + r + i] = o[block(b).0 + i] }
+        }
+        r += shape[0]
+      }
+    }
+    put(mat("inp"), [("inp", "binp")])
+    for l in 0..<2 { put(mat("zh\(l)"), [("z\(l)", "bz\(l)"), ("h\(l)", "bh\(l)")]); put(mat("up\(l)"), [("up\(l)", "bu\(l)")]); put(mat("down\(l)"), [("down\(l)", "bd\(l)")]) }
+    put(mat("out"), [("out", nil)])
+    return t
+  }
+  // a gradient in the fp32 layout's W, b -> this layout's (dV, dg, db), by the chain rule the GPU's chain kernel applies
+  func chain(old d: [Float], theta t: [Float], _ lay: Layout) -> [Float] {
+    var g = [Float](repeating: 0, count: count)
+    func block(_ n: String) -> (Int, [Int]) { let b = lay.blocks.first { $0.name == n }!; return (b.offset, b.shape) }
+    func put(_ m: NetMat, _ rows: [(String, String?)]) {
+      var r = 0
+      for (w, b) in rows {
+        let (wo, shape) = block(w)
+        for i in 0..<shape[0] {
+          let row = r + i
+          var s = 0.0, dot = 0.0
+          for j in 0..<m.cols { let v = Double(t[m.v + row * m.cols + j]); s += v * v; dot += Double(d[wo + i * shape[1] + j]) * v }
+          let k = 1 / max(s.squareRoot(), 1e-30); dot *= k
+          for j in 0..<m.cols { g[m.v + row * m.cols + j] = Float(Double(t[m.g + row]) * k * (Double(d[wo + i * shape[1] + j]) - dot * k * Double(t[m.v + row * m.cols + j]))) }
+          g[m.g + row] = Float(dot)
+          if let b = b { g[m.g + m.rows + row] = d[block(b).0 + i] }
+        }
+        r += shape[0]
+      }
+    }
+    put(mat("inp"), [("inp", "binp")])
+    for l in 0..<2 { put(mat("zh\(l)"), [("z\(l)", "bz\(l)"), ("h\(l)", "bh\(l)")]); put(mat("up\(l)"), [("up\(l)", "bu\(l)")]); put(mat("down\(l)"), [("down\(l)", "bd\(l)")]) }
+    put(mat("out"), [("out", nil)])
+    return g
+  }
+  func toOld(_ t: [Float], _ lay: Layout) -> [Float] {
+    var o = [Float](repeating: 0, count: lay.count)
+    func block(_ n: String) -> (Int, [Int]) { let b = lay.blocks.first { $0.name == n }!; return (b.offset, b.shape) }
+    func get(_ m: NetMat, _ rows: [(String, String?)]) {
+      var r = 0
+      for (w, b) in rows {
+        let (wo, shape) = block(w)
+        for i in 0..<shape[0] {
+          var s = 0.0; for j in 0..<m.cols { s += Double(t[m.v + (r + i) * m.cols + j]) * Double(t[m.v + (r + i) * m.cols + j]) }
+          let k = Double(t[m.g + r + i]) / max(s.squareRoot(), 1e-30)
+          for j in 0..<m.cols { o[wo + i * shape[1] + j] = Float(k * Double(t[m.v + (r + i) * m.cols + j])) }
+          if let b = b { o[block(b).0 + i] = t[m.g + m.rows + r + i] }
+        }
+        r += shape[0]
+      }
+    }
+    get(mat("inp"), [("inp", "binp")])
+    for l in 0..<2 { get(mat("zh\(l)"), [("z\(l)", "bz\(l)"), ("h\(l)", "bh\(l)")]); get(mat("up\(l)"), [("up\(l)", "bu\(l)")]); get(mat("down\(l)"), [("down\(l)", "bd\(l)")]) }
+    get(mat("out"), [("out", nil)])
+    return o
+  }
+}
+
+func pad64(_ n: Int) -> Int { (n + 63) / 64 * 64 }
+let NONE = UInt32.max
+func ident(_ off: Int = 0) -> [UInt32] { [NONE, 0, UInt32(off), 0] }   // a RowMap: rows from `off`
+
+final class Net {
+  let device: MTLDevice, queue: MTLCommandQueue, lay: NetLayout
+  var pipes: [String: MTLComputePipelineState] = [:]
+  let runs: Int, refreshes: Int, laneCap: Int, ctxCap: Int, cap: Int
+  // parameters, optimizer state
+  let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer, matsBuf: MTLBuffer, pinRows: MTLBuffer, pinCount: Int
+  var step = 0, seed: UInt32 = 1
+  // each matrix: fp32 W, its forward codes (rows quantized along its columns) and its dgrad codes (columns, along its rows)
+  var W: [String: MTLBuffer] = [:], wf: [String: MTLBuffer] = [:], wfs: [String: MTLBuffer] = [:], wb: [String: MTLBuffer] = [:], wbs: [String: MTLBuffer] = [:], dW: [String: MTLBuffer] = [:]
+  // activations (fp32), the backward's (tasks stacked), the codes' scratch
+  let T: MTLBuffer, X: [MTLBuffer], ZC: [MTLBuffer], H: [MTLBuffer], XM: [MTLBuffer], U: [MTLBuffer], Nn: MTLBuffer, inv: MTLBuffer, nextScratch: MTLBuffer
+  let dN: MTLBuffer, dX2: MTLBuffer, dU: MTLBuffer, dXM: MTLBuffer, dZC: MTLBuffer, dXa: MTLBuffer, dXb: MTLBuffer, dhp: MTLBuffer, segBuf: MTLBuffer
+  let qa: MTLBuffer, sa: MTLBuffer, qx: MTLBuffer, sx: MTLBuffer, qy: MTLBuffer, sy: MTLBuffer, partial: MTLBuffer
+  let splitTarget = 768
+  // the call being encoded: one command buffer, its compute encoder (profiling: one encoder a kernel, timestamps at each
+  // encoder's start and end, so a kernel's GPU time; the labels "phase kernel")
+  var cb: MTLCommandBuffer!, e: MTLComputeCommandEncoder!, phase = ""
+  var profiling = false, samples: MTLCounterSampleBuffer? = nil, labels: [String] = []
+  func open() {
+    if profiling, let sb = samples, labels.count < 2046 {
+      let d = MTLComputePassDescriptor()
+      d.sampleBufferAttachments[0]!.sampleBuffer = sb
+      d.sampleBufferAttachments[0]!.startOfEncoderSampleIndex = 2 * labels.count; d.sampleBufferAttachments[0]!.endOfEncoderSampleIndex = 2 * labels.count + 1
+      e = cb.makeComputeCommandEncoder(descriptor: d)!
+    } else { e = cb.makeComputeCommandEncoder()! }
+  }
+  func begin() { cb = queue.makeCommandBuffer()!; labels = []; open() }
+  func mark(_ kernel: String) { if profiling { e.endEncoding(); labels.append(phase + " " + kernel); open() } }
+  func blit(_ f: (MTLBlitCommandEncoder) -> Void) { e.endEncoding(); let b = cb.makeBlitCommandEncoder()!; f(b); b.endEncoding(); if profiling { labels.append(phase + " (blit)") }; open() }
+  var lastGPU = 0.0   // the last call's command buffer, GPU start to end, ns
+  func finish(_ what: String) {
+    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let err = cb.error { fatalError("\(what): \(err)") }
+    lastGPU = (cb.gpuEndTime - cb.gpuStartTime) * 1e9
+  }
+  // the last call's GPU time by label (summed over its kernels of that label), in order of first appearance; and the total
+  func profile() -> [(String, Int, Double)] {
+    guard let sb = samples, profiling, !labels.isEmpty else { return [] }
+    let n = labels.count + 1   // the last open() after the final mark: its encoder ends at finish
+    guard let data = try? sb.resolveCounterRange(0..<(2 * min(n, 2048))) else { return [] }
+    let ts = data.withUnsafeBytes { Array($0.bindMemory(to: UInt64.self)) }
+    var out: [(String, Int, Double)] = [], at: [String: Int] = [:]
+    for i in 1..<min(n, ts.count / 2) {   // encoder i ran label i - 1's kernel (encoder 0: the call's first, before any mark)
+      let t0 = ts[2 * i], t1 = ts[2 * i + 1]
+      if t0 == 0 || t1 < t0 || t0 == UInt64.max { continue }
+      let name = labels[i - 1], dt = Double(t1 - t0) * tick
+      if let k = at[name] { out[k].1 += 1; out[k].2 += dt } else { at[name] = out.count; out.append((name, 1, dt)) }
+    }
+    let sum = out.reduce(0) { $0 + $1.2 }   // timestamps' unit unknown: scaled so the kernels sum to the buffer's GPU time
+    return out.map { ($0.0, $0.1, $0.2 / max(sum, 1e-30) * lastGPU) }
+  }
+  var tick = 1.0   // ns a GPU timestamp tick (calibrated in enableProfiling)
+  func enableProfiling() {
+    let d = MTLCounterSampleBufferDescriptor()
+    d.counterSet = device.counterSets!.first { $0.name == MTLCommonCounterSet.timestamp.rawValue }
+    d.storageMode = .shared; d.sampleCount = 4096
+    samples = try! device.makeCounterSampleBuffer(descriptor: d); profiling = true
+    let (c0, g0) = device.sampleTimestamps(); usleep(200000); let (c1, g1) = device.sampleTimestamps()
+    var tb = mach_timebase_info_data_t(); mach_timebase_info(&tb)
+    tick = Double(c1 - c0) * Double(tb.numer) / Double(tb.denom) / Double(g1 - g0)
+  }
+
+  init(_ device: MTLDevice, _ queue: MTLCommandQueue, library: String, runs: Int, refreshes: Int, contexts: Int, initial: [Float]) {
+    self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
+    let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
+    for n in ["quant_rows", "quant_cols", "gemm_nt", "gemm_nn", "gemm_tn", "reduce_splits", "scan_fwd", "ctx_fwd", "rms_fwd", "rms_bwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam"] {
+      pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
+    }
+    let laneCap = runs * refreshes * L, cap = laneCap + contexts
+    self.runs = runs; self.refreshes = refreshes; self.laneCap = laneCap; ctxCap = contexts; self.cap = cap
+    func f(_ n: Int) -> MTLBuffer { device.makeBuffer(length: max(16, n * 4), options: .storageModeShared)! }
+    func p(_ n: Int) -> MTLBuffer { device.makeBuffer(length: max(16, n * 4), options: .storageModePrivate)! }
+    func b8(_ n: Int) -> MTLBuffer { device.makeBuffer(length: max(16, n), options: .storageModePrivate)! }
+    let P = lay.count
+    theta = device.makeBuffer(bytes: initial, length: P * 4, options: .storageModeShared)!
+    m = p(P); v = p(P); grads = f(3 * P); gram = f(9)
+    var mats: [UInt32] = [], rows: [UInt32] = []
+    for (i, mt) in lay.mats.enumerated() {
+      mats += [UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]
+      for r in 0..<mt.rows { rows += [UInt32(i), UInt32(r)] }
+      W[mt.name] = p(mt.rows * mt.cols)
+      wf[mt.name] = b8(mt.rows * pad64(mt.cols)); wfs[mt.name] = p(mt.rows)
+      wb[mt.name] = b8(pad64(mt.rows) * mt.cols); wbs[mt.name] = p(mt.cols)
+      dW[mt.name] = p(3 * mt.rows * (mt.cols + 1))
+    }
+    matsBuf = device.makeBuffer(bytes: mats, length: mats.count * 4, options: .storageModeShared)!
+    pinRows = device.makeBuffer(bytes: rows, length: rows.count * 4, options: .storageModeShared)!; pinCount = rows.count / 2
+    T = p(cap * IN); X = (0..<3).map { _ in p(cap * D) }; ZC = (0..<2).map { _ in p(cap * 2 * D) }; H = (0..<2).map { _ in p(laneCap * D) }
+    XM = (0..<2).map { _ in p(cap * D) }; U = (0..<2).map { _ in p(cap * E) }; Nn = p(contexts * D); inv = p(contexts); nextScratch = p(runs * 2 * D)
+    dN = p(3 * contexts * D); dX2 = p(3 * contexts * D); dU = p(3 * cap * E); dXM = p(3 * cap * D); dZC = p(3 * cap * 2 * D); dXa = p(3 * cap * D); dXb = p(3 * cap * D)
+    dhp = p(3 * contexts * D); segBuf = f(runs * refreshes * 2)
+    let rowsPad = (cap + 255) / 256 * 256
+    qa = b8(3 * cap * 256); sa = p(3 * cap); qx = b8(rowsPad * 256); sx = p(256 * rowsPad / 256); qy = b8(rowsPad * 256); sy = p(256 * rowsPad / 256)
+    partial = p(splitTarget * 64 * 32)   // splits x tiles <= splitTarget, a tile 64 x 32
+    let cb = queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
+    bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0); bl.endEncoding()
+    cb.commit(); cb.waitUntilCompleted()
+    refresh()
+  }
+
+  // ---- encoders ----
+  func set(_ name: String, _ bufs: [(MTLBuffer?, Int)], _ params: [[UInt32]]) {
+    mark(name)
+    e.setComputePipelineState(pipes[name]!)
+    for (i, (b, off)) in bufs.enumerated() { e.setBuffer(b, offset: off * 4, index: i) }
+    for (k, a) in params.enumerated() { a.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: bufs.count + k) } }
+  }
+  func threads(_ n: Int, _ w: Int = 256) { if n > 0 { e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1)) } }
+  func nextSeed() -> UInt32 { seed = seed &* 1664525 &+ 1013904223; return seed | 1 }
+  // rows of x (map, ld, the first `valid` columns) -> codes in qa (cols wide) and scales in sa, from qa row `at`
+  func qrows(_ x: MTLBuffer, _ xoff: Int, rows: Int, cols: Int, ld: Int, valid: Int, map: [UInt32], stochastic: Bool, q: MTLBuffer? = nil, s: MTLBuffer? = nil, at: Int = 0) {
+    if rows == 0 { return }
+    mark("quant_rows")
+    e.setComputePipelineState(pipes["quant_rows"]!)
+    e.setBuffer(x, offset: xoff * 4, index: 0); e.setBuffer(q ?? qa, offset: at * cols, index: 1); e.setBuffer(s ?? sa, offset: at * 4, index: 2)
+    let pr: [UInt32] = [UInt32(rows), UInt32(cols), UInt32(ld), UInt32(valid), 1, stochastic ? nextSeed() : 0, 0, 0] + map
+    pr.withUnsafeBytes { e.setBytes($0.baseAddress!, length: $0.count, index: 3) }
+    let perSimd = cols <= 64 ? 4 : cols <= 128 ? 2 : 1   // rows a SIMD group (int8.metal's quant_rows)
+    threads((rows + perSimd - 1) / perSimd * 32)
+  }
+  // a product from qa/sa (rows M, width K) against matrix `w`: nt (forward: N = its rows) or nn (dgrad: N = its columns)
+  func gemm(_ w: String, forward: Bool, M: Int, out: MTLBuffer, _ outMap: [UInt32], ldo: Int, flags: UInt32,
+            res: (MTLBuffer, [UInt32], Int)? = nil, aux: (MTLBuffer, Int, Int, Int)? = nil) {
+    if M == 0 { return }
+    let mt = lay.mat(w), N = forward ? mt.rows : mt.cols, K = forward ? pad64(mt.cols) : pad64(mt.rows)
+    let bias: (MTLBuffer?, Int) = mt.bias && forward ? (theta, mt.g + mt.rows) : (nil, 0)
+    let params: [UInt32] = [UInt32(M), UInt32(N), UInt32(K), flags | (bias.0 != nil ? 1 : 0), UInt32(ldo), UInt32(res?.2 ?? 0), UInt32(aux?.3 ?? 0), UInt32(aux?.2 ?? 1)]
+      + outMap + (res?.1 ?? ident()) + [UInt32(aux?.1 ?? 0), 0, 0, 0]
+    set(forward ? "gemm_nt" : "gemm_nn", [(qa, 0), (forward ? wf[w]! : wb[w]!, 0), (sa, 0), (forward ? wfs[w]! : wbs[w]!, 0), (out, 0), bias, (res?.0, 0), (aux?.0, 0)], [params])
+    e.dispatchThreadgroups(MTLSize(width: (N + 31) / 32, height: (M + 63) / 64, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+  }
+  // dW[w][task] = dY_t^T [X, 1]: dY rows `rows` from row (t stride + yoff) of dy (width M = w's rows, ld ldy); X rows from
+  // row xoff of x (w's columns, ld ldx); stochastic codes for dY; the bias's column if w has one
+  func wgrad(_ w: String, dy: MTLBuffer, yoff: Int, stride: Int, ldy: Int, x: MTLBuffer, xoff: Int, ldx: Int, rows: Int) {
+    let mt = lay.mat(w), K = (rows + 255) / 256 * 256, nb = K / 256, Nw = mt.cols + (mt.bias ? 1 : 0), M = mt.rows
+    if rows == 0 { return }
+    set("quant_cols", [(x, 0), (qx, 0), (sx, 0)], [[UInt32(K), UInt32(Nw), UInt32(ldx), UInt32(rows), 256, 1, 0, mt.bias ? UInt32(mt.cols) : NONE, UInt32(xoff), UInt32(mt.cols), 0, 0]])
+    e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    let tiles = ((Nw + 31) / 32) * ((M + 63) / 64), want = max(1, min(nb, splitTarget / tiles)), per = (nb + want - 1) / want, splits = (nb + per - 1) / per
+    for t in 0..<3 {
+      set("quant_cols", [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(t * stride + yoff), UInt32(M), 0, 0]])
+      e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+      set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), UInt32(per)]])
+      e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: splits), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+      set("reduce_splits", [(partial, 0), (dW[w]!, t * M * Nw)], [[UInt32(M * Nw), UInt32(splits)]])
+      threads(M * Nw)
+    }
+  }
+  // each matrix's W, and its two sets of codes, from theta
+  func encodeWeights() {
+    for mt in lay.mats {
+      set("weff", [(theta, 0), (W[mt.name]!, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]]); threads(mt.rows, 64)
+      qrows(W[mt.name]!, 0, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, q: wf[mt.name]!, s: wfs[mt.name]!)
+      set("quant_cols", [(W[mt.name]!, 0), (wb[mt.name]!, 0), (wbs[mt.name]!, 0)],
+          [[UInt32(pad64(mt.rows)), UInt32(mt.cols), UInt32(mt.cols), UInt32(mt.rows), UInt32(pad64(mt.rows)), 1, 0, NONE, 0, UInt32(mt.cols), 0, 0]])
+      e.dispatchThreadgroups(MTLSize(width: (mt.cols + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    }
+  }
+
+  // the forward: B runs' K refreshes (lane tokens [B K L][IN] and masks [B K L] in `lanes`, `mask`, their states h0
+  // [B][2][D]), R contexts (tokens [R][IN], each its lane row pos[r]): w [R][FS] and each run's last states [B][2][D]
+  func encodeForward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, K: Int, R: Int, w: MTLBuffer, next: MTLBuffer) {
+    let LR = B * K * L, N = LR + R
+    precondition(B <= runs && K <= refreshes && R <= ctxCap, "a batch past the network's buffers")
+    qrows(lanes, 0, rows: LR, cols: 64, ld: IN, valid: IN, map: ident(), stochastic: false)
+    qrows(tokens, 0, rows: R, cols: 64, ld: IN, valid: IN, map: ident(), stochastic: false, at: LR)   // the contexts' after the lanes'
+    gemm("inp", forward: true, M: N, out: X[0], ident(), ldo: D, flags: 0)
+    for l in 0..<2 {
+      qrows(X[l], 0, rows: N, cols: 64, ld: D, valid: D, map: ident(), stochastic: false)
+      gemm("zh\(l)", forward: true, M: N, out: ZC[l], ident(), ldo: 2 * D, flags: 4)
+      set("scan_fwd", [(ZC[l], 0), (mask, 0), (h0, 0), (H[l], 0), (X[l], 0), (XM[l], 0), (next, 0)], [[UInt32(B), UInt32(K * L), UInt32(l), l == 0 ? 1 : 0]])
+      threads(B * D, 64)
+      if R > 0 {
+        set("ctx_fwd", [(ZC[l], LR * 2 * D), (H[l], 0), (pos, 0), (X[l], LR * D), (XM[l], LR * D)], [[UInt32(R)]]); threads(R * D)
+      }
+      let r0 = l == 0 ? 0 : LR, n = N - r0   // layer 1's lanes: their states only
+      qrows(XM[l], 0, rows: n, cols: 64, ld: D, valid: D, map: ident(r0), stochastic: false)
+      gemm("up\(l)", forward: true, M: n, out: U[l], ident(r0), ldo: E, flags: 2)
+      qrows(U[l], 0, rows: n, cols: 192, ld: E, valid: E, map: ident(r0), stochastic: false)
+      gemm("down\(l)", forward: true, M: n, out: X[l + 1], ident(r0), ldo: D, flags: 16, res: (XM[l], ident(r0), D))
+    }
+    if R > 0 {
+      set("rms_fwd", [(X[2], LR * D), (Nn, 0), (inv, 0)], [[UInt32(R)]]); threads(R * 32)
+      qrows(Nn, 0, rows: R, cols: 64, ld: D, valid: D, map: ident(), stochastic: false)
+      gemm("out", forward: true, M: R, out: w, ident(), ldo: FS, flags: 0)
+    }
+  }
+  func forward(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) {
+    begin(); phase = "forward"
+    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next)
+    finish("forward")
+  }
+
+  // a learning batch: the forward again, then the three tasks' gradients of sum(w . dw_t) (dw [3][R][FS]) into grads
+  // [3][P], and their Gram matrix. seg [B K] (as pairs): each refresh's context rows (contiguous)
+  func learn(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, seg: [UInt32], B: Int, K: Int, R: Int, dw: MTLBuffer, w: MTLBuffer) {
+    let LR = B * K * L, N = LR + R, P = lay.count
+    seg.withUnsafeBytes { memcpy(segBuf.contents(), $0.baseAddress!, $0.count) }
+    begin(); phase = "learn forward"
+    blit { $0.fill(buffer: self.dXM, range: 0..<(3 * N * D * 4), value: 0); $0.fill(buffer: self.grads, range: 0..<(3 * P * 4), value: 0) }
+    encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: K, R: R, w: w, next: nextScratch)
+    // readout: dN = dw out; out's wgrad; through the rms
+    phase = "back readout"
+    qrows(dw, 0, rows: 3 * R, cols: 64, ld: FS, valid: FS, map: ident(), stochastic: true)
+    gemm("out", forward: false, M: 3 * R, out: dN, ident(), ldo: D, flags: 0)
+    wgrad("out", dy: dw, yoff: 0, stride: R, ldy: FS, x: Nn, xoff: 0, ldx: D, rows: R)
+    set("rms_bwd", [(dN, 0), (Nn, 0), (inv, 0), (dX2, 0)], [[UInt32(R), UInt32(3 * R)]]); threads(3 * R * 32)
+    phase = "back layer 1"
+    // layer 1's feed-forward, its context rows: dX2 [3][R] -> dU [3][R] -> dXM's context rows ([3][N] from LR)
+    qrows(dX2, 0, rows: 3 * R, cols: 64, ld: D, valid: D, map: ident(), stochastic: true)
+    gemm("down1", forward: false, M: 3 * R, out: dU, ident(), ldo: E, flags: 8, aux: (U[1], LR, R, E))
+    wgrad("down1", dy: dX2, yoff: 0, stride: R, ldy: D, x: U[1], xoff: LR, ldx: E, rows: R)
+    qrows(dU, 0, rows: 3 * R, cols: 192, ld: E, valid: E, map: ident(), stochastic: true)
+    gemm("up1", forward: false, M: 3 * R, out: dXM, [UInt32(R), UInt32(N), UInt32(LR), 0], ldo: D, flags: 16, res: (dX2, ident(), D))
+    wgrad("up1", dy: dU, yoff: 0, stride: R, ldy: E, x: XM[1], xoff: LR, ldx: D, rows: R)
+    layerBack(1, B: B, K: K, R: R, h0: h0, mask: mask, pos: pos, upstreamDX: nil, out: dXa)
+    phase = "back layer 0"
+    // layer 0, every row: dXa -> dU -> dXM -> (the recurrence) -> dZC -> dXb
+    qrows(dXa, 0, rows: 3 * N, cols: 64, ld: D, valid: D, map: ident(), stochastic: true)
+    gemm("down0", forward: false, M: 3 * N, out: dU, ident(), ldo: E, flags: 8, aux: (U[0], 0, N, E))
+    wgrad("down0", dy: dXa, yoff: 0, stride: N, ldy: D, x: U[0], xoff: 0, ldx: E, rows: N)
+    qrows(dU, 0, rows: 3 * N, cols: 192, ld: E, valid: E, map: ident(), stochastic: true)
+    gemm("up0", forward: false, M: 3 * N, out: dXM, ident(), ldo: D, flags: 16, res: (dXa, ident(), D))
+    wgrad("up0", dy: dU, yoff: 0, stride: N, ldy: E, x: XM[0], xoff: 0, ldx: D, rows: N)
+    layerBack(0, B: B, K: K, R: R, h0: h0, mask: mask, pos: pos, upstreamDX: dXM, out: dXb)
+    // the input projection's tokens: lanes' then contexts' (two sources; wgrad reads one buffer, so T holds both)
+    phase = "back input"
+    blit { b in b.copy(from: lanes, sourceOffset: 0, to: self.T, destinationOffset: 0, size: LR * IN * 4); if R > 0 { b.copy(from: tokens, sourceOffset: 0, to: self.T, destinationOffset: LR * IN * 4, size: R * IN * 4) } }
+    wgrad("inp", dy: dXb, yoff: 0, stride: N, ldy: D, x: T, xoff: 0, ldx: IN, rows: N)
+    for mt in lay.mats {
+      phase = "back params"
+      set("chain", [(dW[mt.name]!, 0), (theta, 0), (grads, 0)], [[UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)], [UInt32(P), mt.bias ? 1 : 0, 3]])
+      threads(3 * mt.rows, 64)
+    }
+    phase = "back params"
+    set("gram", [(grads, 0), (gram, 0)], [[UInt32(P)]]); e.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
+    finish("learn")
+  }
+  // a layer's recurrence and gates, backward: dXM [3][N] (its context rows' gradients; its lanes' too if upstreamDX, the
+  // local path) -> dZC [3][N] -> out = dXM + dZC zh (dX, [3][N]); zh's wgrad
+  func layerBack(_ l: Int, B: Int, K: Int, R: Int, h0: MTLBuffer, mask: MTLBuffer, pos: MTLBuffer, upstreamDX: MTLBuffer?, out: MTLBuffer) {
+    let LR = B * K * L, N = LR + R
+    if R > 0 {
+      set("ctx_bwd", [(dXM, 0), (ZC[l], 0), (H[l], 0), (pos, 0), (dZC, 0), (dhp, 0)], [[UInt32(R), 3, UInt32(N), UInt32(LR)]]); threads(3 * R * D)
+    }
+    set("scan_bwd", [(dXM, 0), (dhp, 0), (segBuf, 0), (ZC[l], 0), (mask, 0), (H[l], 0), (h0, 0), (dZC, 0)],
+        [[UInt32(B), UInt32(K * L), UInt32(l), upstreamDX != nil ? 1 : 0, UInt32(K), UInt32(L), UInt32(N), 3, UInt32(R), 0, 0, 0]])
+    threads(3 * B * D, 64)
+    qrows(dZC, 0, rows: 3 * N, cols: 128, ld: 2 * D, valid: 2 * D, map: ident(), stochastic: true)
+    gemm("zh\(l)", forward: false, M: 3 * N, out: out, ident(), ldo: D, flags: 16, res: (dXM, ident(), D))
+    wgrad("zh\(l)", dy: dZC, yoff: 0, stride: N, ldy: 2 * D, x: X[l], xoff: 0, ldx: D, rows: N)
+  }
+
+  // ---- the optimizer: UPGrad's weights from the Gram matrix (learn.swift's upgrad), Adam, V back to unit rows, codes ----
+  func apply(rate: Double) -> [Double] {
+    let gp = gram.contents().bindMemory(to: Float.self, capacity: 9)
+    let alpha = upgrad((0..<3).map { a in (0..<3).map { b in Double(gp[3 * a + b]) } })
+    step += 1
+    var a = SIMD4<Float>(Float(alpha[0]), Float(alpha[1]), Float(alpha[2]), Float(rate))
+    var c = SIMD4<Float>(Float(1 - pow(0.9, Double(step))), Float(1 - pow(0.999, Double(step))), 0, 0), n = UInt32(lay.count), pc = UInt32(pinCount)
+    begin(); phase = "optimizer"
+    mark("adam")
+    e.setComputePipelineState(pipes["adam"]!)
+    for (i, b) in [theta, m, v, grads].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+    e.setBytes(&a, length: 16, index: 4); e.setBytes(&c, length: 16, index: 5); e.setBytes(&n, length: 4, index: 6)
+    threads(lay.count)
+    mark("pin")
+    e.setComputePipelineState(pipes["pin"]!)
+    e.setBuffer(theta, offset: 0, index: 0); e.setBuffer(matsBuf, offset: 0, index: 1); e.setBuffer(pinRows, offset: 0, index: 2); e.setBytes(&pc, length: 4, index: 3)
+    threads(pinCount, 64)
+    encodeWeights()
+    finish("optimizer")
+    return alpha
+  }
+  // the weights as stored for deployment (int8mm.h's format): the codes and scales the forward reads, as they are on the
+  // GPU (copied out, not computed again), each matrix's bias
+  func writeCodes(_ path: String) {
+    var bytes = Data()
+    func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { bytes.append(contentsOf: $0) } }
+    u32(0x50384952); u32(1); u32(UInt32(lay.mats.count))
+    let cb = queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
+    var staged: [(MTLBuffer, MTLBuffer)] = []
+    for mt in lay.mats {
+      let q = device.makeBuffer(length: mt.rows * pad64(mt.cols), options: .storageModeShared)!, sc = device.makeBuffer(length: mt.rows * 4, options: .storageModeShared)!
+      bl.copy(from: wf[mt.name]!, sourceOffset: 0, to: q, destinationOffset: 0, size: q.length); bl.copy(from: wfs[mt.name]!, sourceOffset: 0, to: sc, destinationOffset: 0, size: sc.length)
+      staged.append((q, sc))
+    }
+    bl.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    let th = theta.contents().bindMemory(to: Float.self, capacity: lay.count)
+    for (i, mt) in lay.mats.enumerated() {
+      u32(UInt32(mt.rows)); u32(UInt32(mt.cols)); u32(UInt32(pad64(mt.cols))); u32(mt.bias ? 1 : 0)
+      bytes.append(Data(bytes: staged[i].0.contents(), count: staged[i].0.length)); bytes.append(Data(bytes: staged[i].1.contents(), count: staged[i].1.length))
+      if mt.bias { bytes.append(Data(bytes: th + mt.g + mt.rows, count: mt.rows * 4)) }
+    }
+    try! bytes.write(to: URL(fileURLWithPath: path))
+  }
+  // after theta was written from the CPU
+  func refresh() { begin(); phase = "weights"; encodeWeights(); finish("weights") }
+}

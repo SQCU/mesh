@@ -118,19 +118,16 @@ static double tdemand[64],tree_fluid;
    and from execution to execution, as a bridge's would be; the table is active `policy_lag` ns after its refresh (the
    first at once). A piece at node v owing S draws its split from its pattern's context (v, S), masked to the lanes that
    leave its path and reach their share without coming back (route_split). Built with -DROUTE_POLICY; ROUTE_THETA names
-   the parameters (minGRU's, or the GRU's with ROUTE_GRU=1). */
+   the policy's stored int8 weights (the trainer's THETA_INT8 file, int8mm.h's format). */
 #include "route/route.h"
 static struct route_stream policy_stream;static struct route_topology policy_topology;static struct route_params policy_params;
-static float *policy_theta,*policy_w,*policy_next,*policy_tokens,*policy_scratch,policy_state[2*ROUTE_D],policy_lanes[ROUTE_L][ROUTE_IN];
+static float *policy_w,*policy_next,*policy_tokens,*policy_scratch,policy_state[2*ROUTE_D],policy_lanes[ROUTE_L][ROUTE_IN];
 static int policy_pattern[ROUTE_CONTEXTS],policy_node[ROUTE_CONTEXTS],policy_nc,policy_ctx[ROUTE_J][ROUTE_N][ROUTE_SETS];static uint32_t policy_owed[ROUTE_CONTEXTS];
 static struct route_state policy_st,policy_stnext;
 static double policy_dt=100e3,policy_lag=100e3,policy_due,policy_at,policy_cdf[3125],policy_us;
 static uint64_t policy_refreshes,policy_draws;static uint8_t *policy_sent;static uint32_t policy_sentroom;
-static void policy_load(const char *path,int full){
-  const int n=route_params_count(full);
-  FILE *f=fopen(path,"rb");if(!f){perror(path);exit(2);}
-  policy_theta=malloc((size_t)n*sizeof(float));assert(policy_theta && fread(policy_theta,sizeof(float),(size_t)n,f)==(size_t)n);fclose(f);
-  route_params_bind(&policy_params,policy_theta,full);
+static void policy_load(const char *path){   /* the trainer's stored int8 weights (THETA_INT8) */
+  if(route_params_read(&policy_params,path)){fprintf(stderr,"%s: not int8 policy weights\n",path);exit(2);}
   policy_w=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));policy_next=malloc((size_t)ROUTE_CONTEXTS*ROUTE_FS*sizeof(float));
   policy_tokens=malloc((size_t)ROUTE_CONTEXTS*ROUTE_IN*sizeof(float));policy_scratch=malloc(route_forward_scratch(ROUTE_CONTEXTS)*sizeof(float));
   assert(policy_w && policy_next && policy_tokens && policy_scratch);
@@ -396,7 +393,7 @@ int main(int argc,char **argv){
   static const double rows[]={2,8,32,128,1024,4096};
 #ifdef ROUTE_POLICY
   const char *theta=getenv("ROUTE_THETA");
-  if(theta)policy_load(theta,getenv("ROUTE_GRU")!=NULL);
+  if(theta)policy_load(theta);
 #endif
   printf("%-10s %9s %9s %18s %18s %9s %9s\n","","S bytes","fixed","sampled","trees","fluid","floor");
   for(int kind=0;kind<2;kind++)for(size_t i=0;i<sizeof rows/sizeof *rows;i++){

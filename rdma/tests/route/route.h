@@ -133,14 +133,13 @@ uint32_t route_split(const struct route_stream *s, const struct route_state *st,
                      const struct route_live *live, const float *w, double u, double *cdf);
 uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
 
-/* The policy's forward on a CPU (forward.c): theta in policy.swift's layout; one refresh: lanes [nl][IN], tokens
-   [nc][IN], the carried state [2][D] (read and advanced), w [nc][FS] out; scratch route_forward_scratch(nc) floats */
-struct route_params {
-  int full;
-  const float *inp, *binp, *z[2], *bz[2], *r[2], *br[2], *h[2], *bh[2], *up[2], *bu[2], *down[2], *bd[2], *out;
-};
-int route_params_count(int full);
-void route_params_bind(struct route_params *p, const float *theta, int full);
+/* The policy's forward on a CPU (forward.c): net.swift's int8 network (minGRU), its weights as stored, int8 codes
+   (int8mm.h's format, written by the trainer's THETA_INT8): route_params_read loads them (0, or -1 on a bad file). One
+   refresh: lanes [nl][IN], tokens [nc][IN], the carried state [2][D] (read and advanced), w [nc][FS] out; scratch
+   route_forward_scratch(nc) floats. A matrix: its codes [rows][k] (k its columns padded to 64), a scale a row, its bias */
+struct route_mat { int rows, cols, k; int8_t *q; float *s, *b; };
+struct route_params { struct route_mat inp, zh[2], up[2], down[2], out; };
+int route_params_read(struct route_params *p, const char *path);
 size_t route_forward_scratch(int nc);
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
 

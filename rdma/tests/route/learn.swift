@@ -1,4 +1,4 @@
-// The backward and the optimizer (route.h), on the GPU. For a batch of B windows, each K refreshes from its initial
+// The fp32 reference's backward (CHECK=1 GRAPH=1 compares net.swift's int8 network against it), and UPGrad's weights. For a batch of B windows, each K refreshes from its initial
 // state: the forward again (policy.swift's layers), refresh by refresh with the state carried, the drawn-from contexts'
 // w from their refresh's state; each task's surrogate sum(w . dw_t) (dw from the environment's credit, already scaled
 // by the advantages); each one's gradient in theta by the graph's autodiff, back through the window's refreshes; and
@@ -62,48 +62,4 @@ func upgrad(_ G: [[Double]]) -> [Double] {
     for t in 0..<3 { total[t] += u[t] / 3 }
   }
   return total
-}
-
-// Adam on the aggregate, in place: theta, m, v [P]; grads [TASKS][P]
-let adamSource = """
-#include <metal_stdlib>
-using namespace metal;
-kernel void adam(device float *theta [[buffer(0)]], device float *m [[buffer(1)]], device float *v [[buffer(2)]], device const float *g [[buffer(3)]],
-                 constant float4 &a [[buffer(4)]], constant float4 &c [[buffer(5)]], constant uint &P [[buffer(6)]], uint i [[thread_position_in_grid]]) {
-  if (i >= P) return;
-  const float d = a.x * g[i] + a.y * g[P + i] + a.z * g[2 * P + i];   // a: the three weights, the step size
-  m[i] = 0.9f * m[i] + 0.1f * d; v[i] = 0.999f * v[i] + 0.001f * d * d;
-  theta[i] -= a.w * (m[i] / c.x) / (sqrt(v[i] / c.y) + 1e-8f);   // c: the bias corrections
-}
-"""
-
-final class Optimizer {
-  let device: MTLDevice, queue: MTLCommandQueue, pipe: MTLComputePipelineState, P: Int
-  let theta: MTLBuffer, m: MTLBuffer, v: MTLBuffer, grads: MTLBuffer, gram: MTLBuffer
-  var step = 0
-  init(_ device: MTLDevice, _ queue: MTLCommandQueue, initial: [Float]) {
-    self.device = device; self.queue = queue; P = initial.count
-    let lib = try! device.makeLibrary(source: adamSource, options: nil)
-    pipe = try! device.makeComputePipelineState(function: lib.makeFunction(name: "adam")!)
-    theta = device.makeBuffer(bytes: initial, length: P * 4, options: .storageModeShared)!
-    m = device.makeBuffer(length: P * 4, options: .storageModePrivate)!; v = device.makeBuffer(length: P * 4, options: .storageModePrivate)!
-    grads = device.makeBuffer(length: TASKS * P * 4, options: .storageModeShared)!; gram = device.makeBuffer(length: TASKS * TASKS * 4, options: .storageModeShared)!
-    let cb = queue.makeCommandBuffer()!, blit = cb.makeBlitCommandEncoder()!
-    blit.fill(buffer: m, range: 0..<(P * 4), value: 0); blit.fill(buffer: v, range: 0..<(P * 4), value: 0); blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-  }
-  // the gradients in `grads` and their Gram in `gram` (from Learn): the step
-  func apply(rate: Double) -> [Double] {
-    let gp = gram.contents().bindMemory(to: Float.self, capacity: 9)
-    let alpha = upgrad((0..<3).map { a in (0..<3).map { b in Double(gp[3 * a + b]) } })
-    step += 1
-    var a = SIMD4<Float>(Float(alpha[0]), Float(alpha[1]), Float(alpha[2]), Float(rate))
-    var c = SIMD4<Float>(Float(1 - pow(0.9, Double(step))), Float(1 - pow(0.999, Double(step))), 0, 0), n = UInt32(P)
-    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
-    enc.setComputePipelineState(pipe)
-    for (i, b) in [theta, m, v, grads].enumerated() { enc.setBuffer(b, offset: 0, index: i) }
-    enc.setBytes(&a, length: 16, index: 4); enc.setBytes(&c, length: 16, index: 5); enc.setBytes(&n, length: 4, index: 6)
-    enc.dispatchThreads(MTLSize(width: P, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-    return alpha
-  }
 }
