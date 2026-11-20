@@ -75,9 +75,10 @@ func batch(_ h: Handle, _ b: UnsafeMutablePointer<route_batch>) -> Batch { h.bat
   return cb.status == .completed || cb.status == .error ? 1 : 0
 }
 @_cdecl("route_net_wait") public func route_net_wait(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>) {
-  let b = batch(handle(p), bp)
+  let h = handle(p), b = batch(h, bp)
   b.last?.waitUntilCompleted()
   if let err = b.last?.error { fail("\(err)") }
+  if let cb = b.last { h.net.lastGPU = (cb.gpuEndTime - cb.gpuStartTime) * 1e9 }   // the profile's scale: this buffer's GPU time
 }
 // the ranks' sum of grads through the lease (its Metal buffer), into the open command buffer
 func encodeExchange(_ n: Net) {

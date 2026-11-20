@@ -35,7 +35,7 @@ static inline float inverse(float m) { return i8_inverse(m); }
 // rotate: the transform within each 64-block, its strides 1, 2, 4 inside a lane, 8, 16, 32 across lanes (the CPU
 // mirror's order). Dispatched (rows / rows a SIMD group, rounded up) x 32 threads.
 struct QR { uint rows, cols, ld, valid, rotate, seed, p0, p1; RowMap map; };
-template <typename T> static inline void quant_rows_t(device const T *x, device int8_t *q, device float *s, constant QR &p, uint gid) {
+template <typename T> static inline void quant_rows_t(device const T *x, device int8_t *q, device float *s, thread const QR &p, uint gid) {
   const uint lane = gid % 32, lpr = p.cols <= 64 ? 8 : p.cols <= 128 ? 16 : 32, row = gid / 32 * (32 / lpr) + lane / lpr, li = lane % lpr, lb = li % 8;
   const bool live = row < p.rows && li * 8 < p.cols;
   float v[8];
@@ -62,7 +62,7 @@ template <typename T> static inline void quant_rows_t(device const T *x, device 
 
 // fp32, fp16 and bf16 inputs
 #define QROWS(name, T) kernel void name(device const T *x [[buffer(0)]], device int8_t *q [[buffer(1)]], device float *s [[buffer(2)]], \
-  constant QR &p [[buffer(3)]], uint gid [[thread_position_in_grid]]) { quant_rows_t<T>(x, q, s, p, gid); }
+  constant QR &p [[buffer(3)]], uint gid [[thread_position_in_grid]]) { const QR c = p; quant_rows_t<T>(x, q, s, c, gid); }
 QROWS(quant_rows, float)
 QROWS(quant_rows_h, half)
 QROWS(quant_rows_b, bfloat)
@@ -74,7 +74,7 @@ QROWS(quant_rows_b, bfloat)
 // sub-block loaded coalesced into threadgroup memory, a column's 64 rows two a lane (rows l, l + 32, as quant_rows'
 // columns), rotated by shuffles and kept in registers; the block's maximum; the codes back through threadgroup memory.
 struct QC { uint rows, cols, ld, valid, block, rotate, seed, ones, off, xcols, p0, p1; };
-template <typename T> static inline void quant_cols_t(device const T *x, device int8_t *q, device float *s, constant QC &p, uint3 tg3, uint tid, uint sg, uint lane,
+template <typename T> static inline void quant_cols_t(device const T *x, device int8_t *q, device float *s, thread const QC &p, uint3 tg3, uint tid, uint sg, uint lane,
                                                       threadgroup float (&tile)[64][33], threadgroup int8_t (&codes)[256][32]) {
   const uint2 tg = tg3.xy; const uint task = tg3.z;   // task: x's rows p.p0 apart; its codes and scales one task's size apart
   const uint nb = p.rows / p.block, b = tg.y, c0 = tg.x * 32, nsb = p.block / 64;
@@ -128,10 +128,30 @@ template <typename T> static inline void quant_cols_t(device const T *x, device 
 #define QCOLS(name, T) kernel void name(device const T *x [[buffer(0)]], device int8_t *q [[buffer(1)]], device float *s [[buffer(2)]], \
   constant QC &p [[buffer(3)]], uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
   uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
-  threadgroup float tile[64][33]; threadgroup int8_t codes[256][32]; quant_cols_t<T>(x, q, s, p, tg, tid, sg, lane, tile, codes); }
+  threadgroup float tile[64][33]; threadgroup int8_t codes[256][32]; const QC c = p; quant_cols_t<T>(x, q, s, c, tg, tid, sg, lane, tile, codes); }
 QCOLS(quant_cols, float)
 QCOLS(quant_cols_h, half)
 QCOLS(quant_cols_b, bfloat)
+
+// every matrix's codes in one dispatch (the optimizer's rebuild of the weights' codes): the same cores, over a table of
+// the matrices' layouts (x at xoff floats, codes at qoff bytes, scales at soff floats) and a list of work items, each
+// (matrix, its SIMD group of rows) for the rows' codes, (matrix, its 32-column block) for the columns'
+struct WM { uint rows, cols, ld, valid, xoff, qoff, soff, block; };
+kernel void quant_rows_mats(device const float *x [[buffer(0)]], device int8_t *q [[buffer(1)]], device float *s [[buffer(2)]], device const WM *mats [[buffer(3)]],
+                            device const uint2 *items [[buffer(4)]], constant uint &n [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+  if (gid / 32 >= n) return;   // whole SIMD groups (the core shuffles within one)
+  const uint2 it = items[gid / 32]; const WM m = mats[it.x];
+  QR p; p.rows = m.rows; p.cols = m.cols; p.ld = m.ld; p.valid = m.valid; p.rotate = 1; p.seed = 0; p.p0 = 0; p.p1 = 0; p.map = RowMap{0xffffffffu, 0, 0, 0};
+  quant_rows_t<float>(x + m.xoff, q + m.qoff, s + m.soff, p, it.y * 32 + gid % 32);
+}
+kernel void quant_cols_mats(device const float *x [[buffer(0)]], device int8_t *q [[buffer(1)]], device float *s [[buffer(2)]], device const WM *mats [[buffer(3)]],
+                            device const uint2 *items [[buffer(4)]], uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                            uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tile[64][33]; threadgroup int8_t codes[256][32];
+  const uint2 it = items[tg.x]; const WM m = mats[it.x];
+  QC p; p.rows = m.rows; p.cols = m.cols; p.ld = m.ld; p.valid = m.valid; p.block = m.block; p.rotate = 1; p.seed = 0; p.ones = 0xffffffffu; p.off = 0; p.xcols = m.cols; p.p0 = 0; p.p1 = 0;
+  quant_cols_t<float>(x + m.xoff, q + m.qoff, s + m.soff, p, uint3(it.y, 0, 0), tid, sg, lane, tile, codes);
+}
 
 // forward (NT: a [M][K] against b [N][K]) and dgrad (NN: a [M][K] against b [K][N]): the whole K one run, a threadgroup a
 // 64 x 32 tile of the output, four SIMD groups. The epilogue, in order: y = fma(float(sum) sa[m], sb[n], bias[n]);

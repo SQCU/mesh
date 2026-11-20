@@ -130,7 +130,11 @@ final class Net {
   var step = 0, seed: UInt32 = 1
   // each matrix: fp32 W, its forward codes (rows quantized along its columns) and its dgrad codes (columns, along its rows)
   var Woff: [String: Int] = [:], Wall: MTLBuffer! = nil, WoffBuf: MTLBuffer! = nil   // every matrix's W, one arena
-  var wf: [String: MTLBuffer] = [:], wfs: [String: MTLBuffer] = [:], wb: [String: MTLBuffer] = [:], wbs: [String: MTLBuffer] = [:]
+  // every matrix's codes, four arenas: rows' (wf: codes [rows][pad64 cols], wfs: a scale a row) and columns' (wb: codes
+  // [pad64 rows][cols], wbs: a scale a column); offsets in floats (bytes / 4 for codes, whole 64-byte blocks)
+  var wfAll: MTLBuffer! = nil, wfsAll: MTLBuffer! = nil, wbAll: MTLBuffer! = nil, wbsAll: MTLBuffer! = nil
+  var wfOff: [String: Int] = [:], wfsOff: [String: Int] = [:], wbOff: [String: Int] = [:], wbsOff: [String: Int] = [:]
+  var rowsMats: MTLBuffer! = nil, rowsItems: MTLBuffer! = nil, rowsCount = 0, colsMats: MTLBuffer! = nil, colsItems: MTLBuffer! = nil, colsCount = 0
   var dWoff: [String: Int] = [:], dWall: MTLBuffer! = nil, dWinfo: MTLBuffer! = nil   // every matrix's weight gradient [3][rows][cols + 1], one arena; (offset, bias) a matrix
   // activations (fp32), the backward's (tasks stacked), the codes' scratch
   let T: MTLBuffer, X: [MTLBuffer], ZC: [MTLBuffer], H: [MTLBuffer], XM: [MTLBuffer], U: [MTLBuffer], Nn: MTLBuffer, inv: MTLBuffer, nextScratch: MTLBuffer
@@ -189,7 +193,7 @@ final class Net {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
     self.library = lib
-    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_blocks", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam", "upgrad_weights"] {
+    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_blocks", "quant_rows_mats", "quant_cols_mats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam", "upgrad_weights"] {
       pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
     }
     let laneCap = runs * refreshes * L, cap = laneCap + contexts
@@ -200,14 +204,27 @@ final class Net {
     let P = lay.count
     theta = device.makeBuffer(bytes: initial, length: P * 4, options: .storageModeShared)!
     m = p(P); v = p(P); grads = f(3 * P); gram = f(9); alphaBuf = f(4)
-    var mats: [UInt32] = [], rows: [UInt32] = [], info: [UInt32] = [], dWsize = 0, woffs: [UInt32] = [], Wsize = 0
+    var mats: [UInt32] = [], rows: [UInt32] = [], info: [UInt32] = [], dWsize = 0, woffs: [UInt32] = [], Wsize = 0, wfSize = 0, wfsSize = 0, wbSize = 0, wbsSize = 0
     for (i, mt) in lay.mats.enumerated() {
       mats += [UInt32(mt.v), UInt32(mt.rows), UInt32(mt.cols), UInt32(mt.g)]
       for r in 0..<mt.rows { rows += [UInt32(i), UInt32(r)] }
       Woff[mt.name] = Wsize; woffs.append(UInt32(Wsize)); Wsize += mt.rows * mt.cols
-      wf[mt.name] = b8(mt.rows * pad64(mt.cols)); wfs[mt.name] = p(mt.rows)
-      wb[mt.name] = b8(pad64(mt.rows) * mt.cols); wbs[mt.name] = p(mt.cols)
+      wfOff[mt.name] = wfSize / 4; wfSize += mt.rows * pad64(mt.cols); wfsOff[mt.name] = wfsSize; wfsSize += mt.rows
+      wbOff[mt.name] = wbSize / 4; wbSize += pad64(mt.rows) * mt.cols; wbsOff[mt.name] = wbsSize; wbsSize += mt.cols
       dWoff[mt.name] = dWsize; info += [UInt32(dWsize), mt.bias ? 1 : 0]; dWsize += 3 * mt.rows * (mt.cols + 1)
+    }
+    wfAll = b8(wfSize); wfsAll = p(wfsSize); wbAll = b8(wbSize); wbsAll = p(wbsSize)
+    do {   // the codes' work: rows (quant_rows' lanes a row by its width) and 32-column blocks, a matrix after another
+      var rm: [UInt32] = [], ri: [UInt32] = [], cm: [UInt32] = [], ci: [UInt32] = []
+      for (i, mt) in lay.mats.enumerated() {
+        let cols = pad64(mt.cols), lpr = cols <= 64 ? 8 : cols <= 128 ? 16 : 32
+        rm += [UInt32(mt.rows), UInt32(cols), UInt32(mt.cols), UInt32(mt.cols), UInt32(Woff[mt.name]!), UInt32(wfOff[mt.name]! * 4), UInt32(wfsOff[mt.name]!), 0]
+        for g in 0..<((mt.rows + 32 / lpr - 1) / (32 / lpr)) { ri += [UInt32(i), UInt32(g)] }
+        cm += [UInt32(pad64(mt.rows)), UInt32(mt.cols), UInt32(mt.cols), UInt32(mt.rows), UInt32(Woff[mt.name]!), UInt32(wbOff[mt.name]! * 4), UInt32(wbsOff[mt.name]!), UInt32(pad64(mt.rows))]
+        for b in 0..<((mt.cols + 31) / 32) { ci += [UInt32(i), UInt32(b)] }
+      }
+      func sh(_ a: [UInt32]) -> MTLBuffer { device.makeBuffer(bytes: a, length: a.count * 4, options: .storageModeShared)! }
+      rowsMats = sh(rm); rowsItems = sh(ri); rowsCount = ri.count / 2; colsMats = sh(cm); colsItems = sh(ci); colsCount = ci.count / 2
     }
     Wall = p(Wsize); WoffBuf = device.makeBuffer(bytes: woffs, length: woffs.count * 4, options: .storageModeShared)!; dWall = p(dWsize); dWinfo = device.makeBuffer(bytes: info, length: info.count * 4, options: .storageModeShared)!
     matsBuf = device.makeBuffer(bytes: mats, length: mats.count * 4, options: .storageModeShared)!
@@ -262,7 +279,7 @@ final class Net {
     let f = flags | (bias.0 != nil ? 1 : 0) | (fused && out != nil ? 32 : 0) | (dst != nil ? 64 : 0)
     let params: [UInt32] = [UInt32(M), UInt32(N), UInt32(K), f, UInt32(out?.2 ?? 0), UInt32(res?.2 ?? 0), UInt32(aux?.3 ?? 0), UInt32(aux?.2 ?? 1)]
       + (out?.1 ?? ident()) + (res?.1 ?? ident()) + [UInt32(aux?.1 ?? 0), sd, 0, 0]
-    var bufs: [(MTLBuffer?, Int)] = [(src.q, 0), (forward ? wf[w]! : wb[w]!, 0), (src.s, 0), (forward ? wfs[w]! : wbs[w]!, 0), (out?.0, 0), bias, (res?.0, 0), (aux?.0, 0)]
+    var bufs: [(MTLBuffer?, Int)] = [(src.q, 0), forward ? (wfAll, wfOff[w]!) : (wbAll, wbOff[w]!), (src.s, 0), forward ? (wfsAll, wfsOff[w]!) : (wbsAll, wbsOff[w]!), (out?.0, 0), bias, (res?.0, 0), (aux?.0, 0)]
     if fused {
       precondition(N % 64 == 0, "a fused product's width is whole 64-blocks")
       mark(forward ? "gemmq_nt" : "gemmq_nn")
@@ -319,17 +336,20 @@ final class Net {
   }
   // each matrix's W, and its two sets of codes, from theta
   func encodeWeights() {
-    var n = UInt32(pinCount)
+    var m = UInt32(pinCount)
     mark("weff")   // every matrix's W, one dispatch
     current = pipes["weff"]!; e.setComputePipelineState(current!)
     for (i, b) in [theta, Wall, matsBuf, pinRows, WoffBuf].enumerated() { e.setBuffer(b, offset: 0, index: i) }
-    e.setBytes(&n, length: 4, index: 5); threads(pinCount)
-    for mt in lay.mats {   // its two sets of codes (shapes differ by matrix)
-      qrows(Wall, Woff[mt.name]!, rows: mt.rows, cols: pad64(mt.cols), ld: mt.cols, valid: mt.cols, map: ident(), stochastic: false, into: Codes(q: wf[mt.name]!, s: wfs[mt.name]!))
-      set("quant_cols", [(Wall, Woff[mt.name]!), (wb[mt.name]!, 0), (wbs[mt.name]!, 0)],
-          [[UInt32(pad64(mt.rows)), UInt32(mt.cols), UInt32(mt.cols), UInt32(mt.rows), UInt32(pad64(mt.rows)), 1, 0, NONE, 0, UInt32(mt.cols), 0, 0]])
-      e.dispatchThreadgroups(MTLSize(width: (mt.cols + 31) / 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    }
+    e.setBytes(&m, length: 4, index: 5); threads(pinCount)
+    var n = UInt32(rowsCount)   // every matrix's codes: rows' then columns', a dispatch each (int8.metal's cores)
+    mark("quant_rows_mats")
+    current = pipes["quant_rows_mats"]!; e.setComputePipelineState(current!)
+    for (i, b) in [Wall, wfAll, wfsAll, rowsMats, rowsItems].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+    e.setBytes(&n, length: 4, index: 5); threads(rowsCount * 32)
+    mark("quant_cols_mats")
+    current = pipes["quant_cols_mats"]!; e.setComputePipelineState(current!)
+    for (i, b) in [Wall, wbAll, wbsAll, colsMats, colsItems].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+    e.dispatchThreadgroups(MTLSize(width: colsCount, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
   }
 
 
@@ -490,7 +510,7 @@ final class Net {
     var staged: [(MTLBuffer, MTLBuffer)] = []
     for mt in lay.mats {
       let q = device.makeBuffer(length: mt.rows * pad64(mt.cols), options: .storageModeShared)!, sc = device.makeBuffer(length: mt.rows * 4, options: .storageModeShared)!
-      bl.copy(from: wf[mt.name]!, sourceOffset: 0, to: q, destinationOffset: 0, size: q.length); bl.copy(from: wfs[mt.name]!, sourceOffset: 0, to: sc, destinationOffset: 0, size: sc.length)
+      bl.copy(from: wfAll, sourceOffset: wfOff[mt.name]! * 4, to: q, destinationOffset: 0, size: q.length); bl.copy(from: wfsAll, sourceOffset: wfsOff[mt.name]! * 4, to: sc, destinationOffset: 0, size: sc.length)
       staged.append((q, sc))
     }
     bl.endEncoding(); cb.commit(); cb.waitUntilCompleted()
