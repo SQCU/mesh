@@ -21,7 +21,12 @@ let device = MTLCreateSystemDefaultDevice()!, queue = device.makeCommandQueue()!
 let lay = Layout(full: env["GRU"] != nil)
 let arm = lay.full ? "GRU" : "minGRU"
 let CONTEXTS = Int(ROUTE_CONTEXTS), KMAX = 4
-var rng = route_rng(s: UInt64(env["SEED"] ?? "20261119")!)
+// data-parallel across machines: RANK of WORLD, rank 0 at LEADER (host:port) summing every rank's three gradients each
+// step and returning their mean, so every rank takes the same step from the same theta (its initial seed the same on
+// every rank; each rank's windows its own, SEED + RANK)
+let rank = Int(env["RANK"] ?? "0")!, world = Int(env["WORLD"] ?? "1")!
+var rng = route_rng(s: UInt64(env["SEED"] ?? "20261119")! &+ UInt64(rank) &* 0x9e3779b97f4a7c15)
+var thetaRng = route_rng(s: 20261119)
 func normal() -> Double { let u = max(route_uniform(&rng), 1e-300), v = route_uniform(&rng); return sqrt(-2 * log(u)) * cos(2 * Double.pi * v) }
 
 var measured = route_fabric()
@@ -54,7 +59,7 @@ let tokBuf = shared(ROWS * IN), idxBuf = shared(ROWS), wBuf = shared(ROWS * FS),
 let laneP = floats(laneBuf, KMAX * BATCH * L * IN), maskP = floats(maskBuf, KMAX * BATCH * L), stateP = floats(stateBuf, BATCH * 2 * D), nextP = floats(nextBuf, BATCH * 2 * D)
 let tokP = floats(tokBuf, ROWS * IN), idxP = idxBuf.contents().bindMemory(to: Int32.self, capacity: ROWS), wP = floats(wBuf, ROWS * FS), dwP = floats(dwBuf, TASKS * ROWS * FS)
 var policies: [Int: Policy] = [:], learners: [Int: Learn] = [:]
-let opt = Optimizer(device, queue, initial: lay.initial(&rng))
+let opt = Optimizer(device, queue, initial: lay.initial(&thetaRng))
 func td(_ b: MTLBuffer, _ shape: [Int], _ type: MPSDataType = .float32) -> MPSGraphTensorData { MPSGraphTensorData(b, shape: dims(shape), dataType: type) }
 
 // one refresh's forward for `bd` runs (lanes, masks, states written) and `rows` context rows: w and the next states
@@ -160,6 +165,46 @@ func learnFeeds(_ l: Learn, _ B: Int, _ K: Int, _ R: Int, _ packed: MTLBuffer) -
   [l.theta: td(opt.theta, [lay.count]), l.lanes: td(laneBuf, [K, B, L, IN]), l.mask: td(maskBuf, [K, B, L]), l.state: td(stateBuf, [B, 2, D]),
    l.tokens: td(tokBuf, [R, IN]), l.index: td(idxBuf, [R], .int32), l.dw: td(packed, [TASKS, R, FS])]
 }
+// ---- the gradients' sum across machines (a star through rank 0, over TCP) ----
+var peers: [Int32] = []
+func fullSend(_ fd: Int32, _ p: UnsafeRawPointer, _ n: Int) { var at = 0; while at < n { let r = Darwin.send(fd, p + at, n - at, 0); precondition(r > 0, "send to a rank failed"); at += r } }
+func fullRecv(_ fd: Int32, _ p: UnsafeMutableRawPointer, _ n: Int) { var at = 0; while at < n { let r = Darwin.recv(fd, p + at, n - at, 0); precondition(r > 0, "a rank went away"); at += r } }
+func join() {
+  guard world > 1 else { return }
+  let parts = (env["LEADER"] ?? "").split(separator: ":"), port = UInt16(parts.count > 1 ? String(parts[1]) : "47611")!
+  if rank == 0 {
+    let fd = socket(AF_INET, SOCK_STREAM, 0); var one: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, 4)
+    var a = sockaddr_in(); a.sin_family = sa_family_t(AF_INET); a.sin_port = port.bigEndian; a.sin_addr.s_addr = INADDR_ANY
+    precondition(withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0, "bind failed")
+    listen(fd, 16)
+    for _ in 1..<world { let c = accept(fd, nil, nil); precondition(c >= 0); setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, 4); peers.append(c) }
+  } else {
+    var hints = addrinfo(); hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM
+    var res: UnsafeMutablePointer<addrinfo>? = nil
+    precondition(getaddrinfo(String(parts[0]), String(port), &hints, &res) == 0, "cannot resolve the leader")
+    var fd: Int32 = -1
+    for _ in 0..<600 { fd = socket(AF_INET, SOCK_STREAM, 0); if connect(fd, res!.pointee.ai_addr, res!.pointee.ai_addrlen) == 0 { break }; close(fd); fd = -1; usleep(500_000) }
+    precondition(fd >= 0, "cannot reach the leader"); var one: Int32 = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, 4); peers = [fd]
+  }
+  print("rank \(rank) of \(world): joined"); fflush(stdout)
+}
+func allMean(_ p: UnsafeMutablePointer<Float>, _ n: Int) {
+  guard world > 1 else { return }
+  if rank == 0 {
+    let part = UnsafeMutablePointer<Float>.allocate(capacity: n); defer { part.deallocate() }
+    for fd in peers { fullRecv(fd, part, n * 4); for i in 0..<n { p[i] += part[i] } }
+    for i in 0..<n { p[i] /= Float(world) }
+    for fd in peers { fullSend(fd, p, n * 4) }
+  } else { fullSend(peers[0], p, n * 4); fullRecv(peers[0], p, n * 4) }
+}
+// the mean gradients' Gram matrix, for UPGrad (each rank's own Gram is of its own gradients)
+func gramOfMean() {
+  let P = lay.count, g = floats(opt.grads, TASKS * P), G = floats(opt.gram, 9)
+  for a in 0..<3 { for b in 0..<3 { var d = 0.0; for i in 0..<P { d += Double(g[a * P + i]) * Double(g[b * P + i]) }; G[3 * a + b] = Float(d) } }
+}
+join()
+
 func gradients(_ B: Int, _ K: Int, _ R: Int, _ packed: MTLBuffer) {
   let t0 = Date(), l = learner(B, K, R)
   var results: [MPSGraphTensor: MPSGraphTensorData] = [l.gram: td(opt.gram, [TASKS * TASKS])]
@@ -310,7 +355,7 @@ if let path = env["THETA_IN"] {   // continue from these parameters
 }
 print(online ? "online: continuing on the deployment's distribution" : "offline: random fabrics, streams, windows")
 print("\(arm), \(lay.count) parameters; \(windows) windows x 4 rollouts a step, up to \(KMAX) refreshes a window; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes, refreshed every 100 us, 100 us late")
-print("start: " + measure())
+if rank == 0 { print("start: " + measure()) }
 let wall = Date()
 var stepTime = 0.0, since = 0
 for k in 0..<steps {
@@ -328,6 +373,7 @@ for k in 0..<steps {
   let adv = ids.map { t -> Double in let s = t / 4 * 4, total = T[s] + T[s + 1] + T[s + 2] + T[s + 3]; return T[t] - (total - T[t]) / 3 }
   let (B, K, R, packed, _) = gather(ids, adv)
   gradients(B, K, R, packed)
+  if world > 1 { allMean(floats(opt.grads, TASKS * lay.count), TASKS * lay.count); gramOfMean() }
   let alpha = opt.apply(rate: rate)
   stepTime += Date().timeIntervalSince(t0); since += 1
   if k < 3 || (k + 1) % 50 == 0 || k + 1 == steps {
@@ -337,8 +383,8 @@ for k in 0..<steps {
     print(String(format: "step %d (%.0fs): train throughput %.3f latency %.3f queueing %.3f, weights %.2f %.2f %.2f, %.2f steps/s (simulate %.0f%%, forward %.0f%%, credit %.0f%%, learn %.0f%%)",
                  k + 1, Date().timeIntervalSince(wall), mean[0], mean[1], mean[2], alpha[0], alpha[1], alpha[2], Double(since) / stepTime,
                  100 * simTime / stepTime, 100 * forwardTime / stepTime, 100 * creditTime / stepTime, 100 * (learnTime - creditTime) / stepTime))
-    if (k + 1) % 100 == 0 || k + 1 == steps { print("  measured cluster: " + measure()) }
+    if rank == 0 && ((k + 1) % 100 == 0 || k + 1 == steps) { print("  measured cluster: " + measure()) }
     fflush(stdout); stepTime = 0; since = 0; simTime = 0; forwardTime = 0; learnTime = 0; creditTime = 0
   }
 }
-if let path = env["THETA"] { try! Data(bytes: opt.theta.contents(), count: lay.count * 4).write(to: URL(fileURLWithPath: path)); print("parameters written to \(path)") }
+if let path = env["THETA"], rank == 0 { try! Data(bytes: opt.theta.contents(), count: lay.count * 4).write(to: URL(fileURLWithPath: path)); print("parameters written to \(path)") }
