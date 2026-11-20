@@ -4,3 +4,4 @@ route.metallib
 train
 int8check
 switch-policy
+route-stat

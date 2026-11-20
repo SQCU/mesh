@@ -23,6 +23,7 @@
    the backward carries it through the layers and back through the window's refreshes. */
 #ifndef ROUTE_H
 #define ROUTE_H
+#include "telemetry.h"
 
 enum {
   ROUTE_N = 6,                    /* nodes */
