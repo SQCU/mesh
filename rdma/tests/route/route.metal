@@ -17,6 +17,9 @@
 // position (RoPE at the embedding only), mean-pooled, and dotted with the stream. A matrix-vector product reads each
 // weight row once, coalesced along the row across a SIMD group's lanes, for every commodity at once.
 #include <metal_stdlib>
+#ifndef NOPOLICY
+#define NOPOLICY 0
+#endif
 using namespace metal;
 
 constant constexpr int N = 6, L = 32, J = 6, K = 8, H = 12, SLOTS = 64, REFRESH = 8;
@@ -93,7 +96,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int t = 0; t < SLOTS; t++) {
-    if (t % REFRESH == 0) {
+    if (!NOPOLICY && t % REFRESH == 0) {
       // the stream: context and last expected embedding, then two layers of GRU and feed-forward
       if (tid < uint(J)) {
         const int j = tid;
