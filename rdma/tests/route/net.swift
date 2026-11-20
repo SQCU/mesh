@@ -256,6 +256,9 @@ final class Net {
     if n == 0 { return }
     e.dispatchThreadgroups(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: (steps + 31) / 32 * 32, height: 1, depth: 1))
   }
+  // a weight gradient's blocks a threadgroup accumulates in registers: sqrt(blocks), balancing the partial sums written
+  // (blocks / per) against each threadgroup's serial work (per); measured flat from 4 to 64 at 1,536 blocks
+  func splitPer(_ nb: Int) -> Int { max(1, Int(Double(nb).squareRoot().rounded())) }
   func nextSeed() -> UInt32 { seed = seed &* 1664525 &+ 1013904223; return seed | 1 }
   // rows of x (map, ld, the first `valid` columns) -> codes (cols wide) into c from code row `at`; returns the seed
   @discardableResult
@@ -335,9 +338,10 @@ final class Net {
     // block a task (the exactness unit, its partial sums), then the blocks' pairwise tree a task
     set("quant_cols" + dyType, [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(yoff), UInt32(M), UInt32(stride), 0]])
     e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 3), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), 1, UInt32(nb)]])
-    e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: 3 * nb), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-    set("reduce_blocks", [(partial, 0), (dWall, dWoff[w]!)], [[UInt32(M * Nw), UInt32(nb), 3]]); threads(3 * M * Nw)
+    let per = splitPer(nb), nz = (nb + per - 1) / per   // blocks a threadgroup accumulates; its partial sums nz a task
+    set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), UInt32(per), UInt32(nz)]])
+    e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: 3 * nz), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    set("reduce_blocks", [(partial, 0), (dWall, dWoff[w]!)], [[UInt32(M * Nw), UInt32(nz), 3]]); threads(3 * M * Nw)
   }
   // each matrix's W, and its two sets of codes, from theta
   func encodeWeights() {

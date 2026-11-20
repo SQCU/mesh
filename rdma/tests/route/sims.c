@@ -18,7 +18,9 @@ struct launched { struct route_sims *x; int slot; };   /* a slot's task context,
 struct route_sims { int n, K; struct slot *s; _Atomic int *ready; int *status, *nc; struct launched *task; };
 /* the one wake-up: a run at its refresh or end, a forward or a step done (net.swift's completion handlers) */
 static dispatch_semaphore_t wake;
-void route_wake(void) { dispatch_semaphore_signal(wake); }
+static dispatch_once_t made;
+static void make_wake(void *unused) { (void)unused; wake = dispatch_semaphore_create(0); }
+void route_wake(void) { dispatch_once_f(&made, 0, make_wake); dispatch_semaphore_signal(wake); }   /* made at first use, whoever is first */
 
 struct route_sims *route_sims_new(int n, int refreshes) {
   struct route_sims *x = calloc(1, sizeof *x);
@@ -26,7 +28,7 @@ struct route_sims *route_sims_new(int n, int refreshes) {
   x->ready = calloc((size_t)n, sizeof *x->ready); x->status = calloc((size_t)n, sizeof(int)); x->nc = calloc((size_t)n, sizeof(int));
   x->task = calloc((size_t)n, sizeof *x->task);
   for (int i = 0; i < n; i++) { x->task[i].x = x; x->task[i].slot = i; }
-  if (!wake) wake = dispatch_semaphore_create(0);
+  dispatch_once_f(&made, 0, make_wake);
   for (int i = 0; i < n; i++) {
     struct slot *s = &x->s[i];
     s->sim = route_sim_new();

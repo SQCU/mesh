@@ -309,6 +309,55 @@ def bench(cfg, lib):
     emit(rec)
 
 
+def roofline(cfg, lib):
+    """random numbers through the real forward and learning step at the configured capacity (no simulator): their
+    effective int8 TOP/s and each kernel's share (profiled call apart)"""
+    cap, K = cfg['capacity'], cfg['capacity']['refreshes']
+    B, R = cap['learn_runs'], cap['forward_rows']
+    rng = np.random.default_rng(1)
+    net = network(cfg, lib, B, K, R)
+    LB = loop.Batch(lib, net, B, K, R)
+    LB.lanes[:] = rng.standard_normal(LB.lanes.shape).astype(np.float32); LB.mask[:] = 1
+    LB.h0[:] = 0.1 * rng.standard_normal(LB.h0.shape).astype(np.float32)
+    LB.tokens[:] = rng.standard_normal(LB.tokens.shape).astype(np.float32)
+    seg = np.repeat(np.arange(B * K), R // (B * K)); seg = np.concatenate([seg, np.full(R - len(seg), B * K - 1)])
+    LB.pos[:] = seg * loop.L + loop.L - 1
+    bounds = np.searchsorted(seg, np.arange(B * K + 1)); LB.seg[:] = np.stack([bounds[:-1], bounds[1:]], 1).ravel()
+    LB.w[:] = 0.1 * rng.standard_normal(LB.w.shape).astype(np.float32); LB.scale0[:] = 1.0 / B
+    dr = LB.draws(R)   # a draw a row: one destination, five lanes all valid and allowed
+    dr['arrive'] = rng.random((R, 30)).astype(np.float32); dr['valid'] = 31; dr['mask'] = 31; dr['S'] = 1; dr['deg'] = 5; dr['ntok'] = 5
+    dr['token'] = rng.integers(0, 5, R); dr['row'] = np.arange(R); dr['unit'] = 1; dr['a1'] = 0.01; dr['a2'] = 0.01
+    LB.first[:] = np.arange(R + 1)
+    ops_learn = 3 * 2 * (B * K * loop.L * loop.LANE_MACS + R * loop.CTX_MACS)
+    lib.route_net_step(net, LB.p, B, K, R, R, 1.0 / B, 0.0, 1); LB.wait()
+    t0 = time.perf_counter(); n = 5
+    for _ in range(n):
+        lib.route_net_step(net, LB.p, B, K, R, R, 1.0 / B, 0.0, 1)
+    LB.wait(); t = (time.perf_counter() - t0) / n
+    out = ffi.new('char[]', 1 << 22)
+    lib.route_net_profile(net, 1, ffi.NULL, 0); lib.route_net_step(net, LB.p, B, K, R, R, 1.0 / B, 0.0, 1); LB.wait(); lib.route_net_profile(net, 0, out, 1 << 22)
+    ks = json.loads(ffi.string(out).decode()); tot = sum(k['ns'] for k in ks); agg = {}
+    for k in ks:
+        name = k['kernel'].rsplit(' ', 1)[1]; agg[name] = agg.get(name, 0) + k['ns']
+    emit({'record': 'roofline', 'call': 'learning step', 'runs': B, 'refreshes': K, 'lane_rows': B * K * loop.L, 'context_rows': R, 'seconds': round(t, 5),
+          'int8_tops': round(ops_learn / t / 1e12, 2), 'kernels_share': {k: round(v / tot, 3) for k, v in sorted(agg.items(), key=lambda x: -x[1])[:12]}})
+    # the forward: as many runs as its rows allow (one refresh each), the same random rows
+    FB = loop.Batch(lib, net, B, 1, R)
+    FB.lanes[:] = LB.lanes[:B]; FB.mask[:] = 1; FB.h0[:] = LB.h0; FB.tokens[:] = LB.tokens; FB.pos[:] = (np.arange(R) % B) * loop.L + loop.L - 1
+    ops_fwd = 2 * (B * loop.L * loop.LANE_MACS + R * loop.CTX_MACS)
+    lib.route_net_forward(net, FB.p, B, R); FB.wait()
+    t0 = time.perf_counter()
+    for _ in range(n):
+        lib.route_net_forward(net, FB.p, B, R)
+    FB.wait(); t = (time.perf_counter() - t0) / n
+    lib.route_net_profile(net, 1, ffi.NULL, 0); lib.route_net_forward(net, FB.p, B, R); FB.wait(); lib.route_net_profile(net, 0, out, 1 << 22)
+    ks = json.loads(ffi.string(out).decode()); tot = sum(k['ns'] for k in ks); agg = {}
+    for k in ks:
+        name = k['kernel'].rsplit(' ', 1)[1]; agg[name] = agg.get(name, 0) + k['ns']
+    emit({'record': 'roofline', 'call': 'forward', 'runs': B, 'lane_rows': B * loop.L, 'context_rows': R, 'seconds': round(t, 5),
+          'int8_tops': round(ops_fwd / t / 1e12, 2), 'kernels_share': {k: round(v / tot, 3) for k, v in sorted(agg.items(), key=lambda x: -x[1])[:12]}})
+
+
 def xbench(cfg, lib, n):
     """the exchange alone: n sums of known values through the mesh (0: joined and closed, a dead run's programs flushed)"""
     r = cfg['run']
@@ -367,6 +416,8 @@ def main(argv):
         check(cfg, lib, '--graph' in rest)
     elif cmd == 'bench':
         bench(cfg, lib)
+    elif cmd == 'roofline':
+        roofline(cfg, lib)
     elif cmd == 'xbench':
         xbench(cfg, lib, int(rest[1]))
     else:
