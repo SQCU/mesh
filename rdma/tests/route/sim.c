@@ -100,7 +100,8 @@ static void delays(const struct route_fabric *f, double q, double (*dist)[ROUTE_
   for (int m = 0; m < ROUTE_N; m++) for (int a = 0; a < ROUTE_N; a++) for (int b = 0; b < ROUTE_N; b++) if (dist[a][m] + dist[m][b] < dist[a][b]) dist[a][b] = dist[a][m] + dist[m][b];
 }
 /* a collective's floor: its cut bound (the most bytes a node must take in or put out, over its rate) and its slowest
-   pair's shortest delay for one piece, at most a page (twice, for an all-reduce's two phases), as tests/switch.c's */
+   pair's shortest delay for one piece, at most a page, as tests/switch.c's (for an all-reduce, the slowest owner's slowest
+   partial in plus its slowest reduced page out: every page goes both ways through its owner) */
 static double op_floor(const struct route_fabric *f, int kind, double S, int root) {
   double in[ROUTE_N] = {0}, out[ROUTE_N] = {0}, dist[ROUTE_N][ROUTE_N], cut = 0, reach = 0;
   for (int l = 0; l < f->lanes; l++) { in[f->to[l]] += f->rate[l]; out[f->from[l]] += f->rate[l]; }
@@ -113,9 +114,12 @@ static double op_floor(const struct route_fabric *f, int kind, double S, int roo
     else { a = v == root ? 0 : S; b = v == root ? (n - 1) * S : 0; }
     if (a / in[v] > cut) cut = a / in[v];
     if (b / out[v] > cut) cut = b / out[v];
-    for (int q = 0; q < n; q++) { const int u = f->compute[q]; if (u != v && (kind != ROUTE_SCATTER || v == root) && dist[v][u] > reach) reach = dist[v][u]; }
+    if (kind == ROUTE_ALLREDUCE) {   /* a page owned by v: its slowest partial in, then its reduced page's slowest way out */
+      double in1 = 0, out1 = 0;
+      for (int q = 0; q < n; q++) { const int u = f->compute[q]; if (u == v) continue; if (dist[u][v] > in1) in1 = dist[u][v]; if (dist[v][u] > out1) out1 = dist[v][u]; }
+      if (k < (S > ROUTE_PAGE ? (int)ceil(S / ROUTE_PAGE) : 1) && in1 + out1 > reach) reach = in1 + out1;   /* v owns a page */
+    } else for (int q = 0; q < n; q++) { const int u = f->compute[q]; if (u != v && (kind != ROUTE_SCATTER || v == root) && dist[v][u] > reach) reach = dist[v][u]; }
   }
-  if (kind == ROUTE_ALLREDUCE) reach *= 2;
   return cut > reach ? cut : reach;
 }
 static void stream_base(const struct route_fabric *f, struct route_stream *s) {
