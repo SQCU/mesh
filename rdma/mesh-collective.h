@@ -513,6 +513,12 @@ int mesh_plan_schedule_graph(struct mesh_plan_flow_geometry *,const struct mesh_
 int mesh_plan_schedule_project(struct plan_schedule_result *,const double *,const uint32_t *,uint32_t);
 void mesh_plan_schedule_retain(struct plan_schedule_result *);
 void mesh_plan_schedule_free(struct plan_schedule_result *);
+struct mesh_plan_periodic {
+  uint32_t values,horizon;
+  const uint32_t *first;
+  const uint64_t *before;
+  const uint32_t *relay_first;
+};
 struct mesh_plan_storage_function {
   struct plan_schedule_result *schedule;
   const struct mesh_function *function;
@@ -521,6 +527,8 @@ struct mesh_plan_storage_function {
   const uint32_t *index;
   uint32_t copies,*value_lag;
   struct mesh_graph_closure before;
+  const struct mesh_plan_storage *program;
+  uint32_t *minimum;
 };
 struct mesh_plan_storage {
   size_t references;
@@ -531,13 +539,14 @@ struct mesh_plan_storage {
   uint64_t *function_lag;
   struct mesh_plan_storage_function *function;
   void *mapped;
+  struct mesh_plan_periodic periodic;
 };
 int mesh_plan_storage(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
   struct mesh_graph_buffer_result *,const uint32_t *,const size_t *,const size_t *const *,const size_t *const *,
   const uint32_t *const *,struct mesh_plan_storage **);
 int mesh_plan_storage_ordered(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
   struct mesh_graph_buffer_result *,const uint32_t *,const size_t *,const size_t *const *,const size_t *const *,
-  const uint32_t *const *,uint64_t *const *,struct mesh_plan_storage **);
+  const uint32_t *const *,uint64_t *const *,const struct mesh_plan_periodic *,struct mesh_plan_storage **);
 void mesh_plan_storage_retain(struct mesh_plan_storage *);
 void mesh_plan_storage_free(struct mesh_plan_storage *);
 struct plan_graph_result {

@@ -228,17 +228,22 @@ class PlanStep(C.Structure):
     pass
 
 
+class PlanPeriodic(C.Structure):
+    _fields_ = [('values', U), ('horizon', U), ('first', C.POINTER(U)), ('before', C.POINTER(Q)), ('relay_first', C.POINTER(U))]
+
+
 class PlanStorageFunction(C.Structure):
     _fields_ = [('schedule', C.POINTER(PlanScheduleResult)), ('function', C.POINTER(Function)), ('lifetimes', Z),
                 ('first', C.POINTER(Z)), ('last', C.POINTER(Z)), ('index', C.POINTER(U)),
-                ('copies', U), ('value_lag', C.POINTER(U)), ('before', mesh_graph.Closed)]
+                ('copies', U), ('value_lag', C.POINTER(U)), ('before', mesh_graph.Closed),
+                ('program', C.c_void_p), ('minimum', C.POINTER(U))]
 
 
 class PlanStorage(C.Structure):
     _fields_ = [('references', Z), ('analysis', C.POINTER(PlanAnalysis)),
                 ('bounds', C.POINTER(mesh_graph.BufferResult)), ('bound_function', C.POINTER(U)),
                 ('horizon', U), ('function_lag', C.POINTER(Q)),
-                ('function', C.POINTER(PlanStorageFunction)), ('mapped', C.c_void_p)]
+                ('function', C.POINTER(PlanStorageFunction)), ('mapped', C.c_void_p), ('periodic', PlanPeriodic)]
 
 
 class ScheduleResource(C.Structure):
@@ -641,7 +646,7 @@ for name, result, arguments in (
         ('mesh_plan_storage_ordered', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
                                        C.POINTER(mesh_graph.BufferResult), C.POINTER(U), C.POINTER(Z),
                                        C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(U)),
-                                       C.POINTER(C.POINTER(Q)), C.POINTER(C.POINTER(PlanStorage))]),
+                                       C.POINTER(C.POINTER(Q)), C.POINTER(PlanPeriodic), C.POINTER(C.POINTER(PlanStorage))]),
         ('mesh_plan_storage_retain', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_storage_free', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_state_page', U, [C.POINTER(PlanCompilation), U]),

@@ -611,6 +611,18 @@ def resource_ancestors(graph, order, cycles, resource, exclusive):
     return Owned(closure, LIB.mesh_graph_closure_free, selected)
 
 
+def periodic_lifetimes(ancestors, order, delays, horizon, values, uses):
+    keys, vertices = zip(*uses) if uses else ((), ())
+    delayed = (Dependence * len(delays))(*(Dependence(*e) for e in delays))
+    before = (C.c_uint64 * ((horizon + 1) * values * ((values + 63) // 64)))()
+    fn = LIB.mesh_graph_periodic_lifetimes
+    fn.argtypes = [C.c_void_p, C.POINTER(Closed), _U, C.c_size_t, C.POINTER(Dependence), C.c_uint32,
+                   C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_uint64)]
+    _check(fn(ancestors.graph.pointer, ancestors.made, order, len(delayed), delayed, horizon, values, len(uses),
+              (C.c_uint32 * len(uses))(*keys), (C.c_uint32 * len(uses))(*vertices), before))
+    return before
+
+
 def resource_cycles(order, resources, resource):
     edges, n = (Dependence * len(order))(), C.c_size_t()
     _check(LIB.mesh_graph_resource_cycles_except(len(order), order, resources, resource, 1, 0, edges, C.byref(n)))

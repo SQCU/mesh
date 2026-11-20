@@ -186,6 +186,16 @@ int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, co
                          size_t *first, size_t *last);
 /* Row b contains a iff every access of a strictly precedes every access of b in each named occurrence.
    Empty access sets are unrelated. reached has values * ceil(values/64) words. */
+static inline int mesh_graph_periodic_before(uint32_t values,const uint64_t *before,uint32_t distance,uint32_t a,uint32_t b){
+  const size_t words=((size_t)values+63)/64;
+  return (int)((before[((size_t)distance*values+b)*words+a/64]>>(a%64))&1);
+}
+int mesh_graph_minimum_reuse(uint32_t horizon,uint32_t values,const uint64_t *before,uint32_t calls,
+                             const size_t *occurrence,const uint32_t *first,uint32_t lifetimes,uint32_t *minimum);
+int mesh_graph_periodic_lifetimes(const struct mesh_graph_relation *,const struct mesh_graph_closure *,
+                                  const uint32_t *order,size_t delays,const struct mesh_graph_dependence *,
+                                  uint32_t horizon,uint32_t values,size_t uses,const uint32_t *value,
+                                  const uint32_t *vertex,uint64_t *before);
 int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, size_t calls, const uint32_t *base,
                                     uint32_t values, size_t uses, const uint32_t *value, const uint32_t *vertex,
                                     uint64_t *reached);
@@ -827,6 +837,9 @@ int mesh_graph_relation_synchronization(struct mesh_graph_relation *, const unsi
    witness's hazard in the asked orientation, view_conflicts' own: key and given the record's, from_view and to_view
    as asked; ENODATA where not known, ENOENT where there is none */
 enum { MESH_GRAPH_QUERY_NONE, MESH_GRAPH_QUERY_DIRECTED, MESH_GRAPH_QUERY_SELF };
+int mesh_graph_relation_ranked_views(uint32_t vertices, const uint32_t *rank,size_t views,const struct mesh_graph_view *view,
+                                     size_t supplied,const uint32_t *from,const uint32_t *to,
+                                     void (*release)(void *),void *owner,struct mesh_graph_relation **out);
 int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
                               const uint32_t *from, const uint32_t *to, int self, void (*release)(void *), void *owner,
                               struct mesh_graph_relation **out);

@@ -1030,6 +1030,78 @@ int mesh_graph_occurrence_lifetimes(const struct mesh_graph_closure *ancestors, 
   return 0;
 }
 
+/* Lam 1988 §2.3. A ring of L values can advance when every occurrence
+   precedes its successor L calls later. Zero denotes no such dependence. */
+int mesh_graph_minimum_reuse(uint32_t horizon,uint32_t values,const uint64_t *before,uint32_t calls,
+                             const size_t *occurrence,const uint32_t *first,uint32_t lifetimes,uint32_t *minimum){
+  const uint64_t copies=(uint64_t)horizon*calls;
+  if(copies>=UINT32_MAX)return ENOMEM;
+  for(uint32_t v=0;v<lifetimes;v++){
+    minimum[v]=0;
+    for(uint32_t lag=1;lag<=copies;lag++){
+      uint32_t c=0;
+      for(;c<calls;c++){
+        const uint64_t next=(uint64_t)c+lag;
+        const uint32_t a=first[occurrence[c]]+v,b=first[occurrence[next%calls]]+v;
+        if(!mesh_graph_periodic_before(values,before,(uint32_t)(next/calls),a,b))break;
+      }
+      if(c==calls){minimum[v]=lag;break;}
+    }
+  }
+  return 0;
+}
+
+/* Lam 1988 §2.3. At distance d, reached[v] names exactly the instructions of
+   iteration zero that finish before v in iteration d. Positive delays start
+   each layer; the selected zero-delay DAG propagates those same bits. */
+int mesh_graph_periodic_lifetimes(const struct mesh_graph_relation *order_graph,const struct mesh_graph_closure *zero,
+                                  const uint32_t *order,size_t delays,const struct mesh_graph_dependence *delayed,
+                                  uint32_t horizon,uint32_t values,size_t uses,const uint32_t *value,
+                                  const uint32_t *vertex,uint64_t *before){
+  const struct mesh_graph_relation_data *dag=mesh_graph_relation_data(order_graph);
+  const uint32_t n=zero->vertices,base=0;
+  const size_t words=zero->words,columns=((size_t)values+63)/64;
+  if(dag->vertices!=n || !horizon)return EINVAL;
+  int status=mesh_graph_occurrence_lifetimes(zero,1,&base,values,uses,value,vertex,before);
+  if(status || !values)return status;
+  uint64_t max_delay=0;
+  for(size_t i=0;i<delays;i++){
+    const struct mesh_graph_dependence e=delayed[i];
+    if(!e.delay || e.from>=n || e.to>=n)return EINVAL;
+    if(e.delay<=horizon && e.delay>max_delay)max_delay=e.delay;
+  }
+  const size_t ring=(size_t)max_delay+1;
+  size_t stride,room;
+  if(__builtin_mul_overflow((size_t)n,words,&stride) || __builtin_mul_overflow(ring,stride,&room) ||
+     room>=SIZE_MAX/sizeof(uint64_t))return ENOMEM;
+  uint64_t *layers=calloc(room+1,sizeof *layers);
+  if(!layers)return ENOMEM;
+  for(uint32_t d=1;!status && d<=horizon;d++){
+    uint64_t *row=layers+(d%ring)*stride;
+    memset(row,0,stride*sizeof *row);
+    for(size_t i=0;i<delays;i++){
+      const struct mesh_graph_dependence e=delayed[i];
+      if(e.delay>d)continue;
+      const uint64_t *prior=(e.delay==d?zero->reached:layers+((d-e.delay)%ring)*stride)+(size_t)e.from*words;
+      uint64_t *dst=row+(size_t)e.to*words;
+      for(size_t w=0;w<words;w++)dst[w]|=prior[w];
+      if(e.delay==d)dst[e.from/64]|=UINT64_C(1)<<(e.from%64);
+    }
+    for(uint32_t k=0;k<n;k++){
+      uint32_t v=order[k];
+      const uint64_t *src=row+(size_t)v*words;
+      for(size_t i=dag->row_first[v];i<dag->row_first[v+1];i++){
+        uint64_t *dst=row+(size_t)dag->edge[dag->row_edge[i]].to*words;
+        for(size_t w=0;w<words;w++)dst[w]|=src[w];
+      }
+    }
+    const struct mesh_graph_closure reached={n,words,row};
+    status=mesh_graph_occurrence_lifetimes(&reached,1,&base,values,uses,value,vertex,
+                                           before+(size_t)d*values*columns);
+  }
+  free(layers);return status;
+}
+
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context) {
   for (uint32_t k = head[key]; k != UINT32_MAX; k = next[k]) if (equal(context, k)) return k;
@@ -1827,7 +1899,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
                           int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
                           void *context, struct mesh_graph_conflict **conflict, struct mesh_graph_origin **origin,
                           struct mesh_graph_relation ***decider, const uint32_t ***decider_map, size_t *deciders,
-                          size_t *edges);
+                          size_t *edges,const uint32_t *rank);
 /* design/compilation-composition-change-request.md items 6, 6.4 and 7: mesh-graph.h struct mesh_graph_relation */
 struct mesh_graph_relation {
   size_t references;
@@ -2031,8 +2103,8 @@ int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh
   return mesh_graph_relation_decided(vertices, views, view, supplied, from, to, self, NULL, NULL, NULL, release, owner,
                                      out);
 }
-int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
-                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,
+static int relation_ordered(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,const uint32_t *rank,
                                 int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
                                 void *context, void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
   *out = NULL;
@@ -2041,8 +2113,9 @@ int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct me
   struct mesh_graph_relation **decider = NULL;
   const uint32_t **decider_map = NULL;
   size_t count = 0, deciders = 0;
+  if(rank)for(size_t i=0;i<views;i++)if(view[i].vertex>=vertices)return EINVAL;
   int result = view_conflicts(views, view, supplied, from, to, self != 0, decide, context, &conflict,
-                              decide ? &origin : NULL, &decider, &decider_map, &deciders, &count);
+                              decide ? &origin : NULL, &decider, &decider_map, &deciders, &count, rank);
   if (!result) result = relation_root(vertices, views, view, count, conflict,
                                       self ? MESH_GRAPH_QUERY_SELF : MESH_GRAPH_QUERY_DIRECTED, release, owner, out);
   if (result) { free(conflict); free(origin); free(decider); free(decider_map); return result; }
@@ -2055,6 +2128,17 @@ int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct me
   (*out)->deciders = deciders;
   (*out)->map = map;
   return 0;
+}
+int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,
+                                int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
+                                void *context, void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
+  return relation_ordered(vertices,views,view,supplied,from,to,self,map,NULL,decide,context,release,owner,out);
+}
+int mesh_graph_relation_ranked_views(uint32_t vertices,const uint32_t *rank,size_t views,const struct mesh_graph_view *view,
+                                     size_t supplied,const uint32_t *from,const uint32_t *to,
+                                     void (*release)(void *),void *owner,struct mesh_graph_relation **out){
+  return relation_ordered(vertices,views,view,supplied,from,to,0,NULL,rank,NULL,NULL,release,owner,out);
 }
 size_t mesh_graph_relation_deciders(const struct mesh_graph_relation *r, struct mesh_graph_relation *const **relation,
                                     const uint32_t *const **maps, const uint32_t **map) {
@@ -4223,7 +4307,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
                           int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
                           void *context, struct mesh_graph_conflict **conflict, struct mesh_graph_origin **origin,
                           struct mesh_graph_relation ***decider, const uint32_t ***decider_map, size_t *deciders,
-                          size_t *edges) {
+                          size_t *edges,const uint32_t *rank) {
   *conflict = NULL; *edges = 0;
   if (origin) *origin = NULL;
   if (decider) { *decider = NULL; *decider_map = NULL; *deciders = 0; }
@@ -4307,7 +4391,8 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
       }
       if (meets < 0) { result = -meets; break; }
       if (!meets) continue;
-      const struct mesh_graph_view *lo = a->vertex < b->vertex ? a : b, *hi = a->vertex < b->vertex ? b : a;
+      const int earlier = rank ? rank[a->vertex] < rank[b->vertex] : a->vertex < b->vertex;
+      const struct mesh_graph_view *lo = earlier ? a : b, *hi = earlier ? b : a;
       uint32_t kind = view_hazard(lo, hi);
       const unsigned directions = 1 + (lo->vertex == hi->vertex && kind != MESH_GRAPH_WRITE_AFTER_WRITE);
       size_t first = (size_t)(lo - view), second = (size_t)(hi - view);
@@ -4378,14 +4463,14 @@ int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view,
                                const uint32_t *supplied_from, const uint32_t *supplied_to,
                                struct mesh_graph_conflict **conflict, size_t *count) {
   return view_conflicts(views, view, supplied, supplied_from, supplied_to, 1, NULL, NULL, conflict, NULL, NULL, NULL,
-                        NULL, count);
+                        NULL, count, NULL);
 }
 
 int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
                                  const uint32_t *supplied_from, const uint32_t *supplied_to,
                                  struct mesh_graph_conflict **conflict, size_t *count) {
   return view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, NULL, NULL, conflict, NULL, NULL, NULL,
-                        NULL, count);
+                        NULL, count, NULL);
 }
 
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2, Definition 3, §7,
