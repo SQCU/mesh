@@ -2248,9 +2248,9 @@ int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_w
   /* design/plan-to-bridge-change-request.md R4; design/aot-compilation-change-request.md A3 */
   for(uint32_t i=0;i<count;i++){
     const struct mesh_weight *x=weights+i;
-    if(declared[i].kind>MESH_PAGES || !(x->produced>0 && x->produced<=DBL_MAX) ||
-       !(x->consumed>0 && x->consumed<=DBL_MAX) || !(x->read>0 && x->read<=DBL_MAX) ||
-       !(x->page>0 && x->page<=DBL_MAX))return EINVAL;
+    if(declared[i].kind>MESH_PAGES || !(x->produced>=0 && x->produced<=DBL_MAX) ||
+       !(x->consumed>=0 && x->consumed<=DBL_MAX) || !(x->read>=0 && x->read<=DBL_MAX) ||
+       !(x->page>=0 && x->page<=DBL_MAX))return EINVAL;
   }
   struct plan_key *key=malloc(((size_t)count+1)*sizeof *key);
   uint32_t *placed=malloc(((size_t)count+1)*sizeof *placed);
