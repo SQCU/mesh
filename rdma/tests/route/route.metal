@@ -66,7 +66,15 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
                     device float *done_out [[buffer(4)]],
                     uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
                     uint sg [[simdgroup_index_in_threadgroup]], uint ln [[thread_index_in_simdgroup]]) {
-  device const Scenario &s = scen[which[r]];
+  // the scenario, copied once into threadgroup memory: every slot reads it, and a device read in a dependent chain
+  // costs hundreds of nanoseconds
+  threadgroup Scenario s;
+  {
+    device const uint *from = (device const uint *)&scen[which[r]];
+    threadgroup uint *to = (threadgroup uint *)&s;
+    for (uint i = tid; i < sizeof(Scenario) / 4; i += T) to[i] = from[i];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   threadgroup float arrived[JKN], sent[JKN];
   threadgroup half ring[H][JKN];   // the last H slots' sends
   threadgroup float share[L], bgq[L], cap[L], want[L];
