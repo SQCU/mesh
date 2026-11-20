@@ -1,13 +1,13 @@
-/* The policy's forward on a CPU, for deployment beside the bridge (route.h): net.swift's network, its weights as the
+/* The policy's forward on a CPU, for deployment beside the bridge (route.h): model.swift's network (fwd.metal's kernels), its weights as the
    trainer stored them (int8 codes and scales, int8mm.h's format: the codes the GPU trained with, read, never cast
    again), its products int8 x int8 -> int32 by int8mm.h's numerics (each input row rotated and quantized to nearest,
-   exact sums by NEON's sdot, out = fma(float(sum) sa, sb, b)), each later step the GPU's own expression. Only the
-   transcendentals (sigmoid, tanh, the rms's 1/sqrt) are the CPU's (vForce) rather than the GPU's, so an activation's
-   code can differ where a value sits on a rounding boundary. Matrices in NetLayout's order: inp [D][IN], zh0 [2D][D],
+   exact sums by NEON's sdot, out = fma(float(sum) sa, sb, b)), each later step the GPU's own expression. The
+   elementwise steps (sigmoid, tanh, the rms) are act.h's, as the GPU's: the same bits. Matrices in NetLayout's order: inp [D][IN], zh0 [2D][D],
    up0 [E][D], down0 [D][E], zh1, up1, down1, out [FS][D]. */
 #include "route.h"
 #include "scan.h"
 #include "int8mm.h"
+#include "act.h"
 #include <Accelerate/Accelerate.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,15 +52,10 @@ static void product_row(const struct route_mat *a, const float *x, float *out, c
     if (res) v = vaddq_f32(v, vld1q_f32(res + o));
     vst1q_f32(out + o, v);
   }
-  if (act == 2) {   /* the gates (vForce): z = 1 / (1 + exp(-y)), h~ = tanh(clamp(y, -20, 20)) */
+  if (act == 2) {   /* the gates (act.h, as the GPU's), fp16 as the GPU's are (fwd.metal) */
     const int half = a->rows / 2;
-    float t[128];
-    for (int j = 0; j < half; j++) t[j] = -out[j];
-    vvexpf(t, t, &half);
-    for (int j = 0; j < half; j++) out[j] = 1 / (1 + t[j]);
-    for (int j = half; j < a->rows; j++) out[j] = out[j] < -20 ? -20 : out[j] > 20 ? 20 : out[j];
-    vvtanhf(out + half, out + half, &half);
-    for (int j = 0; j < a->rows; j++) out[j] = (float)(_Float16)out[j];   /* stored fp16, as the GPU's gates are (net.swift ZC) */
+    for (int j = 0; j < half; j++) out[j] = (float)(_Float16)act_sigmoid(out[j]);
+    for (int j = half; j < a->rows; j++) out[j] = (float)(_Float16)act_tanh(out[j]);
   }
 }
 /* n rows, independent */
@@ -76,15 +71,14 @@ void route_forward_lanes(const struct route_params *p, const float *lanes, int n
   for (int l = 0; l < 2; l++) {
     float *h = state + l * D;
     product(&p->zh[l], x, nl, D, zc, 0, 2);
-    for (int d = 0; d < D; d++) {   /* net.metal's scan_fwd (m = 1): the positions' affine maps scanned in scan.h's order */
-      float A[L], B[L];   /* all L positions, the unused lanes masked (identity), as the GPU's: the state is position L - 1's */
+    for (int d = 0; d < D; d++) {   /* fwd.metal's lanes_fwd: the positions' affine maps scanned in scan.h's order */
+      float A[L], B[L], hs[L];   /* all L positions, the unused lanes masked (identity), as the GPU's: the state is position L - 1's */
       for (int t = 0; t < L; t++) {
         const float mz = t < nl ? zc[t * 2 * D + d] : 0.0f;
         A[t] = 1.0f - mz; B[t] = mz * (t < nl ? zc[t * 2 * D + D + d] : 0.0f);
       }
-      scan_affine(A, B, L);
-      for (int t = 0; t < nl; t++) xm[t * D + d] = x[t * D + d] + fmaf(A[t], h[d], B[t]);
-      h[d] = fmaf(A[L - 1], h[d], B[L - 1]);
+      h[d] = scan_run(A, B, L, h[d], hs);
+      for (int t = 0; t < nl; t++) xm[t * D + d] = x[t * D + d] + hs[t];
     }
     if (l == 0) { product(&p->up[0], xm, nl, D, u, 0, 1); product(&p->down[0], u, nl, E, x, xm, 0); }
   }
@@ -96,11 +90,10 @@ void route_forward_context(const struct route_params *p, const float *token, con
   for (int l = 0; l < 2; l++) {
     const float *h = state + l * D;
     product_row(&p->zh[l], cx, czc, 0, 2);
-    for (int d = 0; d < D; d++) cxm[d] = cx[d] + fmaf(czc[d], czc[D + d] - h[d], h[d]);   /* ctx_fwd */
+    for (int d = 0; d < D; d++) cxm[d] = cx[d] + fmaf(czc[d], czc[D + d] - h[d], h[d]);   /* ctx_fwd's step */
     product_row(&p->up[l], cxm, cu, 0, 1); product_row(&p->down[l], cu, cx, cxm, 0);
   }
-  float m = 0; for (int d = 0; d < D; d++) m += cx[d] * cx[d];   /* rms (rms_fwd), then the readout */
-  const float inv = 1 / sqrtf(m / D + 1e-6f);
+  const float inv = act_rms_inverse(act_sumsq64(cx));   /* rms (act.h, ctx_fwd's order), then the readout */
   for (int d = 0; d < D; d++) cx[d] *= inv;
   product_row(&p->out, cx, w, 0, 0);
 }
