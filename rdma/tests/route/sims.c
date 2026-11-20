@@ -2,6 +2,7 @@
    made, its ended run's draws by refresh), every call a parallel pass over the slots it is given. */
 #include "kernels.h"
 #include <dispatch/dispatch.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,11 +14,19 @@ struct slot {
   struct drawn *drawn;          /* [K] */
   int made;                     /* refreshes decided */
 };
-struct route_sims { int n, K; struct slot *s; };
+struct launched { struct route_sims *x; int slot; };   /* a slot's task context, held from route_sims_new */
+struct route_sims { int n, K; struct slot *s; _Atomic int *ready; int *status, *nc; struct launched *task; };
+/* the one wake-up: a run at its refresh or end, a forward or a step done (net.swift's completion handlers) */
+static dispatch_semaphore_t wake;
+void route_wake(void) { dispatch_semaphore_signal(wake); }
 
 struct route_sims *route_sims_new(int n, int refreshes) {
   struct route_sims *x = calloc(1, sizeof *x);
   x->n = n; x->K = refreshes; x->s = calloc((size_t)n, sizeof *x->s);
+  x->ready = calloc((size_t)n, sizeof *x->ready); x->status = calloc((size_t)n, sizeof(int)); x->nc = calloc((size_t)n, sizeof(int));
+  x->task = calloc((size_t)n, sizeof *x->task);
+  for (int i = 0; i < n; i++) { x->task[i].x = x; x->task[i].slot = i; }
+  if (!wake) wake = dispatch_semaphore_create(0);
   for (int i = 0; i < n; i++) {
     struct slot *s = &x->s[i];
     s->sim = route_sim_new();
@@ -34,7 +43,7 @@ void route_sims_free(struct route_sims *x) {
     for (int k = 0; k < x->K; k++) { free(s->drawn[k].d); free(s->drawn[k].ctx); free(s->drawn[k].first); }
     route_sim_free(s->sim); free(s->dec); free(s->tok); free(s->drawn);
   }
-  free(x->s); free(x);
+  free(x->s); free(x->ready); free(x->status); free(x->nc); free(x->task); free(x);
 }
 struct route_sim *route_sims_sim(struct route_sims *x, int slot) { return x->s[slot].sim; }
 
@@ -51,15 +60,15 @@ void route_sims_begin(struct route_sims *x, const int *slot, int m, const struct
 struct pass { struct route_sims *x; const int *slot; const void *a; const void *b; void *c; void *d; void *e; void *f; void *g; int i0, K; const int *row0, *draw0; };
 #define PASS(name) static void name(void *p_, size_t i)
 
-PASS(step1) {
-  struct pass *p = p_; struct slot *s = &p->x->s[p->slot[i]];
-  const float *w = p->a; const int *wrow = p->b; int *status = p->c, *nc = p->d;
-  if (wrow[i] >= 0) route_sim_answer(s->sim, w + (size_t)wrow[i] * ROUTE_FS);
-  const int k = s->made % p->x->K;
-  status[i] = route_sim_decide(s->sim, &s->dec[k], s->tok + (size_t)k * ROUTE_CONTEXTS * ROUTE_IN);
-  nc[i] = status[i] ? (int)s->dec[k].contexts : 0;
-  if (status[i]) s->made++;
-  else for (int r = 0; r < s->made && r < p->x->K; r++) {   /* ended: each refresh's draws, by context */
+/* one run to its next refresh (status 1, nc its contexts) or its end (0: its draws by refresh, by context) */
+static void advance(struct route_sims *x, int slot, int *status, int *nc) {
+  struct slot *s = &x->s[slot];
+  const uint64_t t0 = route_tel_now();
+  const int k = s->made % x->K;
+  *status = route_sim_decide(s->sim, &s->dec[k], s->tok + (size_t)k * ROUTE_CONTEXTS * ROUTE_IN);
+  *nc = *status ? (int)s->dec[k].contexts : 0;
+  if (*status) s->made++;
+  else for (int r = 0; r < s->made && r < x->K; r++) {   /* ended: each refresh's draws, by context */
     struct drawn *d = &s->drawn[r];
     d->draws = route_sim_draw_count(s->sim, r);
     if (d->draws + 1 > d->room) {
@@ -69,10 +78,27 @@ PASS(step1) {
     }
     d->rows = route_sim_draws(s->sim, r, d->d, d->ctx, d->first);
   }
+  route_tel_add(RT_WORKER_NS, route_tel_now() - t0);   /* the runs' own time: against cores x wall, the cores' use */
 }
-void route_sims_step(struct route_sims *x, const int *slot, int m, const float *w, const int *wrow, int *status, int *nc) {
-  struct pass p = {x, slot, w, wrow, status, nc};
-  dispatch_apply_f((size_t)m, DISPATCH_APPLY_AUTO, &p, step1);
+static void run1(void *p_) {
+  const struct launched *l = p_; struct route_sims *x = l->x; const int slot = l->slot;
+  advance(x, slot, &x->status[slot], &x->nc[slot]);
+  atomic_store_explicit(&x->ready[slot], 1, memory_order_release);
+  dispatch_semaphore_signal(wake);
+}
+void route_sims_launch(struct route_sims *x, const int *slot, int m, const float *w, const int *wrow) {
+  dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+  for (int i = 0; i < m; i++) {
+    if (w && wrow[i] >= 0) route_sim_answer(x->s[slot[i]].sim, w + (size_t)wrow[i] * ROUTE_FS);   /* copied now: the w buffer is the caller's again */
+    dispatch_async_f(q, &x->task[slot[i]], run1);
+  }
+}
+int route_sims_collect(struct route_sims *x, int wait, int *slot, int *status, int *nc) {
+  if (wait) dispatch_semaphore_wait(wake, DISPATCH_TIME_FOREVER);
+  int m = 0;
+  for (int i = 0; i < x->n; i++)
+    if (atomic_exchange_explicit(&x->ready[i], 0, memory_order_acquire)) { slot[m] = i; status[m] = x->status[i]; nc[m] = x->nc[i]; m++; }
+  return m;
 }
 
 PASS(pack1) {

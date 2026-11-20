@@ -187,7 +187,7 @@ final class Net {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: library))
     self.library = lib
-    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_pairs", "copy_floats", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam", "upgrad_weights"] {
+    for n in ["credit_draws", "credit_rows", "seg_sum", "quant_rows", "quant_cols", "quant_rows_h", "quant_rows_b", "quant_cols_h", "quant_cols_b", "gemm_tn", "reduce_blocks", "scan_fwd", "ctx_fwd", "ctx_bwd", "scan_bwd", "weff", "pin", "chain", "gram", "adam", "upgrad_weights"] {
       pipes[n] = try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!)
     }
     let laneCap = runs * refreshes * L, cap = laneCap + contexts
@@ -306,18 +306,13 @@ final class Net {
     if rows == 0 { return }
     set("quant_cols" + xType, [(x, 0), (qx, 0), (sx, 0)], [[UInt32(K), UInt32(Nw), UInt32(ldx), UInt32(rows), 256, 1, 0, mt.bias ? UInt32(mt.cols) : NONE, UInt32(xoff), UInt32(mt.cols), 0, 0]])
     e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-    // a threadgroup a 256-row block (the exactness unit), its partial sum each; then a pairwise tree over the blocks
+    // a threadgroup a 256-row block (the exactness unit), its partial sum each; then the blocks' pairwise tree
     for t in 0..<3 {
       set("quant_cols" + dyType, [(dy, 0), (qy, 0), (sy, 0)], [[UInt32(K), UInt32(M), UInt32(ldy), UInt32(rows), 256, 1, nextSeed(), NONE, UInt32(t * stride + yoff), UInt32(M), 0, 0]])
       e.dispatchThreadgroups(MTLSize(width: (M + 31) / 32, height: nb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
       set("gemm_tn", [(qy, 0), (qx, 0), (sy, 0), (sx, 0), (partial, 0)], [[UInt32(M), UInt32(Nw), UInt32(K), 1]])
       e.dispatchThreadgroups(MTLSize(width: (Nw + 31) / 32, height: (M + 63) / 64, depth: nb), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-      var stride = 1
-      while stride < nb {   // partial[z] += partial[z + stride] for z a multiple of 2 stride: log2(nb) passes, a fixed order
-        set("reduce_pairs", [(partial, 0)], [[UInt32(M * Nw), UInt32(nb), UInt32(stride), 0]]); threads(M * Nw * ((nb + 2 * stride - 1) / (2 * stride)))
-        stride *= 2
-      }
-      set("copy_floats", [(partial, 0), (dW[w]!, t * M * Nw)], [[UInt32(M * Nw)]]); threads(M * Nw)
+      set("reduce_blocks", [(partial, 0), (dW[w]!, t * M * Nw)], [[UInt32(M * Nw), UInt32(nb)]]); threads(M * Nw)   // the blocks' pairwise tree, one dispatch
     }
   }
   // each matrix's W, and its two sets of codes, from theta
@@ -370,11 +365,11 @@ final class Net {
     if R > 0 { product("out", forward: true, M: R, src: xc, flags: 0, out: (w, ident(), FS)) }
   }
   // the same, committed and not waited for: `done` runs when it completes, with its GPU time (s)
-  // a forward, committed (the caller waits on the returned command buffer where it reads w and next)
-  func forwardCommit(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) -> MTLCommandBuffer {
+  // a forward, encoded (the caller adds its completion handler, commits, and waits where it reads w and next)
+  func forwardEncode(lanes: MTLBuffer, mask: MTLBuffer, h0: MTLBuffer, tokens: MTLBuffer, pos: MTLBuffer, B: Int, R: Int, w: MTLBuffer, next: MTLBuffer) -> MTLCommandBuffer {
     begin(); phase = "forward"
     encodeForward(lanes: lanes, mask: mask, h0: h0, tokens: tokens, pos: pos, B: B, K: 1, R: R, w: w, next: next, keep: false)
-    e.endEncoding(); cb.commit()
+    e.endEncoding()
     return cb
   }
 

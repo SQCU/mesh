@@ -78,9 +78,9 @@ def train(cfg, lib):
     measured = fabric.load(r['fabric'])
     dist = C.Distribution(config.flat(cfg), measured, lib, np.random.default_rng([r['data_seed'], r['rank']]))
     lib.route_tel_open(r['telemetry'].encode(), r['rank'], r['world']); lib.route_tel_reach(lib.RT_PHASE_START)
-    half = cap['forward_rows'] // loop.CX // 2
+    runs = cap['forward_rows'] // loop.CX // 4 * 4   # the runs in flight: one forward can carry all of them
     learner = network(cfg, lib, cap['learn_runs'], cap['refreshes'], cap['forward_rows'])
-    actor = network(cfg, lib, half, 1, half * loop.CX)
+    actor = network(cfg, lib, runs, 1, runs * loop.CX)
     lib.route_tel_reach(lib.RT_PHASE_NETWORKS)
     if r['world'] > 1:
         if lib.route_net_join(learner, r['rank'], r['world'], r['mesh_id'].encode()) != 0:
@@ -91,11 +91,14 @@ def train(cfg, lib):
         evaluation(cfg, lib, learner, measured, 'start')
     table = telemetry.Table(r['telemetry']); table.sample()
     done = threading.Event()
-    def report():   # the telemetry table's records (the table is the store; this only reads it)
+    last = {}
+    def report():   # the telemetry table's records (the table is the store; this only reads it); the loop's phases, s/s
         while not done.wait(cfg['report']['interval']):
             rec = table.sample()
             if rec:
-                rec['pool'] = dist.pool.count; emit(rec)
+                rec['pool'] = dist.pool.count
+                now = dict(loop.PHASES); rec['phases'] = {k: round((now[k] - last.get(k, 0.0)) / cfg['report']['interval'], 3) for k in now}; last.update(now)
+                emit(rec)
     threading.Thread(target=report, daemon=True).start()
     loop.train(cfg, lib, dist, learner, actor, r['steps'], r['world'])
     done.set(); lib.route_tel_reach(lib.RT_PHASE_DONE)
@@ -210,17 +213,18 @@ def deploy(cfg, lib):
     path = f'/tmp/route-deploy-{os.getpid()}.i8'; lib.route_net_save(net, ffi.NULL, path.encode())
     p = ffi.new('struct route_params *'); assert lib.route_params_read(p, path.encode()) == 0; os.unlink(path)
     c, _ = C.measured(measured, [(0, 0)]); c = c[[C.KINDS.index('all-reduce') * len(C.SIZES) + C.SIZES.index(12582912)]]
-    ro = loop.Rollouts(lib, net, 1, 1, halves=1); ro.begin([0], c); ro.tick(0)
-    F = ro.F[0]
-    nc = int((F.pos[:4 * loop.CX] == loop.L - 1).sum())   # slot 0's rows: their state its lane row L - 1
-    nl = int(F.mask[0].sum())
-    lanes, tok = F.lanes[0].copy(), F.tokens[:nc].copy()
+    ro = loop.Rollouts(lib, net, 1, 1); ro.begin([0], c)
+    while ro.inset[0] is None:   # the first forward committed (its runs at their first refresh)
+        ro.poll(True)
+    F, (runs, off, ncs) = ro.F[0], ro.inset[0]
+    b = int(np.nonzero(runs == 0)[0][0]); nc, nl = int(ncs[b]), int(F.mask[b].sum())
+    lanes, tok = F.lanes[b].copy(), F.tokens[off[b]:off[b] + nc].copy()
     F.wait()
     h, w = np.zeros(loop.D2, np.float32), np.zeros((nc, loop.FS), np.float32)
     lib.route_forward(p, ffi.from_buffer('float[]', lanes), nl, ffi.from_buffer('float[]', tok), nc, ffi.from_buffer('float[]', h, require_writable=True),
                       ffi.from_buffer('float[]', w, require_writable=True), ffi.new('float[]', lib.route_forward_scratch(loop.CX)))
-    emit({'record': 'deploy', 'lanes': nl, 'contexts': nc, 'w_largest_difference': float(np.abs(F.w[:nc] - w).max()), 'w_largest': float(np.abs(w).max()),
-          'state_largest_difference': float(np.abs(F.next[0] - h).max())})
+    emit({'record': 'deploy', 'lanes': nl, 'contexts': nc, 'w_largest_difference': float(np.abs(F.w[off[b]:off[b] + nc] - w).max()), 'w_largest': float(np.abs(w).max()),
+          'state_largest_difference': float(np.abs(F.next[b] - h).max())})
     lib.route_sims_free(ro.sims); lib.route_net_free(net)
 
 
@@ -231,7 +235,7 @@ def check(cfg, lib, graph):
     K = cfg['capacity']['refreshes']
     measured, dist = one_case(cfg, lib)
     net = network(cfg, lib, 4, K, 4 * K * loop.CX)
-    ro = loop.Rollouts(lib, net, 1, K, halves=1); B = loop.Batch(lib, net, 4, K, 4 * K * loop.CX)
+    ro = loop.Rollouts(lib, net, 1, K); B = loop.Batch(lib, net, 4, K, 4 * K * loop.CX)
     score = np.zeros(loop.FS, np.float32)
     def scores(draws, w):   # each draw's score under w (its row's), split.h on the CPU
         out = np.zeros((len(draws), loop.FS), np.float32)
@@ -282,18 +286,25 @@ def bench(cfg, lib):
     K, cap = cfg['capacity']['refreshes'], cfg['capacity']
     measured, dist = one_case(cfg, lib)
     groups = cap['forward_rows'] // loop.CX // 4
-    actor = network(cfg, lib, groups * 2, 1, groups * 2 * loop.CX); learner = network(cfg, lib, cap['learn_runs'], K, cap['forward_rows'])
-    ro = loop.Rollouts(lib, actor, groups, K); ro.begin(np.arange(groups), dist.draw(groups)[0])
+    actor = network(cfg, lib, groups * 4, 1, groups * 4 * loop.CX); learner = network(cfg, lib, cap['learn_runs'], K, cap['forward_rows'])
+    ro = loop.Rollouts(lib, actor, groups, K)
     out = ffi.new('char[]', 1 << 22); rec = {'record': 'bench'}
-    ro.tick(0); ro.tick(1); ro.F[0].wait()
-    lib.route_net_profile(actor, 1, ffi.NULL, 0); ro.tick(0); ro.F[0].wait(); lib.route_net_profile(actor, 0, out, 1 << 22)
-    rec['forward'] = {'runs': int(len(ro.pend[0])), 'kernels': json.loads(ffi.string(out).decode())}
+    lib.route_net_profile(actor, 1, ffi.NULL, 0)
+    ro.begin(np.arange(groups), dist.draw(groups)[0])
+    while ro.inset[0] is None:
+        ro.poll(True)
+    ro.F[0].wait(); lib.route_net_profile(actor, 0, out, 1 << 22)
+    rec['forward'] = {'runs': int(len(ro.inset[0][0])), 'rows': int(ro.inset[0][2].sum()), 'kernels': json.loads(ffi.string(out).decode())}
     while not len(ro.ready()):
-        ro.tick(0); ro.tick(1)
+        ro.poll(True)
     B = loop.Batch(lib, learner, cap['learn_runs'], K, cap['forward_rows'])
     _, m, R, ND, scale = loop.load(lib, ro, ro.ready(), B)
     lib.route_net_profile(learner, 1, ffi.NULL, 0); lib.route_net_step(learner, B.p, m, K, R, ND, scale, 0.0, 1); B.wait(); lib.route_net_profile(learner, 0, out, 1 << 22)
     rec['step'] = {'runs': m, 'rows': R, 'draws': ND, 'kernels': json.loads(ffi.string(out).decode())}
+    t0 = time.perf_counter()   # the same step again, alone on the GPU, back to back (not profiled): its wall time
+    for _ in range(20):
+        lib.route_net_step(learner, B.p, m, K, R, ND, scale, 0.0, 1)
+    B.wait(); rec['step']['alone_ms'] = (time.perf_counter() - t0) / 20 * 1e3
     emit(rec)
 
 

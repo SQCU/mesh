@@ -30,9 +30,13 @@ struct route_sims *route_sims_new(int n, int refreshes);   /* refreshes: a slot'
 void route_sims_free(struct route_sims *x);
 /* slot[i] begins rollout[i] (0..3) of case c[which[i]] */
 void route_sims_begin(struct route_sims *x, const int *slot, int m, const struct route_case *c, const int *which, const int *rollout);
-/* in parallel, each slot: answers its last refresh with w rows from wrow[i] (-1: none) and runs to its next refresh;
-   status[i] 1 at a refresh (nc[i] its contexts), 0 ended */
-void route_sims_step(struct route_sims *x, const int *slot, int m, const float *w, const int *wrow, int *status, int *nc);
+/* each slot answers its last refresh with w rows from wrow[i] (-1 or w NULL: none; copied before the call returns)
+   and runs, as a task of its own on the system's thread pool, to its next refresh or its end */
+void route_sims_launch(struct route_sims *x, const int *slot, int m, const float *w, const int *wrow);
+/* the runs that have since reached a refresh (status 1, nc its contexts) or ended (status 0): their count; wait: first
+   sleeps until something is ready (a run, or a forward or step done: route_wake) */
+int route_sims_collect(struct route_sims *x, int wait, int *slot, int *status, int *nc);
+void route_wake(void);
 /* in parallel, the slots' current refreshes as one forward's input: lanes [m][L][IN], mask [m][L], tokens at rows
    offset[i] .., pos[row] the row's state (its run's last lane row: i L + L - 1) */
 void route_sims_pack(struct route_sims *x, const int *slot, int m, const int *offset, float *lanes, float *mask, float *tokens, int *pos);
@@ -59,6 +63,7 @@ struct route_batch *route_net_batch(void *net, int runs, int refreshes, int rows
 void route_net_reserve(void *net, struct route_batch *b, int draws);                 /* its draws' room, grown */
 void route_net_forward(void *net, struct route_batch *b, int B, int R);            /* w [R][FS] and next [B][2D] */
 void route_net_wait(void *net, struct route_batch *b);                              /* the batch's last call done */
+int route_net_done(void *net, struct route_batch *b);                               /* the same, without waiting */
 /* the forward again, the credit (draws' score times importance ratio), the backward: grads; then (world > 1) the
    grads summed across the ranks through the mesh's lease, the Gram matrix, UPGrad, Adam, V pinned, the codes: one
    command buffer. ndraws: the draws; scale: the tasks' scale */

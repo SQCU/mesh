@@ -9,7 +9,7 @@ import Foundation
 let device = MTLCreateSystemDefaultDevice()!, queue = device.makeCommandQueue()!
 let lib = try! device.makeLibrary(URL: URL(fileURLWithPath: CommandLine.arguments[1]))
 func pipe(_ n: String) -> MTLComputePipelineState { try! device.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
-let P0 = ["quant_rows", "quant_cols", "gemm_tn", "reduce_pairs", "copy_floats"].reduce(into: [String: MTLComputePipelineState]()) { $0[$1] = pipe($1) }
+let P0 = ["quant_rows", "quant_cols", "gemm_tn", "reduce_blocks"].reduce(into: [String: MTLComputePipelineState]()) { $0[$1] = pipe($1) }
 var cache: [String: MTLComputePipelineState] = [:]
 func pipe(_ n: String, flags: UInt32) -> MTLComputePipelineState {   // a product's pipeline for its epilogue flags (FLAGS)
   if let p = cache["\(n) \(flags)"] { return p }
@@ -186,9 +186,7 @@ for outliers in [false, true] {
     // a threadgroup a 256-row block, then the pairwise tree (net.swift's)
     let partial = zeros(nb * Mw * Nw * 4), out = zeros(Mw * Nw * 4)
     _ = run("gemm_tn", [buf(qa), buf(qb), buf(sa), buf(sb), partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
-    var stride = 1
-    while stride < nb { _ = run("reduce_pairs", [partial], [[UInt32(Mw * Nw), UInt32(nb), UInt32(stride), 0]], .threads(Mw * Nw * ((nb + 2 * stride - 1) / (2 * stride)), 256)); stride *= 2 }
-    _ = run("copy_floats", [partial, out], [[UInt32(Mw * Nw)]], .threads(Mw * Nw, 256))
+    _ = run("reduce_blocks", [partial, out], [[UInt32(Mw * Nw), UInt32(nb)]], .threads(Mw * Nw, 256))
     let got = read(out, Mw * Nw, Float.self)
     var ref = [Float](repeating: 0, count: Mw * Nw), plain = [Float](repeating: 0, count: Mw * Nw)
     for m in 0..<Mw { for n in 0..<Nw {
@@ -267,8 +265,7 @@ for (rows, Mw, Nw) in [(147456, 128, 65), (147456, 192, 65), (147456, 64, 193)] 
   let Kp = rows, nb = Kp / 256, a = zeros(Kp * Mw), b = zeros(Kp * Nw), sa = zeros(Mw * nb * 4), sb = zeros(Nw * nb * 4), partial = zeros(nb * Mw * Nw * 4)
   let t = median {
     var total = run("gemm_tn", [a, b, sa, sb, partial], [[UInt32(Mw), UInt32(Nw), UInt32(Kp), 1]], .groups((Nw + 31) / 32, (Mw + 63) / 64, nb, 128))
-    var stride = 1
-    while stride < nb { total += run("reduce_pairs", [partial], [[UInt32(Mw * Nw), UInt32(nb), UInt32(stride), 0]], .threads(Mw * Nw * ((nb + 2 * stride - 1) / (2 * stride)), 256)); stride *= 2 }
+    total += run("reduce_blocks", [partial, zeros(Mw * Nw * 4)], [[UInt32(Mw * Nw), UInt32(nb)]], .threads(Mw * Nw, 256))
     return total
   }
   print(String(format: "wgrad %3dx%3d over %6d rows (%d blocks, tree): %7.1f us %5.1f TOP/s", Mw, Nw, rows, nb, t * 1e6, 2 * Double(Mw * Nw * rows) / t / 1e12))

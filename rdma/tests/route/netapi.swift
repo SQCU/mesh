@@ -66,7 +66,13 @@ func batch(_ h: Handle, _ b: UnsafeMutablePointer<route_batch>) -> Batch { h.bat
 @_cdecl("route_net_reserve") public func route_net_reserve(_ p: UnsafeMutableRawPointer, _ b: UnsafeMutablePointer<route_batch>, _ n: Int32) { let h = handle(p); batch(h, b).reserve(h.device, Int(n)) }
 @_cdecl("route_net_forward") public func route_net_forward(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>, _ B: Int32, _ R: Int32) {
   let h = handle(p), b = batch(h, bp)
-  b.last = h.net.forwardCommit(lanes: b.lanes, mask: b.mask, h0: b.h0, tokens: b.tokens, pos: b.pos, B: Int(B), R: Int(R), w: b.w, next: b.next)
+  let cb = h.net.forwardEncode(lanes: b.lanes, mask: b.mask, h0: b.h0, tokens: b.tokens, pos: b.pos, B: Int(B), R: Int(R), w: b.w, next: b.next)
+  cb.addCompletedHandler { c in route_tel_add(tel(RT_FORWARD_NS), UInt64((c.gpuEndTime - c.gpuStartTime) * 1e9)); route_wake() }
+  cb.commit(); b.last = cb
+}
+@_cdecl("route_net_done") public func route_net_done(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>) -> Int32 {
+  guard let cb = batch(handle(p), bp).last else { return 1 }
+  return cb.status == .completed || cb.status == .error ? 1 : 0
 }
 @_cdecl("route_net_wait") public func route_net_wait(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>) {
   let b = batch(handle(p), bp)
@@ -100,12 +106,13 @@ func encodeExchange(_ n: Net) {
   n.e.endEncoding()
   let ll = b.ll, count = Int(ndraws)
   n.cb.addCompletedHandler { cb in   // where its results are: the telemetry's counts (no one waits for them)
-    if let err = cb.error { fail("step: \(err)"); return }
+    if let err = cb.error { fail("step: \(err)"); route_wake(); return }
     let r = ll.contents().bindMemory(to: Float.self, capacity: max(count, 1))
     var sum = 0.0, most: Float = 0
     for i in 0..<count { sum += Double(exp(r[i])); most = max(most, abs(r[i])) }
     route_tel_add(tel(RT_OPTIMIZER_STEPS), 1); route_tel_add(tel(RT_LEARN_NS), UInt64((cb.gpuEndTime - cb.gpuStartTime) * 1e9))
     route_tel_add(tel(RT_RATIO_DRAWS), UInt64(count)); route_tel_add(tel(RT_RATIO_SUM_E6), UInt64(sum * 1e6)); route_tel_max(tel(RT_LOGRATIO_MAX_E3), UInt64(most * 1e3))
+    route_wake()
   }
   n.cb.commit(); b.last = n.cb
 }

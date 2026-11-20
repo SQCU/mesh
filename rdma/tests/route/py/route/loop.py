@@ -8,6 +8,8 @@ learning batch's buffers before they are filled again.
               into a learning batch; advantages and scales here (numpy)
   training    one GPU step on the batch (credit, backward, the ranks' sum, UPGrad, Adam, the codes), then theta
               published into the actor, in the GPU's queue order"""
+import time
+
 import numpy as np
 
 from . import cases as C
@@ -49,23 +51,33 @@ class Batch:
         self.lib.route_net_wait(self.net, self.p)
 
 
-class Rollouts:
-    """`groups` groups of 4 slots (a case each), in `halves` halves that take turns: one simulates while the other's
-    forward runs. tick(h) waits for half h's forward, steps its runs (answering it), packs and commits the next."""
+PHASES = {}   # seconds spent in each part of the loop (wall clock, the driver's thread), read by the reporter
 
-    def __init__(self, lib, net, groups, refreshes, halves=2):
+
+class phase:
+    def __init__(self, name): self.name = name
+    def __enter__(self): self.t = time.perf_counter()
+    def __exit__(self, *a): PHASES[self.name] = PHASES.get(self.name, 0.0) + time.perf_counter() - self.t
+
+
+class Rollouts:
+    """`groups` groups of 4 runs (a case each). Each run advances on its own (route_sims_launch) to its next refresh;
+    poll() collects the runs at a refresh and packs them into whichever of the two forward batches is free, and answers
+    a finished forward's runs and launches them again. A forward's size is whatever is ready when a batch is free."""
+
+    def __init__(self, lib, net, groups, refreshes):
         self.lib, self.net, self.n, self.K = lib, net, 4 * groups, refreshes
         self.sims = lib.route_sims_new(self.n, refreshes)
-        self.half = np.array_split(np.arange(self.n, dtype=np.int32), halves)
-        self.F = [Batch(lib, net, len(s), 1, len(s) * CX) for s in self.half]
+        self.F = [Batch(lib, net, self.n, 1, self.n * CX) for _ in range(2)]
+        self.inset = [None, None]                      # each forward batch's runs, rows and contexts, while it runs
         self.state = np.zeros((self.n, D2), np.float32); self.h0 = np.zeros((self.n, D2), np.float32)
-        self.wrow = np.full(self.n, -1, np.int32); self.ended = np.ones(self.n, bool)
-        self.pend = [np.zeros(0, np.int32) for _ in self.half]
-        self.cases = np.zeros(groups, C.CASE)
-        self.version = np.zeros(groups, int)
+        self.ended = np.ones(self.n, bool)
+        self.waiting, self.waiting_nc = np.zeros(0, np.int32), np.zeros(0, np.int32)
+        self.cases = np.zeros(groups, C.CASE); self.version = np.zeros(groups, int)
+        self.got = [np.zeros(self.n, np.int32) for _ in range(3)]
 
     def begin(self, groups, cases, version=0):
-        """groups g (slots 4g..4g+3) begin cases (one each, its 4 rollouts)"""
+        """groups g (slots 4g..4g+3) begin cases (one each, its 4 rollouts), launched to their first refresh"""
         groups = np.asarray(groups, np.int32)
         self.cases[groups] = cases; self.version[groups] = version
         slots = (4 * groups[:, None] + np.arange(4)).ravel().astype(np.int32)
@@ -73,26 +85,34 @@ class Rollouts:
         c = np.ascontiguousarray(cases)
         self.lib.route_sims_begin(self.sims, ptr(slots), len(slots), records('struct route_case', c), ptr(which), ptr(rollout))
         self.state[slots] = np.repeat(c['h'], 4, axis=0); self.h0[slots] = self.state[slots]
-        self.wrow[slots] = -1; self.ended[slots] = False
+        self.ended[slots] = False
+        self.lib.route_sims_launch(self.sims, ptr(slots), len(slots), ffi.NULL, ffi.NULL)
 
-    def tick(self, h):
-        """returns the slots that ended"""
-        F, sl = self.F[h], self.half[h]
-        if len(self.pend[h]):
-            F.wait(); self.state[self.pend[h]] = F.next[:len(self.pend[h])]
-        active = sl[~self.ended[sl]]
-        status, nc = np.zeros(len(active), np.int32), np.zeros(len(active), np.int32)
-        wrow = np.ascontiguousarray(self.wrow[active])
-        self.lib.route_sims_step(self.sims, ptr(active), len(active), F.p.w, ptr(wrow), ptr(status), ptr(nc))
-        done, pend, nc = active[status == 0], active[status == 1], nc[status == 1]
-        self.ended[done] = True; self.wrow[active] = -1
-        off = np.zeros(len(pend), np.int32); np.cumsum(nc[:-1], out=off[1:])
-        if len(pend):
-            self.lib.route_sims_pack(self.sims, ptr(pend), len(pend), ptr(off), F.p.lanes, F.p.mask, F.p.tokens, F.p.pos)
-            F.h0[:len(pend)] = self.state[pend]
-            self.lib.route_net_forward(self.net, F.p, len(pend), int(nc.sum()))
-        self.wrow[pend] = off; self.pend[h] = pend
-        self.lib.route_tel_inc(self.lib.RT_FORWARDS, 1); self.lib.route_tel_inc(self.lib.RT_EVALUATIONS, len(pend)); self.lib.route_tel_inc(self.lib.RT_FORWARD_ROWS, int(nc.sum()))
+    def poll(self, wait):
+        """one turn of the rollouts' data flow; returns the slots that ended"""
+        slot, status, nc = self.got
+        with phase('wait' if wait else 'collect'):
+            m = self.lib.route_sims_collect(self.sims, 1 if wait else 0, ptr(slot), ptr(status), ptr(nc))
+        slot, status, nc = slot[:m].copy(), status[:m], nc[:m]
+        done = slot[status == 0]; self.ended[done] = True
+        self.waiting = np.concatenate([self.waiting, slot[status == 1]]); self.waiting_nc = np.concatenate([self.waiting_nc, nc[status == 1]])
+        for k, F in enumerate(self.F):   # a finished forward: its runs' states and answers, and they run on
+            if self.inset[k] is not None and self.lib.route_net_done(self.net, F.p):
+                runs, off, _ = self.inset[k]; self.inset[k] = None
+                self.state[runs] = F.next[:len(runs)]
+                with phase('answer and launch'):
+                    self.lib.route_sims_launch(self.sims, ptr(runs), len(runs), F.p.w, ptr(off))
+        free = [k for k in range(2) if self.inset[k] is None]
+        if len(self.waiting) and free:   # every run waiting, into a free batch, one forward
+            F, runs, nc = self.F[free[0]], self.waiting.astype(np.int32), self.waiting_nc
+            off = np.zeros(len(runs), np.int32); np.cumsum(nc[:-1], out=off[1:])
+            with phase('pack and commit'):
+                self.lib.route_sims_pack(self.sims, ptr(runs), len(runs), ptr(off), F.p.lanes, F.p.mask, F.p.tokens, F.p.pos)
+                F.h0[:len(runs)] = self.state[runs]
+                self.lib.route_net_forward(self.net, F.p, len(runs), int(nc.sum()))
+            self.inset[free[0]] = (runs, off, nc)
+            self.waiting, self.waiting_nc = np.zeros(0, np.int32), np.zeros(0, np.int32)
+            self.lib.route_tel_inc(self.lib.RT_FORWARDS, 1); self.lib.route_tel_inc(self.lib.RT_EVALUATIONS, len(runs)); self.lib.route_tel_inc(self.lib.RT_FORWARD_ROWS, int(nc.sum()))
         return done
 
     def costs(self, slots):
@@ -106,10 +126,9 @@ class Rollouts:
         return np.nonzero(self.ended.reshape(-1, 4).all(1))[0]
 
     def run_out(self):
-        """every half ticked until every run has ended (evaluation, checks)"""
-        while not self.ended.all() or any(len(p) for p in self.pend):
-            for h in range(len(self.half)):
-                self.tick(h)
+        """polled until every run has ended (evaluation, checks)"""
+        while not self.ended.all():
+            self.poll(True)
 
 
 def load(lib, ro, groups, B):
@@ -144,9 +163,10 @@ def load(lib, ro, groups, B):
     return groups, m, R, ND, scale
 
 
-def train(cfg, lib, dist, learner, actor, steps, world, emit_pool=None):
-    """the loop: both halves ticked; every group whose runs have ended loaded into a learning batch (the two batches
-    alternate) and stepped; theta published to the actor; the groups' slots begun again on fresh cases"""
+def train(cfg, lib, dist, learner, actor, steps, world):
+    """the loop: the rollouts polled (waiting only when nothing is ready); whenever groups have ended and a learning
+    batch is free (two alternate), they are loaded and stepped, theta published to the actor, and their slots begun
+    again on fresh cases"""
     K = cfg['capacity']['refreshes']
     groups = cfg['capacity']['forward_rows'] // CX // 4
     ro = Rollouts(lib, actor, groups, K)
@@ -155,32 +175,35 @@ def train(cfg, lib, dist, learner, actor, steps, world, emit_pool=None):
     lib.route_tel_put(lib.RT_WORKERS, ro.n)
     learned, j = 0, 0
     while learned < steps:
-        for h in range(len(ro.half)):
-            ro.tick(h)
+        ro.poll(True)
         ready = ro.ready()
-        if not len(ready):
+        if not len(ready) or not lib.route_net_done(learner, LB[j].p):
             continue
-        LB[j].wait()                               # the batch's last step done with its buffers
-        taken, m, R, ND, scale = load(lib, ro, ready, LB[j])
+        with phase('load'):
+            taken, m, R, ND, scale = load(lib, ro, ready, LB[j])
         lag = lib.route_net_steps(learner) - ro.version[taken]
         lib.route_tel_inc(lib.RT_LAG_SUM, int(lag.sum())); lib.route_tel_inc(lib.RT_LAG_GROUPS, len(taken)); lib.route_tel_top(lib.RT_LAG_MAX, int(lag.max()))
-        lib.route_net_step(learner, LB[j].p, m, K, R, ND, scale, cfg['run']['rate'], world)
-        lib.route_net_publish(learner, actor)
+        with phase('commit step'):
+            lib.route_net_step(learner, LB[j].p, m, K, R, ND, scale, cfg['run']['rate'], world)
+            lib.route_net_publish(learner, actor)
         slots = (4 * taken[:, None] + np.arange(4)).ravel()
         dist.pool.add(ro.state[slots])
-        ro.begin(taken, dist.draw(len(taken))[0], version=lib.route_net_steps(learner))
+        with phase('draw and begin'):
+            ro.begin(taken, dist.draw(len(taken))[0], version=lib.route_net_steps(learner))
         learned += 1; j ^= 1
         lib.route_tel_inc(lib.RT_STEPS, 1); lib.route_tel_reach(lib.RT_PHASE_FIRST_STEP)
         lib.route_tel_put(lib.RT_RUNS_IN_FLIGHT, int((~ro.ended).sum()))
     for B in LB:
         B.wait()
+    while not ro.ended.all() or any(x is not None for x in ro.inset):   # the runs in flight finished before the arena goes
+        ro.poll(True)
     lib.route_sims_free(ro.sims)
 
 
 def evaluate(lib, learner, evaluator, cases):
     """each case's four rollouts under the learner's theta (published into the evaluator): completion over the floor"""
     lib.route_net_publish(learner, evaluator)
-    ro = Rollouts(lib, evaluator, len(cases), 1, halves=1)
+    ro = Rollouts(lib, evaluator, len(cases), 1)
     ro.begin(np.arange(len(cases)), cases)
     ro.run_out()
     costs, _ = ro.costs(np.arange(ro.n))
