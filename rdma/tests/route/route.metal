@@ -4,7 +4,8 @@
 //
 // A rollout is one scenario's transaction in the fluid model, SLOTS slots long, each slot `dt` ns. Each slot:
 // - at a refresh (every REFRESH slots), the policy's weighting of each commodity's K candidate trees;
-// - each source releases its commodity's bytes into its trees at its out-lanes' rate, split by the weighting;
+// - each source releases its commodity's bytes as whole pieces at its out-lanes' rate, each piece onto one tree
+//   sampled from the weighting (a piece is not split across trees, as in the bridge);
 // - every lane serves the bytes waiting on it (its tree edges' and its background's) by processor sharing at its rate;
 // - bytes sent reach the lane's head after its latency and one page time (a ring of the last H slots' sends, each
 //   as fp16 shares of its commodity's demand, in threadgroup memory with the rest of the rollout's state);
@@ -92,6 +93,9 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
   threadgroup half ring[H][JKN];   // the last H slots' sends
   threadgroup float share[L], bgq[L], cap[L], want[L];
   threadgroup int lag[L];
+  threadgroup float credit[J];
+  threadgroup uint pieces[J];
+  const uint draws = perturb[r].x;   // the rollout's piece draws: its pair's key, the same on both sides
   threadgroup float assigned[JK], released[J], outcap[J], p[JK], area[J * N], frac[J * N], ctx[J][CTX];
   threadgroup float x[J][D], h[2][J][D], gz[J][D], gr[J][D], ex[J][E], last[J][D];
   threadgroup half emb[JK][D];
@@ -109,7 +113,7 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
   if (tid < uint(J)) {
     const int j = tid; float o = 0;
     for (int l = 0; l < nl; l++) if (s.lsrc[l] == s.src[j]) o += s.rate[l] * dt;
-    outcap[j] = o; released[j] = 0;
+    outcap[j] = o; released[j] = 0; credit[j] = 0; pieces[j] = 0;
     for (int k = 0; k < K; k++) { assigned[j * K + k] = 0; p[j * K + k] = mode == 1 ? (k == 0 ? 1.0f : 0.0f) : 1.0f / K; }
     for (int v = 0; v < N; v++) { area[j * N + v] = 0; frac[j * N + v] = 0; before[j * N + v] = 0; }
   }
@@ -205,11 +209,23 @@ kernel void rollout(device const Scenario *scen [[buffer(0)]], device const Net 
     }
 
     // release at the sources, before any lane's share is taken
+    // whole pieces: each source's out-lanes' rate accrues credit, and every page the credit covers is released onto one
+    // tree, the one whose share of the current weighting holds the piece's quantile (a hash of the rollout's draw key
+    // and the piece, the same on both sides of a perturbation pair)
     if (tid < uint(J) && int(tid) < nj) {
       const int j = tid;
-      const float rr = min(max(s.demand[j] - released[j], 0.0f), outcap[j]);
-      released[j] += rr;
-      for (int k = 0; k < K; k++) { assigned[j * K + k] += rr * p[j * K + k]; arrived[(j * K + k) * N + s.src[j]] = assigned[j * K + k]; }
+      credit[j] += outcap[j];
+      while (released[j] < s.demand[j]) {
+        const float piece = min(PAGE, s.demand[j] - released[j]);
+        if (credit[j] < piece) break;
+        credit[j] -= piece; released[j] += piece;
+        const float u = float(fmix(draws ^ uint(j * 0x9e3779b1u) ^ (pieces[j] * 0x85ebca6bu)) >> 8) / 16777216.0f;
+        pieces[j]++;
+        int pick = K - 1; float c = 0;
+        for (int k = 0; k < K; k++) { c += p[j * K + k]; if (u < c) { pick = k; break; } }
+        assigned[j * K + pick] += piece;
+      }
+      for (int k = 0; k < K; k++) arrived[(j * K + k) * N + s.src[j]] = assigned[j * K + k];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // each lane's share: its demand (its edges' bytes not yet sent on, and its background) against its rate

@@ -191,10 +191,11 @@ func rollouts(_ count: Int, amplitude: Float, mode: UInt32) {
 // the measured cluster at the decode sizes: the policy, all on the shortest-path tree, a uniform split
 func measure() -> String {
   var out: [String] = []
+  let draws = 64   // each size's completion the mean over this many piece draws
   for (mode, name) in [(UInt32(0), "policy"), (1, "spt"), (2, "uniform")] {
-    for i in 0..<sizes.count { which[i] = UInt32(pool + i); perturb[2 * i] = 0; perturb[2 * i + 1] = 0 }
-    rollouts(sizes.count, amplitude: 0, mode: mode)
-    out.append(name + " " + (0..<sizes.count).map { String(format: "%.2f", done[$0]) }.joined(separator: " "))
+    for i in 0..<sizes.count { for d in 0..<draws { let r = i * draws + d; which[r] = UInt32(pool + i); perturb[2 * r] = UInt32(d + 1); perturb[2 * r + 1] = 0 } }
+    rollouts(sizes.count * draws, amplitude: 0, mode: mode)
+    out.append(name + " " + (0..<sizes.count).map { i in String(format: "%.2f", (0..<draws).map { done[i * draws + $0] }.reduce(0, +) / Float(draws)) }.joined(separator: " "))
   }
   return out.joined(separator: " | ")
 }
@@ -207,7 +208,7 @@ func ranks(_ v: [Float]) -> [Float] {
 print("network \(P) parameters; \(M) pairs a step; T / floor on the measured cluster at \(sizes.map { Int($0) }) bytes a rank")
 print("start: " + measure())
 if ProcessInfo.processInfo.environment["WEIGHTING"] != nil {   // the policy's first weighting on the measured cluster's held-out scenarios
-  for i in 0..<sizes.count { which[i] = UInt32(pool + i); perturb[2 * i] = 0; perturb[2 * i + 1] = 0 }
+  for i in 0..<sizes.count { which[i] = UInt32(pool + i); perturb[2 * i] = 1; perturb[2 * i + 1] = 0 }
   rollouts(sizes.count, amplitude: 0, mode: 0)
   for i in 0..<sizes.count { print("size \(Int(sizes[i])): " + (0..<4).map { j in (0..<K).map { String(format: "%.3f", weighting[(i * J + j) * K + $0]) }.joined(separator: " ") }.joined(separator: " | ")) }
   exit(0)
