@@ -121,7 +121,7 @@ static uint32_t own_execution,seen[MESH_SWITCH_NODES][256],cursor[MESH_SWITCH_NO
 static struct mesh_switch_gru gru[256];static struct mesh_switch_gru_weights weights;
 static struct piece *pieces;static uint32_t npieces;
 /* the trees a piece is sampled from: commodity j's candidates at tree_first[j] .. tree_first[j + 1] - 1 */
-static struct mesh_switch_tree trees[4096];static uint32_t tree_first[65],ncommodities,csrc[64];static uint64_t cto[64];
+static struct mesh_switch_tree trees[16384];static uint32_t tree_first[65],ncommodities,csrc[64];static uint64_t cto[64];
 static double tdemand[64],tree_fluid;
 
 static uint32_t earliest_cable(uint32_t l){
@@ -277,7 +277,7 @@ static void optimum(int kind,double S,double page){
     for(uint32_t b=0;b<ncompute;b++)if(a!=b){csrc[ncommodities]=compute[a];cto[ncommodities]=UINT64_C(1)<<compute[b];tdemand[ncommodities++]=S/ncompute;}
     csrc[ncommodities]=compute[a];cto[ncommodities]=all&~(UINT64_C(1)<<compute[a]);tdemand[ncommodities++]=S/ncompute;
   }
-  static struct mesh_switch_tree packed[4096];uint32_t packed_first[65];
+  static struct mesh_switch_tree packed[16384];uint32_t packed_first[65];
   assert(!mesh_switch_trees(&fabric,csrc,cto,tdemand,ncommodities,0.05,packed,sizeof packed/sizeof *packed,packed_first));
   double tload[256]={0};tree_fluid=0;
   for(uint32_t j=0;j<ncommodities;j++)for(uint32_t q=packed_first[j];q<packed_first[j+1];q++)

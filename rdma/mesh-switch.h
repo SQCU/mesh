@@ -173,6 +173,7 @@ static inline uint32_t mesh_switch_route(const struct mesh_switch_fabric *f,uint
    are written at first[j] .. first[j + 1] - 1, each as its parents (UINT32_MAX for a node not in it, and the source)
    and the lane into each node, with its share of the commodity's flow. 0, ENOSPC or EINVAL. */
 #define MESH_SWITCH_TREE_NODES 10
+#define MESH_SWITCH_TREES 1024
 struct mesh_switch_tree { uint32_t parent[MESH_SWITCH_TREE_NODES],lane[MESH_SWITCH_TREE_NODES]; double share; };
 
 static inline int mesh_switch_cheapest_tree(const struct mesh_switch_fabric *f,uint32_t s,uint64_t to,const double *length,
@@ -217,8 +218,9 @@ static inline int mesh_switch_trees(const struct mesh_switch_fabric *f,const uin
   for(uint32_t j=0;j<commodities;j++)want+=demand[j];
   if(!(want>0))return EINVAL;
   for(uint32_t j=0;j<commodities;j++)scaled[j]=demand[j]*have/want;
-  static struct mesh_switch_tree found[64][64];static double flow[64][64];uint32_t count[64]={0};
-  for(uint32_t j=0;j<commodities;j++)for(uint32_t k=0;k<64;k++)flow[j][k]=0;
+  /* the distinct trees found a commodity: at most MESH_SWITCH_TREES (a dense fabric's packing uses a few hundred) */
+  static struct mesh_switch_tree found[64][MESH_SWITCH_TREES];static double flow[64][MESH_SWITCH_TREES];uint32_t count[64]={0};
+  for(uint32_t j=0;j<commodities;j++)for(uint32_t k=0;k<MESH_SWITCH_TREES;k++)flow[j][k]=0;
   for(double D=delta*m;D<1;){
     for(uint32_t j=0;j<commodities && D<1;j++){
       double left=scaled[j];
@@ -230,7 +232,7 @@ static inline int mesh_switch_trees(const struct mesh_switch_fabric *f,const uin
         const double g=left<narrow?left:narrow;
         uint32_t k=0;
         while(k<count[j] && memcmp(found[j][k].lane,t.lane,f->nodes*sizeof *t.lane))k++;
-        if(k==count[j]){if(k==64)return ENOSPC;found[j][k]=t;count[j]++;}
+        if(k==count[j]){if(k==MESH_SWITCH_TREES)return ENOSPC;found[j][k]=t;count[j]++;}
         flow[j][k]+=g;total[j]+=g;left-=g;
         for(uint32_t v=0;v<f->nodes;v++)if(t.lane[v]!=UINT32_MAX){
           const uint32_t l=t.lane[v];const double old=length[l];
