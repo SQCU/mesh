@@ -1,5 +1,10 @@
 # The trainer's data flow
 
+The environment is the mesh bridges' own switching code (rdma/mesh-switched.h) over the timed wire
+(rdma/tests/switched-world.h): sim.c's route_sim_* run the distribution's collectives on the bridges. The tokens are
+the bridges' own (mesh_switch_tokens_make). The answer goes in through struct mesh_switch_policy, and the draws and
+their records are the bridges'. The max-plus simulator that sim.c used to be is deleted.
+
 ![the data flow](design/dataflow.png) (design/dataflow.py draws it)
 
 ## The loop (py/route/loop.py, the whole schedule)
@@ -90,7 +95,8 @@ published into the rollouts' actor through a staging network.
 
 ## Checks (python -m route ...)
 
-- simcheck: the switch.c fixed router's table on the measured cluster.
+- envcheck (make check): the environment on the measured cluster, every draw in its table, the bridge's log-probability
+  equal to split.h's under the answered w, the run rate; python -m route sims: the rate on the training distribution.
 - deploy: forward.c against the GPU forward on the first refresh.
 - check --graph: the GPU's credit against split.h's on the CPU; scores against central differences; the fused wgrad
   codes against int8mm.h's CPU definition (probes); the int8 network against the fp32 reference.

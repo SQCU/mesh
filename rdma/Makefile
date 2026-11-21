@@ -136,11 +136,13 @@ clean:
 .PHONY: all install clean
 
 # design/switched-multipath-dma.md "Tests": the bridges' switch over N nodes
-# on a timed wire (tests/sim-switched.c, the measured five-node cluster), then the two simulated nodes
+# on a timed wire (tests/sim-switched.c, the measured five-node cluster), the routing policy's environment on the same
+# code (tests/route/envcheck.c: every draw the policy's table, the bridge's log-probability split.h's), then the two simulated nodes
 # (tests/sim-two-nodes.sh: real clients over a simulated wire that matches each SEND to the receive posted first on its queue pair); builds nothing it installs
 check: all
 	mkdir -p .build/tests
 	cc -std=gnu11 -O2 $(WARN) -I . -o .build/tests/sim-switched tests/sim-switched.c -lm && .build/tests/sim-switched
+	cc -std=c11 -O2 -I . -I tests -o .build/tests/envcheck tests/route/envcheck.c tests/route/sim.c -lm && .build/tests/envcheck tests/fabric-20261119.txt 64
 	cc -std=c11 -O2 $(WARN) -I . -o .build/tests/scatter tests/scatter.c mesh-collective.c mesh-fabric.c mesh-routed.c -lm && .build/tests/scatter
 	tests/sim-two-nodes.sh
 .PHONY: check
