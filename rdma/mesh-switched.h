@@ -187,7 +187,7 @@ struct mesh_switch {
   uint64_t slot_bytes,slot_base;    /* a slot's bytes (MESH_SWITCH_HEAD and a piece, whole frames) and the pool's region offset */
   _Alignas(64) _Atomic uint64_t free_head;
   _Atomic uint64_t free_count,stamp,refreshing;
-  _Atomic uint32_t logging,padding;
+  _Atomic uint32_t logging,weighted;   /* weighted: a draw from the weights (else the earliest arrival, the design's rule) */
   struct mesh_switch_view view;
   struct mesh_switch_weights weights;
   struct mesh_switch_splits splits;
@@ -427,7 +427,7 @@ static inline uint64_t mesh_switch_lanes_mask(struct mesh_switch *sw,uint32_t pe
 }
 /* mesh_switch_lanes_toward over the lanes of `mask` alone (the refresh's: struct mesh_switch_weights `toward`), each
    read live again; every lane where `mask` is 0 */
-static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate){
+static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra){
   double least=INFINITY;*best=UINT32_MAX;*rate=0;
   const uint64_t every=~UINT64_C(0)>>(64-MESH_SWITCH_LANES);
   if(!mask)mask=every;
@@ -439,15 +439,15 @@ static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mas
     float r,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&r,&waited);
     const double each=r>0?r:fallback_rate>0?fallback_rate:1;
     *rate+=each;
-    const double wait=(double)atomic_load_explicit(&x->queued,memory_order_relaxed)/each;
+    const double wait=((double)atomic_load_explicit(&x->queued,memory_order_relaxed)+extra)/each;
     if(wait<least){least=wait;*best=l;}
   }
   /* none of the mask's lanes live: every lane looked at (one come up since the refresh) */
-  if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among(sw,every,peer,fallback_rate,best,rate);
+  if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among(sw,every,peer,fallback_rate,best,rate,extra);
   return least;
 }
 static inline double mesh_switch_lanes_toward(struct mesh_switch *sw,uint32_t peer,double fallback_rate,uint32_t *best,double *rate){
-  return mesh_switch_lanes_among(sw,~UINT64_C(0)>>(64-MESH_SWITCH_LANES),peer,fallback_rate,best,rate);
+  return mesh_switch_lanes_among(sw,~UINT64_C(0)>>(64-MESH_SWITCH_LANES),peer,fallback_rate,best,rate,0);
 }
 
 /* ---- The draw ---------------------------------------------------------------------------------------------------- */
@@ -557,7 +557,8 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
   for(uint32_t k=0;k<deg;k++){
     const uint32_t nb=w->neighbour[k];
     const struct mesh_switch_link *x=nb<v->nodes?mesh_switch_link_of((struct mesh_switch_view *)v,v->self,v->node[nb]):NULL;
-    wait[k]=nb<v->nodes?mesh_switch_lanes_among(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k):INFINITY;
+    /* the lane's wait with this piece's own bytes on it: its time to clear the lane (design: (backlog + bytes) / rate) */
+    wait[k]=nb<v->nodes?mesh_switch_lanes_among(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,(double)sw->slot_bytes):INFINITY;
     latency[k]=x?x->latency:0;
   }
   /* the policy's context: the piece's source and destinations as staged, the owed ones (view indices) */
@@ -588,20 +589,23 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
       if(logged){
         const int valid=nb==d || mesh_switch_reaches(v,nb,UINT64_C(1)<<self,d);
         const uint32_t b=d*SPLIT_DEG+k;
-        const double hop=wait[k]+(rate[k]>0?(double)name->bytes/rate[k]:0)+latency[k];
+        const double hop=wait[k]+latency[k];
         record->arrive[b]=(float)(hop+(nb==d?0:w->togo[nb][d]));
         if(valid)record->valid|=1u<<b;
         if(ok[k])record->mask|=1u<<b;
       }
       if(!ok[k])continue;
       allowed++;total+=w->w[d][k];
-      const double c=wait[k]+(nb==d?0:w->togo[nb][d]);
+      const double c=wait[k]+latency[k]+(nb==d?0:w->togo[nb][d]);
       if(c<cost){cost=c;cheapest=k;}
     }
     if(!allowed)return UINT32_MAX;
     ntok*=allowed;
     if(logged)record->S|=1u<<d;
     if(split)continue;
+    /* the design's rule: the allowed neighbour of the earliest arrival at d, its lane's backlog and this piece's
+       bytes on it, the link's latency, then the cost-to-go from it (the weights' draw where `weighted` is set) */
+    if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed)){choice[i]=cheapest;continue;}
     if(total>0){
       double at=0;
       for(uint32_t k=0;k<deg && choice[i]==UINT32_MAX;k++){
