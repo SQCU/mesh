@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-/* Layouts 153 to MESH_LAYOUT differ in transport entries/pins and the header's tail (node_off, switch_off), not
+/* Layouts from 153 on (a later build's too: an install of an earlier build reads its region) differ in transport entries/pins and the header's tail (node_off, switch_off), not
    holder identity: the observer reads only magic, version, clients and client_off, whose offsets are these in every
    one of them (compared against the 153 committed header). */
 _Static_assert(offsetof(struct hdr,version)==4 &&
@@ -15,7 +15,7 @@ _Static_assert(sizeof(struct mesh_client)==64 && offsetof(struct mesh_client,own
                offsetof(struct mesh_client,start)==8,"install observer client ABI");
 static int install_state_valid(const struct hdr *m,size_t bytes){
   return bytes>=offsetof(struct hdr,client_off)+sizeof m->client_off && m->magic==MESH_MAGIC &&
-    (m->version==0 || (m->version>=153 && m->version<=MESH_LAYOUT)) && m->clients<=MESH_CLIENTS &&
+    (m->version==0 || m->version>=153) && m->clients<=MESH_CLIENTS &&
     m->client_off>=offsetof(struct hdr,client_off)+sizeof m->client_off && m->client_off%_Alignof(struct mesh_client)==0 && m->client_off<=bytes &&
     (uint64_t)m->clients*sizeof(struct mesh_client)<=bytes-m->client_off;
 }
