@@ -139,7 +139,7 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
   TILE_MEMORY
   const Lanes c = lanes_of(t);
   const uint r0 = tile * TM, g0 = p.RL + r0, RT = gr.RT;   // the tile's first context, its global row (the wgrad operands')
-  const uint nv = min(TM, p.R - r0);
+  const uint nv = r0 < p.R ? min(TM, p.R - r0) : 0u;   // the tile's contexts (none: a tile past them, as a padded batch has)
   int ref[2];
   for (uint s = 0; s < 2; s++) { const uint r = r0 + row_of(c, s); ref[s] = r < p.R ? pos[r] / int(L) : 0; }
   for (uint i = t; i < TM * IN / 4; i += NT) {

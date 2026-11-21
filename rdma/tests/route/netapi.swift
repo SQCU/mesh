@@ -252,3 +252,20 @@ func json(_ r: Any, _ out: UnsafeMutablePointer<CChar>, _ room: Int) -> Int32 {
   return 0
 }
 @_cdecl("route_net_free") public func route_net_free(_ p: UnsafeMutableRawPointer) { idle(handle(p).net); Unmanaged<Handle>.fromOpaque(p).release() }
+// the exchange for an array library's trainer (qnn.py): a communicator and lease of n floats on a queue of its own,
+// and one in-place sum of n floats over the ranks (copied into the lease, the declared all-reduce, waited, copied back)
+var exchangeQueue: MTLCommandQueue? = nil
+@_cdecl("route_exchange_join") public func route_exchange_join(_ rank: Int32, _ world: Int32, _ id: UnsafePointer<CChar>, _ n: Int) -> Int32 {
+  let q = MTLCreateSystemDefaultDevice()!.makeCommandQueue()!; exchangeQueue = q
+  return route_exchange_open(rank, world, id, n, Unmanaged.passUnretained(q.makeCommandBuffer()!).toOpaque())
+}
+@_cdecl("route_exchange_sum") public func route_exchange_sum(_ data: UnsafeMutablePointer<Float>, _ n: Int) -> Int32 {
+  let buf = route_exchange_buffer()!
+  memcpy(buf, data, n * 4)
+  let cb = exchangeQueue!.makeCommandBuffer()!
+  if route_exchange_encode(Unmanaged.passUnretained(cb).toOpaque()) != 0 { return -1 }
+  cb.commit(); cb.waitUntilCompleted()
+  if route_exchange_status() != 0 { return -1 }
+  memcpy(data, buf, n * 4)
+  return 0
+}

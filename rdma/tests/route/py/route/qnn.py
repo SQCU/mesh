@@ -84,7 +84,8 @@ def _fp(B, K, R, RL, Rp, seed):
     """tile.h's FP: runs, refreshes, a run's lane rows, contexts, the lane rows' offset (0: each op its own codes), the
     seed (an array: it changes every step), the contexts' room, lane tiles a threadgroup"""
     k = _klp(K)
-    head = mx.array([B, K, k, R, RL], mx.uint32); tail = mx.array([Rp, 1 if K == 1 else k // 64], mx.uint32)
+    R = mx.array([R], mx.uint32) if isinstance(R, int) else R.reshape(1).astype(mx.uint32)   # an array: a padded batch's own rows
+    head = mx.concatenate([mx.array([B, K, k], mx.uint32), R, mx.array([RL], mx.uint32)]); tail = mx.array([Rp, 1 if K == 1 else k // 64], mx.uint32)
     return mx.concatenate([head, seed.reshape(1).astype(mx.uint32), tail])
 
 
@@ -179,21 +180,22 @@ def _(primals, cots, outs):
 
 # the fused context-row chain op: tokens [R][IN], pos [R] (a context's state: its refresh's last lane row, pos / L the
 # refresh), seg [B K][2] (each refresh's contexts' rows), st -> w [R][FS]
-def _ctx_fwd(wq, wsc, tokens, pos, st, B, K, seed, store):
+def _ctx_fwd(wq, wsc, tokens, pos, st, B, K, seed, store, rows=None):
+    """rows: the contexts that are (an array; a padded batch's rows past it are the kernels' invalid rows), else all"""
     R = tokens.shape[0]; Rp = pad64(R)
     table, (xq, xf), _ = _grad_table(Rp, 1)
     n = lambda size, dt: ((size if store else 1,), dt)
     o = _kernel('fwd.metal', 'ctx_fwd', template=(('STORE', store), ('STAGE', 0)), tag='_s' if store else '')(
-        {'tokens': tokens, 'pos': pos, 'st': st, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': _fp(B, K, R, 0, Rp, seed), 'gr': _c(table), 'H': _c(_H)},
+        {'tokens': tokens, 'pos': pos, 'st': st, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': _fp(B, K, R if rows is None else rows, 0, Rp, seed), 'gr': _c(table), 'H': _c(_H)},
         {'w': ((R * FS,), mx.float32), 'gq': n(xq, mx.int8), 'gs': n(xf, mx.float32), 'czc': n(R * 4 * D, mx.float16), 'cu': n(R * 12, mx.uint32),
          'cn': n(R * D, mx.float32), 'cinv': n(R, mx.float32)}, (-(-R // TM),), 256)
     return o['w'].reshape(R, FS), o
 
 
-def _ctx_back_impl(dw, wq, wsc, pos, seg, st, seed, gqx, gsx, czc, cu, cn, cinv):
+def _ctx_back_impl(dw, wq, wsc, pos, seg, st, seed, rows, gqx, gsx, czc, cu, cn, cinv):
     T, R = dw.shape[:2]; Rp = pad64(R); BK = seg.shape[0]
     table, _, (yq, yf) = _grad_table(Rp, T)
-    p = _fp(BK, 1, R, 0, Rp, seed)   # B K refreshes as states_grad reads them (its B K)
+    p = _fp(BK, 1, rows, 0, Rp, seed)   # B K refreshes as states_grad reads them (its B K)
     o = _kernel('bwd.metal', 'ctx_bwd')(
         {'dw': dw.reshape(-1), 'pos': pos, 'st': st, 'czc': czc, 'cu': cu, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': p, 'gr': _c(table), 'cn': cn, 'cinv': cinv, 'H': _c(_H)},
         {'gq': ((yq,), mx.int8), 'gs': ((yf,), mx.float32), 'dhp': ((T * 2 * Rp * D,), mx.float32)}, (-(-R // TM), T), 256)
@@ -203,17 +205,18 @@ def _ctx_back_impl(dw, wq, wsc, pos, seg, st, seed, gqx, gsx, czc, cu, cn, cinv)
 
 
 @mx.custom_function
-def contexts(wb, wq, wsc, tokens, pos, seg, st, seed):
-    """wb [T][NW], st [T][B K][2][D] (a task each, equal: the forward once) -> w [T][R][FS]; the VJP the T tasks'"""
-    w, o = _ctx_fwd(wq, wsc, tokens, pos, st[0], 0, 1, seed, True)
+def contexts(wb, wq, wsc, tokens, pos, seg, st, seed, rows):
+    """wb [T][NW], st [T][B K][2][D] (a task each, equal: the forward once), rows (the contexts that are: a padded
+    batch's) -> w [T][R][FS]; the VJP the T tasks'"""
+    w, o = _ctx_fwd(wq, wsc, tokens, pos, st[0], 0, 1, seed, True, rows)
     return mx.broadcast_to(w[None], (wb.shape[0],) + w.shape), o['gq'], o['gs'], o['czc'], o['cu'], o['cn'], o['cinv']
 
 
 @contexts.vjp
 def _(primals, cots, outs):
-    wb, wq, wsc, tokens, pos, seg, st, seed = primals
-    dwb, dst = _ctx_back_impl(cots[0], wq, wsc, pos, seg, st[0], seed, *outs[1:])
-    return (dwb, mx.zeros_like(wq), mx.zeros_like(wsc), mx.zeros_like(tokens), mx.zeros_like(pos), mx.zeros_like(seg), dst, mx.zeros_like(seed))
+    wb, wq, wsc, tokens, pos, seg, st, seed, rows = primals
+    dwb, dst = _ctx_back_impl(cots[0], wq, wsc, pos, seg, st[0], seed, rows, *outs[1:])
+    return (dwb, mx.zeros_like(wq), mx.zeros_like(wsc), mx.zeros_like(tokens), mx.zeros_like(pos), mx.zeros_like(seg), dst, mx.zeros_like(seed), mx.zeros_like(rows))
 
 
 # ---- the generic int8 product (qnn's first op, kept: its own quantization, a 64-block Walsh-Hadamard as a product) ----
@@ -341,12 +344,13 @@ class Policy(nn.Module):
         wq, wsc = weight_codes(mx.stop_gradient(wb[0]))
         return wb, wq, wsc
 
-    def __call__(self, lanes_, mask, h0, tokens, pos, seg, seed):
+    def __call__(self, lanes_, mask, h0, tokens, pos, seg, seed, rows=None):
         """a learning batch: B runs' K refreshes (lanes [B][K][L][IN], mask [B][K][L], h0 [B][2][D]), R contexts
         (tokens [R][IN], pos [R], seg [B K][2]) -> w [T][R][FS] (T: the parameters' task copies, or 1), next [B][2][D]"""
         wb, wq, wsc = self.weights()
         st, nxt = lanes(wb, wq, wsc, lanes_, mask, h0, seed)[:2]
-        return contexts(wb, wq, wsc, tokens, pos, seg, st, seed)[0], nxt
+        rows = mx.array([tokens.shape[0]], mx.uint32) if rows is None else rows.reshape(1).astype(mx.uint32)
+        return contexts(wb, wq, wsc, tokens, pos, seg, st, seed, rows)[0], nxt
 
     def codes(self):
         """the weights' codes alone (an actor's, made once a publish)"""
@@ -383,29 +387,30 @@ DRAW_WORDS = 40   # struct route_draw: 160 bytes
 
 
 @mx.custom_function
-def surrogate(w, wbeh, draws, first, scale0, scale):
+def surrogate(w, wbeh, draws, first, scale0, scale, counts=None):
     """draws [ND][40] (struct route_draw's words; first [R + 1] a row's first) under w [3][R][FS] (task t's under
     w[t]: the step's task copies, equal; the credit computed once) and the rows' behaviour w (wbeh: the behaviour
     w they were drawn under): per task, sum over draws of c_t x stop(ratio) x log pi(token) (c: task 0 the row's
     scale0, tasks 1, 2 the draw's a1, a2 times scale) -> [3]; besides, its gradient dL/dw [3][R][FS] (the credit)"""
     R, ND = w.shape[1], draws.shape[0]
-    o = _kernel('credit.metal', 'credit_draws', fast=True)({'draws': draws.reshape(-1), 'wb': wbeh.reshape(-1), 'wc': w[0].reshape(-1), 'n': mx.array([ND], mx.uint32)},
+    counts = mx.array([R, ND], mx.uint32) if counts is None else counts   # (rows, draws) that are: a padded batch's
+    o = _kernel('credit.metal', 'credit_draws', fast=True)({'draws': draws.reshape(-1), 'wb': wbeh.reshape(-1), 'wc': w[0].reshape(-1), 'n': counts[1:2]},
                                                          {'diff': ((ND * FS,), mx.float32), 'll': ((ND,), mx.float32), 'lp': ((ND,), mx.float32)},
                                                          (max(1, -(-ND * 8 // 256)),), 256)
     dw = _kernel('credit.metal', 'credit_rows', fast=True)({'diff': o['diff'], 'draws': draws.reshape(-1), 'first': first, 'scale0': scale0,
-                                                         'p': mx.concatenate([mx.array([R, 0], mx.uint32), scale.reshape(1).view(mx.uint32), mx.array([0], mx.uint32)])},
+                                                         'p': mx.concatenate([counts[0:1], mx.array([0], mx.uint32), scale.reshape(1).view(mx.uint32), mx.array([0], mx.uint32)])},
                                                         {'dw': ((3 * R * FS,), mx.float32)}, (-(-3 * R * FS // 256),), 256)['dw']
     f = draws[:, 36:40].view(mx.float32); row = draws[:, 36]
-    v = mx.exp(o['ll']) * o['lp']
+    v = mx.where(mx.arange(ND) < counts[1], mx.exp(o['ll']) * o['lp'], 0.0)
     loss = mx.stack([(scale0[row] * v).sum(), scale * (f[:, 2] * v).sum(), scale * (f[:, 3] * v).sum()])
     return loss, dw.reshape(3, R, FS)
 
 
 @surrogate.vjp
 def _(primals, cots, outs):
-    w, wbeh, draws, first, scale0, scale = primals
+    w, wbeh, draws, first, scale0, scale, counts = primals
     dw = cots[0][:, None, None] * outs[1]
-    return dw, mx.zeros_like(wbeh), mx.zeros_like(draws), mx.zeros_like(first), mx.zeros_like(scale0), mx.zeros_like(scale)
+    return dw, mx.zeros_like(wbeh), mx.zeros_like(draws), mx.zeros_like(first), mx.zeros_like(scale0), mx.zeros_like(scale), mx.zeros_like(counts)
 
 
 # ---- step ----
@@ -445,8 +450,9 @@ class Learner:
 
         def f(p3):
             model.update(tree_unflatten(list(zip(names, p3))))
-            w, _ = model(b['lanes'], b['mask'], b['h0'], b['tokens'], b['pos'], b['seg'], seed)
-            loss = surrogate(w, b['w'], b['draws'], b['first'], b['scale0'], b['scale'])[0]
+            counts = b['counts'] if 'counts' in b else mx.array([b['tokens'].shape[0], b['draws'].shape[0]], mx.uint32)
+            w, _ = model(b['lanes'], b['mask'], b['h0'], b['tokens'], b['pos'], b['seg'], seed, counts[0])
+            loss = surrogate(w, b['w'], b['draws'], b['first'], b['scale0'], b['scale'], counts)[0]
             return loss.sum(), loss
         (_, loss), g = mx.value_and_grad(f)([mx.broadcast_to(v[None], (TASKS,) + v.shape) for _, v in params])
         model.update(tree_unflatten(params))
@@ -454,7 +460,7 @@ class Learner:
 
     def _gradient(self, b, acc):
         J, loss = self.grads(b)
-        rows = mx.array(b['tokens'].shape[0], mx.float32)
+        rows = b['counts'][0].astype(mx.float32) if 'counts' in b else mx.array(b['tokens'].shape[0], mx.float32)   # a padded batch's own rows
         n = (J * J).sum(1)
         tail = mx.concatenate([rows[None], n, mx.ones((1,)), mx.zeros((3,))]) * (rows > 0)
         self.rng['seed'] = (self.rng['seed'] * 1664525 + 1013904223) | 1
@@ -486,3 +492,34 @@ class Learner:
     def step(self, b, exchange=None):
         acc, loss = self.gradient(b, self.zero())
         return self.apply(acc, exchange), loss
+
+
+class Exchange:
+    """the ranks' sum of a flat float array through the mesh (libroute's route_exchange_sum: libnccl-mesh's declared
+    all-reduce over a lease of its own); the step's one exchange carries the gradient sums, the rows and the
+    microbatches' squared norms and count, so every rank derives the same statistics"""
+
+    def __init__(self, lib, ffi, rank, world, mesh_id, n):
+        self.lib, self.ffi, self.n = lib, ffi, n
+        if lib.route_exchange_join(rank, world, mesh_id.encode(), n) != 0:
+            raise RuntimeError(ffi.string(lib.route_exchange_failure()).decode())
+
+    def __call__(self, acc):
+        h = np.array(acc, np.float32)
+        if self.lib.route_exchange_sum(self.ffi.from_buffer('float[]', h, require_writable=True), self.n) != 0:
+            raise RuntimeError(self.ffi.string(self.lib.route_exchange_failure()).decode())
+        return mx.array(h)
+
+
+def theta(model):
+    """the parameters as NetLayout's theta (model.swift: each matrix's V, g, then b), the fp32 master copy"""
+    return mx.concatenate([x.reshape(-1) for m in model.mats() for x in ([m.V, m.g] + ([m.b] if 'b' in m else []))])
+
+
+def load_theta(model, t):
+    """theta (NetLayout's) into the model's parameters"""
+    t, at = mx.array(t), 0
+    for m in model.mats():
+        for name in ('V', 'g', 'b'):
+            if name in m:
+                v = getattr(m, name); setattr(m, name, t[at:at + v.size].reshape(v.shape)); at += v.size

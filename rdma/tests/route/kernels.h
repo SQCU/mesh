@@ -100,4 +100,8 @@ void route_net_free(void *net);
 
 /* ---- the exchange (exchange.c): world > 1 ---- */
 void *route_exchange_metal(size_t *offset);   /* the lease's Metal buffer (id<MTLBuffer>) and its offset */
+/* an array library's trainer (qnn.py): this rank's communicator and a lease of n floats on a queue of its own; the
+   in-place sum of n floats over the ranks (waited). 0, or -1 (route_exchange_failure) */
+int route_exchange_join(int rank, int world, const char *id, size_t n);
+int route_exchange_sum(float *data, size_t n);
 #endif

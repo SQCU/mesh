@@ -64,7 +64,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
   threadgroup int refid[TM];
   const Lanes c = lanes_of(t);
   const uint task = tg.y, r0 = tg.x * TM, g0 = p.RL + r0, RT = gr.RT;
-  const uint nv = min(TM, p.R - r0);
+  const uint nv = r0 < p.R ? min(TM, p.R - r0) : 0u;   // the tile's contexts (none: a tile past them, as a padded batch has)
   if (t < TM) refid[t] = r0 + t < p.R ? pos[r0 + t] / int(L) : -1;
   for (uint i = t; i < TM * 16; i += NT) {
     const uint r = i / 16, f = 4 * (i % 16);

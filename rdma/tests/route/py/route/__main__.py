@@ -80,16 +80,18 @@ def train(cfg, lib):
     dist = C.Distribution(config.flat(cfg), measured, lib, np.random.default_rng([r['data_seed'], r['rank']]))
     lib.route_tel_open(r['telemetry'].encode(), r['rank'], r['world']); lib.route_tel_reach(lib.RT_PHASE_START)
     runs = cap['forward_rows'] // loop.CX // 4 * 4   # the runs in flight: one forward can carry all of them
-    learner = network(cfg, lib, cap['learn_runs'], cap['refreshes'], cap['forward_rows'])
+    staging = network(cfg, lib, 4, 1, loop.CX)   # theta's initial value (theta_seed, theta_in), then what is published
     actor = network(cfg, lib, runs, 1, runs * loop.CX)
+    try:
+        learner = loop.Learner(cfg, lib, staging)   # qnn.py's (world > 1: joined to the exchange)
+    except RuntimeError as e:
+        emit({'record': 'failure', 'rank': r['rank'], 'what': str(e)}); sys.exit(1)
     lib.route_tel_reach(lib.RT_PHASE_NETWORKS)
     if r['world'] > 1:
-        if lib.route_net_join(learner, r['rank'], r['world'], r['mesh_id'].encode()) != 0:
-            emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(lib.route_exchange_failure()).decode()}); sys.exit(1)
         lib.route_tel_reach(lib.RT_PHASE_JOINED)
     evaluating = r['rank'] in cfg['evaluation']['ranks']
     if evaluating and 'start' in cfg['evaluation']['at']:
-        evaluation(cfg, lib, learner, measured, 'start')
+        evaluation(cfg, lib, learner.staged(), measured, 'start')
     table = telemetry.Table(r['telemetry']); table.sample()
     done = threading.Event()
     last, lastops = {}, {}
@@ -108,9 +110,9 @@ def train(cfg, lib):
     if failure != ffi.NULL:
         emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(failure).decode()})
     if evaluating and 'end' in cfg['evaluation']['at']:
-        evaluation(cfg, lib, learner, measured, f'end, {lib.route_net_steps(learner)} steps')
+        evaluation(cfg, lib, learner.staged(), measured, f'end, {learner.steps} steps')
     if r['rank'] == 0 and (r['theta'] or r['theta_int8']):
-        lib.route_net_save(learner, r['theta'].encode() if r['theta'] else ffi.NULL, r['theta_int8'].encode() if r['theta_int8'] else ffi.NULL)
+        learner.save(r['theta'], r['theta_int8'])
         emit({'record': 'saved', 'theta': r['theta'], 'theta_int8': r['theta_int8']})
     if r['world'] > 1:
         lib.route_exchange_close()
@@ -411,6 +413,8 @@ def main(argv):
             Q.roofline(cfg['capacity']['learn_runs'], cfg['capacity']['refreshes'], cfg['capacity']['forward_rows'])
         elif cmd == 'qnn-check':
             Q.check()
+        elif cmd == 'qnn-padding':
+            Q.padding()
         elif cmd == 'qnn-i8mm':
             Q.i8mm_exact()
         elif cmd == 'qnn-deploy':

@@ -159,3 +159,20 @@ def i8mm_exact(M=1000, N=300, K=640):
     c = np.array(qnn.i8(mx.array(a), mx.array(b)))
     want = a.astype(np.float64) @ b.astype(np.float64).T
     emit({'record': 'qnn-i8mm', 'shape': [M, N, K], 'exact': bool((c == want).all()), 'largest_difference': float(np.abs(c - want).max())})
+
+
+def padding(B=12, K=4, R=1321):
+    """the data ring's padded batch (loop.HostBatch: bucket sizes, pad rows and draws weighing nothing) against the
+    batch itself: the three gradients, rounding to nearest (seed 0), bit for bit"""
+    from . import loop
+    mx.random.seed(13); model = qnn.Policy(); lr = qnn.Learner(model, 0.0); lr.rng['seed'] = mx.array([0], mx.uint32)
+    bn = batch(B, K, R, np.random.default_rng(6), nd=3 * R); ND = len(bn['draws'])
+    J0, l0 = lr.grads(to_mx(bn))
+    hb = loop.HostBatch(B, K, R)
+    hb.lanes[:B * K] = bn['lanes'].reshape(B * K, L, IN); hb.mask[:B * K] = bn['mask'].reshape(B * K, L); hb.h0[:B] = bn['h0'].reshape(B, 2 * D)
+    hb.tokens[:R] = bn['tokens']; hb.pos[:R] = bn['pos']; hb.seg[:2 * B * K] = bn['seg'].ravel(); hb.w[:R] = bn['w']; hb.scale0[:R] = bn['scale0']
+    hb.first[:R + 1] = bn['first']; hb.draws(ND).view(np.uint32).reshape(ND, 40)[:] = bn['draws']
+    b = hb.arrays(B, R, ND, bn['scale'])
+    J1, l1 = lr.grads(b)
+    emit({'record': 'qnn-padding', 'padded': [b['lanes'].shape[0], b['tokens'].shape[0], b['draws'].shape[0]], 'of': [B, R, ND],
+          'gradient_largest_difference': float(mx.abs(J1 - J0).max()), 'gradient_largest': float(mx.abs(J0).max()), 'loss': [np.array(l0).tolist(), np.array(l1).tolist()]})
