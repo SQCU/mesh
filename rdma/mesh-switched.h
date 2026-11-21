@@ -67,7 +67,9 @@
 #define MESH_SWITCH_LINES 24u                                /* lines a name carries */
 #define MESH_SWITCH_LOG 2048u                                /* records a process's log ring */
 #define MESH_SWITCH_LOGS (MESH_PORTS+2u)                     /* a ring a port child, the parent's, the simulator's */
-#define MESH_SWITCH_CONTEXTS 256u                            /* the policy's contexts at a node, at most */
+#define MESH_SWITCH_CONTEXTS 256u
+#define MESH_SWITCH_KIN 64u                                  /* programs whose kin (same key, other nodes) a thread keeps */
+#define MESH_SWITCH_SIBLING_USES 256u                        /* a program's kin looked for again after this many stagings */                            /* the policy's contexts at a node, at most */
 #define MESH_SWITCH_REFRESH_NS 50000.0                       /* the refresh's period (the bridge's thread, the simulator) */
 #define MESH_SWITCH_DRAWS 32u                                /* Thompson sampling's draws a refresh */
 #define MESH_SWITCH_ETA 0.5f                                 /* the residual's rate a refresh */
@@ -445,17 +447,30 @@ static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t
   const uint64_t every=~UINT64_C(0)>>(64-MESH_SWITCH_LANES);
   if(!mask)mask=every;
   const uint64_t given=mask;
-  for(;mask;mask&=mask-1){
-    const uint32_t l=(uint32_t)__builtin_ctzll(mask);
+  /* a cable's lanes share it: each cable's (port's) bytes queued over all its live lanes toward the peer, and its rate
+     (the view's per cable, else its lanes' estimates summed) */
+  enum { CABLES=MESH_SWITCH_LANES/(2*MESH_LINK_STREAMS) };
+  double queued[CABLES]={0},estimate[CABLES]={0};uint64_t live=0;
+  for(uint64_t k=mask;k;k&=k-1){
+    const uint32_t l=(uint32_t)__builtin_ctzll(k);
     struct mesh_switch_lane *x=sw->lane+l;
     if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->peer,memory_order_relaxed)!=peer)continue;
+    live|=UINT64_C(1)<<l;
+    const uint32_t c=l/(2*MESH_LINK_STREAMS);
+    queued[c]+=(double)atomic_load_explicit(&x->queued,memory_order_relaxed);
+    float r,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&r,&waited);
+    estimate[c]+=r>0?r:0;
+  }
+  uint32_t counted=0;
+  for(uint64_t k=live;k;k&=k-1){
+    const uint32_t l=(uint32_t)__builtin_ctzll(k),c=l/(2*MESH_LINK_STREAMS);
+    const double each=fallback_rate>0?fallback_rate:estimate[c]>0?estimate[c]:1;
+    if(!(counted>>c&1)){*rate+=each;counted|=1u<<c;}
     const uint64_t carries=mesh_switch_lane_bytes(sw,l);
     if(need>carries)continue;
-    float r,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&r,&waited);
-    const double each=r>0?r:fallback_rate>0?fallback_rate:1;
-    *rate+=each;
-    const double wait=((double)atomic_load_explicit(&x->queued,memory_order_relaxed)+(extra<0?(double)carries:extra))/each;
-    if(wait<least){least=wait;*best=l;}
+    const double wait=(queued[c]+(extra<0?(double)carries:extra))/each;
+    if(wait<least || (wait==least && *best!=UINT32_MAX &&
+                      atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)<atomic_load_explicit(&sw->lane[*best].queued,memory_order_relaxed))){least=wait;*best=l;}
   }
   /* none of the mask's lanes live: every lane looked at (one come up since the refresh) */
   if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among_for(sw,every,peer,fallback_rate,best,rate,extra,need);
@@ -1056,11 +1071,25 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
   /* the same bytes released toward other nodes by programs of the same key (one declaration's: a collective's
      all-gather or broadcast sends one span to several), in the same execution, as their next pieces: claimed with it,
      each a destination of the one slot (multicast: the switch then shares SENDs while their paths agree) */
-  for(uint32_t k=0;k<MESH_NODES && valid && name->dests<MESH_SWITCH_N;k++){
-    struct mesh_node *y=mesh_node_at(m,k);
-    if(y==x || !atomic_load_explicit(&y->node,memory_order_acquire))continue;
-    for(uint32_t j=0;j<MESH_PROGRAMS && name->dests<MESH_SWITCH_N;j++){
-      struct mesh_declared *q=y->program+j;
+  /* the programs of p's key toward other nodes, as this thread last found them (looked for again every
+     MESH_SWITCH_SIBLING_USES uses, or where p's key moved): each read again below, so a stale one is let be */
+  static __thread struct { const struct mesh_declared *p; uint64_t key; uint32_t uses,n; struct mesh_declared *q[MESH_SWITCH_N];struct mesh_node *y[MESH_SWITCH_N]; } kin[MESH_SWITCH_KIN];
+  __typeof__(kin[0]) *c=kin+((uintptr_t)p/sizeof *p)%MESH_SWITCH_KIN;
+  if(valid && (c->p!=p || c->key!=p->program.key || ++c->uses>=MESH_SWITCH_SIBLING_USES)){
+    c->p=p;c->key=p->program.key;c->uses=0;c->n=0;
+    for(uint32_t k=0;k<MESH_NODES;k++){
+      struct mesh_node *y=mesh_node_at(m,k);
+      if(y==x || !atomic_load_explicit(&y->node,memory_order_acquire))continue;
+      for(uint32_t j=0;j<MESH_PROGRAMS && c->n<MESH_SWITCH_N;j++){
+        struct mesh_declared *q=y->program+j;
+        if(mesh_switch_owned(q) && q->program.key==p->program.key){c->q[c->n]=q;c->y[c->n]=y;c->n++;}
+      }
+    }
+  }
+  for(uint32_t i=0;i<c->n && valid && name->dests<MESH_SWITCH_N;i++){
+    struct mesh_node *y=c->y[i];
+    {
+      struct mesh_declared *q=c->q[i];
       if(!mesh_switch_owned(q) || q->program.key!=p->program.key || !q->progress[0])continue;
       const struct mesh_crossing *qt=mesh_switch_table(m,q,0);
       uint64_t qn=atomic_load_explicit(&q->claimed,memory_order_acquire),qe,qs;uint32_t qtr;
