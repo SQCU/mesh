@@ -24,7 +24,7 @@ box(20, 80, 430, 200, '1  SYNTHESIS: cases (py/route/cases.py, numpy)', [
     'rng -> fabric (6 kinds) , stream (collectives,', '        arrivals on their floors), window', '        (dt, lag, refreshes, warm router, burst),',
     '        h0 (zero | sigma N(0,1) | pool), keys', 'out: case[n]  (struct route_case records)', 'pool  <-  states runs ended with'], SYN)
 
-box(520, 80, 960, 380, '2  SYNTHESIS: rollouts (py/route/loop.py Rollouts.tick; sims.c, net.swift)', [
+box(520, 80, 960, 380, '2  SYNTHESIS: rollouts (py/route/loop.py Rollouts.tick; sims.c, model.swift)', [
     'sim (sim.c, CPU, one per run)            policy forward (GPU, int8 minGRU)',
     '  fabric state at tau_k', '  -> tokens: lanes [L][IN], contexts [C][IN]   (route.h features)  ----->   h, tokens -> w [C][FS], h\'',
     '                                                                   <-----   w',

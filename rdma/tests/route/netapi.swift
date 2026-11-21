@@ -80,15 +80,16 @@ func batch(_ h: Handle, _ b: UnsafeMutablePointer<route_batch>) -> Batch { h.bat
   if let err = b.last?.error { fail("\(err)") }
   if let cb = b.last { h.net.lastGPU = (cb.gpuEndTime - cb.gpuStartTime) * 1e9 }   // the profile's scale: this buffer's GPU time
 }
-// the ranks' sum of grads through the lease (its Metal buffer), into the open command buffer
+// the ranks' sum of the step's gradient sum and its tail (rows, norms, count) through the lease (its Metal buffer),
+// into the open command buffer
 func encodeExchange(_ n: Net) {
   var off = 0
-  let lease = Unmanaged<MTLBuffer>.fromOpaque(route_exchange_metal(&off)).takeUnretainedValue(), bytes = 3 * n.lay.count * 4
-  n.blit { $0.copy(from: n.grads, sourceOffset: 0, to: lease, destinationOffset: off, size: bytes) }
+  let lease = Unmanaged<MTLBuffer>.fromOpaque(route_exchange_metal(&off)).takeUnretainedValue(), bytes = (3 * n.npad + 8) * 4
+  n.blit { $0.copy(from: n.gsum, sourceOffset: 0, to: lease, destinationOffset: off, size: bytes) }
   n.e.endEncoding()
   if route_exchange_encode(Unmanaged.passUnretained(n.cb).toOpaque()) != 0 { fail("exchange: " + String(cString: route_exchange_failure())) }
   n.open()
-  n.blit { $0.copy(from: lease, sourceOffset: off, to: n.grads, destinationOffset: 0, size: bytes) }
+  n.blit { $0.copy(from: lease, sourceOffset: off, to: n.gsum, destinationOffset: 0, size: bytes) }
 }
 @_cdecl("route_net_exchange") public func route_net_exchange(_ p: UnsafeMutableRawPointer) {
   let n = handle(p).net
@@ -97,25 +98,69 @@ func encodeExchange(_ n: Net) {
 @_cdecl("route_net_dw") public func route_net_dw(_ p: UnsafeMutableRawPointer) -> UnsafeMutablePointer<Float> {
   let n = handle(p).net; idle(n); return n.dwBuf!.contents().bindMemory(to: Float.self, capacity: n.dwBuf!.length / 4)
 }
-@_cdecl("route_net_step") public func route_net_step(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>, _ B: Int32, _ K: Int32, _ R: Int32, _ ndraws: Int32, _ scale: Float, _ rate: Double, _ world: Int32) {
-  let h = handle(p), b = batch(h, bp), n = h.net, P = n.lay.count
-  let credit = Net.Credit(draws: b.draws, count: Int(ndraws), first: b.first, wrows: b.w, scale0: b.scale0, scale: scale, ll: b.ll)
+// one microbatch (B runs, K refreshes, R rows; B = R = 0: nothing, its rows 0) learned, its gradient added into the
+// step's sum (accumulate 0: a new sum); committed, no CPU wait. Its statistics in route_net_stats
+@_cdecl("route_net_gradient") public func route_net_gradient(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>, _ B: Int32, _ K: Int32, _ R: Int32, _ ndraws: Int32, _ scale: Float, _ accumulate: Int32) {
+  let h = handle(p), b = batch(h, bp), n = h.net
   n.begin()
-  n.encodeLearn(lanes: b.lanes, mask: b.mask, h0: b.h0, tokens: b.tokens, pos: b.pos, seg: b.seg, B: Int(B), K: Int(K), R: Int(R), credit: credit, w: b.wcur)
-  if world > 1 { encodeExchange(n) }
-  n.encodeApply(rate: rate, inv: 1 / Float(world))
+  encodeGradient(n, b, B, K, R, ndraws, scale, accumulate)
   n.e.endEncoding()
+  gradientDone(n, b, ndraws)
+  n.cb.commit(); b.last = n.cb
+}
+func encodeGradient(_ n: Net, _ b: Batch, _ B: Int32, _ K: Int32, _ R: Int32, _ ndraws: Int32, _ scale: Float, _ accumulate: Int32) {
+  let credit = Net.Credit(draws: b.draws, count: Int(ndraws), first: b.first, wrows: b.w, scale0: b.scale0, scale: scale, ll: b.ll)
+  if R > 0 || B > 0 {
+    n.encodeLearn(lanes: b.lanes, mask: b.mask, h0: b.h0, tokens: b.tokens, pos: b.pos, seg: b.seg, B: Int(B), K: Int(K), R: Int(R), credit: credit, w: b.wcur)
+  } else { n.blit { $0.fill(buffer: n.gmicro, range: 0..<(3 * n.npad * 4), value: 0) } }
+  n.encodeAccumulate(rows: Int(R), accumulate: accumulate != 0)
+}
+func gradientDone(_ n: Net, _ b: Batch, _ ndraws: Int32) {
   let ll = b.ll, count = Int(ndraws)
   n.cb.addCompletedHandler { cb in   // where its results are: the telemetry's counts (no one waits for them)
-    if let err = cb.error { fail("step: \(err)"); route_wake(); return }
+    if let err = cb.error { fail("gradient: \(err)"); route_wake(); return }
     let r = ll.contents().bindMemory(to: Float.self, capacity: max(count, 1))
     var sum = 0.0, most: Float = 0
     for i in 0..<count { sum += Double(exp(r[i])); most = max(most, abs(r[i])) }
-    route_tel_add(tel(RT_OPTIMIZER_STEPS), 1); route_tel_add(tel(RT_LEARN_NS), UInt64((cb.gpuEndTime - cb.gpuStartTime) * 1e9))
+    route_tel_add(tel(RT_LEARN_NS), UInt64((cb.gpuEndTime - cb.gpuStartTime) * 1e9))
     route_tel_add(tel(RT_RATIO_DRAWS), UInt64(count)); route_tel_add(tel(RT_RATIO_SUM_E6), UInt64(sum * 1e6)); route_tel_max(tel(RT_LOGRATIO_MAX_E3), UInt64(most * 1e3))
     route_wake()
   }
+}
+// the step on the accumulated sum: the exchange (world > 1: the sum, rows and norms summed over the ranks), the
+// rows-weighted mean and its norms, the Gram matrix, UPGrad, Adam, pin, the codes; committed, no CPU wait
+@_cdecl("route_net_apply") public func route_net_apply(_ p: UnsafeMutableRawPointer, _ rate: Double, _ world: Int32) {
+  let n = handle(p).net
+  n.begin()
+  encodeApplyAll(n, rate, world)
+  n.e.endEncoding()
+  applyDone(n)
+  n.cb.commit()
+}
+func encodeApplyAll(_ n: Net, _ rate: Double, _ world: Int32) {
+  if world > 1 { encodeExchange(n) }
+  n.encodeFinish()
+  n.encodeApply(rate: rate, inv: 1)
+}
+func applyDone(_ n: Net) {
+  n.cb.addCompletedHandler { cb in
+    if let err = cb.error { fail("apply: \(err)") } else { route_tel_add(tel(RT_OPTIMIZER_STEPS), 1) }
+    route_wake()
+  }
+}
+// the statistics (opt.metal's accumulate and finish): [0..7] the last microbatch's, [8..16] the last apply's
+@_cdecl("route_net_stats") public func route_net_stats(_ p: UnsafeMutableRawPointer) -> UnsafeMutablePointer<Float> {
+  handle(p).net.stats.contents().bindMemory(to: Float.self, capacity: 32)
+}
+@_cdecl("route_net_step") public func route_net_step(_ p: UnsafeMutableRawPointer, _ bp: UnsafeMutablePointer<route_batch>, _ B: Int32, _ K: Int32, _ R: Int32, _ ndraws: Int32, _ scale: Float, _ rate: Double, _ world: Int32) {
+  let h = handle(p), b = batch(h, bp), n = h.net   // one command buffer: gradient(0) then apply
+  n.begin()
+  encodeGradient(n, b, B, K, R, ndraws, scale, 0)
+  encodeApplyAll(n, rate, world)
+  n.e.endEncoding()
+  gradientDone(n, b, ndraws); applyDone(n)
   n.cb.commit(); b.last = n.cb
+
 }
 @_cdecl("route_net_publish") public func route_net_publish(_ fp: UnsafeMutableRawPointer, _ tp: UnsafeMutableRawPointer) {
   let from = handle(fp), to = handle(tp), n = to.published + 1, st = to.staging[Int(n % 2)], bytes = to.net.lay.count * 4
@@ -133,7 +178,7 @@ func encodeExchange(_ n: Net) {
 @_cdecl("route_net_steps") public func route_net_steps(_ p: UnsafeMutableRawPointer) -> Int32 { Int32(handle(p).net.step) }
 @_cdecl("route_net_join") public func route_net_join(_ p: UnsafeMutableRawPointer, _ rank: Int32, _ world: Int32, _ id: UnsafePointer<CChar>) -> Int32 {
   let n = handle(p).net, declaring = n.queue.makeCommandBuffer()!
-  return route_exchange_open(rank, world, id, size_t(3 * n.lay.count), Unmanaged.passUnretained(declaring).toOpaque())
+  return route_exchange_open(rank, world, id, size_t(3 * n.npad + 8), Unmanaged.passUnretained(declaring).toOpaque())
 }
 func idle(_ n: Net) { let cb = n.queue.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted() }
 @_cdecl("route_net_save") public func route_net_save(_ p: UnsafeMutableRawPointer, _ fp32: UnsafePointer<CChar>?, _ int8: UnsafePointer<CChar>?) -> Int32 {
@@ -197,4 +242,30 @@ func json(_ r: Any, _ out: UnsafeMutablePointer<CChar>, _ room: Int) -> Int32 {
     memcpy(gOut + t * P, g, P * 4)
   }
 }
+@_cdecl("route_net_read") public func route_net_read(_ p: UnsafeMutableRawPointer, _ name: UnsafePointer<CChar>, _ offset: Int, _ bytes: Int, _ out: UnsafeMutableRawPointer) -> Int32 {
+  let n = handle(p).net
+  guard let b = n.named(String(cString: name)), offset + bytes <= b.length else { return -1 }
+  let stage = n.device.makeBuffer(length: max(16, bytes), options: .storageModeShared)!
+  let cb = n.queue.makeCommandBuffer()!, bl = cb.makeBlitCommandEncoder()!
+  bl.copy(from: b, sourceOffset: offset, to: stage, destinationOffset: 0, size: bytes); bl.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  memcpy(out, stage.contents(), bytes)
+  return 0
+}
 @_cdecl("route_net_free") public func route_net_free(_ p: UnsafeMutableRawPointer) { idle(handle(p).net); Unmanaged<Handle>.fromOpaque(p).release() }
+// the exchange for an array library's trainer (qnn.py): a communicator and lease of n floats on a queue of its own,
+// and one in-place sum of n floats over the ranks (copied into the lease, the declared all-reduce, waited, copied back)
+var exchangeQueue: MTLCommandQueue? = nil
+@_cdecl("route_exchange_join") public func route_exchange_join(_ rank: Int32, _ world: Int32, _ id: UnsafePointer<CChar>, _ n: Int) -> Int32 {
+  let q = MTLCreateSystemDefaultDevice()!.makeCommandQueue()!; exchangeQueue = q
+  return route_exchange_open(rank, world, id, n, Unmanaged.passUnretained(q.makeCommandBuffer()!).toOpaque())
+}
+@_cdecl("route_exchange_sum") public func route_exchange_sum(_ data: UnsafeMutablePointer<Float>, _ n: Int) -> Int32 {
+  let buf = route_exchange_buffer()!
+  memcpy(buf, data, n * 4)
+  let cb = exchangeQueue!.makeCommandBuffer()!
+  if route_exchange_encode(Unmanaged.passUnretained(cb).toOpaque()) != 0 { return -1 }
+  cb.commit(); cb.waitUntilCompleted()
+  if route_exchange_status() != 0 { return -1 }
+  memcpy(data, buf, n * 4)
+  return 0
+}

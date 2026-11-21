@@ -1,4 +1,4 @@
-/* UPGrad's task weights, defined once (net.metal's upgrad kernel computes them where the Gram matrix is made, so the
+/* UPGrad's task weights, defined once (opt.metal's optimizer kernel computes them where the Gram matrix is made, so the
    optimizer's step never reads anything back): from G = J J^T of the three tasks' gradients, for each task i
    u_i = argmin_(u >= e_i) u^T G u (the dual of projecting g_i onto {x : J x >= 0}, whose projection is J^T u_i); the
    aggregate J^T (sum_i u_i) / 3. A 3-variable box QP each, by projected gradient (step 1 / (3 max |G|), a bound on

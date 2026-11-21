@@ -1,31 +1,39 @@
 /* The minGRU recurrence's prefix, defined once. h_t = a_t h_{t-1} + b_t (a = 1 - m z, b = m z h~) is an affine map a
-   position; composing them, (a2, b2) o (a1, b1) = (a2 a1, fma(a2, b1, b2)), is associative, so every position's state
-   is a prefix scan, h_t = fma(A_t, h_0, B_t). The order: inclusive within each group of 32 positions (a SIMD group: the
-   earlier element at offsets 1, 2, 4, 8, 16), then the groups' totals scanned alike, and each later group's elements
-   composed with the total of the groups before it. net.metal's scans run it on SIMD groups (scan_affine_simd);
-   forward.c, the deployed forward, runs it on arrays (scan_affine): the same operations in the same order. */
+   position; composing them, (a2, b2) o (a1, b1) = (a2 a1, fma(a2, b1, b2)), is associative, so a group's states are a
+   prefix scan from the state before it, h_t = fma(A_t, h_in, B_t). The order: inclusive within each group of 8
+   positions (the earlier element at offsets 1, 2, 4; on the GPU eight consecutive lanes, a lane a position), then each
+   group from the state its previous group left (h_in: the run's state before the group), across a run's refreshes in
+   order. fwd.metal's lanes kernel runs it on SIMD groups (scan_affine_lanes8), forward.c, the deployed forward, on
+   arrays (scan_group, scan_run): the same operations in the same order.
+   The backward runs the same composition over the positions reversed: with u_t the gradient arriving at h_t, the
+   gradient e_t = a_t (u_t + e_{t+1}) passed to h_{t-1} is the affine map e -> a_t e + a_t u_t, scanned from the latest
+   position back (scan_affine_lanes8 on reversed lanes, the groups in turn), and h_t's own gradient is u_t + e_{t+1}. */
 #ifndef ROUTE_SCAN_H
 #define ROUTE_SCAN_H
+enum { SCAN_GROUP = 8 };
 #ifdef __METAL_VERSION__
-static inline void scan_affine_simd(thread float &A, thread float &B, uint lane) {
-  for (ushort d = 1; d < 32; d <<= 1) {
+/* a group's inclusive scan over eight consecutive lanes (tile.h: a lane a position, four groups a SIMD group) */
+static inline void scan_affine_lanes8(thread float &A, thread float &B, uint lane) {
+  for (ushort d = 1; d < 8; d <<= 1) {
     const float pa = metal::simd_shuffle_up(A, d), pb = metal::simd_shuffle_up(B, d);
-    if (lane >= d) { B = metal::fma(A, pb, B); A = A * pa; }
+    if ((lane & 7) >= d) { B = metal::fma(A, pb, B); A = A * pa; }
   }
 }
 #else
 #include <math.h>
-static inline void scan_affine(float *A, float *B, int n) {   /* in place, inclusive */
-  for (int g = 0; g < n; g += 32) {
-    const int m = n - g < 32 ? n - g : 32;
-    for (int d = 1; d < 32; d <<= 1) for (int i = m - 1; i >= d; i--) { B[g + i] = fmaf(A[g + i], B[g + i - d], B[g + i]); A[g + i] *= A[g + i - d]; }
+/* one group of m <= 8 positions, inclusive, in place */
+static inline void scan_group(float *A, float *B, int m) {
+  for (int d = 1; d < 8; d <<= 1) for (int i = m - 1; i >= d; i--) { B[i] = fmaf(A[i], B[i - d], B[i]); A[i] *= A[i - d]; }
+}
+/* n positions' maps (a, b) from state h: every position's state into out (a, b consumed); returns the last state */
+static inline float scan_run(float *a, float *b, int n, float h, float *out) {
+  for (int g = 0; g < n; g += SCAN_GROUP) {
+    const int m = n - g < SCAN_GROUP ? n - g : SCAN_GROUP;
+    scan_group(a + g, b + g, m);
+    for (int i = 0; i < m; i++) out[g + i] = fmaf(a[g + i], h, b[g + i]);
+    h = out[g + m - 1];
   }
-  const int ng = (n + 31) / 32;
-  if (ng < 2) return;
-  float TA[32], TB[32];
-  for (int k = 0; k < ng; k++) { const int last = k * 32 + 31 < n ? k * 32 + 31 : n - 1; TA[k] = A[last]; TB[k] = B[last]; }
-  for (int d = 1; d < 32; d <<= 1) for (int i = ng - 1; i >= d; i--) { TB[i] = fmaf(TA[i], TB[i - d], TB[i]); TA[i] *= TA[i - d]; }
-  for (int i = 32; i < n; i++) { const int k = i / 32; B[i] = fmaf(A[i], TB[k - 1], B[i]); A[i] *= TA[k - 1]; }
+  return h;
 }
 #endif
 #endif

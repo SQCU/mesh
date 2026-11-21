@@ -3,7 +3,7 @@
 
    sims (sims.c): n simulators and their arena, held from route_sims_new: each slot's refreshes as made (lanes,
    tokens), which a forward reads packed and a learning batch reads by the contexts drawn; its run's costs.
-   net (net.swift): the int8 network on the GPU; batches are its input and output buffers in shared memory (the
+   net (model.swift): the int8 network on the GPU; batches are its input and output buffers in shared memory (the
    driver's numpy views); forward, learn and the optimizer's step are committed, never waited on, except by
    route_net_wait (a batch's results, where the driver reads them). */
 #ifndef ROUTE_KERNELS_H
@@ -67,7 +67,17 @@ int route_net_done(void *net, struct route_batch *b);                           
 /* the forward again, the credit (draws' score times importance ratio), the backward: grads; then (world > 1) the
    grads summed across the ranks through the mesh's lease, the Gram matrix, UPGrad, Adam, V pinned, the codes: one
    command buffer. ndraws: the draws; scale: the tasks' scale */
-void route_net_step(void *net, struct route_batch *b, int B, int K, int R, int ndraws, float scale, double rate, int world);
+void route_net_step(void *net, struct route_batch *b, int B, int K, int R, int ndraws, float scale, double rate, int world);   /* gradient(0), apply */
+/* one microbatch's gradient (as the scale makes it: its rows' mean) added into the step's sum, times its R rows
+   (accumulate 0: a new sum; B = R = 0: nothing); then the step on the sum: the exchange (world > 1: the sum, the rows,
+   the microbatches' squared norms and count summed over the ranks), the rows-weighted mean, UPGrad, Adam, pin, codes.
+   Both committed without a CPU wait. route_net_stats: [0] the microbatch's rows, [1..3] its squared norms (a task
+   each), [4] the accumulated rows; after apply, identical at every rank: [8] total rows, [9..11] the mean microbatch
+   squared norm, [12] the microbatches, [13] their mean rows, [14..16] the mean's squared norms (norms on the matrix
+   units: trace(X^T X)) */
+void route_net_gradient(void *net, struct route_batch *b, int B, int K, int R, int ndraws, float scale, int accumulate);
+void route_net_apply(void *net, double rate, int world);
+float *route_net_stats(void *net);
 /* theta from `from` into `to`, in their queues' order (a shared event between them), the codes rebuilt */
 void route_net_publish(void *from, void *to);
 int route_net_steps(void *net);
@@ -82,9 +92,16 @@ void route_net_exchange(void *net);                                             
 /* the checks: the fp32 reference (learn.swift) on a learned batch: w [R][FS], grads [3][P]; each kernel's GPU time */
 void route_net_reference(void *net, struct route_batch *b, int B, int K, int R, float *w, float *grads);
 int route_net_profile(void *net, int on, char *out, size_t room);   /* on: from the next call; off: that call's, as JSON */
-int route_net_probes(void *net, int on, char *out, size_t room);    /* fused producers' codes against quant_rows (JSON) */
+int route_net_probes(void *net, int on, char *out, size_t room);    /* fused producers' codes against int8mm.h's (JSON) */
+/* the checks' view of the network's own buffers (model.swift's names: "gq", "gs", "partial", ...): bytes from offset,
+   copied into out once the queue is idle; 0, or -1 (no such buffer, or past its end) */
+int route_net_read(void *net, const char *buffer, size_t offset, size_t bytes, void *out);
 void route_net_free(void *net);
 
 /* ---- the exchange (exchange.c): world > 1 ---- */
 void *route_exchange_metal(size_t *offset);   /* the lease's Metal buffer (id<MTLBuffer>) and its offset */
+/* an array library's trainer (qnn.py): this rank's communicator and a lease of n floats on a queue of its own; the
+   in-place sum of n floats over the ranks (waited). 0, or -1 (route_exchange_failure) */
+int route_exchange_join(int rank, int world, const char *id, size_t n);
+int route_exchange_sum(float *data, size_t n);
 #endif

@@ -8,7 +8,9 @@ learning batch's buffers before they are filled again.
               into a learning batch; advantages and scales here (numpy)
   training    one GPU step on the batch (credit, backward, the ranks' sum, UPGrad, Adam, the codes), then theta
               published into the actor, in the GPU's queue order"""
+import mmap
 import time
+import types
 
 import numpy as np
 
@@ -49,6 +51,64 @@ class Batch:
 
     def wait(self):
         self.lib.route_net_wait(self.net, self.p)
+
+
+def bucket(n):
+    """the next size of the form k 2^e, k in 8..15 (sizes an eighth apart: few shapes, so few compiled steps)"""
+    e = max(0, int(n - 1).bit_length() - 4)
+    return -(-n // (1 << e)) * (1 << e)
+
+
+class HostBatch:
+    """a learning batch in host memory, one slot of the data ring: page-aligned arrays the simulators export into
+    (Batch's fields and pointers, so load() fills either), handed to the array library without a copy (DLPack),
+    padded to bucket sizes (runs, rows, draws) whose rows and draws weigh nothing: the gradient is the batch's"""
+
+    def __init__(self, runs, refreshes, rows):
+        self.runs, self.K, self.rows, self.room = runs, refreshes, rows, 0
+        n = bucket(runs) * refreshes; runs, rows = bucket(runs), bucket(rows + 1)
+
+        def a(shape, dt):
+            dt = np.dtype(dt); count = int(np.prod(shape))
+            return np.frombuffer(mmap.mmap(-1, max(count * dt.itemsize, 1)), dt, count).reshape(shape)
+        self.lanes, self.mask = a((n, L, IN), np.float32), a((n, L), np.float32)
+        self.h0, self.tokens, self.pos = a((runs, D2), np.float32), a((rows, IN), np.float32), a(rows, np.int32)
+        self.w, self.scale0, self.first, self.seg = a((rows, FS), np.float32), a(rows, np.float32), a(rows + 1, np.uint32), a(n * 2, np.uint32)
+        self.p = types.SimpleNamespace(lanes=ptr(self.lanes, 'float[]'), mask=ptr(self.mask, 'float[]'), tokens=ptr(self.tokens, 'float[]'), pos=ptr(self.pos),
+                                       w=ptr(self.w, 'float[]'), first=ptr(self.first, 'uint32_t[]'), draws=None)
+        self._draws = None
+        self.handle = None   # the step that last read this slot (evaluated before the slot is filled again)
+
+    def draws(self, n):
+        if bucket(n + 1) > self.room:
+            self.room = 2 * bucket(n + 1); self._draws = np.frombuffer(mmap.mmap(-1, self.room * DRAW.itemsize), DRAW, self.room)
+            self.p.draws = ffi.from_buffer('struct route_draw[]', self._draws, require_writable=True)
+        return self._draws[:n]
+
+    def arrays(self, m, R, ND, scale):
+        """the batch (m runs, R rows, ND draws) as MLX arrays over these buffers (DLPack: no copy), padded to bucket
+        sizes: runs with no lanes and no contexts; rows and draws past the counts given with them (the kernels' invalid
+        rows and draws, as a tile's tail)"""
+        import mlx.core as mx
+        K, v = self.K, mx.from_dlpack
+        mb, Rb, NDb = bucket(m), bucket(R + 1), bucket(ND + 1); self.real = (R, ND)
+        self.lanes[m * K:mb * K] = 0; self.mask[m * K:mb * K] = 0; self.h0[m:mb] = 0; self.seg[2 * m * K:2 * mb * K] = Rb
+        self.tokens[R:Rb] = 0; self.pos[R:Rb] = self.pos[R - 1]; self.w[R:Rb] = 0; self.scale0[R:Rb] = 0
+        self.first[R + 1:Rb] = ND; self.first[Rb] = NDb
+        d = self.draws(NDb)[ND:]
+        d.fill(0); d['valid'] = 31; d['mask'] = 31; d['S'] = 1; d['deg'] = 5; d['ntok'] = 5; d['row'] = Rb - 1; d['unit'] = 1
+        m, R, ND = mb, Rb, NDb
+        out = {'lanes': v(self.lanes[:m * K].reshape(m, K, L, IN)), 'mask': v(self.mask[:m * K].reshape(m, K, L)), 'h0': v(self.h0[:m].reshape(m, 2, D2 // 2)),
+                'tokens': v(self.tokens[:R]), 'pos': v(self.pos[:R]), 'seg': v(self.seg[:2 * m * K].reshape(m * K, 2)), 'w': v(self.w[:R]),
+                'draws': v(self._draws[:ND].view(np.uint32).reshape(ND, DRAW.itemsize // 4)), 'first': v(self.first[:R + 1]), 'scale0': v(self.scale0[:R]),
+                'scale': mx.array(np.float32(scale))}
+        out['counts'] = mx.array(np.array(self.real, np.uint32))   # the rows and draws that are
+        return out
+
+    def wait(self):
+        if self.handle is not None:
+            import mlx.core as mx
+            mx.eval(self.handle); self.handle = None
 
 
 PHASES = {}   # seconds spent in each part of the loop (wall clock, the driver's thread), read by the reporter
@@ -171,36 +231,73 @@ def load(lib, ro, groups, B):
     return groups, m, R, ND, scale
 
 
+class Learner:
+    """the learning side of the loop: qnn's Learner on a Policy (its compiled step: the forward, credit, backward,
+    the ranks' exchange, UPGrad, Adam), publishing theta into the rollouts' networks through a staging network
+    (libroute's, whose theta is written here and published in its queue's order)"""
+
+    def __init__(self, cfg, lib, staging):
+        from . import qnn
+        self.qnn, self.lib, self.staging = qnn, lib, staging
+        self.model = qnn.Policy(); qnn.load_theta(self.model, self._theta().copy())
+        self.learner = qnn.Learner(self.model, cfg['run']['rate'])
+        self.steps, self.stats = 0, None
+        r = cfg['run']
+        self.exchange = qnn.Exchange(lib, ffi, r['rank'], r['world'], r['mesh_id'], qnn.TASKS * self.learner.P + 8) if r['world'] > 1 else None
+
+    def _theta(self):
+        P = ffi.new('int *'); p = self.lib.route_net_theta(self.staging, P)
+        return np.frombuffer(ffi.buffer(p, P[0] * 4), np.float32)
+
+    def step(self, B, m, R, ND, scale):
+        self.stats, loss = self.learner.step(B.arrays(m, R, ND, scale), self.exchange)
+        B.handle = [self.stats, loss]; self.steps += 1
+
+    def staged(self):
+        """theta into the staging network (waits for the last step): the network to publish from"""
+        self._theta()[:] = np.array(self.qnn.theta(self.model))
+        return self.staging
+
+    def save(self, fp32, int8):
+        from . import qnnchecks
+        if fp32:
+            np.array(self.qnn.theta(self.model)).astype(np.float32).tofile(fp32)
+        if int8:
+            qnnchecks.write_codes(self.model, int8)
+
+
 def train(cfg, lib, dist, learner, actor, steps, world):
-    """the loop: the rollouts polled (waiting only when nothing is ready); whenever groups have ended and a learning
-    batch is free (two alternate), they are loaded and stepped, theta published to the actor, and their slots begun
-    again on fresh cases"""
+    """the loop: the rollouts polled (waiting only when nothing is ready); whenever groups have ended they are loaded
+    into a slot of the data ring (two alternate; a slot waits for the step that last read it), stepped, theta
+    published to the actor, and their slots begun again on fresh cases"""
     K = cfg['capacity']['refreshes']
     groups = cfg['capacity']['forward_rows'] // CX // 4
     ro = Rollouts(lib, actor, groups, K)
-    LB = [Batch(lib, learner, cfg['capacity']['learn_runs'], K, cfg['capacity']['forward_rows']) for _ in range(2)]
+    LB = [HostBatch(cfg['capacity']['learn_runs'], K, cfg['capacity']['forward_rows']) for _ in range(2)]
     ro.begin(np.arange(groups), dist.draw(groups)[0])
     lib.route_tel_put(lib.RT_WORKERS, ro.n)
     learned, j = 0, 0
     while learned < steps:
         ro.poll(True)
         ready = ro.ready()
-        if not len(ready) or not lib.route_net_done(learner, LB[j].p):
+        if not len(ready):
             continue
+        LB[j].wait()
         with phase('load'):
             taken, m, R, ND, scale = load(lib, ro, ready, LB[j])
-        lag = lib.route_net_steps(learner) - ro.version[taken]
+        lag = learner.steps - ro.version[taken]
         lib.route_tel_inc(lib.RT_LAG_SUM, int(lag.sum())); lib.route_tel_inc(lib.RT_LAG_GROUPS, len(taken)); lib.route_tel_top(lib.RT_LAG_MAX, int(lag.max()))
         OPS['learn'] = OPS.get('learn', 0) + 3 * 2 * (m * K * L * LANE_MACS + R * CTX_MACS)
         with phase('commit step'):
-            lib.route_net_step(learner, LB[j].p, m, K, R, ND, scale, cfg['run']['rate'], world)
-            lib.route_net_publish(learner, actor)
+            learner.step(LB[j], m, R, ND, scale)
+        with phase('publish'):
+            lib.route_net_publish(learner.staged(), actor)
         slots = (4 * taken[:, None] + np.arange(4)).ravel()
         dist.pool.add(ro.state[slots])
         with phase('draw and begin'):
-            ro.begin(taken, dist.draw(len(taken))[0], version=lib.route_net_steps(learner))
+            ro.begin(taken, dist.draw(len(taken))[0], version=learner.steps)
         learned += 1; j ^= 1
-        lib.route_tel_inc(lib.RT_STEPS, 1); lib.route_tel_reach(lib.RT_PHASE_FIRST_STEP)
+        lib.route_tel_inc(lib.RT_STEPS, 1); lib.route_tel_inc(lib.RT_OPTIMIZER_STEPS, 1); lib.route_tel_reach(lib.RT_PHASE_FIRST_STEP)
         lib.route_tel_put(lib.RT_RUNS_IN_FLIGHT, int((~ro.ended).sum()))
     for B in LB:
         B.wait()

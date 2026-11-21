@@ -13,6 +13,7 @@
               network against the fp32 reference)
   bench       one forward and one learning step of the training's sizes, kernel by kernel
   xbench      the exchange alone (world > 1): N rounds (0: declare and close, a dead run's programs flushed)
+  qnn-roofline | qnn-deploy | qnn-check | qnn-i8mm   qnn.py's (MLX ops) measurements and gates (qnnchecks.py)
   stat        telemetry records of tables (FILE...) where they lie
   cluster     python -m route cluster {build|train|xbench|stat} ...: every host of cluster.hosts (cluster.py)"""
 import json
@@ -79,16 +80,18 @@ def train(cfg, lib):
     dist = C.Distribution(config.flat(cfg), measured, lib, np.random.default_rng([r['data_seed'], r['rank']]))
     lib.route_tel_open(r['telemetry'].encode(), r['rank'], r['world']); lib.route_tel_reach(lib.RT_PHASE_START)
     runs = cap['forward_rows'] // loop.CX // 4 * 4   # the runs in flight: one forward can carry all of them
-    learner = network(cfg, lib, cap['learn_runs'], cap['refreshes'], cap['forward_rows'])
+    staging = network(cfg, lib, 4, 1, loop.CX)   # theta's initial value (theta_seed, theta_in), then what is published
     actor = network(cfg, lib, runs, 1, runs * loop.CX)
+    try:
+        learner = loop.Learner(cfg, lib, staging)   # qnn.py's (world > 1: joined to the exchange)
+    except RuntimeError as e:
+        emit({'record': 'failure', 'rank': r['rank'], 'what': str(e)}); sys.exit(1)
     lib.route_tel_reach(lib.RT_PHASE_NETWORKS)
     if r['world'] > 1:
-        if lib.route_net_join(learner, r['rank'], r['world'], r['mesh_id'].encode()) != 0:
-            emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(lib.route_exchange_failure()).decode()}); sys.exit(1)
         lib.route_tel_reach(lib.RT_PHASE_JOINED)
     evaluating = r['rank'] in cfg['evaluation']['ranks']
     if evaluating and 'start' in cfg['evaluation']['at']:
-        evaluation(cfg, lib, learner, measured, 'start')
+        evaluation(cfg, lib, learner.staged(), measured, 'start')
     table = telemetry.Table(r['telemetry']); table.sample()
     done = threading.Event()
     last, lastops = {}, {}
@@ -107,9 +110,9 @@ def train(cfg, lib):
     if failure != ffi.NULL:
         emit({'record': 'failure', 'rank': r['rank'], 'what': ffi.string(failure).decode()})
     if evaluating and 'end' in cfg['evaluation']['at']:
-        evaluation(cfg, lib, learner, measured, f'end, {lib.route_net_steps(learner)} steps')
+        evaluation(cfg, lib, learner.staged(), measured, f'end, {learner.steps} steps')
     if r['rank'] == 0 and (r['theta'] or r['theta_int8']):
-        lib.route_net_save(learner, r['theta'].encode() if r['theta'] else ffi.NULL, r['theta_int8'].encode() if r['theta_int8'] else ffi.NULL)
+        learner.save(r['theta'], r['theta_int8'])
         emit({'record': 'saved', 'theta': r['theta'], 'theta_int8': r['theta_int8']})
     if r['world'] > 1:
         lib.route_exchange_close()
@@ -271,6 +274,12 @@ def check(cfg, lib, graph):
         pairs.append({'feature': int(f), 'score': float(total[f]), 'central_difference': float((logp(up) - logp(down)) / (2 * eps))})
     rec = {'record': 'check', 'cases_tried': tried, 'runs': m, 'rows': R, 'draws': ND, 'gpu_credit_vs_cpu': {'largest_difference': float(np.abs(gpu - cpu).max()), 'largest': float(np.abs(cpu).max())},
            'score_vs_central_difference': pairs, 'fused_codes_vs_quant_rows': json.loads(ffi.string(buf).decode())}
+    # the step's statistics (route_net_stats) against numpy's: the mean's squared norms (matrix units) and the rows
+    Pn = ffi.new('int *'); lib.route_net_theta(net, Pn)
+    g3 = np.frombuffer(ffi.buffer(lib.route_net_grads(net), 3 * Pn[0] * 4), np.float32).reshape(3, Pn[0]).astype(np.float64)
+    stv = np.frombuffer(ffi.buffer(lib.route_net_stats(net), 17 * 4), np.float32)
+    rec['stats_vs_numpy'] = {'rows': [float(stv[8]), R], 'mean_sq_norms': [float(x) for x in stv[14:17]], 'numpy': [float(x) for x in (g3 ** 2).sum(1)],
+                             'microbatch_sq_norms': [float(x) for x in stv[9:12]]}
     if graph:
         P = ffi.new('int *'); lib.route_net_theta(net, P); P = P[0]
         wref, gref = np.zeros((R, loop.FS), np.float32), np.zeros(3 * P, np.float32)
@@ -398,6 +407,23 @@ def main(argv):
     if cmd == 'cluster':
         from . import cluster
         cluster.main(cfg, rest[1:], sets); return
+    if cmd.startswith('qnn-'):
+        from . import qnnchecks as Q
+        if cmd == 'qnn-roofline':
+            Q.roofline(cfg['capacity']['learn_runs'], cfg['capacity']['refreshes'], cfg['capacity']['forward_rows'])
+        elif cmd == 'qnn-check':
+            Q.check()
+        elif cmd == 'qnn-padding':
+            Q.padding()
+        elif cmd == 'qnn-exchange':
+            Q.exchange()
+        elif cmd == 'qnn-xbench':
+            r = cfg['run']; Q.xbench(native.load(cfg['run']['library']), ffi, r['rank'], r['world'], r['mesh_id'], int(rest[1]) if len(rest) > 1 else 5)
+        elif cmd == 'qnn-i8mm':
+            Q.i8mm_exact()
+        elif cmd == 'qnn-deploy':
+            Q.deploy(native.load(cfg['run']['library']), ffi)
+        return
     lib = native.load(cfg['run']['library'])
     lib.route_argmax = 1 if cfg['run']['argmax'] else 0
     if cmd == 'train':
