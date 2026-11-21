@@ -71,7 +71,10 @@ def verify_active(source, commit):
     expected = source / 'rdma/mesh-heartbeat'
     if active_program(service) != str(expected):
         raise RuntimeError('loaded heartbeat executable is not the requested committed snapshot')
-    pids = run('pgrep', '-x', '-U', str(os.getuid()), 'mesh-flow').stdout.split()
+    every = run('pgrep', '-x', '-U', str(os.getuid()), 'mesh-flow').stdout.split()
+    # the bridge is the mesh-flow whose parent is no mesh-flow: its port children (one a link) are mesh-flow too
+    parent = {p: run('ps', '-o', 'ppid=', '-p', p, check=False).stdout.strip() for p in every}
+    pids = [p for p in every if parent[p] not in every]
     if len(pids) != 1:
         raise RuntimeError(f'expected exactly one bridge process, found {pids}')
     actual = run('ps', '-o', 'comm=', '-p', pids[0]).stdout.strip()
@@ -133,7 +136,7 @@ def _install_locked(source, commit, allow_source_transition):
         output = run(source / 'bin/mesh-user.sh', config, source)
         print(output.stdout, end='', flush=True)
         wait_for(lambda: json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1]),
-                 lambda v: v.get('up') is True, 60, 'installed bridge did not start')
+                 lambda v: v.get('up') is True, 300, 'installed bridge did not start')
         # A module loaded from this immutable source must verify the installed package too.
         check_package(source)
         result = verify_active(source, commit)
