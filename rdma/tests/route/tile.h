@@ -15,12 +15,12 @@
 // - quantizing a row's 64-block (int8mm.h): its absmax over the eight lanes, the 12-bit grid into X (fp16), the
 //   rotation Y = X H on the matrix units (fp16 operands, fp32 accumulation: exact on the grid's integers), Y's absmax,
 //   the codes into A (or B), a scale a (row, block);
-// - a column pass (the learning calls' wgrad codes of a value in S): a column's two 32-row blocks (I8_WBLOCK), its
-//   absmax a block, the grid into X, the rotation along the rows Y^T = X^T Hb (Hb = diag(H32, H32)) on the matrix units
-//   into S transposed, then the row pass over S^T: a column's 64 rows eight consecutive a lane, the codes stored
-//   transposed (each column's rows contiguous, as the wgrad product reads them, eight bytes a lane), one scale a
-//   (column, block); a gradient's column sums (its bias's gradient) beside.
-// Every phase (a product, a pass) ends at a threadgroup barrier: the next one may then overwrite what it read.
+// - a column pass (the learning calls' wgrad codes of a value in S): a SIMD group's eight columns, both 32-row blocks
+//   (I8_WBLOCK): a block's absmax, the grid, the rotation along the rows Y^T = X^T H32 by the SIMD group's product,
+//   the codes stored transposed (each column's rows contiguous, as the wgrad product reads them), one scale a (column,
+//   block); a gradient's column sums (its bias's gradient) beside.
+// A threadgroup barrier stands between two phases (a product, a pass) wherever the later one writes what another
+// SIMD group's rows were read from; a row pass that rewrites its own rows' room needs none (a row is a SIMD group's).
 //
 // Rows: the lanes' ([run][KLp], a run's positions in order, its pad rows masked; one refresh: a tile two runs) then the
 // contexts'. The learning calls' backward: three tasks, each its own threadgroups.
@@ -86,18 +86,6 @@ static inline void hrow(threadgroup const half *X, device const half *H, threadg
   op.run(tX, tH, c);
   c.store(tS);
 }
-// the columns' rotation along the rows: S [column][row] = (X^T Hb), X [TM rows][64 columns] the grid, Hb = diag(H32,
-// H32) (the two 32-row blocks)
-static inline void hcol(threadgroup const half *X, device const half *Hb, threadgroup float *S) {
-  TgH tX((threadgroup half *)X, dextents<int32_t, 2>(64, TM), array<int32_t, 2>{1, LX});
-  DevH tH((device half *)Hb, dextents<int32_t, 2>(TM, TM));
-  TgF tS(S, dextents<int32_t, 2>(TM, 64), array<int32_t, 2>{1, LD});
-  matmul2d<matmul2d_descriptor(64, TM, TM, true, false), execution_simdgroups<NSG>> op;
-  auto c = op.template get_destination_cooperative_tensor<TgH, DevH, float>();
-  op.run(tX, tH, c);
-  c.store(tS);
-}
-
 // ---- the row pass ----
 static inline void s_get(threadgroup const float *S, uint row, Lanes c, thread float *v) {
   const threadgroup float4 *x = (const threadgroup float4 *)(S + row * LD + 8 * c.li); const float4 a = x[0], b = x[1];

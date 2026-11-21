@@ -192,11 +192,10 @@ final class Net {
     let table: [UInt32] = Array(matg.joined()) + [UInt32(RT), 0, 0, 0]
     gradTable = device.makeBuffer(bytes: table, length: table.count * 4, options: .storageModeShared)!
     dhp = pv(3 * 2 * pad64(contexts) * D * 4)
-    // H, the 64 x 64 Walsh-Hadamard matrix in fp16 (tile.h's row rotations), then Hb = diag(H32, H32) (the column
-    // rotations over two 32-row blocks)
-    var h = [UInt16](repeating: 0, count: 2 * 64 * 64)
+    // H, the 64 x 64 Walsh-Hadamard matrix in fp16 (tile.h's row rotations; H32, the column rotations', its top-left
+    // block)
+    var h = [UInt16](repeating: 0, count: 64 * 64)
     for i in 0..<64 { for j in 0..<64 { h[i * 64 + j] = (i & j).nonzeroBitCount % 2 == 1 ? Float16(-1).bitPattern : Float16(1).bitPattern } }
-    for i in 0..<64 { for j in 0..<64 where i / 32 == j / 32 { h[4096 + i * 64 + j] = (i & j & 31).nonzeroBitCount % 2 == 1 ? Float16(-1).bitPattern : Float16(1).bitPattern } }
     hadamard = device.makeBuffer(bytes: h, length: h.count * 2, options: .storageModeShared)!
     let c0 = queue.makeCommandBuffer()!, bl = c0.makeBlitCommandEncoder()!
     bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0)

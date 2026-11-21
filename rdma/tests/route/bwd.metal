@@ -5,10 +5,10 @@
 
 // a gradient's wgrad codes (the column pass over S's chunk j of a matrix's output, `rows` its outputs): task t's
 // columns at t rows + 64 j of the matrix's dY codes, its scales and column sums at the tile's blocks
-static inline void ycodes(threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *Hb, Lanes c, device int8_t *gq, device float *gs, MatG g,
+static inline void ycodes(threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *H, Lanes c, device int8_t *gq, device float *gs, MatG g,
                           uint rows, uint task, uint j, uint RT, uint row0, uint seed) {
   const uint M = 3 * rows, col0 = task * rows + 64 * j, blk = row0 / I8_WBLOCK;
-  colcodes(S, X, cm, Hb, c, gq + g.yt + size_t(col0) * RT, RT, row0, gs + g.sy + blk * M + col0, M, gs + g.dbp + blk * M + col0, min(64u, rows - 64 * j), 8.0f, seed);
+  colcodes(S, X, cm, H, c, gq + g.yt + size_t(col0) * RT, RT, row0, gs + g.sy + blk * M + col0, M, gs + g.dbp + blk * M + col0, min(64u, rows - 64 * j), 8.0f, seed);
 }
 // a product's ids for the seeds (row codes: id, column codes: id + 64)
 enum : uint { S_OUT = 1, S_DOWN1, S_UP1, S_ZH1, S_DOWN0, S_UP0, S_ZH0, S_INP, S_LZH1, S_LDOWN0, S_LUP0, S_LZH0, S_LINP };
@@ -21,14 +21,13 @@ static inline void dgrad_block(thread float (&x)[2][8], thread const float (&v)[
   quant(v, S, X, H, c, Bq, sB, seed, row0, cols, 64 * jj);
   const ColV cv1 = colv(wsc + m.wbs, nullptr, 0, c); chunk(Bq, 64, wq + m.wb + 64 * jj, m.kb, S); tg_barrier();
   for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); epilogue(S, c, row, sB[row], cv1, x[s], !first); }
-  tg_barrier();
 }
 // the wgrad codes of v (put into S first)
-static inline void vcodes(thread const float (&v)[2][8], threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *Hb, Lanes c,
+static inline void vcodes(thread const float (&v)[2][8], threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *H, Lanes c,
                           device int8_t *gq, device float *gs, MatG g, uint rows, uint task, uint j, uint RT, uint row0, uint seed) {
   for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), v[s]);
   tg_barrier();
-  ycodes(S, X, cm, Hb, c, gq, gs, g, rows, task, j, RT, row0, seed);
+  ycodes(S, X, cm, H, c, gq, gs, g, rows, task, j, RT, row0, seed);
 }
 // the feed-forward back: x = dL/dx' (its codes in A with sA) -> x + (relu' (x down)) up; up's dY codes, mask bits from
 // mw (row stride mstride; rows < nv)
@@ -36,6 +35,7 @@ static inline void ffn_back(thread float (&x)[2][8], threadgroup float *S, threa
                             threadgroup float *sB, threadgroup float *cm, MatW mu, MatW md, device const int8_t *wq, device const float *wsc, device const half *H, Lanes c,
                             device const uint *mw, uint mstride, uint nv, device int8_t *gq, device float *gs, MatG gu, uint task, uint RT, uint row0, uint seedc, uint seedr) {
   for (uint jj = 0; jj < 3; jj++) {
+    if (jj) tg_barrier();   // the last dgrad block's epilogue read S
     const ColV cv2 = colv(wsc + md.wbs, nullptr, jj, c); chunk(A, 64, wq + md.wb + 64 * jj * md.kb, md.kb, S); tg_barrier();
     float du[2][8];
     for (uint s = 0; s < 2; s++) {
@@ -94,7 +94,6 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     const uint zh = l ? M_ZH1 : M_ZH0, up = l ? M_UP1 : M_UP0, down = l ? M_DOWN1 : M_DOWN0;
     const uint sd = l ? S_DOWN1 : S_DOWN0, su = l ? S_UP1 : S_UP0, sz = l ? S_ZH1 : S_ZH0;
     // x: dL/dx_{l+1}: down's dY; its codes; the feed-forward back: dxm
-    tg_barrier();
     vcodes(x, S, X, cm, H, c, gq, gs, gr.m[down], D, task, 0, RT, g0, seed_of(p.seed, sd + 64, task));
     quant(x, S, X, H, c, A, sA, seed_of(p.seed, sd, task), g0, 64, 0);
     ffn_back(x, S, A, X, Bq, sA, sB, cm, nw.m[up], nw.m[down], wq, wsc, H, c, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[up], task, RT, g0,
@@ -117,7 +116,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     }
     // dh summed a refresh: Sg [64 starts][64 rows] (1 where row j is in the segment starting at row i) . dh, fp16
     { threadgroup half *Sg = (threadgroup half *)S;
-      tg_barrier();
+      tg_barrier();   // the dgrad block's epilogue read S
       for (uint s = 0; s < 2; s++) { threadgroup half4 *o = (threadgroup half4 *)(X + row_of(c, s) * LX + 8 * c.li);
         o[0] = half4(dh[s][0], dh[s][1], dh[s][2], dh[s][3]); o[1] = half4(dh[s][4], dh[s][5], dh[s][6], dh[s][7]); }
       { const uint i = t / 4, j0 = 16 * (t % 4); const int ri = refid[i]; const bool start = ri >= 0 && (i == 0 || refid[i - 1] != ri);
