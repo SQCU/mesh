@@ -415,6 +415,8 @@ def main(argv):
             Q.check()
         elif cmd == 'qnn-padding':
             Q.padding()
+        elif cmd == 'qnn-exchange':
+            Q.exchange()
         elif cmd == 'qnn-i8mm':
             Q.i8mm_exact()
         elif cmd == 'qnn-deploy':

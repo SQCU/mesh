@@ -176,3 +176,31 @@ def padding(B=12, K=4, R=1321):
     J1, l1 = lr.grads(b)
     emit({'record': 'qnn-padding', 'padded': [b['lanes'].shape[0], b['tokens'].shape[0], b['draws'].shape[0]], 'of': [B, R, ND],
           'gradient_largest_difference': float(mx.abs(J1 - J0).max()), 'gradient_largest': float(mx.abs(J0).max()), 'loss': [np.array(l0).tolist(), np.array(l1).tolist()]})
+
+
+def exchange(K=4):
+    """route_net_gradient / apply's semantics on qnn's Learner, three ranks in one process (the exchange: the sum of
+    their accumulators, as the mesh's all-reduce): rank 0 two microbatches, rank 1 one, rank 2 none (it still steps).
+    Every rank's statistics and parameters after apply are the same, and those of one rank accumulating all three
+    (rounding to nearest: seed 0 at every microbatch)"""
+    rng = np.random.default_rng(8)
+    micro = [to_mx(batch(B, K, R, rng, nd=2 * R)) for B, R in ((4, 700), (3, 400), (5, 900))]
+    def learner():
+        mx.random.seed(21); m = qnn.Policy(); return qnn.Learner(m, 1e-3)
+    def grad(lr, acc, b):
+        lr.rng['seed'] = mx.array([0], mx.uint32); return lr.gradient(b, acc)[0]
+    ranks = [learner() for _ in range(3)]
+    accs = [lr.zero() for lr in ranks]
+    for r, bs in ((0, micro[:2]), (1, micro[2:]), (2, [])):
+        for b in bs:
+            accs[r] = grad(ranks[r], accs[r], b)
+    total = accs[0] + accs[1] + accs[2]
+    stats = [np.array(lr.apply(accs[r], lambda a: total)) for r, lr in enumerate(ranks)]
+    one = learner(); acc = one.zero()
+    for b in micro:
+        acc = grad(one, acc, b)
+    s1 = np.array(one.apply(acc))
+    th = [np.array(qnn.theta(lr.model)) for lr in ranks + [one]]
+    emit({'record': 'qnn-exchange', 'stats': stats[0].tolist(), 'stats_identical_at_every_rank': bool(all((s == stats[0]).all() for s in stats)),
+          'stats_vs_one_rank_largest_difference': float(np.abs(stats[0] - s1).max()), 'theta_identical_at_every_rank': bool(all((t == th[0]).all() for t in th[:3])),
+          'theta_vs_one_rank_largest_difference': float(np.abs(th[0] - th[3]).max()), 'rows': [700 + 400, 900, 0]})
