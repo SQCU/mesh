@@ -742,9 +742,9 @@ static void link_heard(struct port *port,const struct message *heard){
    gone, what its lanes held (their receives, their outboxes, their SENDs not completed, its held pieces) is switched
    again from here: a piece whose SEND may have crossed is sent again, and its destinations count each unit once
    (mesh-switched.h mesh_switch_count) */
-#define SWITCH_REFRESH_NS UINT64_C(50000)
-#define SWITCH_DRAWS 32u
-#define SWITCH_ETA 0.5f
+#define SWITCH_REFRESH_NS ((uint64_t)MESH_SWITCH_REFRESH_NS)
+#define SWITCH_DRAWS MESH_SWITCH_DRAWS
+#define SWITCH_ETA MESH_SWITCH_ETA
 /* the programs' slot toward `node`, made (generation 1, no program) as the map first holds the node; MESH_ABSENT where
    every slot holds another node (the event loop's pairing and the refresh thread's view both make slots: one at a
    time) */

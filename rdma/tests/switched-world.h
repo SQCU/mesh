@@ -10,8 +10,9 @@
    latency, a SEND waiting for a receive posted at the far end (the transport's credit), a cable sending while its
    reverse is busy at the fabric's duplex share, every SEND one whole slot.  Each node's bridge stages what its
    clients' programs release, forwards what lands, posts its lanes' outboxes and reposts its receives; copies cost the
-   node's CPU time (copy_gbps).  Every refresh_ns each node's bridge refreshes its weights (Thompson sampling, eta 0.5;
-   `fixed`: the unloaded shortest-delay weights, set once).
+   node's CPU time (copy_gbps).  Every refresh_ns (the bridge's MESH_SWITCH_REFRESH_NS) each node's bridge refreshes
+   its weights as the bridge's refresh thread does (Thompson sampling, MESH_SWITCH_DRAWS, MESH_SWITCH_ETA; `fixed`: the
+   unloaded shortest-delay weights, set once).
 
    The clients are collectives, each as libnccl-mesh declares one: a program toward every other rank it exchanges
    with, both ends' tables equal with directions swapped, one execution, its own key:
@@ -99,7 +100,7 @@ static inline struct sw_world *sw_world_new(uint32_t nodes,uint32_t ranks,const 
                                             uint32_t slots,uint64_t region_mb,int payload){
   struct sw_world *w=calloc(1,sizeof *w);if(!w)abort();
   w->nodes=nodes;w->ranks=ranks;w->nlinks=nlinks;memcpy(w->link,links,nlinks*sizeof *links);w->duplex=duplex;w->payload=payload;
-  w->copy_gbps=24;w->refresh_ns=20e3;w->draws=32;
+  w->copy_gbps=24;w->refresh_ns=MESH_SWITCH_REFRESH_NS;w->draws=MESH_SWITCH_DRAWS;   /* the bridge's own refresh */
   for(uint32_t i=0;i<nodes;i++){w->rank_of[i]=UINT32_MAX;if(ranks>>i&1){w->rank_of[i]=w->ncompute;w->compute[w->ncompute++]=i;}}
   for(uint32_t i=0;i<nodes;i++){
     struct hdr h;memset(&h,0,sizeof h);
@@ -428,7 +429,7 @@ static inline void sw_check_ops(struct sw_world *w,double t){
 static inline void sw_step(struct sw_world *w,struct sw_event ev){
   w->count[0]++;
   if(ev.kind==SW_EV_REFRESH){
-    for(uint32_t i=0;i<w->nodes;i++)mesh_switch_refresh(w->node[i].sw,NULL,w->draws,0.5f,mesh_switch_mix(w->seed^(uint64_t)ev.t)^i,(double)w->node[i].sw->slot_bytes,0);
+    for(uint32_t i=0;i<w->nodes;i++)mesh_switch_refresh(w->node[i].sw,NULL,w->draws,MESH_SWITCH_ETA,mesh_switch_mix(w->seed^(uint64_t)ev.t)^i,(double)w->node[i].sw->slot_bytes,0);
     for(uint32_t i=0;i<w->nodes;i++)sw_bridge_pass(w,i,ev.t);   /* what waited for the view to change */
     int owed=w->events>0;for(uint32_t i=0;i<SW_OPS && !owed;i++)owed=w->op[i].live && w->op[i].end<0;
     if(owed)sw_push(w,(struct sw_event){ev.t+w->refresh_ns,SW_EV_REFRESH,0,0,0,0,0});
