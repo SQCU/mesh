@@ -234,7 +234,8 @@ static void link_receive(struct port *port,uint32_t served){
   }
 }
 /* the pieces this node's clients' programs release, staged (each claimed by one compare-exchange, whichever child
-   claims it first) and switched, at most SWITCH_BURST a pass; then the held ones retried */
+   claims it first) and switched, at most SWITCH_BURST a pass (the held ones retried after, switch_retry, once what
+   was staged is posted) */
 #define SWITCH_BURST 16u
 static void switch_stage(struct port *port){
   struct mesh_switch *sw=switch_of();
@@ -267,7 +268,13 @@ static void switch_stage(struct port *port){
       }
     }
   }
+}
+/* the pieces this child holds (a destination here not ready, no lane yet) retried */
+static void switch_retry(struct port *port){
   struct link *l=&port->link;
+  if(!l->holds)return;
+  struct mesh_switch *sw=switch_of();
+  const uint64_t at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   uint32_t kept=0;
   for(uint32_t i=0;i<l->holds;i++)if(!mesh_switch_forward(M,sw,l->held[i],at,port->index))l->held[kept++]=l->held[i];
   l->holds=kept;
@@ -288,20 +295,17 @@ static void port_pass(struct port *port,uint64_t *told){
   struct link *l=&port->link;
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   const uint32_t lanes=2*plan_streams(l->plan);
-  struct mesh_switch *sw=switch_of();
-  uint64_t t[6];t[0]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  /* what landed, switched on, posted before anything is staged; what is staged posted before the held are retried */
   if(served)link_receive(port,served);
-  t[1]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_receives(port,j);
-  t[2]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  if(served>>MESH_LANE_FIRST)switch_stage(port);
-  t[3]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_sends(port,j);
-  t[4]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_receives(port,j);
+  if(served>>MESH_LANE_FIRST)switch_stage(port);
+  for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_sends(port,j);
+  if(served>>MESH_LANE_FIRST){
+    switch_retry(port);
+    for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_sends(port,j);
+  }
   if(served)link_send(port,served);
-  t[5]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  MESH_SWITCH_COUNT(sw,port->index,passes,1);MESH_SWITCH_COUNT(sw,port->index,pass_ns,t[5]-t[0]);
-  for(int k=0;k<5;k++)MESH_SWITCH_COUNT(sw,port->index,part_ns[k],t[k+1]-t[k]);
   struct mesh_lanes *counted=lanes_of(port,0);
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
