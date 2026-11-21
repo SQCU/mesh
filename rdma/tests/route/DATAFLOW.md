@@ -52,7 +52,7 @@ memory between them) is deleted except its int8 x int8 -> int32 matmul2d product
 gemm_tn retiled, and gemm_wg, wgrad over operands stored transposed). On them, a call is a few dispatches:
 
 - forward: lanes_fwd (a run's lanes, the recurrence's state carried tile to tile; one refresh: two runs a tile),
-  ctx_fwd (a SIMD group's 32-row tile of contexts through both layers and the readout, in registers: sg.h);
+  ctx_fwd (a threadgroup a 64-row tile of contexts through both layers and the readout: tile.h);
 - learning step: the forward storing what the backward reads and every X's wgrad codes; credit (credit.metal);
   ctx_bwd and lanes_bwd (a task a threadgroup: each dgrad's codes, each gradient's wgrad codes and column sums, the
   contexts' state gradients summed a refresh); gemm_wg a matrix; grads (the partial sums, the chain rule);

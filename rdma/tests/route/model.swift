@@ -149,7 +149,7 @@ final class Net {
     self.device = device; self.queue = queue; lay = NetLayout(); precondition(initial.count == lay.count)
     library = try! device.makeLibrary(URL: URL(fileURLWithPath: path))
     self.runs = runs; self.refreshes = refreshes; ctxCap = contexts; klpCap = Net.klp(refreshes)
-    RT = runs * klpCap + pad64(contexts)
+    RT = pad64(runs * klpCap) + pad64(contexts)
     func sh(_ bytes: Int) -> MTLBuffer { device.makeBuffer(length: max(16, bytes), options: .storageModeShared)! }
     func pv(_ bytes: Int) -> MTLBuffer { device.makeBuffer(length: max(16, bytes), options: .storageModePrivate)! }
     let P = lay.count
@@ -174,7 +174,7 @@ final class Net {
     rowItems = device.makeBuffer(bytes: ri, length: ri.count * 4, options: .storageModeShared)!; rowCount = ri.count / 2
     colItems = device.makeBuffer(bytes: ci, length: ci.count * 4, options: .storageModeShared)!; colCount = ci.count / 2
     pinItems = device.makeBuffer(bytes: pr, length: pr.count * 4, options: .storageModeShared)!; pinCount = pr.count / 2
-    let laneCap = runs * klpCap
+    let laneCap = pad64(runs * klpCap)
     st = pv(runs * refreshes * 2 * D * 4); nextScratch = pv(runs * 2 * D * 4)
     lzc = pv(laneCap * 2 * 2 * D * 2); lh = pv(laneCap * 2 * D * 4); lu = pv(laneCap * 6 * 4)
     czc = pv(contexts * 2 * 2 * D * 2); cu = pv(contexts * 12 * 4); cn = pv(contexts * D * 4); cinv = pv(contexts * 4)
@@ -192,9 +192,11 @@ final class Net {
     let table: [UInt32] = Array(matg.joined()) + [UInt32(RT), 0, 0, 0]
     gradTable = device.makeBuffer(bytes: table, length: table.count * 4, options: .storageModeShared)!
     dhp = pv(3 * 2 * pad64(contexts) * D * 4)
-    // H, the 64 x 64 Walsh-Hadamard matrix in fp16 (sg.h's rotations; H32 its top-left block)
-    var h = [UInt16](repeating: 0, count: 64 * 64)
+    // H, the 64 x 64 Walsh-Hadamard matrix in fp16 (tile.h's row rotations), then Hb = diag(H32, H32) (the column
+    // rotations over two 32-row blocks)
+    var h = [UInt16](repeating: 0, count: 2 * 64 * 64)
     for i in 0..<64 { for j in 0..<64 { h[i * 64 + j] = (i & j).nonzeroBitCount % 2 == 1 ? Float16(-1).bitPattern : Float16(1).bitPattern } }
+    for i in 0..<64 { for j in 0..<64 where i / 32 == j / 32 { h[4096 + i * 64 + j] = (i & j & 31).nonzeroBitCount % 2 == 1 ? Float16(-1).bitPattern : Float16(1).bitPattern } }
     hadamard = device.makeBuffer(bytes: h, length: h.count * 2, options: .storageModeShared)!
     let c0 = queue.makeCommandBuffer()!, bl = c0.makeBlitCommandEncoder()!
     bl.fill(buffer: m, range: 0..<(P * 4), value: 0); bl.fill(buffer: v, range: 0..<(P * 4), value: 0)
@@ -260,7 +262,7 @@ final class Net {
     if x > 0 && y > 0 && z > 0 { e.dispatchThreadgroups(MTLSize(width: x, height: y, depth: z), threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1)) }
   }
   func nextSeed() -> UInt32 { seed = seed &* 1664525 &+ 1013904223; return seed | 1 }
-  static let tileThreads = 128   // sg.h's NSG SIMD groups
+  static let tileThreads = 256   // tile.h's NSG SIMD groups
 
   // the weights' codes from theta: a SIMD group a row (W, forward codes, bias), then a column (dgrad codes)
   func encodeWeights() {
@@ -273,16 +275,14 @@ final class Net {
   }
   func refresh() { begin(); phase = "weights"; encodeWeights(); finish("weights") }
 
-  // the lanes' layout (sg.h): a tile a (run, refresh), 32 rows; a run's refreshes padded to Kp (1, 2 or 4) so a
-  // threadgroup's four tiles are whole runs; its threadgroups
-  static func kp(_ K: Int) -> Int { K <= 2 ? K : 4 }
-  static func klp(_ K: Int) -> Int { L * kp(K) }
-  static let tilesPerGroup = 4   // sg.h's NSG
-  static func laneGroups(B: Int, K: Int) -> Int { (B * kp(K) + tilesPerGroup - 1) / tilesPerGroup }
-  static func ctxGroups(_ R: Int) -> Int { (R + 32 * tilesPerGroup - 1) / (32 * tilesPerGroup) }
+  // the lanes' layout (tile.h): a run's rows K L padded to the tile, or for one refresh 32 (a tile two runs); a
+  // threadgroup a run (its tiles in order), or for one refresh a tile; the contexts a threadgroup a 64-row tile
+  static func klp(_ K: Int) -> Int { K == 1 ? L : pad64(K * L) }
+  static func laneGroups(B: Int, K: Int) -> Int { K == 1 ? (B + 1) / 2 : B }
+  static func ctxGroups(_ R: Int) -> Int { (R + 63) / 64 }
   func fp(B: Int, K: Int, R: Int, seed s: UInt32 = 0) -> [UInt32] {
     let k = Net.klp(K)
-    return [UInt32(B), UInt32(K), UInt32(k), UInt32(R), UInt32(B * k), s, UInt32(pad64(ctxCap)), UInt32(Net.kp(K))]
+    return [UInt32(B), UInt32(K), UInt32(k), UInt32(R), UInt32(pad64(B * k)), s, UInt32(pad64(ctxCap)), UInt32(K == 1 ? 1 : k / 64)]
   }
   // the forward: B runs' K refreshes (lanes [B K][L][IN], mask, h0 [B][2][D]), R contexts (tokens [R][IN], pos):
   // w [R][FS], next [B][2][D]; store: what the backward reads, the wgrad codes of every X
@@ -335,7 +335,7 @@ final class Net {
     groups(Net.laneGroups(B: B, K: K), 3, threads: Net.tileThreads)
     // the wgrad products: a matrix's [3 rows] x [cols] over its blocks (lanes' and contexts', or the contexts' alone)
     phase = "wgrad"
-    let RL = B * Net.klp(K), WB = Int(I8_WBLOCK), lb = RL / WB, cbk = (R + WB - 1) / WB
+    let RL = pad64(B * Net.klp(K)), WB = Int(I8_WBLOCK), lb = RL / WB, cbk = (R + WB - 1) / WB
     let wgp = pipe("gemm_wg_64x64_4")
     var gitems: [UInt32] = []
     for (i, mt) in lay.mats.enumerated() {
@@ -406,7 +406,7 @@ final class Net {
       bl.copy(from: b, sourceOffset: off, to: st, destinationOffset: 0, size: n); bl.endEncoding(); cb.commit(); cb.waitUntilCompleted()
       let out = UnsafeMutableRawPointer.allocate(byteCount: max(16, n), alignment: 16); memcpy(out, st.contents(), n); return out
     }
-    let RL = c.B * Net.klp(c.K), WB = Int(I8_WBLOCK)
+    let RL = pad64(c.B * Net.klp(c.K)), WB = Int(I8_WBLOCK)
     // one block's columns (x [32 rows][cols] at stride ld) against the GPU's codes (gq at qoff, stride RT) and scales:
     // int8mm.h's column block (grid, H32, scale k: 4 X's, 8 dY's), element r's index col RT + row0 + r
     func compare(_ label: String, _ x: [Float], cols: Int, ld: Int, qoff: Int, soff: Int, row0: Int, seed: UInt32, k: Float) -> String {

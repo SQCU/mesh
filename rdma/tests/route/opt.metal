@@ -1,7 +1,7 @@
 // The parameters' kernels: the weights' codes from theta, the gradients from the wgrad products' partial sums (the
 // chain rule of W = diag(g) V / |V|), and the optimizer's step (the three gradients' Gram matrix, UPGrad's weights,
 // Adam, V pinned to unit rows) in one threadgroup: theta is 72,872 floats, a few passes of 1,024 threads.
-#include "sg.h"
+#include "tile.h"
 
 // a work item: (matrix, row or column)
 struct Item { uint m, i; };
