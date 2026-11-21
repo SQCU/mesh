@@ -117,7 +117,7 @@ def _wgrad(gq, gs, gqx, gsx, table, i, RT, T, b1):
     scaled, fp32 across: gemm_wg), and db [T][rows] its dY's column sums"""
     _, rows, cols, bias = MATS[i]
     yt, xt, sy, sx, dbp = (int(x) for x in table[8 * i:8 * i + 5])
-    M, kf, blocks, per = T * rows, pad64(cols), RT // WB, 128
+    M, kf, blocks, per = T * rows, pad64(cols), RT // WB, 64
     nz = -(-b1 // per)
     part = _kernel('mm.metal', 'gemm_wg')({'a': gq[yt:yt + pad64(M) * RT], 'b': gqx[xt:xt + kf * RT], 'sa': gs[sy:sy + blocks * M], 'sb': gsx[sx:sx + blocks * kf],
                                                    'p': mx.array([M, kf, RT, per, 0, b1, 0, 0], mx.uint32)},

@@ -9,11 +9,12 @@ b = Q.to_mx(Q.batch(B, K, R, np.random.default_rng(1)))
 seed = mx.array([5], mx.uint32)
 wb, wq, wsc = model.weights(); wb = mx.broadcast_to(wb, (3, wb.shape[1]))
 lo = qnn.lanes(wb, wq, wsc, b['lanes'], b['mask'], b['h0'], seed)
-co = qnn.contexts(wb, wq, wsc, b['tokens'], b['pos'], b['seg'], lo[0], seed)
+RR = mx.array([R], mx.uint32)
+co = qnn.contexts(wb, wq, wsc, b['tokens'], b['pos'], b['seg'], lo[0], seed, RR)
 so = qnn.surrogate(co[0], b['w'], b['draws'], b['first'], b['scale0'], b['scale'])
 dw = so[1]
 mx.eval(lo, co, so)
-dst = qnn._ctx_back_impl(dw, wq, wsc, b['pos'], b['seg'], lo[0][0], seed, *co[1:])[1]; mx.eval(dst)
+dst = qnn._ctx_back_impl(dw, wq, wsc, b['pos'], b['seg'], lo[0][0], seed, RR, *co[1:])[1]; mx.eval(dst)
 
 
 def timed(name, f):
