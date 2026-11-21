@@ -68,3 +68,17 @@ no reset of a queue pair) leave one algorithm in place, close to multipath TCP:
    equal the single-node run's. Report ms/step against 4.15 / 5.27 / 7.17 / 12.1, the triplet, and per-cable
    utilisation.
 8. **Then:** the saturation demonstration, TP-share rebalancing, and the H200 Pareto sweep.
+
+## Where the work stands (2026-11-20)
+- Items 2-4 are in rdma/mesh-switched.h, driven by the port children and the parent in mesh-link.c. Pieces are
+  staged into a pool of slots (name frame, then page frame) and drawn per hop from the routing weights. Relays
+  forward by name, delivery goes by key into the receiving program's span, and a receive window of credits bounds
+  each sender to what its receiver's pool holds. The weights are refreshed off the hot path as a residual toward a
+  policy's target (Thompson sampling by default; struct mesh_switch_policy is where the trained policy plugs in).
+  Each draw is logged in rdma/tests/route's record format (mesh-switch-log drains it).
+- Item 5: ORDER, SEGMENT, epochs, segments, rounds composition, agreement restarts, the gone-client restart and the
+  declaration-time route tables (mesh-write-routes.h, ncclMeshCommWriteRoutes) are deleted. Still there: the
+  relay-only rank support in libnccl-mesh, the Python controller's route weights in its fluid model, and libmesh's
+  generic multi-hop lowering (mesh_write_compile, mesh_routed_compile), which nothing compiles routes into now.
+- Item 6: tests/sim-switched.c (five nodes, timed wire) is in `make check`, and tests/sim-two-nodes.sh runs over it.
+- Item 7: rdma/tests/switched-cluster-bench.py runs it once the cluster is free.

@@ -553,8 +553,14 @@ Porting:
 
 ## Routes between unlinked ranks
 
-A communicator retains every paired physical cable between its admitted ranks.
-Every node used as a relay participates in that physical communicator, while
+No route is compiled (design/switched-multipath-dma.md). A communicator's map joins every two of its ranks, each pair
+one channel at the widest bottleneck of the bridges' whole map between their nodes, and its default trees are each
+root's star: every part goes from its source to each rank that needs it as one logical step. The bridges switch each
+of its pieces over cables and relays as it moves (rdma/mesh-switched.h): a relay node such as the Mac mini forwards
+by name and needs no rank, no client and no route table. `ncclMeshCommWriteRoutes` and `ncclMeshCommWritePaths` are
+gone with the per-pair path tables.
+
+A communicator may still hold a rank that only relays, and
 `ncclMeshCall.contributors` and `.recipients` separately declare numerical
 input and output roles. `mesh_compile_members` preserves those roles and the
 selected tree weights/phase; `mesh_routed_compile` lowers the resulting graph
