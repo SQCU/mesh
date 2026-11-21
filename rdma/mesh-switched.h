@@ -60,6 +60,7 @@
 #define MESH_SWITCH_N 8u                                     /* nodes the view holds */
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view holds */
 #define MESH_SWITCH_HEAD 1088u                               /* a slot's name, the piece's bytes after it */
+#define MESH_SWITCH_UNITS 2u                                 /* a transfer's consecutive units a slot carries, at most */
 #define MESH_SWITCH_SHORT 2u                                 /* a short lane's frames (a link's first data lane, where it has two) */
 #define MESH_SWITCH_WINDOW 8u                                /* executions of a transfer in progress at once */
 #define MESH_SWITCH_RING 4096u                               /* a lane's outbox */
@@ -76,7 +77,7 @@
 _Static_assert(MESH_SWITCH_N<=64 && MESH_SWITCH_N<=MESH_NODES,"a node a bit");
 
 /* ---- The name ------------------------------------------------------------------------------------------------- */
-struct mesh_switch_dest { uint32_t node,transfer,span,padding; };
+struct mesh_switch_dest { uint32_t node,transfer,span,units; };   /* units: the spans from `span` the piece carries (0: one) */
 /* a line: a directed link's predicted wait (ns) and its spread, its rate (bytes a ns, every cable) and latency, as its
    sender (`from`) measured it at its refresh `stamp` */
 struct mesh_switch_line { uint32_t from,to; uint64_t stamp; float wait,spread,rate,latency; };
@@ -225,7 +226,7 @@ static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
 /* a piece's bytes at most (mesh-order.h's order_piece_bytes: one allocation block) and the slot that carries one */
 static inline uint64_t mesh_switch_piece(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
-static inline uint64_t mesh_switch_slot_bytes(const struct hdr *m){ return (MESH_SWITCH_HEAD+mesh_switch_piece(m)+4095)/4096*4096; }   /* whole frames of 4096 (mesh-bridge.h MESH_FRAME) */
+static inline uint64_t mesh_switch_slot_bytes(const struct hdr *m){ return (MESH_SWITCH_HEAD+MESH_SWITCH_UNITS*mesh_switch_piece(m)+4095)/4096*4096; }   /* whole frames of 4096 (mesh-bridge.h MESH_FRAME) */
 /* the bytes every SEND on lane l carries (its frames: a short lane's MESH_SWITCH_SHORT, another's a whole slot) */
 static inline uint64_t mesh_switch_lane_bytes(const struct mesh_switch *sw,uint32_t l){
   const uint64_t f=atomic_load_explicit(&sw->lane[l].frames,memory_order_relaxed);
@@ -1064,12 +1065,27 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
   *name=(struct mesh_switch_name){.magic=MESH_SWITCH_MAGIC,.source=m->node,.key=p->program.key,.execution=e,
     .bytes=valid?(uint32_t)bytes.bytes:0,.hops=0,.dests=1,.from=m->node};
   name->path[0]=m->node;name->born=now;
-  name->dest[0]=(struct mesh_switch_dest){atomic_load_explicit(&x->node,memory_order_relaxed),t,(uint32_t)span,0};
+  name->dest[0]=(struct mesh_switch_dest){atomic_load_explicit(&x->node,memory_order_relaxed),t,(uint32_t)span,1};
   if(valid)memcpy(at+MESH_SWITCH_HEAD,(const char *)m+bytes.offset,bytes.bytes);
   atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
   atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
   sw->slot[s].staged=now;sw->slot[s].landed=now;sw->slot[s].wait_word=0;
   mesh_switch_count(m,p,0,table,t,e,span);
+  /* the transfer's next units, where ready and the slot holds them: claimed with it, one SEND for them all */
+  struct mesh_dma_span unit[MESH_SWITCH_UNITS];unit[0]=bytes;
+  uint32_t units=1;
+  while(valid && units<MESH_SWITCH_UNITS){
+    uint64_t e2,span2;uint32_t t2;
+    const struct mesh_dma_span next=span+units<table[t].units?((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span+units]:(struct mesh_dma_span){0,0};
+    if(span+units>=table[t].units || !mesh_switch_locate(p,table,0,n+units,&e2,&t2,&span2) || e2!=e || t2!=t || span2!=span+units ||
+       !mesh_dma_span_valid(m,next) || next.bytes>piece || MESH_SWITCH_HEAD+name->bytes+next.bytes>sw->slot_bytes || !mesh_switch_ready(m,p,table+t,0,e,span2))break;
+    uint64_t want=n+units;
+    if(!atomic_compare_exchange_strong_explicit(&p->claimed,&want,n+units+1,memory_order_acq_rel,memory_order_acquire))break;
+    memcpy(at+MESH_SWITCH_HEAD+name->bytes,(const char *)m+next.offset,next.bytes);
+    name->bytes+=(uint32_t)next.bytes;unit[units++]=next;
+    mesh_switch_count(m,p,0,table,t,e,span2);
+  }
+  name->dest[0].units=units;
   /* the same bytes released toward other nodes by programs of the same key (one declaration's: a collective's
      all-gather or broadcast sends one span to several), in the same execution, as their next pieces: claimed with it,
      each a destination of the one slot (multicast: the switch then shares SENDs while their paths agree) */
@@ -1096,13 +1112,19 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
       const struct mesh_crossing *qt=mesh_switch_table(m,q,0);
       uint64_t qn=atomic_load_explicit(&q->claimed,memory_order_acquire),qe,qs;uint32_t qtr;
       if(!qt || !mesh_switch_locate(q,qt,0,qn,&qe,&qtr,&qs) || qe!=e)continue;
-      const struct mesh_dma_span other=((const struct mesh_dma_span *)((const char *)m+qt[qtr].spans))[qs];
-      if(other.offset!=bytes.offset || other.bytes!=bytes.bytes || !mesh_switch_ready(m,q,qt+qtr,0,qe,qs) ||
+      int same=qs+units<=qt[qtr].units;
+      for(uint32_t u=0;u<units && same;u++){
+        const struct mesh_dma_span other=((const struct mesh_dma_span *)((const char *)m+qt[qtr].spans))[qs+u];
+        uint64_t ue,us;uint32_t ut;
+        same=other.offset==unit[u].offset && other.bytes==unit[u].bytes && mesh_switch_locate(q,qt,0,qn+u,&ue,&ut,&us) && ue==qe && ut==qtr && us==qs+u &&
+             mesh_switch_ready(m,q,qt+qtr,0,qe,qs+u);
+      }
+      if(!same ||
          qe>=atomic_load_explicit(&mesh_switch_progress(m,q,0)[qtr].complete,memory_order_acquire)+MESH_SWITCH_WINDOW ||
          qe>=atomic_load_explicit(&q->credit,memory_order_acquire)+mesh_switch_ahead(sw,q))continue;
-      if(!atomic_compare_exchange_strong_explicit(&q->claimed,&qn,qn+1,memory_order_acq_rel,memory_order_acquire))continue;
-      name->dest[name->dests++]=(struct mesh_switch_dest){atomic_load_explicit(&y->node,memory_order_relaxed),qtr,(uint32_t)qs,0};
-      mesh_switch_count(m,q,0,qt,qtr,qe,qs);
+      if(!atomic_compare_exchange_strong_explicit(&q->claimed,&qn,qn+units,memory_order_acq_rel,memory_order_acquire))continue;
+      name->dest[name->dests++]=(struct mesh_switch_dest){atomic_load_explicit(&y->node,memory_order_relaxed),qtr,(uint32_t)qs,units};
+      for(uint32_t u=0;u<units;u++)mesh_switch_count(m,q,0,qt,qtr,qe,qs+u);
     }
   }
   name->nwanted=name->dests;
@@ -1125,7 +1147,8 @@ static inline int mesh_switch_deliver(struct hdr *m,const struct mesh_switch_nam
   if(!p)return 0;
   if(found)*found=p;
   const struct mesh_crossing *table=mesh_switch_table(m,p,1);
-  if(!table || dest->transfer>=p->program.transfers[1] || dest->span>=table[dest->transfer].units)return 0;
+  const uint32_t units=dest->units?dest->units:1;
+  if(!table || dest->transfer>=p->program.transfers[1] || (uint64_t)dest->span+units>table[dest->transfer].units)return 0;
   const struct mesh_crossing *t=table+dest->transfer;
   if(!mesh_switch_ready(m,p,t,1,name->execution,dest->span))return 0;
   struct mesh_switch_transfer *progress=mesh_switch_progress(m,p,1)+dest->transfer;
@@ -1135,11 +1158,19 @@ static inline int mesh_switch_deliver(struct hdr *m,const struct mesh_switch_nam
   struct mesh_switch_cell_head *c=mesh_switch_cell(m,p,1,dest->transfer,name->execution);
   if(atomic_load_explicit(&c->tag,memory_order_acquire)!=name->execution+1)return 0;
   const _Atomic uint64_t *bits=(const _Atomic uint64_t *)(c+1);
-  if(atomic_load_explicit(bits+dest->span/64,memory_order_acquire)>>(dest->span%64)&1)return 1;
-  const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)m+t->spans))[dest->span];
-  if(mesh_dma_span_valid(m,bytes) && bytes.bytes<=mesh_switch_piece(m))memcpy((char *)m+bytes.offset,data,bytes.bytes<name->bytes?bytes.bytes:name->bytes);
-  atomic_thread_fence(memory_order_release);
-  return mesh_switch_count(m,p,1,table,dest->transfer,name->execution,dest->span)>=0;
+  /* each unit the piece carries at its place in the slot (the units' bytes in order), placed and counted once */
+  uint64_t off=0;int placed=1;
+  for(uint32_t u=0;u<units;u++){
+    const uint64_t sp=(uint64_t)dest->span+u;
+    const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)m+t->spans))[sp];
+    const uint64_t here=off<name->bytes?name->bytes-off:0,len=bytes.bytes<here?bytes.bytes:here;
+    off+=bytes.bytes;
+    if(atomic_load_explicit(bits+sp/64,memory_order_acquire)>>(sp%64)&1)continue;
+    if(mesh_dma_span_valid(m,bytes) && bytes.bytes<=mesh_switch_piece(m))memcpy((char *)m+bytes.offset,data+off-bytes.bytes,len);
+    atomic_thread_fence(memory_order_release);
+    placed&=mesh_switch_count(m,p,1,table,dest->transfer,name->execution,sp)>=0;
+  }
+  return placed;
 }
 
 /* the word a destination here not yet deliverable waits on, and the value it must reach (mesh_switch_ready's first
@@ -1198,8 +1229,9 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
         struct mesh_switch_record r;memset(&r,0,sizeof r);
         r.kind=MESH_LOG_PIECE;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;
         r.latency=name->born && now>name->born?(float)(now-name->born):name->queued+name->transit;r.dest=self;r.context=UINT32_MAX;
-        r.queueing=name->queued;r.floor=name->floor;r.source=name->source;r.transfer=name->dest[i].transfer;r.span=name->dest[i].span;r.bytes=name->bytes;
-        mesh_switch_log_put(sw,ring,&r);
+        r.queueing=name->queued;r.floor=name->floor;r.source=name->source;r.transfer=name->dest[i].transfer;r.bytes=name->bytes;
+        /* a record a unit the piece carried */
+        for(uint32_t u=0;u<(name->dest[i].units?name->dest[i].units:1u);u++){r.span=name->dest[i].span+u;mesh_switch_log_put(sw,ring,&r);}
       }
     }else{
       kept[nkept++]=name->dest[i];
