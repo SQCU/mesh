@@ -49,6 +49,36 @@ kernel void weights_cols(device int8_t *wq [[buffer(1)]], device float *wsc [[bu
   if (lane == 0) wsc[m.wbs + col] = i8_scale(mx, m0, 8.0f);
 }
 
+// the codes from the weights themselves (qnn.py's ops: W computed by the array library): w holds each matrix's W
+// [rows][cols] at m.v and its bias [rows] at m.g (no bias: M_OUT); a SIMD group an item, the matrices' rows (items
+// [0, nrows): W's forward codes rotated along the columns, one scale a row, the bias; pad rows 0) then their columns
+// (items [nrows, n): dgrad codes along the rows, one scale a column), as weights_rows and weights_cols
+kernel void codes(device const float *w [[buffer(0)]], device int8_t *wq [[buffer(1)]], device float *wsc [[buffer(2)]], constant Net &nw [[buffer(4)]],
+                  device const Item *items [[buffer(5)]], constant uint2 &n [[buffer(6)]], uint gid [[thread_position_in_grid]]) {   // n: (items, rows' items)
+  if (gid / 32 >= n.x) return;
+  const bool row = gid / 32 < n.y;
+  const Item it = items[gid / 32]; const MatW m = nw.m[it.m]; const uint i = it.i, lane = gid % 32;
+  float v[8], m0 = 0;
+  for (uint k = 0; k < 8; k++) {
+    const uint j = 8 * lane + k, r = row ? i : j, col = row ? j : i;
+    v[k] = r < m.rows && col < m.cols ? w[m.v + r * m.cols + col] : 0.0f; m0 = max(m0, abs(v[k]));
+  }
+  m0 = simd_max(m0);
+  const float gi = i8_grid_inverse(m0);
+  float mx = 0;
+  for (uint k = 0; k < 8; k++) v[k] = i8_grid(v[k], gi);
+  i8_fwht64_lanes(v, ushort(lane % 8));
+  for (uint k = 0; k < 8; k++) mx = max(mx, abs(v[k]));
+  mx = simd_max(mx); const float inv = i8_inverse(mx);
+  if (row) {
+    if (8 * lane < m.kf) *(device uint2 *)(wq + m.wf + i * m.kf + 8 * lane) = i8_pack8(v, inv, 0, 0);
+    if (lane == 0) { wsc[m.wfs + i] = i8_scale(mx, m0, 8.0f); wsc[m.b + i] = i < m.rows && it.m != M_OUT ? w[m.g + i] : 0.0f; }
+  } else {
+    for (uint k = 0; k < 8; k++) { const uint r = 8 * lane + k; if (r < m.kb) wq[m.wb + i * m.kb + r] = i8_code(v[k], inv, 0, 0); }
+    if (lane == 0) wsc[m.wbs + i] = i8_scale(mx, m0, 8.0f);
+  }
+}
+
 // a SIMD group a (task, matrix, row): dW's row summed over the wgrad product's partial sums [z][3 rows][kf], db over
 // the column sums [block][3 rows] of the matrix's blocks; then with u = V / |V| a row: dg = dW . u,
 // dV = g / |V| (dW - (dW . u) u), db -> grads [task][P]

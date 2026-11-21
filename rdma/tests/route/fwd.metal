@@ -1,7 +1,9 @@
 // The forward's kernels (tile.h's tiles): a run's lanes, a tile of contexts.
 #include "tile.h"
+#ifndef ROUTE_MLX   // the MLX ops' (qnn.py) are the kernels' template parameters
 constant bool STORE [[function_constant(0)]];   // the learning forward: what the backward reads, and the wgrad codes
 constant uint STAGE [[function_constant(1)]];   // stages.swift's build-up (0: everything)
+#endif
 
 // the wgrad X codes of the value in S (64 columns of the tile, at the matrix's column offset jj 64; kf its columns)
 static inline void xcodes(threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *H, Lanes c, device int8_t *gq, device float *gs, MatG g,

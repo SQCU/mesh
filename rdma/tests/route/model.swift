@@ -136,7 +136,7 @@ final class Net {
   let st: MTLBuffer, lzc: MTLBuffer, lh: MTLBuffer, lu: MTLBuffer, czc: MTLBuffer, cu: MTLBuffer, cn: MTLBuffer, cinv: MTLBuffer, nextScratch: MTLBuffer
   let gq: MTLBuffer, gs: MTLBuffer, gradTable: MTLBuffer, dhp: MTLBuffer, partial: MTLBuffer
   var matg: [[UInt32]] = [], partialOff: [Int] = []
-  var dwBuf: MTLBuffer? = nil, diffBuf: MTLBuffer? = nil
+  var dwBuf: MTLBuffer? = nil, diffBuf: MTLBuffer? = nil, dstBuf: MTLBuffer? = nil, lpBuf: MTLBuffer? = nil
   // the call being encoded; profiling: an encoder a kernel, timestamps at each encoder's ends ("phase kernel")
   var cb: MTLCommandBuffer!, e: MTLComputeCommandEncoder!, phase = ""
   var profiling = false, samples: MTLCounterSampleBuffer? = nil, labels: [String] = [], tick = 1.0, lastGPU = 0.0
@@ -189,7 +189,7 @@ final class Net {
       partialOff.append(pf); pf += Net.zMax(blocks) * M * kf
     }
     gq = pv(gb); gs = pv(gf * 4); partial = pv(pf * 4)
-    let table: [UInt32] = Array(matg.joined()) + [UInt32(RT), 0, 0, 0]
+    let table: [UInt32] = Array(matg.joined()) + [UInt32(RT), 3, 0, 0]
     gradTable = device.makeBuffer(bytes: table, length: table.count * 4, options: .storageModeShared)!
     dhp = pv(3 * 2 * pad64(contexts) * D * 4)
     // H, the 64 x 64 Walsh-Hadamard matrix in fp16 (tile.h's row rotations; H32, the column rotations', its top-left
@@ -318,7 +318,8 @@ final class Net {
     phase = "credit"   // a draw eight lanes (credit.metal), then a row's draws summed in order
     let diff = room(&diffBuf, max(1, c.count) * FS * 4, shared: false)
     if c.count > 0 {
-      set(pipe("credit_draws"), "credit_draws", [0: (c.draws, 0), 1: (c.wrows, 0), 2: (w, 0), 3: (diff, 0), 4: (c.ll, 0)], [5: [UInt32(c.count)]])
+      let lp = room(&lpBuf, max(1, c.count) * 4, shared: false)
+      set(pipe("credit_draws"), "credit_draws", [0: (c.draws, 0), 1: (c.wrows, 0), 2: (w, 0), 3: (diff, 0), 4: (c.ll, 0), 6: (lp, 0)], [5: [UInt32(c.count)]])
       e.dispatchThreads(MTLSize(width: (c.count + 3) / 4 * 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
     set(pipe("credit_rows"), "credit_rows", [0: (diff, 0), 1: (c.draws, 0), 2: (c.first, 0), 3: (c.scale0, 0), 4: (dw, 0)], [5: [UInt32(R), 0, c.scale.bitPattern, 0]])
@@ -329,8 +330,11 @@ final class Net {
     set(pipe("ctx_bwd"), "ctx_bwd", [0: (dw, 0), 1: (pos, 0), 2: (st, 0), 3: (czc, 0), 4: (cu, 0), 5: (netTable, 0), 6: (wq, 0), 7: (wsc, 0), 9: (gq, 0), 10: (gs, 0),
         11: (gradTable, 0), 12: (cn, 0), 13: (cinv, 0), 14: (dhp, 0), 16: (hadamard, 0)], [8: prm])
     groups(Net.ctxGroups(R), 3, threads: Net.tileThreads)
+    let dst = room(&dstBuf, 3 * B * K * 2 * D * 4, shared: false)
+    set(pipe("states_grad"), "states_grad", [0: (dhp, 0), 1: (seg, 0), 2: (dst, 0)], [8: prm])
+    e.dispatchThreads(MTLSize(width: 3 * B * K * 2 * D, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     set(pipe("lanes_bwd"), "lanes_bwd", [0: (mask, 0), 1: (h0, 0), 2: (lzc, 0), 3: (lh, 0), 4: (lu, 0), 5: (netTable, 0), 6: (wq, 0), 7: (wsc, 0), 9: (gq, 0), 10: (gs, 0),
-        11: (gradTable, 0), 12: (seg, 0), 13: (dhp, 0), 15: (pos, 0), 16: (hadamard, 0)], [8: prm])
+        11: (gradTable, 0), 13: (dst, 0), 16: (hadamard, 0)], [8: prm])
     groups(Net.laneGroups(B: B, K: K), 3, threads: Net.tileThreads)
     // the wgrad products: a matrix's [3 rows] x [cols] over its blocks (lanes' and contexts', or the contexts' alone)
     phase = "wgrad"

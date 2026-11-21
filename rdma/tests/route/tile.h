@@ -36,6 +36,11 @@ using namespace mpp::tensor_ops;
 #include "split.h"
 #include "upgrad.h"
 #include "act.h"
+// the kernels' tables (Net, Grad, FP) as bound: constant buffers (the Metal library's kernels), or device memory (the
+// same kernels as MLX ops, qnn.py: ROUTE_TBL defined device const)
+#ifndef ROUTE_TBL
+#define ROUTE_TBL constant
+#endif
 
 enum : uint { D = 64, E = 192, IN = 48, FS = 40, L = 32, TM = 64, NSG = 8, NT = NSG * 32, LD = 68, LX = 68 };
 
@@ -49,7 +54,7 @@ struct Net { MatW m[8]; };
 // a matrix's wgrad operands: dY's codes transposed yt [pad64(3 rows)][RT] (task t's row c at t rows + c), their
 // scales sy [RT / 32][3 rows], column sums dbp [RT / 32][3 rows]; X's xt [kf][RT], sx [RT / 32][kf]
 struct MatG { uint yt, xt, sy, sx, dbp, b0, b1, p0; };
-struct Grad { MatG m[8]; uint RT, pad[3]; };
+struct Grad { MatG m[8]; uint RT, T, pad[2]; };   // T: the tasks (a gradient's dY rows: T rows; the learning step's three)
 
 typedef tensor<threadgroup int8_t, dextents<int32_t, 2>, tensor_inline> TgI8;
 typedef tensor<device int8_t, dextents<int32_t, 2>, tensor_inline> DevI8;
@@ -237,7 +242,7 @@ static inline uint seed_of(uint base, uint product, uint task) { return base ? (
 // threadgroup (LT)
 struct FP { uint B, K, KLp, R, RL, seed, Rp, LT; };
 struct LanePos { uint b, pos; bool valid; };
-static inline LanePos lane_pos(uint row, constant FP &p) { LanePos q; q.b = row / p.KLp; q.pos = row % p.KLp; q.valid = q.b < p.B && q.pos < p.K * L; return q; }
+static inline LanePos lane_pos(uint row, ROUTE_TBL FP &p) { LanePos q; q.b = row / p.KLp; q.pos = row % p.KLp; q.valid = q.b < p.B && q.pos < p.K * L; return q; }
 
 // a row's relu mask over a 64-column chunk: two words (lanes li 0..3, 4..7), held by lanes li 0 and 4
 static inline uint mask_word(thread const float *u, Lanes c) {

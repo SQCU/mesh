@@ -4,10 +4,11 @@
 #include "tile.h"
 
 // a gradient's wgrad codes (the column pass over S's chunk j of a matrix's output, `rows` its outputs): task t's
-// columns at t rows + 64 j of the matrix's dY codes, its scales and column sums at the tile's blocks
+// columns at t rows + 64 j of the matrix's dY codes (T rows of them: T tasks), its scales and column sums at the tile's
+// blocks
 static inline void ycodes(threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *H, Lanes c, device int8_t *gq, device float *gs, MatG g,
-                          uint rows, uint task, uint j, uint RT, uint row0, uint seed) {
-  const uint M = 3 * rows, col0 = task * rows + 64 * j, blk = row0 / I8_WBLOCK;
+                          uint rows, uint task, uint j, uint RT, uint row0, uint seed, uint T) {
+  const uint M = T * rows, col0 = task * rows + 64 * j, blk = row0 / I8_WBLOCK;
   colcodes(S, X, cm, H, c, gq + g.yt + size_t(col0) * RT, RT, row0, gs + g.sy + blk * M + col0, M, gs + g.dbp + blk * M + col0, min(64u, rows - 64 * j), 8.0f, seed);
 }
 // a product's ids for the seeds (row codes: id, column codes: id + 64)
@@ -24,16 +25,16 @@ static inline void dgrad_block(thread float (&x)[2][8], thread const float (&v)[
 }
 // the wgrad codes of v (put into S first)
 static inline void vcodes(thread const float (&v)[2][8], threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *H, Lanes c,
-                          device int8_t *gq, device float *gs, MatG g, uint rows, uint task, uint j, uint RT, uint row0, uint seed) {
+                          device int8_t *gq, device float *gs, MatG g, uint rows, uint task, uint j, uint RT, uint row0, uint seed, uint T) {
   for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), v[s]);
   tg_barrier();
-  ycodes(S, X, cm, H, c, gq, gs, g, rows, task, j, RT, row0, seed);
+  ycodes(S, X, cm, H, c, gq, gs, g, rows, task, j, RT, row0, seed, T);
 }
 // the feed-forward back: x = dL/dx' (its codes in A with sA) -> x + (relu' (x down)) up; up's dY codes, mask bits from
 // mw (row stride mstride; rows < nv)
 static inline void ffn_back(thread float (&x)[2][8], threadgroup float *S, threadgroup int8_t *A, threadgroup half *X, threadgroup int8_t *Bq, threadgroup float *sA,
                             threadgroup float *sB, threadgroup float *cm, MatW mu, MatW md, device const int8_t *wq, device const float *wsc, device const half *H, Lanes c,
-                            device const uint *mw, uint mstride, uint nv, device int8_t *gq, device float *gs, MatG gu, uint task, uint RT, uint row0, uint seedc, uint seedr) {
+                            device const uint *mw, uint mstride, uint nv, device int8_t *gq, device float *gs, MatG gu, uint task, uint RT, uint row0, uint seedc, uint seedr, uint T) {
   for (uint jj = 0; jj < 3; jj++) {
     if (jj) tg_barrier();   // the last dgrad block's epilogue read S
     const ColV cv2 = colv(wsc + md.wbs, nullptr, jj, c); chunk(A, 64, wq + md.wb + 64 * jj * md.kb, md.kb, S); tg_barrier();
@@ -46,7 +47,7 @@ static inline void ffn_back(thread float (&x)[2][8], threadgroup float *S, threa
       put_s(S, c, row, du[s]);
     }
     tg_barrier();
-    ycodes(S, X, cm, H, c, gq, gs, gu, E, task, jj, RT, row0, seedc);
+    ycodes(S, X, cm, H, c, gq, gs, gu, E, task, jj, RT, row0, seedc, T);
     dgrad_block(x, du, mu, jj, false, S, X, Bq, sB, H, wq, wsc, c, seedr, row0, E);
   }
 }
@@ -72,7 +73,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
   tg_barrier();
   float x[2][8];
   for (uint s = 0; s < 2; s++) s_get(S, row_of(c, s), c, x[s]);
-  ycodes(S, X, cm, H, c, gq, gs, gr.m[M_OUT], FS, task, 0, RT, g0, seed_of(p.seed, S_OUT + 64, task));
+  ycodes(S, X, cm, H, c, gq, gs, gr.m[M_OUT], FS, task, 0, RT, g0, seed_of(p.seed, S_OUT + 64, task), gr.T);
   quant(x, S, X, H, c, A, sA, seed_of(p.seed, S_OUT, task), g0, 64, 0);
   bool live[2]; int ref[2];
   for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); live[s] = row < nv; ref[s] = live[s] ? refid[row] : 0; }
@@ -94,10 +95,10 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     const uint zh = l ? M_ZH1 : M_ZH0, up = l ? M_UP1 : M_UP0, down = l ? M_DOWN1 : M_DOWN0;
     const uint sd = l ? S_DOWN1 : S_DOWN0, su = l ? S_UP1 : S_UP0, sz = l ? S_ZH1 : S_ZH0;
     // x: dL/dx_{l+1}: down's dY; its codes; the feed-forward back: dxm
-    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[down], D, task, 0, RT, g0, seed_of(p.seed, sd + 64, task));
+    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[down], D, task, 0, RT, g0, seed_of(p.seed, sd + 64, task), gr.T);
     quant(x, S, X, H, c, A, sA, seed_of(p.seed, sd, task), g0, 64, 0);
     ffn_back(x, S, A, X, Bq, sA, sB, cm, nw.m[up], nw.m[down], wq, wsc, H, c, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[up], task, RT, g0,
-             seed_of(p.seed, su + 64, task), seed_of(p.seed, su, task));
+             seed_of(p.seed, su + 64, task), seed_of(p.seed, su, task), gr.T);
     // the step back through the context's state (h = hp + z (h~ - hp)): the gates' gradients and hp's
     float dz[2][8], dc[2][8], dh[2][8];
     for (uint s = 0; s < 2; s++) {
@@ -133,13 +134,13 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
       }
       tg_barrier(); }
     // the gates' gradients: zh's dY (z, then h~), its dgrad: dx_l = dxm + dzc zh
-    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[zh], 2 * D, task, 0, RT, g0, seed_of(p.seed, sz + 64, task));
-    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[zh], 2 * D, task, 1, RT, g0, seed_of(p.seed, sz + 64, task));
+    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[zh], 2 * D, task, 0, RT, g0, seed_of(p.seed, sz + 64, task), gr.T);
+    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[zh], 2 * D, task, 1, RT, g0, seed_of(p.seed, sz + 64, task), gr.T);
     dgrad_block(x, dz, nw.m[zh], 0, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, sz, task), g0, 128);
     dgrad_block(x, dc, nw.m[zh], 1, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, sz, task), g0, 128);
   }
   // dx0: inp's dY
-  vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_INP], D, task, 0, RT, g0, seed_of(p.seed, S_INP + 64, task));
+  vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_INP], D, task, 0, RT, g0, seed_of(p.seed, S_INP + 64, task), gr.T);
 }
 
 // the reverse recurrence over a tile's two groups of 32 positions (scan.h), a SIMD group 8 channels, a lane a position
@@ -147,7 +148,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
 // contexts' inj at a refresh's last lane), the carry e from the later tile (carry[ch], updated); each state's own
 // gradient D = u + e_{t+1} written over S
 static inline void scan_back(threadgroup float *S, threadgroup float *carry, threadgroup const float (&inj)[2][D], bool local, Lanes c,
-                             device const float *mask, device const half *lzc, uint l, uint row0, constant FP &p) {
+                             device const float *mask, device const half *lzc, uint l, uint row0, ROUTE_TBL FP &p) {
   for (uint cc = 0; cc < 8; cc++) {
     const uint ch = 8 * c.sg + cc;
     float ein = carry[ch];
@@ -171,7 +172,7 @@ static inline void scan_back(threadgroup float *S, threadgroup float *carry, thr
 }
 // the gates' gradients from the states' (D in S): z: m D (h~ - h_{t-1}) z (1 - z); h~: m D z (1 - h~^2)
 static inline void gates_back(threadgroup const float *S, Lanes c, device const float *mask, device const half *lzc, device const float *lh, device const float *h0,
-                              uint l, uint row0, constant FP &p, thread float (&dz)[2][8], thread float (&dc)[2][8]) {
+                              uint l, uint row0, ROUTE_TBL FP &p, thread float (&dz)[2][8], thread float (&dc)[2][8]) {
   for (uint s = 0; s < 2; s++) {
     const uint row = row_of(c, s); const LanePos lp = lane_pos(row0 + row, p);
     float Dh[8]; s_get(S, row, c, Dh);
@@ -195,7 +196,7 @@ static inline void gates_back(threadgroup const float *S, Lanes c, device const 
 kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float *h0 [[buffer(1)]], device const half *lzc [[buffer(2)]], device const float *lh [[buffer(3)]],
                       device const uint *lu [[buffer(4)]], constant Net &nw [[buffer(5)]], device const int8_t *wq [[buffer(6)]], device const float *wsc [[buffer(7)]],
                       constant FP &p [[buffer(8)]], device int8_t *gq [[buffer(9)]], device float *gs [[buffer(10)]], constant Grad &gr [[buffer(11)]],
-                      device const uint *seg [[buffer(12)]], device const float *dhp [[buffer(13)]], device const half *H [[buffer(16)]],
+                      device const float *dst [[buffer(13)]], device const half *H [[buffer(16)]],
                       uint2 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
   TILE_MEMORY
   threadgroup float carry[2][D], inj[2][2][D];   // [layer][channel]; [layer][the tile's refresh][channel]
@@ -204,15 +205,10 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
   if (t < 2 * D) carry[t / D][t % D] = 0;
   for (uint j = p.LT; j-- > 0;) {
     const uint row0 = (tg.x * p.LT + j) * TM;
-    { // the tile's two refreshes' contexts' state gradients, a thread a (layer, refresh, channel)
+    { // the tile's two refreshes' states' gradients (dst: the contexts', summed a refresh), a thread a (layer, refresh,
+      // channel)
       const uint l = t / 128, kk = t / 64 % 2, ch = t % 64; const LanePos lg = lane_pos(row0 + 32 * kk, p);
-      float acc = 0;
-      if (lg.valid) {
-        const uint i = lg.b * p.K + lg.pos / L, x0 = seg[2 * i], x1 = seg[2 * i + 1];
-        device const float *src = dhp + (size_t(task) * 2 + l) * p.Rp * D + ch;
-        for (uint tt = x0 / TM; x1 > x0 && tt <= (x1 - 1) / TM; tt++) acc += src[size_t(tt == x0 / TM ? x0 : tt * TM) * D];
-      }
-      inj[l][kk][ch] = acc;
+      inj[l][kk][ch] = lg.valid ? dst[((size_t(task) * p.B * p.K + lg.b * p.K + lg.pos / L) * 2 + l) * D + ch] : 0.0f;
     }
     tg_barrier();
     // layer 1: the recurrence back from the contexts' gradients alone
@@ -220,25 +216,38 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     tg_barrier();
     float dz[2][8], dc[2][8], x[2][8];
     gates_back(S, c, mask, lzc, lh, h0, 1, row0, p, dz, dc);
-    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH1 + 64, task));
-    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH1 + 64, task));
+    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH1 + 64, task), gr.T);
+    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH1 + 64, task), gr.T);
     dgrad_block(x, dz, nw.m[M_ZH1], 0, true, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH1, task), row0, 128);
     dgrad_block(x, dc, nw.m[M_ZH1], 1, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH1, task), row0, 128);
     // x1's gradient: down0's dY; layer 0's feed-forward back
-    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_DOWN0], D, task, 0, RT, row0, seed_of(p.seed, S_LDOWN0 + 64, task));
+    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_DOWN0], D, task, 0, RT, row0, seed_of(p.seed, S_LDOWN0 + 64, task), gr.T);
     quant(x, S, X, H, c, A, sA, seed_of(p.seed, S_LDOWN0, task), row0, 64, 0);
     ffn_back(x, S, A, X, Bq, sA, sB, cm, nw.m[M_UP0], nw.m[M_DOWN0], wq, wsc, H, c, lu + size_t(row0) * 6, 6, TM, gq, gs, gr.m[M_UP0], task, RT, row0,
-             seed_of(p.seed, S_LUP0 + 64, task), seed_of(p.seed, S_LUP0, task));
+             seed_of(p.seed, S_LUP0 + 64, task), seed_of(p.seed, S_LUP0, task), gr.T);
     // layer 0: the recurrence back from xm0's gradient (every position) and the contexts'
     for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]);
     tg_barrier();
     scan_back(S, carry[0], inj[0], true, c, mask, lzc, 0, row0, p);
     tg_barrier();
     gates_back(S, c, mask, lzc, lh, h0, 0, row0, p, dz, dc);
-    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH0 + 64, task));
-    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH0 + 64, task));
+    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH0 + 64, task), gr.T);
+    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH0 + 64, task), gr.T);
     dgrad_block(x, dz, nw.m[M_ZH0], 0, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH0, task), row0, 128);
     dgrad_block(x, dc, nw.m[M_ZH0], 1, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH0, task), row0, 128);
-    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_INP], D, task, 0, RT, row0, seed_of(p.seed, S_LINP + 64, task));
+    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_INP], D, task, 0, RT, row0, seed_of(p.seed, S_LINP + 64, task), gr.T);
   }
+}
+
+// the states' gradients from the contexts' (ctx_bwd's dhp: a refresh's contexts summed in each tile, at the row its rows
+// begin there), summed over the tiles its rows span (seg [i] its rows [x0, x1)): dst [task][B K][2][D] as st, a thread a
+// (task, refresh, layer, channel), exactly T B K 2 D of them
+kernel void states_grad(device const float *dhp [[buffer(0)]], device const uint *seg [[buffer(1)]], device float *dst [[buffer(2)]], constant FP &p [[buffer(8)]],
+                        uint gid [[thread_position_in_grid]]) {
+  const uint n = p.B * p.K * 2 * D;   // dispatched T n threads (T tasks)
+  const uint task = gid / n, i = gid % n / (2 * D), l = gid % (2 * D) / D, ch = gid % D, x0 = seg[2 * i], x1 = seg[2 * i + 1];
+  device const float *src = dhp + (size_t(task) * 2 + l) * p.Rp * D + ch;
+  float acc = 0;
+  for (uint tt = x0 / TM; x1 > x0 && tt <= (x1 - 1) / TM; tt++) acc += src[size_t(tt == x0 / TM ? x0 : tt * TM) * D];
+  dst[gid] = acc;
 }

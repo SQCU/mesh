@@ -12,11 +12,13 @@ enum : uint { FS = 40 };
 // roofline's step): each draw's score function under the learning forward's w (its row's: d.row),
 // psi(token) - E_p[psi] over its table (split.h, as the simulator's sampler and route_draw_score), its table's splits
 // across the eight lanes in contiguous chunks, the reductions over the eight (xor 1, 2, 4), times its importance ratio
-// pi_current(token) / pi_behaviour(token) (wb: the w it was drawn under) -> diff [draw][FS]; ll [draw]: the log ratio ----
+// pi_current(token) / pi_behaviour(token) (wb: the w it was drawn under) -> diff [draw][FS]; ll [draw]: the log ratio; lp
+// [draw]: log pi_current(token) ----
 static inline float sum8(float v) { v += simd_shuffle_xor(v, ushort(1)); v += simd_shuffle_xor(v, ushort(2)); return v + simd_shuffle_xor(v, ushort(4)); }
 static inline float max8(float v) { v = max(v, simd_shuffle_xor(v, ushort(1))); v = max(v, simd_shuffle_xor(v, ushort(2))); return max(v, simd_shuffle_xor(v, ushort(4))); }
 kernel void credit_draws(device const route_draw *draws [[buffer(0)]], device const float *wb [[buffer(1)]], device const float *wc [[buffer(2)]],
-                         device float *diff [[buffer(3)]], device float *ll [[buffer(4)]], constant uint &n [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+                         device float *diff [[buffer(3)]], device float *ll [[buffer(4)]], constant uint &n [[buffer(5)]], device float *lp [[buffer(6)]],
+                         uint gid [[thread_position_in_grid]]) {
   const uint i = gid / 8, gl = gid % 8;
   const bool valid = i < n;   // a group past the end still joins its SIMD group's shuffles
   route_draw d;
@@ -46,7 +48,7 @@ kernel void credit_draws(device const route_draw *draws [[buffer(0)]], device co
     const float e = sum8(cur.e[f] * sc) / Ssum;
     if (valid && f % 8 == gl) diff[size_t(i) * FS + f] = ratio * (psi[f] - e);
   }
-  if (valid && gl == 0) ll[i] = logRatio;
+  if (valid && gl == 0) { ll[i] = logRatio; lp[i] = lgTok - (M + log(Ssum)); }
 }
 // a thread a (task, row, feature): dw [task][row][f] = the row's draws' (first[row] .. first[row + 1]) diff, in order,
 // each times its advantage (task 0: 1, 1: a1, 2: a2), times the task's scale (task 0: scale0[row], else `scale`)
