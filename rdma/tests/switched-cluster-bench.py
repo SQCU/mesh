@@ -27,15 +27,16 @@ ROOT_ADDRESS = '10.0.0.14'
 SIZES = [6144, 24576, 98304, 393216, 1572864, 3145728, 12582912]
 
 
+ROOT_NUMBER = 371057962   # Studio-3, the bootstrap root's node (reached at ROOT_ADDRESS on the mesh)
+
+
 def ordered(found):
-    """rank 0 the bootstrap root's node, the mini last, the rest by node number"""
-    root = [n for n in found if n.addr == ROOT_ADDRESS or ROOT_ADDRESS in (n.ula or '')]
-    mini = [n for n in found if n.number == nodes_.MINI]
-    rest = sorted((n for n in found if n not in root and n not in mini), key=lambda n: n.number)
-    if len(root) != 1 or len(mini) != 1:
-        raise SystemExit(f'the cluster as discovered has no single bootstrap root at {ROOT_ADDRESS} or no Mac mini: '
-                         + ', '.join(f'{n.number} {n.addr}' for n in found))
-    return root + rest + mini
+    """rank 0 the bootstrap root's node (Studio-3 by its node number, whatever address discovery reports; else the
+    lowest number), the mini last, the rest by node number. Always an order: every discovered node takes part."""
+    by = sorted(found, key=lambda n: n.number)
+    root = [n for n in by if n.number == ROOT_NUMBER or n.addr == ROOT_ADDRESS or ROOT_ADDRESS in (n.ula or '')][:1] or by[:1]
+    mini = [n for n in by if n.number == nodes_.MINI and n not in root]
+    return root + [n for n in by if n not in root and n not in mini] + mini
 
 
 def phase(found, out, tag, branch, sizes, relay_mini, port):
