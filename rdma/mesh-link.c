@@ -149,17 +149,29 @@ static void switch_receives(struct port *port,uint32_t j){
   const uint32_t lane=MESH_LANE_FIRST+j;struct lane_state *state=l->lane+lane;
   const uint64_t frames=lane_frames(port,j),most=state->frame_capacity/frames<64?state->frame_capacity/frames:64;
   const struct mesh_queue *queue=l->provider.queues+lane;
+  /* the receives owed, as a list a post_recv (its call's cost the list's, not each receive's) */
+  enum { BATCH=16 };
   while(state->posted-state->got<most){
-    const uint32_t s=mesh_switch_take(sw);
-    if(s==UINT32_MAX)return;
-    atomic_store_explicit(&sw->slot[s].state,SLOT_RECEIVE,memory_order_relaxed);sw->slot[s].lane=switch_lane(port,j);
-    struct ibv_sge span=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,frames*MESH_FRAME});
-    struct ibv_recv_wr request={.wr_id=((uint64_t)lane<<48)|s,.sg_list=&span,.num_sge=1},*bad;
-    const int error=queue->receive(queue->pair,&request,&bad);
-    if(error){mesh_switch_give(sw,s);lane_lost(port,lane,error<0?-error:error);return;}
-    state->posted++;
+    struct ibv_recv_wr request[BATCH];struct ibv_sge span[BATCH];uint32_t slot[BATCH],n=0;
+    while(n<BATCH && state->posted+n-state->got<most){
+      const uint32_t s=mesh_switch_take(sw);
+      if(s==UINT32_MAX)break;
+      atomic_store_explicit(&sw->slot[s].state,SLOT_RECEIVE,memory_order_relaxed);sw->slot[s].lane=switch_lane(port,j);
+      span[n]=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,frames*MESH_FRAME});
+      request[n]=(struct ibv_recv_wr){.wr_id=((uint64_t)lane<<48)|s,.sg_list=span+n,.num_sge=1};
+      if(n)request[n-1].next=request+n;
+      slot[n++]=s;
+    }
+    if(!n)return;
+    struct ibv_recv_wr *bad=NULL;
+    const int error=queue->receive(queue->pair,request,&bad);
+    const uint32_t made=error?(bad>=request && bad<request+n?(uint32_t)(bad-request):0):n;
+    for(uint32_t k=made;k<n;k++)mesh_switch_give(sw,slot[k]);
+    state->posted+=made;
     struct mesh_lanes *x=lanes_of(port,j/2);
     atomic_store_explicit(&x->posts[1].posted[j&1],state->posted,memory_order_relaxed);
+    if(error){lane_lost(port,lane,error<0?-error:error);return;}
+    if(n<BATCH)return;
   }
 }
 /* the lane's outbox posted: a slot a SEND, while the lane's frame gate and its ring of units hold one more */
@@ -169,24 +181,40 @@ static void switch_sends(struct port *port,uint32_t j){
   const uint32_t lane=MESH_LANE_FIRST+j,at=switch_lane(port,j);struct lane_state *state=l->lane+lane;
   const struct frames each={lane_frames(port,j)};
   const struct mesh_queue *queue=l->provider.queues+lane;
+  /* every slot the outbox holds, as many as the lane's units and frame gate take, one post_send for them all (the
+     provider's call costs about 0.85 us whatever it carries: a request list a call, not a call a request) */
+  enum { BATCH=16 };
   for(;;){
-    if(state->sent-state->done>=MESH_LANE_UNITS || !gate_holds(l->gate+lane,each))return;
-    const uint32_t s=mesh_switch_peek(sw,at);
-    if(s==UINT32_MAX)return;
-    struct ibv_sge span=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,each.n*MESH_FRAME});
-    struct ibv_send_wr request={.wr_id=gate_post(l->gate+lane,lane,each),.sg_list=&span,.num_sge=1,
-                                .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+    struct ibv_send_wr request[BATCH];struct ibv_sge span[BATCH];uint32_t slot[BATCH],n=0;
+    while(n<BATCH && state->sent+n-state->done<MESH_LANE_UNITS && gate_holds(l->gate+lane,each)){
+      const uint32_t s=mesh_switch_peek_at(sw,at,n);
+      if(s==UINT32_MAX)break;
+      span[n]=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,each.n*MESH_FRAME});
+      request[n]=(struct ibv_send_wr){.wr_id=gate_post(l->gate+lane,lane,each),.sg_list=span+n,.num_sge=1,
+                                      .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+      if(n)request[n-1].next=request+n;
+      slot[n++]=s;
+    }
+    if(!n)return;
+    struct ibv_send_wr *bad=NULL;
     const uint64_t posting=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-    const int error=queue->send(queue->pair,&request,&bad);
-    if(error){l->gate[lane].posted.n-=each.n;lane_lost(port,lane,error<0?-error:error);return;}
-    mesh_switch_pop(sw,at);
+    const int error=queue->send(queue->pair,request,&bad);
     const uint64_t posted=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-    MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posting>sw->slot[s].posted?posting-sw->slot[s].posted:0);
+    /* the requests before `bad` posted (all of them without an error) */
+    const uint32_t made=error?(bad>=request && bad<request+n?(uint32_t)(bad-request):0):n;
+    l->gate[lane].posted.n-=(uint64_t)(n-made)*each.n;
     MESH_SWITCH_COUNT(sw,port->index,post_call_ns,posted-posting);
-    state->sent_at[state->sent&(MESH_LANE_UNITS-1)]=posted;
-    state->slot[state->sent&(MESH_LANE_UNITS-1)]=s;
-    __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;
+    for(uint32_t k=0;k<made;k++){
+      const uint32_t s=slot[k];
+      mesh_switch_pop(sw,at);
+      MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posting>sw->slot[s].posted?posting-sw->slot[s].posted:0);
+      state->sent_at[state->sent&(MESH_LANE_UNITS-1)]=posted;
+      state->slot[state->sent&(MESH_LANE_UNITS-1)]=s;
+      __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;
+    }
     atomic_store_explicit(&lanes_of(port,j/2)->posts[0].posted[j&1],state->sent,memory_order_relaxed);
+    if(error){lane_lost(port,lane,error<0?-error:error);return;}
+    if(n<BATCH)return;
   }
 }
 /* design/transport.md: the link's SEND completions (a lane no longer served drops its own; a failed one fails the

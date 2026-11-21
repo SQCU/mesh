@@ -164,9 +164,8 @@ def _install_locked(source, commit, allow_source_transition):
         if output.returncode:
             raise RuntimeError(f'mesh-user.sh failed ({output.returncode}): {output.stderr.strip()} {output.stdout.strip()}')
         print(output.stdout, end='', flush=True)
-        # the job started now, not at the end of launchd's ThrottleInterval (60 s) from the old bridge's exit: a
-        # bootstrap of a label that ran within it is held that long, which the 60 s wait met at its end (09f8585a5)
-        run('launchctl', 'kickstart', service, check=False)
+        # (the minute 09f8585a5's 60 s wait met at its end was mesh-user.sh's SIGHUP to the job it had just loaded,
+        # which ended the heartbeat before it held the signal, and launchd's ThrottleInterval held the respawn 60 s)
         wait_bridge(source, service)
         # A module loaded from this immutable source must verify the installed package too.
         check_package(source)

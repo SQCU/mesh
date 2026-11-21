@@ -47,8 +47,7 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
 # the new images run once (each prints its usage and ends): the system's first-run assessment of a newly signed binary
-# (syspolicyd, about 60 s for mesh-heartbeat on 2026-11-20) is made here, while any running bridge serves, not at the
-# launchd job's start
+# (syspolicyd's scan) is made here, while any running bridge serves, not at the launchd job's start
 "$source/rdma/mesh-heartbeat" >/dev/null 2>&1; "$source/rdma/mesh-flow" >/dev/null 2>&1
 [ "${MESH_USER_PREPARE:-}" = 1 ] && exit 0
 configuration="$support/io.mesh.bridge/configuration.plist"; renew=
@@ -71,6 +70,9 @@ cat > "$launchd_agents/io.mesh.bridge.plist.new" <<PL
 PL
 out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
+# a job loaded just now runs the new images already: no SIGHUP for it (sent within its first milliseconds, before the
+# heartbeat holds the signal, it ended the heartbeat, and launchd held the respawn its ThrottleInterval, 60 s: 2026-11-20)
+case $out in *" loaded in "*) renew=; before=$images ;; esac
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
        echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the region kept"; }

@@ -61,7 +61,6 @@
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view holds */
 #define MESH_SWITCH_HEAD 1088u                               /* a slot's name, the piece's bytes after it */
 #define MESH_SWITCH_UNITS 2u                                 /* a transfer's consecutive units a slot carries, at most */
-#define MESH_SWITCH_PACK 8u                                  /* a transfer's units from which a slot carries several */
 #define MESH_SWITCH_SHORT 2u                                 /* a short lane's frames (a link's first data lane, where it has two) */
 #define MESH_SWITCH_WINDOW 8u                                /* executions of a transfer in progress at once */
 #define MESH_SWITCH_RING 4096u                               /* a lane's outbox */
@@ -298,6 +297,12 @@ static inline int mesh_switch_push(struct mesh_switch *sw,uint32_t lane,uint32_t
 /* the next slot on the lane's outbox, UINT32_MAX none (one consumer: the lane's child) */
 static inline uint32_t mesh_switch_peek(struct mesh_switch *sw,uint32_t lane){
   const uint64_t at=atomic_load_explicit(&sw->lane[lane].head,memory_order_relaxed);
+  struct mesh_switch_cell *c=sw->ring[lane]+at%MESH_SWITCH_RING;
+  return atomic_load_explicit(&c->sequence,memory_order_acquire)==at+1?(uint32_t)atomic_load_explicit(&c->slot,memory_order_relaxed):UINT32_MAX;
+}
+/* the slot k places behind the next on the lane's outbox, UINT32_MAX none (its consumer's) */
+static inline uint32_t mesh_switch_peek_at(struct mesh_switch *sw,uint32_t lane,uint32_t k){
+  const uint64_t at=atomic_load_explicit(&sw->lane[lane].head,memory_order_relaxed)+k;
   struct mesh_switch_cell *c=sw->ring[lane]+at%MESH_SWITCH_RING;
   return atomic_load_explicit(&c->sequence,memory_order_acquire)==at+1?(uint32_t)atomic_load_explicit(&c->slot,memory_order_relaxed):UINT32_MAX;
 }
@@ -1074,12 +1079,11 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
   atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
   sw->slot[s].staged=now;sw->slot[s].landed=now;sw->slot[s].wait_word=0;
   mesh_switch_count(m,p,0,table,t,e,span);
-  /* the transfer's next units, where ready and the slot holds them: claimed with it, one SEND for them all.  Only a
-     transfer of MESH_SWITCH_PACK units or more packs: a few units go faster as as many SENDs over parallel cables
-     (TP-4 B=8, two units: 6.26 ms/step packed against 5.90), many faster as fewer, fuller SENDs (B=128: 14.9 against 15.9) */
+  /* the transfer's next units, where ready and the slot holds them: claimed with it, one SEND for them all (TP-4
+     B=32 8.24 ms/step packed against 8.57 not, B=128 14.9 against 15.9, B=8 within its noise either way) */
   struct mesh_dma_span unit[MESH_SWITCH_UNITS];unit[0]=bytes;
   uint32_t units=1;
-  while(valid && units<MESH_SWITCH_UNITS && table[t].units>=MESH_SWITCH_PACK){
+  while(valid && units<MESH_SWITCH_UNITS){
     uint64_t e2,span2;uint32_t t2;
     const struct mesh_dma_span next=span+units<table[t].units?((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span+units]:(struct mesh_dma_span){0,0};
     if(span+units>=table[t].units || !mesh_switch_locate(p,table,0,n+units,&e2,&t2,&span2) || e2!=e || t2!=t || span2!=span+units ||
