@@ -11,6 +11,8 @@
 # bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its region kept (design/transport.md section 2).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes).
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT]  (~/mesh)
+# MESH_USER_PREPARE=1: the build and the Python environment alone (everything before the bridge's configuration and its
+# launchd agent), so an installer builds a new source while the running bridge serves on (rdma/mesh_install.py)
 set -u
 if [ $# -lt 1 ] || [ $# -gt 2 ] || [ ! -f "$1" ]; then
   echo "mesh-user.sh CONFIGURATION [CHECKOUT]: the node's bridge configuration document (JSON, TOML or YAML; etc/bridge/README.md) is required, the bridge has no default" >&2
@@ -42,6 +44,7 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   [ "$status" = 0 ] || exit "$status"
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
+[ "${MESH_USER_PREPARE:-}" = 1 ] && exit 0
 configuration="$support/io.mesh.bridge/configuration.plist"; renew=
 "$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration.new" || exit 1
 if cmp -s "$configuration.new" "$configuration"; then rm -f "$configuration.new"

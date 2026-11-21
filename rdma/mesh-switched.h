@@ -187,7 +187,8 @@ struct mesh_switch_counters {
   _Atomic uint64_t forwards,forward_ns,groups,copies,kept;
   _Atomic uint64_t posts,post_wait_ns,sent,send_ns;
   _Atomic uint64_t landed,delivered,deliver_wait_ns,hops[4];
-  _Atomic uint64_t credits,credits_taken,refreshes,refresh_ns,spare[8];
+  _Atomic uint64_t credits,credits_taken,refreshes,refresh_ns;
+  _Atomic uint64_t unplaced[8];     /* deliveries put off, by why (mesh_switch_unplaced) */
 };
 struct mesh_switch {
   uint32_t magic,slots;
@@ -1198,6 +1199,29 @@ static inline uint64_t mesh_switch_waits_on(const struct hdr *m,const struct mes
   return 0;
 }
 
+/* why a destination here was not placed: 0 no program of the key toward its source, 1 its table or bounds, 2 the
+   program closed before it, 3 the step not issued, 4 its gate short, 5 past the transfer's window, 6 its cell not
+   yet made free, 7 none of these (placed meanwhile) */
+static inline uint32_t mesh_switch_unplaced(const struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest){
+  struct mesh_node *x=mesh_switch_order((struct hdr *)m,name->source);
+  const struct mesh_declared *p=NULL;
+  for(uint32_t k=0;x && k<MESH_PROGRAMS && !p;k++)
+    if(mesh_switch_owned(x->program+k) && x->program[k].program.key==name->key && x->program[k].progress[1])p=x->program+k;
+  if(!p)return 0;
+  const struct mesh_crossing *table=mesh_switch_table(m,p,1);
+  if(!table || dest->transfer>=p->program.transfers[1])return 1;
+  const struct mesh_crossing *t=table+dest->transfer;
+  const uint64_t e=name->execution;
+  if(e>=atomic_load_explicit(&p->closed,memory_order_acquire))return 2;
+  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=e*p->program.period+t->step)return 3;
+  if(!mesh_switch_ready(m,p,t,1,e,dest->span))return 4;
+  const struct mesh_switch_transfer *progress=mesh_switch_progress((struct hdr *)m,p,1)+dest->transfer;
+  if(e>=atomic_load_explicit(&progress->complete,memory_order_acquire)+MESH_SWITCH_WINDOW)return 5;
+  const struct mesh_switch_cell_head *c=mesh_switch_cell((struct hdr *)m,p,1,dest->transfer,e);
+  if(atomic_load_explicit(&c->tag,memory_order_acquire)!=e+1)return 6;
+  return 7;
+}
+
 /* ---- The forward: a held slot's destinations here delivered, the rest switched onto lanes --------------------------
    Slot s holds a piece (staged here, or landed).  Its destinations at this node are delivered, the others split
    (mesh_switch_choose), every group in a copy of the slot but the last, which goes in the slot itself where nothing
@@ -1236,6 +1260,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
     }else{
       kept[nkept++]=name->dest[i];
       waits=mesh_switch_waits_on(m,found,name,name->dest+i,&wait_value);
+      if(!waits)MESH_SWITCH_COUNT(sw,ring,unplaced[mesh_switch_unplaced(m,name,name->dest+i)],1);
     }
   }
   const struct mesh_switch_name sending=*name;

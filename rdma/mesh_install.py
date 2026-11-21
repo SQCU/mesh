@@ -36,6 +36,26 @@ def wait_for(read, accept, seconds, description):
         time.sleep(0.25)
 
 
+def wait_bridge(source, service):
+    """The new bridge up (mesh-stat), its region registered in under a second once it runs; a job that is not running
+    (its process gone: a failed start) ends the wait at once rather than at a bound"""
+    def read():
+        state = run('launchctl', 'print', service, check=False).stdout
+        running = bool(re.search(r'^\s*state = running', state, re.M))
+        stat = json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1])
+        return {'running': running, **stat}
+    end = time.monotonic() + 30
+    while True:
+        value = read()
+        if value.get('up') is True:
+            return value
+        if not value['running'] and time.monotonic() > end - 25:
+            raise RuntimeError(f'installed bridge is not running: {value}')
+        if time.monotonic() >= end:
+            raise RuntimeError(f'installed bridge did not come up: {value}')
+        time.sleep(0.1)
+
+
 def disabled(domain):
     result = run('launchctl', 'print-disabled', domain)
     return bool(re.search(r'"io\.mesh\.bridge"\s*=>\s*(true|disabled)', result.stdout))
@@ -125,6 +145,12 @@ def _install_locked(source, commit, allow_source_transition):
     if initial['clients']:
         raise RuntimeError(f'live client holders prevent install: {initial["clients"]}')
     released = unloaded = False
+    # the new source built (its images, its Python environment) while the running bridge serves on: the node is
+    # without a bridge only from the old one's release to the new one's start, not through a build
+    prepared = subprocess.run([str(source / 'bin/mesh-user.sh'), str(config), str(source)], capture_output=True, text=True,
+                              env={**os.environ, 'MESH_USER_PREPARE': '1'})
+    if prepared.returncode:
+        raise RuntimeError(f'mesh-user.sh (prepare) failed ({prepared.returncode}): {prepared.stderr.strip()} {prepared.stdout.strip()}')
     try:
         if changing:
             # Heartbeat owns expiration and unlink. Do not unlink a live region ourselves.
@@ -135,8 +161,10 @@ def _install_locked(source, commit, allow_source_transition):
             unloaded = True
         output = run(source / 'bin/mesh-user.sh', config, source)
         print(output.stdout, end='', flush=True)
-        wait_for(lambda: json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1]),
-                 lambda v: v.get('up') is True, 300, 'installed bridge did not start')
+        # the job started now, not at the end of launchd's ThrottleInterval (60 s) from the old bridge's exit: a
+        # bootstrap of a label that ran within it is held that long, which the 60 s wait met at its end (09f8585a5)
+        run('launchctl', 'kickstart', service, check=False)
+        wait_bridge(source, service)
         # A module loaded from this immutable source must verify the installed package too.
         check_package(source)
         result = verify_active(source, commit)

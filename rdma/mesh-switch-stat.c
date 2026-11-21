@@ -35,7 +35,9 @@ int main(void){
     printf("\"posts\":%llu,\"post_wait_ns\":%llu,\"sent\":%llu,\"send_ns\":%llu,",U(c->posts),U(c->post_wait_ns),U(c->sent),U(c->send_ns));
     printf("\"landed\":%llu,\"delivered\":%llu,\"deliver_wait_ns\":%llu,\"hops\":[%llu,%llu,%llu,%llu],",U(c->landed),U(c->delivered),U(c->deliver_wait_ns),
            U(c->hops[0]),U(c->hops[1]),U(c->hops[2]),U(c->hops[3]));
-    printf("\"credits\":%llu,\"credits_taken\":%llu,\"refreshes\":%llu,\"refresh_ns\":%llu}",U(c->credits),U(c->credits_taken),U(c->refreshes),U(c->refresh_ns));
+    printf("\"credits\":%llu,\"credits_taken\":%llu,\"refreshes\":%llu,\"refresh_ns\":%llu,\"unplaced\":[",U(c->credits),U(c->credits_taken),U(c->refreshes),U(c->refresh_ns));
+    for(int k=0;k<8;k++)printf("%s%llu",k?",":"",U(c->unplaced[k]));
+    printf("]}");
   }
   printf("],\"lanes\":[");
   int first=1;
