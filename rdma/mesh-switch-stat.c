@@ -37,7 +37,7 @@ int main(void){
            U(c->hops[0]),U(c->hops[1]),U(c->hops[2]),U(c->hops[3]));
     printf("\"credits\":%llu,\"credits_taken\":%llu,\"refreshes\":%llu,\"refresh_ns\":%llu,\"unplaced\":[",U(c->credits),U(c->credits_taken),U(c->refreshes),U(c->refresh_ns));
     for(int k=0;k<8;k++)printf("%s%llu",k?",":"",U(c->unplaced[k]));
-    printf("]}");
+    printf("],\"post_call_ns\":%llu}",U(c->post_call_ns));
   }
   printf("],\"lanes\":[");
   int first=1;

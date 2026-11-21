@@ -27,7 +27,9 @@ fi
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
-make -C "$source/rdma" all install >/dev/null || exit 1
+# MESH_USER_BUILT=1: the build made already by a MESH_USER_PREPARE run of this source (its kernels' binary archive is
+# made anew at every make: about a minute, not to be spent with no bridge running)
+[ "${MESH_USER_BUILT:-}" = 1 ] || make -C "$source/rdma" all install >/dev/null || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
 bound=$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))') || exit 1

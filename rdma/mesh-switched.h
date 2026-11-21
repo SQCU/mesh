@@ -61,6 +61,7 @@
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view holds */
 #define MESH_SWITCH_HEAD 1088u                               /* a slot's name, the piece's bytes after it */
 #define MESH_SWITCH_UNITS 2u                                 /* a transfer's consecutive units a slot carries, at most */
+#define MESH_SWITCH_PACK 8u                                  /* a transfer's units from which a slot carries several */
 #define MESH_SWITCH_SHORT 2u                                 /* a short lane's frames (a link's first data lane, where it has two) */
 #define MESH_SWITCH_WINDOW 8u                                /* executions of a transfer in progress at once */
 #define MESH_SWITCH_RING 4096u                               /* a lane's outbox */
@@ -189,6 +190,7 @@ struct mesh_switch_counters {
   _Atomic uint64_t landed,delivered,deliver_wait_ns,hops[4];
   _Atomic uint64_t credits,credits_taken,refreshes,refresh_ns;
   _Atomic uint64_t unplaced[8];     /* deliveries put off, by why (mesh_switch_unplaced) */
+  _Atomic uint64_t post_call_ns;    /* the posts' own time (the provider's post_send) */
 };
 struct mesh_switch {
   uint32_t magic,slots;
@@ -1072,10 +1074,12 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
   atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
   sw->slot[s].staged=now;sw->slot[s].landed=now;sw->slot[s].wait_word=0;
   mesh_switch_count(m,p,0,table,t,e,span);
-  /* the transfer's next units, where ready and the slot holds them: claimed with it, one SEND for them all */
+  /* the transfer's next units, where ready and the slot holds them: claimed with it, one SEND for them all.  Only a
+     transfer of MESH_SWITCH_PACK units or more packs: a few units go faster as as many SENDs over parallel cables
+     (TP-4 B=8, two units: 6.26 ms/step packed against 5.90), many faster as fewer, fuller SENDs (B=128: 14.9 against 15.9) */
   struct mesh_dma_span unit[MESH_SWITCH_UNITS];unit[0]=bytes;
   uint32_t units=1;
-  while(valid && units<MESH_SWITCH_UNITS){
+  while(valid && units<MESH_SWITCH_UNITS && table[t].units>=MESH_SWITCH_PACK){
     uint64_t e2,span2;uint32_t t2;
     const struct mesh_dma_span next=span+units<table[t].units?((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span+units]:(struct mesh_dma_span){0,0};
     if(span+units>=table[t].units || !mesh_switch_locate(p,table,0,n+units,&e2,&t2,&span2) || e2!=e || t2!=t || span2!=span+units ||

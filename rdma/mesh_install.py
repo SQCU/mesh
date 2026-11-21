@@ -159,7 +159,10 @@ def _install_locked(source, commit, allow_source_transition):
             wait_for(read_state, lambda v: not v['present'], 60, 'old region still present')
             run('launchctl', 'bootout', service)
             unloaded = True
-        output = run(source / 'bin/mesh-user.sh', config, source)
+        output = subprocess.run([str(source / 'bin/mesh-user.sh'), str(config), str(source)], capture_output=True, text=True,
+                                env={**os.environ, 'MESH_USER_BUILT': '1'})
+        if output.returncode:
+            raise RuntimeError(f'mesh-user.sh failed ({output.returncode}): {output.stderr.strip()} {output.stdout.strip()}')
         print(output.stdout, end='', flush=True)
         # the job started now, not at the end of launchd's ThrottleInterval (60 s) from the old bridge's exit: a
         # bootstrap of a label that ran within it is held that long, which the 60 s wait met at its end (09f8585a5)

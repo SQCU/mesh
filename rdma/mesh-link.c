@@ -176,11 +176,13 @@ static void switch_sends(struct port *port,uint32_t j){
     struct ibv_sge span=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,each.n*MESH_FRAME});
     struct ibv_send_wr request={.wr_id=gate_post(l->gate+lane,lane,each),.sg_list=&span,.num_sge=1,
                                 .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+    const uint64_t posting=clock_gettime_nsec_np(CLOCK_MONOTONIC);
     const int error=queue->send(queue->pair,&request,&bad);
     if(error){l->gate[lane].posted.n-=each.n;lane_lost(port,lane,error<0?-error:error);return;}
     mesh_switch_pop(sw,at);
     const uint64_t posted=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-    MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posted>sw->slot[s].posted?posted-sw->slot[s].posted:0);
+    MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posting>sw->slot[s].posted?posting-sw->slot[s].posted:0);
+    MESH_SWITCH_COUNT(sw,port->index,post_call_ns,posted-posting);
     state->sent_at[state->sent&(MESH_LANE_UNITS-1)]=posted;
     state->slot[state->sent&(MESH_LANE_UNITS-1)]=s;
     __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;
