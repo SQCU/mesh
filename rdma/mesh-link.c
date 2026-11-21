@@ -1003,10 +1003,8 @@ static void *switch_watch(void *unused){
     for(uint32_t i=0;i<switch_holds;i++)if(!mesh_switch_forward(M,sw,switch_held[i],at,MESH_PORTS))switch_held[kept++]=switch_held[i];
     switch_holds=kept;
     pthread_mutex_unlock(&switch_lock);
-    /* the next refresh SWITCH_REFRESH_NS after this one began: the pause read on the clock (a sleep of 50 us ran about
-       460 us, the system's timer slack for the bridge's launchd session, which made the lines and the cost-to-go a
-       B=128 crossing's age or more) */
-    while(!stop && clock_gettime_nsec_np(CLOCK_MONOTONIC)-t0<SWITCH_REFRESH_NS)sched_yield();
+    struct timespec pause={0,(long)SWITCH_REFRESH_NS};
+    nanosleep(&pause,NULL);
   }
   return NULL;
 }
