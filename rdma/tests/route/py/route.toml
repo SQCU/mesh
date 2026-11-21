@@ -42,3 +42,6 @@ hosts = ["mdots-Mac-Studio-3-ts", "m5ult2-ts", "mdots-Mac-Studio-ts", "mdots-Mac
 root = "10.0.0.14"                      # rank 0's address on the mesh, for the bootstrap
 dir = "~/route-int8/w"                  # where the sources unpack and build on each host
 python = "~/mesh-runtime/runtime-current/.venv/bin/python"   # bin/mesh-runtime-install.sh's runtime
+
+[sims]                                  # python -m route sims: the environment alone
+groups = 64                             # case groups (4 runs each) run at once
