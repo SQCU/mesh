@@ -44,6 +44,10 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   [ "$status" = 0 ] || exit "$status"
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
+# the new images run once (each prints its usage and ends): the system's first-run assessment of a newly signed binary
+# (syspolicyd, about 60 s for mesh-heartbeat on 2026-11-20) is made here, while any running bridge serves, not at the
+# launchd job's start
+"$source/rdma/mesh-heartbeat" >/dev/null 2>&1; "$source/rdma/mesh-flow" >/dev/null 2>&1
 [ "${MESH_USER_PREPARE:-}" = 1 ] && exit 0
 configuration="$support/io.mesh.bridge/configuration.plist"; renew=
 "$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration.new" || exit 1

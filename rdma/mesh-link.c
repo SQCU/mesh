@@ -243,6 +243,7 @@ static void link_receive(struct port *port,uint32_t served){
    was staged is posted) */
 #define SWITCH_BURST 16u
 #define SWITCH_CREDIT_PASSES 1024u
+#define SWITCH_OWNED_PASSES 256u
 static void switch_stage(struct port *port){
   struct mesh_switch *sw=switch_of();
   uint32_t staged=0;
@@ -254,11 +255,20 @@ static void switch_stage(struct port *port){
   if(credits){l->credit_delivered=delivered;l->credit_passes=0;}
   /* the clock read where a piece is made, not each pass */
   uint64_t at=credits?clock_gettime_nsec_np(CLOCK_MONOTONIC):0;
-  for(uint32_t n=0;n<MESH_NODES && staged<SWITCH_BURST;n++){
-    struct mesh_node *x=mesh_node_at(M,n);
-    if(!atomic_load_explicit(&x->node,memory_order_acquire))continue;
-    for(uint32_t p=0;p<MESH_PROGRAMS && staged<SWITCH_BURST;p++){
-      struct mesh_declared *d=x->program+p;
+  /* the owned program slots, as last looked for (every SWITCH_OWNED_PASSES passes: a new declaration waits that many
+     passes at most, a few tens of microseconds), each read owned again */
+  if(!l->owned_passes--){
+    l->owned_passes=SWITCH_OWNED_PASSES;l->owned_count=0;
+    for(uint32_t n=0;n<MESH_NODES;n++){
+      struct mesh_node *x=mesh_node_at(M,n);
+      if(!atomic_load_explicit(&x->node,memory_order_acquire))continue;
+      for(uint32_t p=0;p<MESH_PROGRAMS;p++)if(mesh_switch_owned(x->program+p))l->owned[l->owned_count++]=(uint16_t)(n*MESH_PROGRAMS+p);
+    }
+  }
+  for(uint32_t i=0;i<l->owned_count && staged<SWITCH_BURST;i++){
+    {
+      struct mesh_node *x=mesh_node_at(M,l->owned[i]/MESH_PROGRAMS);
+      struct mesh_declared *d=x->program+l->owned[i]%MESH_PROGRAMS;
       if(!mesh_switch_owned(d))continue;
       uint32_t s;
       if(credits && mesh_switch_credit(M,sw,x,d,at,&s)){
@@ -323,6 +333,7 @@ static void port_pass(struct port *port,uint64_t *told){
     for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_sends(port,j);
   }
   if(served)link_send(port,served);
+  MESH_SWITCH_COUNT(switch_of(),port->index,passes,1);   /* the pass time is the wall time over these (the thread spins) */
   struct mesh_lanes *counted=lanes_of(port,0);
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}

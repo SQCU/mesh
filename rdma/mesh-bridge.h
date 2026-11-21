@@ -173,6 +173,10 @@ struct link {
   uint32_t *held,holds,held_room;
   /* the child's deliveries when it last looked for credits due, and its passes since (mesh-link.c switch_stage) */
   uint64_t credit_delivered,credit_passes;
+  /* the program slots owned when the child last looked (node slot x MESH_PROGRAMS + program), looked at again every
+     SWITCH_OWNED_PASSES passes (mesh-link.c switch_stage) */
+  uint16_t owned[MESH_NODES*MESH_PROGRAMS];
+  uint32_t owned_count,owned_passes;
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
