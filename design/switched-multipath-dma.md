@@ -81,4 +81,3 @@ no reset of a queue pair) leave one algorithm in place, close to multipath TCP:
   relay-only rank support in libnccl-mesh, the Python controller's route weights in its fluid model, and libmesh's
   generic multi-hop lowering (mesh_write_compile, mesh_routed_compile), which nothing compiles routes into now.
 - Item 6: tests/sim-switched.c (five nodes, timed wire) is in `make check`, and tests/sim-two-nodes.sh runs over it.
-- Item 7: rdma/tests/switched-cluster-bench.py runs it once the cluster is free.
