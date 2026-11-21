@@ -417,6 +417,8 @@ def main(argv):
             Q.padding()
         elif cmd == 'qnn-exchange':
             Q.exchange()
+        elif cmd == 'qnn-xbench':
+            r = cfg['run']; Q.xbench(native.load(cfg['run']['library']), ffi, r['rank'], r['world'], r['mesh_id'], int(rest[1]) if len(rest) > 1 else 5)
         elif cmd == 'qnn-i8mm':
             Q.i8mm_exact()
         elif cmd == 'qnn-deploy':

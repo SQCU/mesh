@@ -204,3 +204,24 @@ def exchange(K=4):
     emit({'record': 'qnn-exchange', 'stats': stats[0].tolist(), 'stats_identical_at_every_rank': bool(all((s == stats[0]).all() for s in stats)),
           'stats_vs_one_rank_largest_difference': float(np.abs(stats[0] - s1).max()), 'theta_identical_at_every_rank': bool(all((t == th[0]).all() for t in th[:3])),
           'theta_vs_one_rank_largest_difference': float(np.abs(th[0] - th[3]).max()), 'rows': [700 + 400, 900, 0]})
+
+
+def xbench(lib, ffi, rank, world, mesh_id, n=5, K=4):
+    """qnn.Exchange over the mesh (world ranks, rank on this host): n sums of known values (wrong elements counted),
+    then one learning step: this rank's microbatch (its own data; rank 1 none when world is 2: a rank without data
+    still steps), the step's exchange, its statistics and theta's checksum (every rank's must be the same)"""
+    mx.random.seed(21); model = qnn.Policy(); lr = qnn.Learner(model, 1e-3)
+    N = qnn.TASKS * lr.P + 8
+    ex = qnn.Exchange(lib, ffi, rank, world, mesh_id, N)
+    base = np.arange(N) % 7
+    wrong, ms = 0, []
+    for k in range(n):
+        t0 = time.perf_counter(); out = np.array(ex(mx.array((rank + 1 + k % 5 + base).astype(np.float32)))); ms.append((time.perf_counter() - t0) * 1e3)
+        wrong += int((out != world * (world + 1) / 2 + world * (k % 5 + base)).sum())
+    acc = lr.zero()
+    if not (world == 2 and rank == 1):
+        acc = lr.gradient(to_mx(batch(4, K, 500 + 100 * rank, np.random.default_rng(100 + rank), nd=1000)), acc)[0]
+    stats = np.array(lr.apply(acc, ex)); th = np.array(qnn.theta(model), np.float64)
+    lib.route_exchange_close()
+    emit({'record': 'qnn-xbench', 'rank': rank, 'world': world, 'rounds': n, 'floats': N, 'wrong': wrong, 'ms_median': float(np.median(ms)),
+          'stats': stats.tolist(), 'theta_sum': float(th.sum()), 'theta_sq': float((th * th).sum())})
