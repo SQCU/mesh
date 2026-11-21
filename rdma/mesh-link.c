@@ -949,15 +949,54 @@ static void switch_reclaim(struct port *port){
   pthread_mutex_unlock(&switch_lock);
 }
 /* the refresh, on a thread of its own: the view kept, the weights recomputed, what the parent holds forwarded */
+/* design/switched-multipath-dma.md: the trained routing policy in the bridge (rdma/tests/route forward.c on the CPU):
+   its theta read as the bridge starts from the POSIX shared memory object SWITCH_THETA (route_params_read's bytes, which
+   the trainer puts there: memory, never storage), where one is there; each refresh then runs the forward over this
+   node's tokens (the lanes from the carried state, then each context) and publishes the contexts' w, from which every
+   piece here draws its split (mesh_switch_choose).  With no theta, the design's rule (the earliest arrival) routes.  A
+   new theta is taken at the bridge's restart (SIGHUP to its heartbeat, the region kept) */
+#define SWITCH_THETA "/mesh-route-theta"
+static struct route_params switch_theta;
+static int switch_policy_on;
+static float switch_policy_state[2*ROUTE_D],*switch_policy_scratch;
+static int switch_policy_splits(void *unused,const struct mesh_switch_tokens *tokens,float w[MESH_SWITCH_CONTEXTS][SPLIT_FS]){
+  (void)unused;
+  _Static_assert(SPLIT_FS==ROUTE_FS && MESH_SWITCH_CONTEXTS>=1,"a context's w the forward's");
+  const int lanes=(int)(tokens->lanes<(uint32_t)ROUTE_L?tokens->lanes:(uint32_t)ROUTE_L);
+  route_forward_lanes(&switch_theta,&tokens->lane[0][0],lanes,switch_policy_state,switch_policy_scratch);
+  for(uint32_t c=0;c<tokens->contexts && c<MESH_SWITCH_CONTEXTS;c++)route_forward_context(&switch_theta,tokens->context[c],switch_policy_state,w[c]);
+  return 0;
+}
+static void switch_policy_load(void){
+  const int fd=shm_open(SWITCH_THETA,O_RDONLY,0);
+  if(fd<0)return;
+  struct stat st;
+  void *bytes=!fstat(fd,&st) && st.st_size>0?mmap(NULL,(size_t)st.st_size,PROT_READ,MAP_SHARED,fd,0):MAP_FAILED;
+  close(fd);
+  if(bytes==MAP_FAILED){say("bridge: the routing policy's theta %s not mapped: the design's rule routes\n",SWITCH_THETA);return;}
+  /* route_params_read's stream over the object's bytes (fmemopen: no file) */
+  FILE *f=fmemopen(bytes,(size_t)st.st_size,"rb");
+  const int failed=!f || route_params_read_stream(&switch_theta,f);
+  if(f)fclose(f);
+  munmap(bytes,(size_t)st.st_size);
+  if(failed){say("bridge: the routing policy's theta %s not read (not route_params_read's format): the design's rule routes\n",SWITCH_THETA);return;}
+  switch_policy_scratch=calloc(route_forward_scratch(0),sizeof(float));
+  if(!switch_policy_scratch){say("bridge: no memory for the routing policy's scratch: the design's rule routes\n");return;}
+  switch_policy_on=1;
+  say("bridge: the routing policy's theta %s in memory (%lld bytes): its tables route\n",SWITCH_THETA,(long long)st.st_size);
+}
 static void *switch_watch(void *unused){
   (void)unused;
   pthread_setname_np("mesh.switch");
   struct mesh_switch *sw=mesh_switch_of(M);
-  uint64_t seed=mesh_switch_mix((uint64_t)getpid()^clock_ns());
+  uint64_t seed=mesh_switch_mix((uint64_t)getpid()^clock_ns()),point=0;
+  static struct mesh_switch_tokens tokens;
+  const struct mesh_switch_policy policy={NULL,NULL,switch_policy_splits};
   while(!stop){
     switch_view();
     const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
     mesh_switch_refresh(sw,NULL,SWITCH_DRAWS,SWITCH_ETA,seed=mesh_switch_mix(seed),(double)sw->slot_bytes,0);
+    if(switch_policy_on)mesh_switch_policy_refresh(M,sw,&policy,clock_ns(),++point,0,&tokens);
     MESH_SWITCH_COUNT(sw,MESH_PORTS,refreshes,1);MESH_SWITCH_COUNT(sw,MESH_PORTS,refresh_ns,clock_gettime_nsec_np(CLOCK_MONOTONIC)-t0);
     pthread_mutex_lock(&switch_lock);
     uint32_t kept=0;const uint64_t at=clock_ns();
@@ -2068,6 +2107,7 @@ int main(int argc,char **argv){
   if(!atomic_load(&M->map_nodes))die("the map's lease");
   link_reserve();
   switch_make();
+  switch_policy_load();
   int watched[4]={listener,hello,network,addresses};
   for(int i=0;i<4 && watched[i]>=0;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
   EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
@@ -2077,8 +2117,12 @@ int main(int argc,char **argv){
   __sync_synchronize();M->magic=MESH_MAGIC;
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
+  /* the refresh at the progress threads' class: its SWITCH_REFRESH_NS pause kept near its length (at the default class
+     the system's timer slack made 50 us about 460 us: the cost-to-go and the lines a crossing's age at B=128) */
   pthread_t refresher;
-  if(pthread_create(&refresher,NULL,switch_watch,NULL))die("the switch's refresh");
+  pthread_attr_t refreshing;pthread_attr_init(&refreshing);pthread_attr_set_qos_class_np(&refreshing,QOS_CLASS_USER_INTERACTIVE,0);
+  if(pthread_create(&refresher,&refreshing,switch_watch,NULL))die("the switch's refresh");
+  pthread_attr_destroy(&refreshing);
   /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
      once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
      else as they stand at the bound */

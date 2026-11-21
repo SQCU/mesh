@@ -53,6 +53,7 @@ struct route_decision {
 
 #ifndef __METAL_VERSION__
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 
 /* a fabric: nodes (the compute ones the collectives' ranks), and lanes, each a direction of a cabled pair */
@@ -143,6 +144,7 @@ extern int route_argmax;   /* sim.c: set, the bridges' draws take their table's 
 struct route_mat { int rows, cols, k; int8_t *q; float *s, *b; };
 struct route_params { struct route_mat inp, zh[2], up[2], down[2], out; };
 int route_params_read(struct route_params *p, const char *path);
+int route_params_read_stream(struct route_params *p, FILE *f);   /* the same from an open stream, left open */
 size_t route_forward_scratch(int nc);
 void route_forward(const struct route_params *p, const float *lanes, int nl, const float *tokens, int nc, float *state, float *w, float *scratch);
 /* the same in parts, for a router computing a context's w where it is used: the lanes (the refresh's state, `state`

@@ -10,8 +10,13 @@ all: $(IMAGES:%=.build/%)
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
-.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-switched.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit
+.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-switched.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib .build/route-forward.o Makefile
+	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c .build/route-forward.o $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit -framework Accelerate
+# the routing policy's forward on the CPU (tests/route/forward.c, as its build.sh makes it: no contraction, act.h's
+# bits), which the bridge's refresh runs where a theta is given (mesh-link.c switch_policy)
+.build/route-forward.o: tests/route/forward.c tests/route/route.h tests/route/int8mm.h tests/route/act.h tests/route/scan.h tests/route/split.h Makefile
+	mkdir -p .build
+	cc -std=c11 -O2 -DACCELERATE_NEW_LAPACK -I . -I tests -ffp-contract=off -c tests/route/forward.c -o $@
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 # design/transport.md section 2: the heartbeat, the job launchd keeps alive, which opens and closes the bridge
 .build/mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-plan.h mesh-dataflow.h mesh-observe.h Makefile

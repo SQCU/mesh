@@ -798,6 +798,11 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
     for(uint32_t l=0;l<v.links;l++)s.spread[l]=0;
     mesh_switch_thompson(&s,1,seed,target);
     eta=1;
+  }else if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed) && !(policy && policy->target)){
+    /* no draw reads the weights (the earliest arrival routes): they stand, and the refresh is the cost-to-go and the
+       lines alone (Thompson's draws cost 10 us a refresh of the refresh thread's) */
+    for(uint32_t d=0;d<MESH_SWITCH_N;d++)for(uint32_t k=0;k<MESH_SWITCH_N;k++)target[d][k]=sw->weights.w[d][k];
+    eta=1;
   }else if(!policy || !policy->target || policy->target(policy->context,&s,target))mesh_switch_thompson(&s,draws,seed,target);
   struct mesh_switch_weights *w=&sw->weights;
   const int moved=w->deg!=s.deg || memcmp(w->neighbour,s.neighbour,sizeof s.neighbour);

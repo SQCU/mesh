@@ -19,6 +19,12 @@ static const int shapes[8][3] = {{D, IN, 1}, {2 * D, D, 1}, {E, D, 1}, {D, E, 1}
 int route_params_read(struct route_params *p, const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return -1;
+  const int r = route_params_read_stream(p, f);
+  fclose(f);
+  return r;
+}
+/* the same from an open stream (the bridge's: fmemopen over a shared memory object), left open */
+int route_params_read_stream(struct route_params *p, FILE *f) {
   struct route_mat *m[8] = {&p->inp, &p->zh[0], &p->up[0], &p->down[0], &p->zh[1], &p->up[1], &p->down[1], &p->out};
   uint32_t h[3];
   int ok = fread(h, 4, 3, f) == 3 && h[0] == I8_PARAMS_MAGIC && h[1] == I8_PARAMS_VERSION && h[2] == 8;
@@ -32,7 +38,6 @@ int route_params_read(struct route_params *p, const char *path) {
     ok = a->q && a->s && fread(a->q, 1, (size_t)a->rows * a->k, f) == (size_t)a->rows * a->k && fread(a->s, 4, (size_t)a->rows, f) == (size_t)a->rows
          && (!a->b || fread(a->b, 4, (size_t)a->rows, f) == (size_t)a->rows);
   }
-  fclose(f);
   return ok ? 0 : -1;
 }
 
