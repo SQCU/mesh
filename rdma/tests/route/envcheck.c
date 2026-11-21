@@ -1,7 +1,7 @@
 /* The environment's own check (sim.c over the bridges, route.h's API as the trainer calls it): one all-gather and one
    all-reduce of each size on the measured cluster (tests/fabric-20261119.txt), in a training window of 4 refreshes,
    every context's w random; every refresh's tokens finite, every draw in its table (a valid, allowed token, its
-   context one of the stream's, its log-probability under its w at most 0), the collectives all ending; and the
+   context one of the stream's, its log-probability under its w at most 0, equal to the bridge's), every window measured; and the
    runs' rate: many runs at once, a thread each (dispatch), runs and draws a second.  usage: envcheck [fabric] */
 #include "route.h"
 #include <dispatch/dispatch.h>
@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
   struct result total = {0};
   for (int k = 0; k < 2; k++) for (int i = 0; i < 3; i++) {
     struct result r = {0}; one(k, sizes[i], (uint32_t)(k * 3 + i + 1), &r);
-    printf("%s %8.0f: %llu refreshes, %llu draws, %d of 2 collectives ended, completion over floor %.2f, piece latency %.2f, bad %llu\n",
+    printf("%s %8.0f: %llu refreshes, %llu draws, %d window measured, makespan over its cut %.2f, piece latency %.2f, bad %llu\n",
            k ? "all-reduce" : "all-gather", sizes[i], (unsigned long long)r.refreshes, (unsigned long long)r.draws, r.c.ops, r.c.throughput, r.c.latency, (unsigned long long)r.bad);
     total.bad += r.bad; total.ops += r.ops;
   }
@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
   const double sec = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
   uint64_t draws = 0; for (int i = 0; i < N; i++) { draws += rs[i].draws; total.bad += rs[i].bad; }
   printf("%d runs at once: %.2f s, %.1f runs/s, %.0f draws/s\n", N, sec, N / sec, (double)draws / sec);
-  if (total.bad || total.ops != 12) { printf("envcheck: failed (%llu bad, %llu of 12 collectives ended)\n", (unsigned long long)total.bad, (unsigned long long)total.ops); return 1; }
+  if (total.bad || total.ops != 6) { printf("envcheck: failed (%llu bad, %llu of 6 windows measured)\n", (unsigned long long)total.bad, (unsigned long long)total.ops); return 1; }
   printf("envcheck: passed\n");
   return 0;
 }

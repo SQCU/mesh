@@ -20,7 +20,7 @@ import threading
 from .config import HERE
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))   # the checkout
-SOURCES = ['rdma/mesh_c_build.py', 'rdma/mesh-switch.h', 'rdma/tests/switch.c', 'rdma/tests/fabric-20261119.txt']
+SOURCES = ['rdma/mesh_c_build.py', 'rdma/tests/switched-world.h', 'rdma/tests/fabric-20261119.txt']   # and rdma/*.h (the bridge's switch: the environment)
 ROUTE = ['*.c', '*.h', '*.swift', '*.metal', 'build.sh']
 
 
@@ -42,7 +42,7 @@ def pack():
     import glob
     f = tempfile.NamedTemporaryFile(suffix='.tgz', delete=False)
     with tarfile.open(fileobj=f, mode='w:gz') as tar:
-        for s in SOURCES:
+        for s in SOURCES + [os.path.relpath(p, REPO) for p in glob.glob(os.path.join(REPO, 'rdma/*.h'))]:
             tar.add(os.path.join(REPO, s), s)
         for pat in ROUTE:
             for p in glob.glob(os.path.join(REPO, 'rdma/tests/route', pat)):

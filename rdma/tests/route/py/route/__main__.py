@@ -3,6 +3,9 @@
   train       one rank's training: loop.train, the data flow (design/dataflow.png); a telemetry record every
               report.interval; rank 0's evaluations at evaluation.at
   evaluate    the measured cluster's table for run.theta_in (or the initial theta): each mode, kind and size
+  sims        the environment alone (the bridges' code over the wire, tests/switched-world.h): N groups of the
+              training distribution's cases run to their end, every refresh answered with w = 0 (no network): runs,
+              events, draws a second, against the cores (--set sims.groups=N)
   cases       the distribution's draws: their rate, and what they are (state sources, fabrics, windows, streams)
   dump        every refresh's tokens of one collective simulated from a zero state, the CPU forward (forward.c, as
               switch.c's router) answering: tests/switch.c ROUTE_DUMP's format (--set dump.*: see DUMP)
@@ -132,6 +135,40 @@ def describe(cfg, lib, n=4096):
           'refreshes': {int(k): int(v) for k, v in zip(*np.unique(c['w']['points'], return_counts=True))},
           'dt_us_median': round(float(np.median(c['w']['dt'])) / 1e3, 1), 'burst': round(float(c['w']['burst'].mean()), 3), 'warm_spt': round(float((c['w']['warm'] == 2).mean()), 3),
           'background_lanes': round(float((c['background'] > 0).sum(1).mean() / np.maximum(c['f']['lanes'], 1).mean()), 3)})
+
+
+def sims(cfg, lib, groups):
+    """the environment's rate on the training distribution: every slot a run, the runs advanced in parallel on the
+    system's thread pool (sims.c), each refresh answered with zero tables at once"""
+    r = cfg['run']; measured = fabric.load(r['fabric'])
+    dist = C.Distribution(config.flat(cfg), measured, lib, np.random.default_rng([r['data_seed'], r['rank']]))
+    K = cfg['capacity']['refreshes']; n = 4 * groups
+    x = lib.route_sims_new(n, K)
+    cases = np.ascontiguousarray(dist.draw(groups)[0])
+    slots = np.arange(n, dtype=np.int32); which = np.repeat(np.arange(groups, dtype=np.int32), 4); rollout = np.tile(np.arange(4, dtype=np.int32), groups)
+    zero = np.zeros(loop.CX * const('ROUTE_FS'), np.float32); wrow = np.zeros(n, np.int32)
+    got = [np.zeros(n, np.int32) for _ in range(3)]
+    t0 = time.perf_counter()
+    lib.route_sims_begin(x, loop.ptr(slots), n, native.records('struct route_case', cases), loop.ptr(which), loop.ptr(rollout))
+    lib.route_sims_launch(x, loop.ptr(slots), n, ffi.NULL, ffi.NULL)
+    left, refreshes = n, 0
+    while left:
+        m = lib.route_sims_collect(x, 1, loop.ptr(got[0]), loop.ptr(got[1]), loop.ptr(got[2]))
+        sl, st = got[0][:m].copy(), got[1][:m]
+        left -= int((st == 0).sum()); again = sl[st == 1]; refreshes += len(again)
+        if len(again):
+            lib.route_sims_launch(x, loop.ptr(again), len(again), ffi.from_buffer('float[]', zero), loop.ptr(wrow[:len(again)]))
+    sec = time.perf_counter() - t0
+    c = np.zeros(n, loop.COSTS); k = np.zeros((n, 4), np.uint64)
+    lib.route_sims_costs(x, loop.ptr(slots), n, native.records('struct route_costs', c, True), loop.ptr(k, 'uint64_t[]'))
+    rows, draws = np.zeros((n, K), np.int32), np.zeros((n, K), np.int32)
+    lib.route_sims_sizes(x, loop.ptr(slots), n, loop.ptr(rows), loop.ptr(draws))
+    lib.route_sims_free(x)
+    emit({'record': 'sims', 'runs': n, 'seconds': round(sec, 3), 'runs_per_second': round(n / sec, 1), 'refreshes': refreshes,
+          'events_per_second': round(float(k[:, 0].sum()) / sec), 'bridge_draws_per_second': round(float(k[:, 1].sum()) / sec),
+          'policy_draws_per_second': round(float(draws.sum()) / sec), 'sends_per_second': round(float(k[:, 3].sum()) / sec),
+          'cores': os.cpu_count(), 'ops_mean': round(float(cases['ops'].mean()), 2), 'collectives_ended': int(c['ops'].sum()),
+          'completion_over_floor_mean': round(float(c['throughput'][c['ops'] > 0].mean()), 3)})
 
 
 def stream_one(lib, f, kind, size):
@@ -421,6 +458,8 @@ def main(argv):
         train(cfg, lib)
     elif cmd == 'evaluate':
         evaluation(cfg, lib, network(cfg, lib, 4, 1, loop.CX), fabric.load(cfg['run']['fabric']), cfg['run']['theta_in'] or 'initial')
+    elif cmd == 'sims':
+        sims(cfg, lib, cfg['sims']['groups'])
     elif cmd == 'cases':
         describe(cfg, lib)
     elif cmd == 'dump':

@@ -80,4 +80,19 @@ no reset of a queue pair) leave one algorithm in place, close to multipath TCP:
   declaration-time route tables (mesh-write-routes.h, ncclMeshCommWriteRoutes) are deleted. Still there: the
   relay-only rank support in libnccl-mesh, the Python controller's route weights in its fluid model, and libmesh's
   generic multi-hop lowering (mesh_write_compile, mesh_routed_compile), which nothing compiles routes into now.
-- Item 6: tests/sim-switched.c (five nodes, timed wire) is in `make check`, and tests/sim-two-nodes.sh runs over it.
+- Item 6: tests/switched-world.h is the bridges' own functions on N regions over the timed wire, reentrant (a world a
+  thread). tests/sim-switched.c (five nodes, every byte checked) runs on it in `make check`, and tests/sim-two-nodes.sh
+  runs over sim-wire.c. tests/switch.c and mesh-switch.h, a second router, are deleted.
+- The routing policy's training environment (rdma/tests/route/sim.c, route.h's route_sim_* as the trainer calls them)
+  is the same world: the training distribution's collectives (cases.py) run by the bridges. The policy's tokens are
+  made by each bridge from its own state (mesh_switch_tokens_make). Its answer reaches each bridge through struct
+  mesh_switch_policy (mesh_switch_policy_refresh, the deployed path), as each context's w in the split tables. Every
+  piece's split is the bridge's draw from split.h's table under that w, and its logged log-probability equals the
+  trainer's (envcheck, in `make check`). A training window posts nothing past its end. Records stay in memory.
+  On a Studio (30 cores), the training distribution runs at 163 runs/s, ~1.1M draws/s and ~1M wire events/s with 256
+  runs at once, at ~100 MB of memory a run. The memory is mostly the switch's fixed rings and logs plus the pool,
+  times 4-6 nodes.
+- Deployed by git on all five nodes (2026-11-20), TP-4 tp_fused.py decode with tokens equal to N=1: 8.2 / 7.0 / 9.7 /
+  17.6 ms/step at B = 2 / 8 / 32 / 128 (11-19, shortest-path routes: 4.15 / 5.27 / 7.30 / 12.25). Below a 12 KB
+  partial, a crossing costs ~40 us more than above it. The draws, queues, SEND service and pool were measured as not
+  the cause; the time is before the draw or after landing.

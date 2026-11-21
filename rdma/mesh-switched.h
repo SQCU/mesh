@@ -67,6 +67,9 @@
 #define MESH_SWITCH_LOG 2048u                                /* records a process's log ring */
 #define MESH_SWITCH_LOGS (MESH_PORTS+2u)                     /* a ring a port child, the parent's, the simulator's */
 #define MESH_SWITCH_CONTEXTS 256u                            /* the policy's contexts at a node, at most */
+#define MESH_SWITCH_REFRESH_NS 50000.0                       /* the refresh's period (the bridge's thread, the simulator) */
+#define MESH_SWITCH_DRAWS 32u                                /* Thompson sampling's draws a refresh */
+#define MESH_SWITCH_ETA 0.5f                                 /* the residual's rate a refresh */
 _Static_assert(MESH_SWITCH_N<=64 && MESH_SWITCH_N<=MESH_NODES,"a node a bit");
 
 /* ---- The name ------------------------------------------------------------------------------------------------- */
@@ -91,7 +94,7 @@ _Static_assert(sizeof(struct mesh_switch_name)<=MESH_SWITCH_HEAD,"a name within 
 /* ---- The region's switch (struct hdr switch_off; MESH_SWITCH_BYTES, mesh.h) ------------------------------------- */
 /* a link of the view: a directed node pair, its cables, rate (all of them, bytes a ns), latency (ns), and its line's
    wait and spread (two floats in one word) with the line's stamp */
-struct mesh_switch_link { uint32_t from,to,cables,padding; double rate,latency; _Atomic uint64_t line,stamp; };
+struct mesh_switch_link { uint32_t from,to,cables,ends; double rate,latency; _Atomic uint64_t line,stamp; };   /* ends: the view indices, from | to << 8 */
 struct mesh_switch_view {
   _Atomic uint64_t serial;          /* odd while the parent writes it */
   uint32_t self,nodes,links,ranks; /* ranks: the view nodes that run collectives' ranks, bits over view indices (0: all) */
@@ -117,7 +120,7 @@ struct mesh_switch_context { uint32_t source,wanted,owed,pattern; };
 struct mesh_switch_splits {
   _Atomic uint64_t serial;
   uint32_t active,contexts,argmax,padding;
-  uint64_t point;
+  uint64_t point,unit_view;          /* unit_view: the view serial `unit` was made from */
   float unit,spare;
   struct mesh_switch_context key[MESH_SWITCH_CONTEXTS];
   float w[MESH_SWITCH_CONTEXTS][SPLIT_FS];
@@ -309,6 +312,7 @@ static inline void mesh_switch_view_set(struct mesh_switch *sw,uint32_t self,con
   for(uint32_t l=0;l<count && v->links<MESH_SWITCH_LINKS;l++){
     struct mesh_switch_link *x=v->link+v->links++;
     x->from=links[l].from;x->to=links[l].to;x->cables=links[l].cables?links[l].cables:1;x->rate=links[l].rate;x->latency=links[l].latency;
+    x->ends=(mesh_switch_index(v,x->from)&255)|(mesh_switch_index(v,x->to)&255)<<8;
     uint64_t line=0,stamp=0;
     for(uint32_t h=0;h<held;h++)if(from[h]==x->from && to[h]==x->to){line=lines[h];stamp=stamps[h];}
     atomic_store_explicit(&x->line,line,memory_order_relaxed);atomic_store_explicit(&x->stamp,stamp,memory_order_relaxed);
@@ -664,8 +668,8 @@ static inline void mesh_switch_arrivals(const struct mesh_switch_view *v,uint32_
     if(u==UINT32_MAX)return;
     done|=UINT64_C(1)<<u;
     for(uint32_t l=0;l<v->links;l++){
-      if(v->link[l].from!=v->node[u])continue;
-      const uint32_t b=mesh_switch_index(v,v->link[l].to);
+      if((v->link[l].ends&255)!=u)continue;
+      const uint32_t b=v->link[l].ends>>8&255;
       if(b<v->nodes && !(done>>b&1) && at[u]+hop[l]<at[b])at[b]=at[u]+hop[l];
     }
   }
@@ -687,19 +691,23 @@ static inline void mesh_switch_state_make(struct mesh_switch *sw,const struct me
 static inline void mesh_switch_thompson(const struct mesh_switch_state *s,uint32_t draws,uint64_t seed,float target[MESH_SWITCH_N][MESH_SWITCH_N]){
   const struct mesh_switch_view *v=s->view;
   uint32_t wins[MESH_SWITCH_N][MESH_SWITCH_N];memset(wins,0,sizeof wins);
-  double hop[MESH_SWITCH_LINKS],at[MESH_SWITCH_N],best[MESH_SWITCH_N];uint32_t by[MESH_SWITCH_N];
-  for(uint32_t r=0;r<draws;r++){
-    for(uint32_t l=0;l<v->links;l++){const double h=s->hop[l]+s->spread[l]*mesh_switch_normal(seed^((uint64_t)r<<32)^l);hop[l]=h>0?h:0;}
+  double hop[MESH_SWITCH_LINKS],at[MESH_SWITCH_N],best[MESH_SWITCH_N];uint32_t by[MESH_SWITCH_N],firstlink[MESH_SWITCH_N];
+  /* each neighbour's link from here; and whether any hop is uncertain (none: every draw is the same, one stands for all) */
+  int spread=0;
+  for(uint32_t l=0;l<v->links;l++)spread|=s->spread[l]!=0;
+  for(uint32_t k=0;k<s->deg;k++){firstlink[k]=UINT32_MAX;for(uint32_t l=0;l<v->links;l++)if(v->link[l].from==v->self && (v->link[l].ends>>8&255)==s->neighbour[k])firstlink[k]=l;}
+  const uint32_t made=spread?draws:(draws?1:0);
+  for(uint32_t r=0;r<made;r++){
+    for(uint32_t l=0;l<v->links;l++){const double h=s->spread[l]!=0?s->hop[l]+s->spread[l]*mesh_switch_normal(seed^((uint64_t)r<<32)^l):s->hop[l];hop[l]=h>0?h:0;}
     for(uint32_t d=0;d<v->nodes;d++){best[d]=INFINITY;by[d]=UINT32_MAX;}
     for(uint32_t k=0;k<s->deg;k++){
-      double first=s->first[k];
-      for(uint32_t l=0;l<v->links;l++)if(v->link[l].from==v->self && mesh_switch_index(v,v->link[l].to)==s->neighbour[k])first=hop[l];
+      const double first=firstlink[k]!=UINT32_MAX?hop[firstlink[k]]:s->first[k];
       mesh_switch_arrivals(v,s->neighbour[k],first,UINT64_C(1)<<s->self,hop,at);
       for(uint32_t d=0;d<v->nodes;d++)if(at[d]<best[d]){best[d]=at[d];by[d]=k;}
     }
     for(uint32_t d=0;d<v->nodes;d++)if(by[d]!=UINT32_MAX)wins[d][by[d]]++;
   }
-  for(uint32_t d=0;d<v->nodes;d++)for(uint32_t k=0;k<MESH_SWITCH_N;k++)target[d][k]=k<s->deg && draws?(float)wins[d][k]/(float)draws:0;
+  for(uint32_t d=0;d<v->nodes;d++)for(uint32_t k=0;k<MESH_SWITCH_N;k++)target[d][k]=k<s->deg && made?(float)wins[d][k]/(float)made:0;
 }
 static inline double mesh_switch_unit(const struct mesh_switch_view *v,double page);
 /* one refresh: the state, the target (the policy's, else Thompson's), the residual (target less the weights now) applied
@@ -733,9 +741,12 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
   }
   w->refreshes++;
   atomic_fetch_add_explicit(&w->serial,1,memory_order_release);
-  atomic_fetch_add_explicit(&sw->splits.serial,1,memory_order_acq_rel);
-  sw->splits.unit=(float)mesh_switch_unit(&v,page);
-  atomic_fetch_add_explicit(&sw->splits.serial,1,memory_order_release);
+  if(sw->splits.unit_view!=v.serial+1){   /* the features' unit, as the view changes */
+    const float unit=(float)mesh_switch_unit(&v,page);
+    atomic_fetch_add_explicit(&sw->splits.serial,1,memory_order_acq_rel);
+    sw->splits.unit=unit;sw->splits.unit_view=v.serial+1;
+    atomic_fetch_add_explicit(&sw->splits.serial,1,memory_order_release);
+  }
   /* this node's own links' lines, for the names it sends: each one's wait now, its spread the wait's change */
   for(uint32_t l=0;l<v.links;l++){
     if(v.link[l].from!=v.self)continue;
