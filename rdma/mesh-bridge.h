@@ -7,7 +7,7 @@
 #include "mesh-verbs.h"
 #include "mesh-call.h"
 #include "mesh-observe.h"
-#include "mesh-order.h"
+#include "mesh-switched.h"
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
@@ -110,16 +110,19 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    the cumulative frame prefix retired by each completion. */
 /* sent_at: each SEND's post time, by its unit (sent's value at its post) modulo MESH_LANE_UNITS: an RC queue pair
    completes its SENDs in their order, so the unit `done` counts next is the one posted at sent_at[done] */
-struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity; uint64_t sent_at[MESH_LANE_UNITS]; };
+/* slot: each SEND's slot of the switch's pool by its unit, the same way (mesh-switched.h: a SEND is a slot, its
+   completion gives the slot back: mesh_switch_sent); last: the lane's previous SEND completion (its next one's service
+   begins no earlier) */
+struct lane_state { uint64_t sent,done,posted,got,frames_posted,frames_retired,frame_capacity,last; uint64_t sent_at[MESH_LANE_UNITS]; uint32_t slot[MESH_LANE_UNITS]; };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
    sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
-enum { HELLO=1, FAREWELL, RECORD, LINK, ORDER, SEGMENT };
-/* design/declared-programs.md: an ORDER (mesh-order.h struct order_message, the agreement of a node pair's next epoch);
-   a SEGMENT (mesh-order.h struct segment_message, a segment's digest: the agreement of what both ends declared) */
+enum { HELLO=1, FAREWELL, RECORD, LINK };
+/* design/switched-multipath-dma.md: ORDER (5) and SEGMENT (6), the agreements of a node pair's epochs and segments,
+   are gone: nothing about any piece is agreed; a message of either kind from an older bridge is let be (message_heard) */
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
@@ -163,13 +166,11 @@ struct link {
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at;
   uint64_t wire[MESH_LINK_STREAMS];
-  /* the child's: the order it serves (its node slot, MESH_ABSENT none) and the generation it connected in, each
-     lane's posting cursor each way (mesh-order.h order_next), and its raising of the done words each way
-     (mesh-order.h struct order_raiser: order_done) */
-  uint32_t order;
-  uint64_t generation;
-  struct order_post post[2][MESH_LINK_LANES];
-  struct order_raiser raiser[2];
+  /* the child's: each data lane's receives (`receives`: posted, in the pool's slots) and the slots it holds with a
+     destination owed here or no way on yet (`held`, `holds` of them, retried each pass: mesh-switched.h
+     mesh_switch_forward) */
+  uint32_t receives;
+  uint32_t *held,holds,held_room;
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
@@ -190,8 +191,10 @@ struct link {
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
    its bytes (the operator, 2026-10-21).  4: a child posts the pieces the node's declared programs place on its link's
-   queue pairs (mesh-order.h), and the generation's first cable's child raises their done words */
-#define MESH_CHILD_VERSION 4u
+   queue pairs (mesh-order.h), and the generation's first cable's child raises their done words.  5
+   (design/switched-multipath-dma.md): a child posts its lanes' receives into the switch's pool, stages, delivers and
+   forwards pieces by name, and posts its lanes' outboxes (mesh-switched.h) */
+#define MESH_CHILD_VERSION 5u
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
    outstanding (mesh-link.c stream_end): the ends of its clients' holdings, not a failure of its lanes (EIO) or its
    hardware (design/rubrics.md M10: a fact named as what it is), told the parent in CHILD_BROKEN's `result` (version

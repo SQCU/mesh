@@ -1,5 +1,5 @@
 #include "mesh-peer.h"
-#include "mesh-order.h"
+#include "mesh-switched.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,7 +26,7 @@ int mesh_peer_install(struct mesh_ctx *ctx,uint32_t peer,uint64_t group,uint64_t
   if(!count || !installation || !peer || !ctx || !ctx->M || records<ctx->M->data_off || records%8 ||
      records>ctx->M->length || count>(ctx->M->length-records)/sizeof(struct mesh_peer_transfer))return EINVAL;
   struct hdr *m=ctx->M;
-  const uint64_t piece=order_piece_bytes(m);
+  const uint64_t piece=mesh_switch_piece(m);
   const struct mesh_peer_transfer *record=(const struct mesh_peer_transfer *)((const char *)m+records);
   uint64_t transfers[2]={0},pieces[2]={0};
   for(uint32_t i=0;i<count;i++){

@@ -1,182 +1,138 @@
-/* design/declared-programs.md "Testing": two simulated nodes' bridges in one process.  Each node's region is made as
+/* design/switched-multipath-dma.md "Tests": two simulated nodes' bridges in one process.  Each node's region is made as
    the bridge makes it (mesh.h mesh_layout), named $MESH_REGION-style /mesh-sim-<node>, so a client process run with
-   MESH_REGION set attaches it as it attaches a bridge's (libmesh, libnccl-mesh unchanged).  Each node's order toward the
-   other is served by the bridge's own steps (mesh-order.h order_next, order_raise_pass) over the simulated wire of
-   tests/wire.h, CABLES cables of LANES queue pairs, which enforces receive-before-send, each queue pair's post order and
-   equal lengths, and that both ends took every piece for the same piece of the same transfer (any mismatch ends the
-   simulator).  Queue pairs are served in a rotating, jittered order; with LAG set (a queue pair's index: direction,
-   cable, lane), that one is served once in 64 turns at most, so it lags far behind the others; with BURST set, each queue
-   pair served makes up to that many matches a turn (else 1 to 8 at random).
+   MESH_REGION set attaches it as it attaches a bridge's (libmesh, libnccl-mesh unchanged).  Each node's switch is served
+   by the bridge's own steps (mesh-switched.h: staging, forwarding by name, delivery, the estimators, the refresh) over a
+   simulated wire of CABLES cables of LANES queue pairs, as the hardware is: a queue pair's SENDs fill the receives posted
+   on it strictly in their order, a SEND waits until a receive is posted (the transport's credit), and every SEND and
+   receive is one whole slot (one frame count).  Queue pairs are served in a rotating, jittered order; with LAG set (a
+   queue pair's index: direction, cable, lane), that one is served once in 64 turns at most, so it lags far behind the
+   others (the switch moves pieces off it: its queue counts in every draw); with BURST set, each queue pair served makes
+   up to that many matches a turn (else 1 to 8 at random).  The refresh runs every REFRESH turns (default 64).
 
-   With RESTARTS set, the two bridges' parents run as mesh-link.c order_turn runs them: no epoch at the start, the cables
-   coming up one at a time (cable 0 first, then each STAGGER ms later), each end's epochs agreed by mesh-order.h
-   order_agree_turn over ORDER messages (delivered while a cable is up at both ends, a turn later); a cable of an epoch
-   lost restarts the order there (order_restart) and loses every cable toward the peer (order_lose); a restart a client's
-   declaration asked (`restart`: it met a program of a client gone with pieces outstanding) does the same; every cable
-   lost comes up again UP ms later (500; each further cable STAGGER ms after, 200), made new (a new identity, its lanes' counts 0, its port's child serving the
-   generation its node is at then: mesh-link.c lanes_open). SIGUSR2 loses cable 1 (or 0 with one cable): node A's
-   bridge notices at once, node B's NOTICE ms later (0: at once), so a client may declare at B before B restarts.
-   Each segment's digest is told the peer as a SEGMENT (mesh-order.h order_segments_turn) and its pieces posted once both
-   ends' agree. Every restart, epoch and loss is said on stderr. Each node's clients gone are retired, as the bridge does on their
-   exit.
+   SIGUSR2 loses cable 1 (or 0 with one cable) at both ends, as a link lost: its queue pairs and every unit on them go
+   (the receives posted given back to their pools, the SENDs not yet matched switched again from their slots: a piece
+   that may have crossed is sent again, and its destination counts each unit once), and it comes up again UP ms later
+   (500).  Every loss is said on stderr.  Each node's clients gone are retired, as the bridge does on their exit.
 
    usage: sim-wire NODE_A NODE_B CABLES LANES MIB   (runs until SIGTERM; prints "ready" once both regions are live) */
-#include "wire.h"
+#include "../mesh-switched.h"
 #include "../mesh-dataflow.h"
 #include "../mesh-call.h"
 #include <fcntl.h>
 #include <signal.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
 
-static struct wire w;
-static volatile sig_atomic_t losing;
-static void lose_asked(int signal){ (void)signal; losing=1; }
-
-/* ---- RESTARTS: the bridges' parents (mesh-link.c order_turn, order_lose, lanes_open) -------------------------------- */
-static int restarts;
-static uint64_t stagger=200,up_delay=500,notice;   /* milliseconds */
-static struct order_agree agree[2];
-/* ORDER messages toward node n, in flight: delivered a turn after sent, in order, while a cable is up at both ends */
-static struct { struct order_message message[16]; uint64_t at[16]; uint32_t head,tail; } inbox[2];
-static uint64_t identity[WIRE_CABLES],made,up_at[WIRE_CABLES],lost_at[2][WIRE_CABLES];
-/* SEGMENT messages toward node n, in flight (as ORDER's), and each node's agreement of its segments */
-static struct { struct segment_message message[64]; uint64_t at[64]; uint32_t head,tail; } segbox[2];
-static struct order_segments segmented[2];
-static uint64_t turn_now,ms_now;
+enum { CABLES=8, LANES=8, POSTED=16 };
+struct qp { uint32_t send[MESH_SWITCH_RING],receive[POSTED*4]; uint64_t sends_head,sends_tail,head,tail; };
+struct node { struct hdr *m; struct mesh_switch *sw; uint32_t *held,holds,room; };
+static struct node node[2];
+static struct qp qp[2][CABLES][LANES];   /* qp[d][c][j]: node d's SENDs on cable c lane j, node 1 - d's receives there */
+static uint32_t cables,lanes;static uint8_t down[CABLES];static uint64_t up_at[CABLES];
+static uint64_t matched,bytes,random_state=0x9e3779b97f4a7c15u,burst;
+static uint64_t next_random(void){ random_state^=random_state<<13;random_state^=random_state>>7;random_state^=random_state<<17;return random_state; }
 static uint64_t clock_ms(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000+(uint64_t)t.tv_nsec/1000000; }
-static int cable_up(uint32_t c){ return !w.node[0].down[c] && !w.node[1].down[c]; }
-static int any_up(void){ for(uint32_t c=0;c<w.cables;c++)if(cable_up(c))return 1; return 0; }
-/* cable c lost (both ends: its queue pairs gone, every unit on them with them), made again `up_delay` turns on */
-static void cable_lose(uint32_t c,const char *why){
-  /* a cable down already (still to come up, or lost before) is made again after this loss too */
-  if(w.node[0].down[c] && w.node[1].down[c]){up_at[c]=ms_now+up_delay+c*stagger;return;}
-  fprintf(stderr,"sim-wire: turn %llu: cable %u (identity %llu) lost: %s\n",(unsigned long long)turn_now,c,(unsigned long long)identity[c],why);
-  for(int n=0;n<2;n++){w.node[n].down[c]=1;lost_at[n][c]=ms_now;}
-  for(int d=0;d<2;d++)for(uint32_t j=0;j<w.lanes;j++){
-    struct wire_fifo *f=&w.fifo[d][c][j];f->sent_head=f->sent_tail;f->received_head=f->received_tail;
-  }
-  up_at[c]=ms_now+up_delay+c*stagger;
+static uint64_t clock_ns(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec; }
+static uint32_t lane_of(uint32_t c,uint32_t j){ return c*2*MESH_LINK_STREAMS+j; }
+static void hold(struct node *v,uint32_t s){
+  if(v->holds==v->room){v->room=v->room?2*v->room:256;v->held=realloc(v->held,v->room*sizeof *v->held);if(!v->held)exit(1);}
+  v->held[v->holds++]=s;
 }
-/* cable c made again: a new identity, its lanes' counts 0, each end's child serving the generation its node is at now */
+/* a slot that was on its way out a lost cable switched again: its last hop undone, held for forwarding */
+static void again(struct node *v,uint32_t s){
+  struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(v->m,v->sw,s);
+  if(name->magic==MESH_SWITCH_MAGIC && name->hops)name->hops--;
+  atomic_store(&v->sw->slot[s].refs,1);atomic_store(&v->sw->slot[s].state,SLOT_HELD);
+  hold(v,s);
+}
+static void cable_lose(uint32_t c){
+  if(down[c])return;
+  fprintf(stderr,"sim-wire: cable %u lost\n",c);
+  down[c]=1;up_at[c]=clock_ms()+(getenv("UP")?strtoull(getenv("UP"),NULL,0):500);
+  for(int d=0;d<2;d++)for(uint32_t j=0;j<lanes;j++){
+    struct node *v=node+d,*r=node+1-d;
+    const uint32_t l=lane_of(c,j);
+    atomic_store(&v->sw->lane[l].live,0);
+    struct qp *q=&qp[d][c][j];
+    for(;q->sends_head<q->sends_tail;q->sends_head++)again(v,q->send[q->sends_head%MESH_SWITCH_RING]);
+    for(uint32_t s;(s=mesh_switch_peek(v->sw,l))!=UINT32_MAX;){mesh_switch_pop(v->sw,l);again(v,s);}
+    atomic_store(&v->sw->lane[l].queued,0);
+    for(;q->head<q->tail;q->head++)mesh_switch_give(r->sw,q->receive[q->head%(POSTED*4)]);
+  }
+}
 static void cable_make(uint32_t c){
-  identity[c]=++made;up_at[c]=UINT64_MAX;
-  for(int n=0;n<2;n++){
-    struct wire_node *v=w.node+n;
-    v->down[c]=0;v->generation[c]=atomic_load(&v->x->generation);
-    for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++){v->posted[way][c][j]=0;atomic_store(wire_done(v,way,c,j),0);v->post[way][c][j]=(struct order_post){0};}
-    for(int way=0;way<2;way++)order_raiser_clear(&v->raiser[c][way]);
-  }
-  fprintf(stderr,"sim-wire: turn %llu: cable %u up (identity %llu)\n",(unsigned long long)turn_now,c,(unsigned long long)identity[c]);
+  fprintf(stderr,"sim-wire: cable %u up\n",c);
+  down[c]=0;up_at[c]=UINT64_MAX;
+  for(int d=0;d<2;d++)for(uint32_t j=0;j<lanes;j++)atomic_store(&node[d].sw->lane[lane_of(c,j)].live,1);
 }
-/* node n's order restarted (order_restart) and every cable toward the peer lost (order_lose) */
-static void order_restart_at(uint32_t n,const char *why){
-  fprintf(stderr,"sim-wire: turn %llu: node %u: %s: the order restarts\n",(unsigned long long)turn_now,w.node[n].m->node,why);
-  order_restart(w.node[n].m,w.node[n].x);agree[n]=(struct order_agree){0};segmented[n]=(struct order_segments){0};
-  for(uint32_t c=0;c<w.cables;c++)cable_lose(c,"the order restarted");
-}
-struct frontier_context { uint32_t n; };
-static uint64_t sim_frontier(const struct mesh_node *x,int way,void *context){
-  const struct wire_node *v=w.node+((struct frontier_context *)context)->n;
-  const uint32_t epochs=atomic_load(&x->epochs);
-  if(!epochs)return 0;
-  const struct mesh_epoch *last=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
-  uint64_t posted[WIRE_CABLES*WIRE_LANES];uint32_t k=0;
-  for(uint32_t c=0;c<last->cables;c++)for(uint32_t j=0;j<last->cable[c].lanes;j++)posted[k++]=v->posted[way][last->cable[c].port][j];
-  return order_posted_through(x,epochs,way,posted);
-}
-/* one turn of node n's parent (mesh-link.c order_turn) */
-static void order_turn_at(uint32_t n){
-  struct wire_node *v=w.node+n;struct mesh_node *x=v->x;
-  /* a message in flight is lost with the last cable (the ports' sockets it went on) */
-  if(!any_up()){inbox[n].head=inbox[n].tail;segbox[n].head=segbox[n].tail;}
-  while(segbox[n].head!=segbox[n].tail && segbox[n].at[segbox[n].head%64]<turn_now){
-    order_segments_heard(segmented+n,x,&segbox[n].message[segbox[n].head%64]);segbox[n].head++;
+/* node n's child pass: what its programs release staged and switched, what it holds retried, its lanes' outboxes
+   moved onto their queue pairs, every queue pair's receives at the far end topped up */
+static void pass(uint32_t n){
+  struct node *v=node+n;
+  const uint64_t now=clock_ns();
+  for(uint32_t k=0;k<MESH_NODES;k++){
+    struct mesh_node *x=mesh_node_at(v->m,k);
+    if(!atomic_load(&x->node))continue;
+    for(uint32_t p=0;p<MESH_PROGRAMS;p++){
+      struct mesh_declared *d=x->program+p;
+      if(!mesh_switch_owned(d))continue;
+      uint32_t s;
+      if(mesh_switch_credit(v->m,v->sw,x,d,now,&s) && !mesh_switch_forward(v->m,v->sw,s,now,MESH_SWITCH_LOGS-1))hold(v,s);
+      for(int burst_=0;burst_<16 && mesh_switch_stage(v->m,v->sw,x,d,now,&s)==1;burst_++)if(!mesh_switch_forward(v->m,v->sw,s,now,MESH_SWITCH_LOGS-1))hold(v,s);
+    }
   }
-  while(inbox[n].head!=inbox[n].tail && inbox[n].at[inbox[n].head%16]<turn_now){
-    order_agree_heard(agree+n,x,&inbox[n].message[inbox[n].head%16]);inbox[n].head++;
-  }
-  if(atomic_load(&x->restart)){order_restart_at(n,"a declaration met a program of a client gone with pieces outstanding");return;}
-  uint64_t wire[WIRE_CABLES];uint32_t port[WIRE_CABLES],lanes[WIRE_CABLES],up=0;
-  for(uint32_t c=0;c<w.cables;c++)if(!v->down[c]){wire[up]=identity[c];port[up]=c;lanes[up]=w.lanes;up++;}
-  for(uint32_t a=1;a<up;a++)for(uint32_t b=a;b>0 && wire[b]<wire[b-1];b--){
-    uint64_t t=wire[b];wire[b]=wire[b-1];wire[b-1]=t;uint32_t q=port[b];port[b]=port[b-1];port[b-1]=q;
-  }
-  const uint32_t epochs=atomic_load(&x->epochs);
-  const struct mesh_epoch *last=epochs?x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1:NULL;
-  for(uint32_t c=0;last && c<last->cables;c++){
-    uint32_t k=0;
-    while(k<up && wire[k]!=last->cable[c].wire)k++;
-    /* node B's bridge notices a loss `notice` ms late (node A's at once) */
-    if(k==up && (n==0 || ms_now>=lost_at[n][last->cable[c].port]+notice)){order_restart_at(n,"a cable of its epoch lost");return;}
-  }
-  struct order_message told;struct frontier_context context={n};
-  const int done=order_agree_turn(x,v->m->node<w.node[1-n].m->node,agree+n,up,wire,port,lanes,sim_frontier,&context,&told);
-  if(done&ORDER_LOST){order_restart_at(n,"its agreed epoch names a cable not up here");return;}
-  if(done&ORDER_SAY){
-    if(any_up() && inbox[1-n].tail-inbox[1-n].head<16){
-      inbox[1-n].message[inbox[1-n].tail%16]=told;inbox[1-n].at[inbox[1-n].tail%16]=turn_now;inbox[1-n].tail++;
-    }else if(told.kind==ORDER_PROPOSE)agree[n].sent.cables=UINT32_MAX;
-    else{order_restart_at(n,"an accept not sent");return;}
-  }
-  /* the segments' digests told and agreed (mesh-link.c order_turn) */
-  struct segment_message said[ORDER_TELLS];uint32_t says=0;
-  if(order_segments_turn(v->m,x,v->m->node<w.node[1-n].m->node,segmented+n,said,&says)&ORDER_LOST){
-    order_restart_at(n,"its segments as declared here and there cannot agree");return;
-  }
-  for(uint32_t k=0;k<says;k++){
-    if(!any_up() || segbox[1-n].tail-segbox[1-n].head>=64){order_segments_untold(segmented+n,said+k);continue;}
-    segbox[1-n].message[segbox[1-n].tail%64]=said[k];segbox[1-n].at[segbox[1-n].tail%64]=turn_now;segbox[1-n].tail++;
-  }
-  if(done&ORDER_EXTENDED){
-    const struct mesh_epoch *e=x->epoch+atomic_load(&x->epochs)-1;
-    fprintf(stderr,"sim-wire: turn %llu: node %u: epoch %u over %u cable%s from pieces %llu sent, %llu received (%s)\n",(unsigned long long)turn_now,
-            v->m->node,atomic_load(&x->epochs),e->cables,e->cables==1?"":"s",(unsigned long long)e->first[0],(unsigned long long)e->first[1],
-            v->m->node<w.node[1-n].m->node?"proposed":"accepted");
-  }
-}
-/* each node's clients gone retired (the bridge's watch of their exits: mesh-records.c, mesh-link.c mesh_retire) */
-static void clients_reap(void){
-  for(int n=0;n<2;n++){
-    struct hdr *m=w.node[n].m;
-    for(uint32_t s=0;s<MESH_CLIENTS;s++){
-      const uint64_t owner=atomic_load(&((struct mesh_client *)((char *)m+m->client_off)+s)->owner);
-      if(owner && !(owner&MESH_RETIRING) && kill((pid_t)(uint32_t)owner,0) && errno==ESRCH)mesh_retire(m,owner);
+  uint32_t kept=0;
+  for(uint32_t i=0;i<v->holds;i++)if(!mesh_switch_forward(v->m,v->sw,v->held[i],now,MESH_SWITCH_LOGS-1))v->held[kept++]=v->held[i];
+  v->holds=kept;
+  for(uint32_t c=0;c<cables;c++)for(uint32_t j=0;j<lanes;j++){
+    if(down[c])continue;
+    struct qp *q=&qp[n][c][j];struct node *r=node+1-n;
+    while(q->tail-q->head<POSTED){
+      const uint32_t s=mesh_switch_take(r->sw);
+      if(s==UINT32_MAX)break;
+      atomic_store(&r->sw->slot[s].state,SLOT_RECEIVE);r->sw->slot[s].lane=lane_of(c,j);
+      q->receive[q->tail++%(POSTED*4)]=s;
+    }
+    for(uint32_t s;q->sends_tail-q->sends_head<MESH_SWITCH_RING && (s=mesh_switch_peek(v->sw,lane_of(c,j)))!=UINT32_MAX;){
+      mesh_switch_pop(v->sw,lane_of(c,j));
+      q->send[q->sends_tail++%MESH_SWITCH_RING]=s;
     }
   }
 }
-static void restarts_turn(void){
-  if(losing){losing=0;cable_lose(w.cables>1?1:0,"SIGUSR2");}
-  for(uint32_t c=0;c<w.cables;c++)if(up_at[c]<=ms_now)cable_make(c);
-  for(uint32_t n=0;n<2;n++)order_turn_at(n);
-}
-static char names[2][64];
-static volatile sig_atomic_t stopping,dumping;
-static void stop(int signal){ (void)signal; stopping=1; }
-static void dump_asked(int signal){ (void)signal; dumping=1; }
-/* SIGUSR1: every queue pair's counts and depth, and each order's raised pieces, on stderr */
-static void dump(void){
-  for(uint32_t n=0;n<2;n++){
-    const struct mesh_node *x=w.node[n].x;
-    const struct order_segments *a=w.told?segmented+n:w.segments+n;
-    fprintf(stderr,"node %u: segments %llu agreed %llu raised %llu/%llu; placing %llu told %llu scanned %llu open %llu/%llx/%llu\n",w.node[n].m->node,
-            (unsigned long long)atomic_load(&x->segments),(unsigned long long)atomic_load(&x->agreed),
-            (unsigned long long)atomic_load(&x->raised[0]),(unsigned long long)atomic_load(&x->raised[1]),(unsigned long long)a->placing,
-            (unsigned long long)a->told,(unsigned long long)a->scanned,(unsigned long long)a->open[0],(unsigned long long)a->open[1],(unsigned long long)a->open[2]);
-    for(uint64_t k=0;k<a->placing+1 && k<8;k++)
-      fprintf(stderr,"  heard place %llu: %llu %llx committed %llu rounds %lld; local %llu\n",(unsigned long long)k,(unsigned long long)a->heard[k][0],
-              (unsigned long long)a->heard[k][1],(unsigned long long)a->heard[k][2],(long long)a->heard[k][3],(unsigned long long)(k<a->placing?a->local[k]:UINT64_MAX));
-    for(uint64_t s=0;s<atomic_load(&x->segments) && s<8;s++)
-      fprintf(stderr,"  segment %llu digest %llx\n",(unsigned long long)s,(unsigned long long)order_segment_digest(w.node[n].m,x,s,w.node[n].m->node<w.node[1-n].m->node));
-    for(uint32_t c=0;c<w.cables;c++)for(int way=0;way<2;way++)for(uint32_t j=0;j<w.lanes;j++)
-      fprintf(stderr,"  cable %u %s lane %u: posted %llu done %llu\n",c,way?"receive":"send",j,(unsigned long long)w.node[n].posted[way][c][j],
-              (unsigned long long)atomic_load(wire_done(w.node+n,way,c,j)));
+/* node d's queue pair (c, j): each SEND at its head fills the receive at its head */
+static void match(uint32_t d,uint32_t c,uint32_t j,uint64_t most){
+  struct qp *q=&qp[d][c][j];struct node *v=node+d,*r=node+1-d;
+  if(down[c])return;
+  for(;most && q->sends_head!=q->sends_tail && q->head!=q->tail;most--){
+    const uint32_t s=q->send[q->sends_head++%MESH_SWITCH_RING],into=q->receive[q->head++%(POSTED*4)];
+    memcpy(mesh_switch_slot_at(r->m,r->sw,into),mesh_switch_slot_at(v->m,v->sw,s),v->sw->slot_bytes);
+    atomic_thread_fence(memory_order_release);
+    const uint64_t now=clock_ns();
+    mesh_switch_sent(v->sw,lane_of(c,j),s,v->sw->slot_bytes,now,now,now+1);
+    if(!mesh_switch_landed(r->m,r->sw,lane_of(c,j),into,now,MESH_SWITCH_LOGS-1))hold(r,into);
+    matched++;bytes+=v->sw->slot_bytes;
   }
 }
-static void node_make(uint32_t n,uint32_t node,uint32_t peer,uint64_t mib){
-  snprintf(names[n],sizeof names[n],"/mesh-sim-%u",node);
+static char names[2][64];
+static volatile sig_atomic_t stopping,dumping,losing;
+static void stop(int signal){ (void)signal; stopping=1; }
+static void dump_asked(int signal){ (void)signal; dumping=1; }
+static void lose_asked(int signal){ (void)signal; losing=1; }
+static void dump(void){
+  for(uint32_t n=0;n<2;n++){
+    fprintf(stderr,"node %u: %llu slots free of %u, %u held\n",node[n].m->node,(unsigned long long)atomic_load(&node[n].sw->free_count),node[n].sw->slots,node[n].holds);
+    for(uint32_t c=0;c<cables;c++)for(uint32_t j=0;j<lanes;j++){
+      const struct qp *q=&qp[n][c][j];
+      fprintf(stderr,"  cable %u lane %u: %llu SENDs waiting, %llu receives posted at the peer, outbox %llu\n",c,j,(unsigned long long)(q->sends_tail-q->sends_head),
+              (unsigned long long)(q->tail-q->head),(unsigned long long)(atomic_load(&node[n].sw->lane[lane_of(c,j)].tail)-atomic_load(&node[n].sw->lane[lane_of(c,j)].head)));
+    }
+  }
+}
+static void node_make(uint32_t n,uint32_t me,uint32_t peer,uint64_t mib){
+  snprintf(names[n],sizeof names[n],"/mesh-sim-%u",me);
   shm_unlink(names[n]);
   const uint32_t pg=(uint32_t)getpagesize();
   struct hdr geometry={0};
@@ -186,72 +142,84 @@ static void node_make(uint32_t n,uint32_t node,uint32_t peer,uint64_t mib){
   struct hdr *m=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   close(fd);
   if(m==MAP_FAILED){perror("sim-wire: mmap");exit(1);}
-  *m=geometry;m->version=MESH_LAYOUT;m->node=node;m->boot=1;
+  *m=geometry;m->version=MESH_LAYOUT;m->node=me;m->boot=1;
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store(&mesh_page(m)[r].mapping,MESH_ABSENT);
   atomic_store(&m->bridge_pid,(uint64_t)getpid());
   m->magic=MESH_MAGIC;
   struct mesh_node *x=mesh_node_at(m,0);
-  order_restart(m,x);
-  atomic_store(&x->node,peer);
-  atomic_store(&x->bandwidth,UINT64_C(80000000000)*w.cables);
-  w.node[n].m=m;w.node[n].x=x;
+  atomic_store(&x->generation,1);atomic_store(&x->node,peer);atomic_store(&x->live,1);
+  atomic_store(&x->bandwidth,UINT64_C(80000000000)*cables);
+  /* the switch's pool, as the bridge leases it (mesh-link.c switch_make) */
+  struct mesh_ctx ctx={.M=m};
+  const uint64_t slot=mesh_switch_slot_bytes(m);
+  const uint32_t slots=1024,pages=(uint32_t)((slots*slot+pg-1)/pg),page=mesh_arena_alloc(&ctx,pages,1);
+  if(page==MESH_ABSENT){fprintf(stderr,"sim-wire: no pages for the pool\n");exit(1);}
+  struct mesh_switch *sw=mesh_switch_of(m);
+  mesh_switch_init(sw,slots,slot,m->data_off+(uint64_t)page*pg);
+  for(uint32_t c=0;c<cables;c++)for(uint32_t j=0;j<lanes;j++){atomic_store(&sw->lane[lane_of(c,j)].peer,peer);atomic_store(&sw->lane[lane_of(c,j)].live,1);}
+  const uint32_t nodes[2]={me,peer};
+  const struct mesh_switch_fabric_link links[2]={{me,peer,cables*lanes,10.0*cables*lanes,6000},{peer,me,cables*lanes,10.0*cables*lanes,6000}};
+  mesh_switch_view_set(sw,me,nodes,2,links,2);
+  node[n]=(struct node){m,sw,NULL,0,0};
 }
 /* the map each region holds, as the bridges' floods leave it (mesh-records.c map_put, mesh-link.c record_reach): both
-   nodes' records, each one's reach an entry a cable toward the other at the cable's 80 Gbit/s, in arena pages leased
-   for them as the bridge leases its map's; the communicator's map is made from them (mesh_map) */
-static void records_make(uint32_t n,uint32_t cables){
-  struct hdr *m=w.node[n].m;
+   nodes' records, each one's reach an entry a cable toward the other at the cable's 80 Gbit/s */
+static void records_make(uint32_t n){
+  struct hdr *m=node[n].m;
   struct mesh_ctx c={.M=m};
   const uint32_t pages=(uint32_t)((2*sizeof(struct mesh_record)+m->pgsz-1)/m->pgsz),page=mesh_arena_alloc(&c,pages,1);
   if(page==MESH_ABSENT){fprintf(stderr,"sim-wire: no pages for the map\n");exit(1);}
   struct mesh_record *r=(struct mesh_record *)mesh_at(m,page);
   for(uint32_t k=0;k<2;k++){
-    r[k]=(struct mesh_record){.node=w.node[k].m->node,.reached=cables,.boot=1,.sequence=1};
-    for(uint32_t e=0;e<cables;e++)r[k].reach[e]=(struct mesh_reach){.node=w.node[1-k].m->node,.padding=1,.bandwidth=UINT64_C(80000000000)};
+    r[k]=(struct mesh_record){.node=node[k].m->node,.reached=cables,.boot=1,.sequence=1};
+    for(uint32_t e=0;e<cables;e++)r[k].reach[e]=(struct mesh_reach){.node=node[1-k].m->node,.padding=1,.bandwidth=UINT64_C(80000000000)};
   }
   atomic_store(&m->map_off,(uint64_t)((unsigned char *)r-(unsigned char *)m));
   atomic_store(&m->map_nodes,2);
   atomic_store(&m->map,2);
 }
+static void clients_reap(void){
+  for(int n=0;n<2;n++){
+    struct hdr *m=node[n].m;
+    for(uint32_t s=0;s<MESH_CLIENTS;s++){
+      const uint64_t owner=atomic_load(&((struct mesh_client *)((char *)m+m->client_off)+s)->owner);
+      if(owner && !(owner&MESH_RETIRING) && kill((pid_t)(uint32_t)owner,0) && errno==ESRCH)mesh_retire(m,owner);
+    }
+  }
+}
 int main(int argc,char **argv){
   if(argc!=6){fprintf(stderr,"usage: sim-wire NODE_A NODE_B CABLES LANES MIB\n");return 2;}
   const uint32_t a=(uint32_t)strtoul(argv[1],NULL,0),b=(uint32_t)strtoul(argv[2],NULL,0);
-  const uint32_t cables=(uint32_t)strtoul(argv[3],NULL,0),lanes=(uint32_t)strtoul(argv[4],NULL,0);
-  if(!a || !b || a==b || !cables || cables>WIRE_CABLES || !lanes || lanes>WIRE_LANES)return 2;
+  cables=(uint32_t)strtoul(argv[3],NULL,0);lanes=(uint32_t)strtoul(argv[4],NULL,0);
+  if(!a || !b || a==b || !cables || cables>CABLES || !lanes || lanes>LANES || lanes>2*MESH_LINK_STREAMS)return 2;
   const char *lagging=getenv("LAG");
   const uint32_t lag=lagging && *lagging?(uint32_t)strtoul(lagging,NULL,0):UINT32_MAX;
-  signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGUSR1,dump_asked);
-  wire_make(&w,cables,lanes,getenv("ROOM")?(uint32_t)strtoul(getenv("ROOM"),NULL,0):256);
-  /* BURST: every queue pair's matches a turn drained up to it (the wire's jitter then in which queue pairs are served) */
-  w.burst=getenv("BURST")?strtoull(getenv("BURST"),NULL,0):0;
+  const uint64_t refresh=getenv("REFRESH")?strtoull(getenv("REFRESH"),NULL,0):64;
+  burst=getenv("BURST")?strtoull(getenv("BURST"),NULL,0):0;
+  signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGUSR1,dump_asked);signal(SIGUSR2,lose_asked);
   node_make(0,a,b,strtoull(argv[5],NULL,0));node_make(1,b,a,strtoull(argv[5],NULL,0));
-  for(uint32_t n=0;n<2;n++)records_make(n,cables);
-  /* the one epoch both ends agree: every cable from piece 0, cables named by port c, identity c + 1 at both ends; with
-     FRESH (an order just restarted, as the bridges re-form it: its first cable up alone, then every one), an epoch over
-     cable 0 from piece 0 and then one over every cable from that same piece, before any client */
-  restarts=getenv("RESTARTS") && *getenv("RESTARTS");
-  if(getenv("STAGGER"))stagger=strtoull(getenv("STAGGER"),NULL,0);
-  if(getenv("UP"))up_delay=strtoull(getenv("UP"),NULL,0);
-  if(getenv("NOTICE"))notice=strtoull(getenv("NOTICE"),NULL,0);
-  signal(SIGUSR2,lose_asked);
-  if(restarts){
-    /* no epoch: every cable comes up in turn, cable 0 first, and the bridges agree the epochs */
-    for(int n=0;n<2;n++)w.node[n].served=1;
-    w.told=1;
-    for(uint32_t c=0;c<cables;c++){for(int n=0;n<2;n++)w.node[n].down[c]=1;up_at[c]=clock_ms()+c*stagger;}
-  }
-  else if(getenv("FRESH") && *getenv("FRESH") && cables>1){wire_epoch(&w,1,0);wire_epoch(&w,cables,0);}
-  else wire_epoch(&w,cables,0);
+  for(uint32_t n=0;n<2;n++){records_make(n);up_at[0]=UINT64_MAX;}
+  for(uint32_t c=0;c<CABLES;c++)up_at[c]=UINT64_MAX;
+  for(uint32_t n=0;n<2;n++)mesh_switch_refresh(node[n].sw,NULL,32,1,n,(double)node[n].sw->slot_bytes,0);
   printf("ready\n");fflush(stdout);
+  const uint32_t q=2*cables*lanes;
   for(uint64_t turn=0;!stopping;turn++){
     if(dumping){dumping=0;dump();}
-    turn_now=turn;
-    if(restarts){if(!(turn%64))ms_now=clock_ms();restarts_turn();}
+    if(losing){losing=0;cable_lose(cables>1?1:0);}
+    if(!(turn%64)){const uint64_t ms=clock_ms();for(uint32_t c=0;c<cables;c++)if(up_at[c]<=ms)cable_make(c);}
+    if(!(turn%refresh))for(uint32_t n=0;n<2;n++)mesh_switch_refresh(node[n].sw,NULL,32,0.5f,turn^n,(double)node[n].sw->slot_bytes,0);
     if(!(turn%16384))clients_reap();
-    wire_turn(&w,turn,lag,64);
-    if(!(turn%4096))for(uint32_t n=0;n<2;n++)mesh_retired_release(w.node[n].m);
+    for(uint32_t n=0;n<2;n++)pass(n);
+    for(uint32_t k=0;k<q;k++){
+      const uint32_t at=(uint32_t)((k+turn)%q);
+      const uint64_t r=next_random();
+      if(r%4==0)continue;
+      if(at==lag && (r>>8)%64)continue;
+      match(at/(cables*lanes),at/lanes%cables,at%lanes,burst?burst:1+(r>>20)%8);
+    }
+    if(!(turn%4096))for(uint32_t n=0;n<2;n++)mesh_retired_release(node[n].m);
   }
-  fprintf(stderr,"sim-wire: %llu pieces, %llu bytes crossed\n",(unsigned long long)w.matched,(unsigned long long)w.bytes);
+  fprintf(stderr,"sim-wire: %llu SENDs, %llu bytes crossed\n",(unsigned long long)matched,(unsigned long long)bytes);
   for(int n=0;n<2;n++)shm_unlink(names[n]);
   return 0;
 }

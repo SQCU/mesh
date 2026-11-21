@@ -5,8 +5,8 @@
    the same on every node once the floods settle: `records` (each node's boot, sequence, region, memory, model and
    cables) and `links` (every cable the two ends both report, each pair's count the fewer of the two ends' reports,
    its bandwidth the lesser, as mesh_map takes it; `one_sided` the reports the other end does not match).  The local
-   part is this node's own: its ports (peer, phase, bandwidth, pairings) and its orders (toward each node: live,
-   generation, the newest epoch's cables: port, lanes, wire).  Run it on every node and compare `records` and `links`.
+   part is this node's own: its ports (peer, phase, bandwidth, pairings) and its program slots (toward each node: live,
+   generation, its own cables' bandwidth, its programs).  Run it on every node and compare `records` and `links`.
    usage: mesh-cluster   (MESH_REGION names another region, as the clients' attach) */
 #include <errno.h>
 #include <fcntl.h>
@@ -79,16 +79,11 @@ int main(void){
     const struct mesh_node *x=mesh_node_at(m,k);
     const uint32_t node=atomic_load(&x->node);
     if(!node)continue;
-    const uint32_t epochs=atomic_load(&x->epochs);
-    printf("%s{\"peer\":%u,\"live\":%u,\"generation\":%llu,\"epochs\":%u,\"cables\":[",first?"":",",node,atomic_load(&x->live),
-           u(atomic_load(&x->generation)),epochs);
+    uint32_t programs=0;
+    for(uint32_t p=0;p<MESH_PROGRAMS;p++)programs+=atomic_load(&x->program[p].owner)!=0;
+    printf("%s{\"peer\":%u,\"live\":%u,\"generation\":%llu,\"bandwidth\":%llu,\"programs\":%u}",first?"":",",node,atomic_load(&x->live),
+           u(atomic_load(&x->generation)),u(atomic_load(&x->bandwidth)),programs);
     first=0;
-    if(epochs){
-      const struct mesh_epoch *e=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
-      for(uint32_t c=0;c<e->cables && c<MESH_PORTS;c++)
-        printf("%s{\"port\":%u,\"lanes\":%u,\"wire\":%llu}",c?",":"",e->cable[c].port,e->cable[c].lanes,u(e->cable[c].wire));
-    }
-    printf("]}");
   }
   printf("]}\n");
   free(rec);munmap(m,(size_t)st.st_size);

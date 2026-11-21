@@ -1,7 +1,7 @@
 #!/bin/sh
-# design/declared-programs.md "Testing": the two-simulated-node test.  Builds the simulator (tests/sim-wire.c over
-# tests/wire.h: the bridge's own steps on each node's region, a wire that enforces receive-before-send, each queue pair's
-# post order, equal lengths and the same piece at both ends), the libnccl-mesh communicator test (tests/sim-collectives.c),
+# design/declared-programs.md "Testing": the two-simulated-node test.  Builds the simulator (tests/sim-wire.c: the
+# switch's own steps, mesh-switched.h, on each node's region, a wire that enforces receive-before-send, each queue pair's
+# post order and one frame count), the libnccl-mesh communicator test (tests/sim-collectives.c),
 # the run-ahead test (tests/sim-runahead.c) and the peer service's test (tests/peer-groups.c) against rdma/.build (make -C
 # rdma all first).  It runs the simulator with CABLES cables of LANES queue pairs (default 3 and 2, the M5 Ultra pair),
 # then every peer-groups mode between its two nodes, then a two-rank communicator and COMMS (default 2) at once in one
@@ -120,81 +120,45 @@ for pid in $pids; do wait $pid || failed=1; done
 echo "run-ahead: $programs programs sharing the nodes, $calls Broadcasts each, queue pair $lag lagging:"
 cat "$out"/ahead.*
 finish
-# restarts (sim-wire RESTARTS: the bridges' parents as mesh-link.c order_turn runs them, cables coming up in turn and
-# epochs agreed by ORDER, segments agreed by SEGMENT, a restart losing every cable): a program either runs or fails as
-# a value at both ranks, never waits its deadline with the two ends apart; and the next one runs.  A pair of
-# sim-programs processes is the clients (rounds: how long it runs)
-restarting() {
-  RESTARTS=1 NOTICE=${1:-0} UP=${2:-500} "$here/.build/tests/sim-wire" 11 12 "$cables" "$lanes" 768 > "$out/sim.out" 2> "$out/sim.err" &
-  sim=$!
-  while ! grep -q ready "$out/sim.out" 2>/dev/null; do sleep 0.1; done
-}
-programs_pair() {   # programs_pair NAME ROUNDS: ranks 0 and 1 in the background (r0, r1: the clients' own processes, so a
-                    # signal reaches the client itself, not a shell around it)
+# a cable lost while a program runs (sim-wire SIGUSR2: its queue pairs and every unit on them gone, the cable up again
+# UP ms later): the pieces on it are switched again over the other cables, so the program runs to its end at both ranks
+# and the next one runs; nothing fails and nothing restarts (design/switched-multipath-dma.md).  A pair of sim-programs
+# processes is the clients (rounds: how long it runs)
+simulate ""
+programs_pair() {   # programs_pair NAME ROUNDS: ranks 0 and 1 in the background (r0, r1: the clients' own processes)
   port=$((port + 8))
   env MESH_REGION=/mesh-sim-11 NCCL_COMM_ID="::1:$port" perl -e "alarm $wait; exec @ARGV" "$here/.build/tests/sim-programs" 0 "$2" > "$out/$1.0" 2>&1 &
   r0=$!
   env MESH_REGION=/mesh-sim-12 NCCL_COMM_ID="::1:$port" perl -e "alarm $wait; exec @ARGV" "$here/.build/tests/sim-programs" 1 "$2" > "$out/$1.1" 2>&1 &
   r1=$!
 }
-# the pair's end: both ranks' exits; neither waited its deadline (the two ends apart), the simulator's wire still
-# checking; `$2` passed: both 0; failed: both ranks ended, either way, with no deadline met
-pair_end() {
+pair_end() {   # both ranks 0, the simulator still running
   wait $r0; first=$?; wait $r1; second=$?
-  apart=$(cat "$out/$1.0" "$out/$1.1" | grep -c "past its deadline")
   alive=1; kill -0 $sim 2>/dev/null || alive=0
-  echo "restarts, $1: rank 0 $first rank 1 $second, deadlines met $apart, the wire $([ $alive = 1 ] && echo checking || echo ENDED)"
-  shown() { cat "$out/$1.0" "$out/$1.1"; for n in 11 12; do MESH_REGION=/mesh-sim-$n "$here/.build/mesh-order-state" 2; done; }
-  [ $apart = 0 ] && [ $alive = 1 ] || { failed=1; shown $1; cat "$out/sim.err"; }
-  if [ "$2" = passed ]; then [ $first = 0 ] && [ $second = 0 ] || { failed=1; shown $1; }; fi
+  echo "cable loss, $1: rank 0 $first rank 1 $second, the wire $([ $alive = 1 ] && echo running || echo ENDED)"
+  [ $first = 0 ] && [ $second = 0 ] && [ $alive = 1 ] || { failed=1; cat "$out/$1.0" "$out/$1.1"; for n in 11 12; do MESH_REGION=/mesh-sim-$n "$here/.build/mesh-order-state" 2; done; }
 }
-restarting 0
-programs_pair first 100000000; sleep 2
-# a client gone at node 12 as node 11's bridge loses a cable: the order restarts at both; the next pair, made at once,
-# waits for the order and runs
-kill -9 $r1; kill -USR2 $sim; wait $r0 2>/dev/null; wait $r1 2>/dev/null
-programs_pair recovered 6; pair_end recovered passed
-# a client gone at node 12 while its peer at node 11 lives on (stopped): a pair declared meanwhile composes the live
-# program at 11 and not at 12, so the two ends' segments cannot agree: the order restarts and the pair fails as values
-programs_pair stopped 100000000; sleep 2
-kill -STOP $r0; held=$r0; kill -9 $r1; wait $r1 2>/dev/null; sleep 0.5
-programs_pair apart 6; pair_end apart either
-kill -9 $held; wait $held 2>/dev/null
-programs_pair after 6; pair_end after passed
+programs_pair lost 40; sleep 1
+kill -USR2 $sim; sleep 1; kill -USR2 $sim
+pair_end lost
+programs_pair after 6; pair_end after
 finish
-# a declaration at node 12 before its bridge has seen node 11's restart (it notices 300 ms late): either way, then a run
-restarting 300
-programs_pair before 6; wait $r0; wait $r1
-kill -USR2 $sim
-programs_pair unseen 6; pair_end unseen either
-sleep 1; programs_pair seen 6; pair_end seen passed
-finish
-# a program left with a piece never sent (its last SEND's gate never opened, as a fused crossing's last frame whose
-# producer never ran: tests/sim-dangling.c), closed at the executions it issued and its clients gone: that piece can
-# never be posted, so the next declaration restarts the order and fails as values (before, the next pair waited its
-# deadline behind it, the hang of the M5 Ultra pair's logit_check, 2026-11-19), and the one after runs.  Then a gone
-# pair's last pieces posted and still crossing as it ends ("inflight"): they complete through their own completions,
-# and the pair declared at once after it runs behind them, no restart.  The cables come back 7 s after a restart here
-# (the M5 Ultra pair took 7 s, 2026-11-19), far longer than a bootstrap phase's deadline (5 s): the pair made after the failed
-# one awaits its order before its bootstrap at both ranks, and runs (db24deb1 awaited it inside the first gather, and
-# the root's bootstrap met its deadline meanwhile)
+# a program left with a piece never sent (its last SEND's gate never opened: tests/sim-dangling.c), closed at the
+# executions it issued and its clients gone: no queue pair waits at that piece (no piece is placed on one ahead of
+# time), so the pair declared after it runs at once; then a gone pair's last pieces still crossing as it ends
+# ("inflight"), and the pair after it runs behind them
 dangling_pair() {   # dangling_pair NAME EXECUTIONS MODE: both ranks, ended before it returns
   MESH_REGION=/mesh-sim-11 bounded "$here/.build/tests/sim-dangling" 12 "$2" "$3" > "$out/$1.0" 2>&1 &
   r0=$!
   MESH_REGION=/mesh-sim-12 bounded "$here/.build/tests/sim-dangling" 11 "$2" "$3" > "$out/$1.1" 2>&1
   second=$?; wait $r0; first=$?
-  echo "restarts, $1: rank 0 $first rank 1 $second"; [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/$1.0" "$out/$1.1"; }
+  echo "dangling, $1: rank 0 $first rank 1 $second"; [ $first = 0 ] && [ $second = 0 ] || { failed=1; cat "$out/$1.0" "$out/$1.1"; }
 }
-restarting 0 15000
+simulate ""
 dangling_pair dangling 16 dangling
-t0=$(date +%s); programs_pair behind 6; pair_end behind either; echo "restarts, behind ended after $(( $(date +%s) - t0 )) s"
-t0=$(date +%s); programs_pair cleared 6; pair_end cleared passed; echo "restarts, cleared ended after $(( $(date +%s) - t0 )) s"
-restarts=$(grep -c "the order restarts" "$out/sim.err")
+t0=$(date +%s); programs_pair behind 6; pair_end behind; echo "dangling, behind ended after $(( $(date +%s) - t0 )) s"
 dangling_pair inflight 200000 inflight
-# its pieces still crossing as the next pair declares: node 11's raised then, short of the gone program's 200,000
-echo "restarts, inflight: node 11 $(MESH_REGION=/mesh-sim-11 "$here/.build/mesh-order-state" 0 | grep -m1 'send: ' | sed 's/.*raised/raised/') as the next pair begins"
-programs_pair following 6; pair_end following passed
-[ "$(grep -c "the order restarts" "$out/sim.err")" = "$restarts" ] || { echo "restarts, following: the order restarted"; failed=1; }
+programs_pair following 6; pair_end following
 finish
 echo "two simulated nodes: $([ $failed = 0 ] && echo passed || echo FAILED)"
 exit $failed

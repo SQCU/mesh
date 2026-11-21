@@ -1,6 +1,6 @@
 #include "mesh-dataflow.h"
 #include "mesh-call.h"
-#include "mesh-order.h"
+#include "mesh-switched.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -457,40 +457,9 @@ static void mesh_reclaim(struct hdr *m){
   }
 }
 
-/* design/transport.md section 14; design/extents-and-liveness.md, d: whether a row of `first` to `first` + `count` is in
-   W(t), a request outstanding on some stream's lane naming its page: a unit posted and not completed, a receive not
-   landed or a SEND not done (mesh.h struct mesh_posts: the plan's window in flight, at most a lane's queue each way).
-   A row is held for nothing else: a holder that gave or died has no future write targeting any other of its rows (the
-   bridge posts a unit only while its holding is its holder's, and tells it first: mesh-link.c unit_told), so they are
-   released at once, and a row in W(t) once its unit completes or the port child that posted it is gone (its pid and
-   start, struct mesh_lanes `child`, no longer a live process: its queue pairs, and the requests on them, went with
-   it), whichever launch of the bridge spawned it.  Each lane's units completed are read before those posted, every
-   read sequentially consistent after the caller's give or retirement */
-/* Actual registered-memory overlap, independent of the row/alias that named
-   a DMA. A racing pin snapshot conservatively keeps storage for a later reap. */
-int mesh_interval_pinned(struct hdr *m,struct mesh_dma_span allocation){
-  for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
-    const struct mesh_lanes *x=mesh_lanes_at(m,s);
-    int live=-1;
-    for(int way=0;x->rows && way<2;way++)
-      for(int lane=0;lane<2;lane++){
-        const uint64_t done=atomic_load(&x->posts[way].done[lane]),posted=atomic_load(&x->posts[way].posted[lane]);
-        if(done<posted && live<0){const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);}
-        if(live<=0)continue;
-        if(posted-done>MESH_LANE_UNITS)return 1;
-        for(uint64_t u=done;u<posted;u++){
-          struct mesh_dma_pin *at=mesh_unit_pin(m,x->rows,way,lane,u);
-          struct mesh_dma_span pin;
-          if(!mesh_pin_load(at,u,&pin)){
-            if(atomic_load(&x->posts[way].done[lane])>u)continue;
-            return 1;
-          }
-          if(mesh_span_overlaps(allocation,pin))return 1;
-        }
-      }
-  }
-  return 0;
-}
+/* design/switched-multipath-dma.md: no request on any lane names a client's bytes: a SEND is staged into the bridge's
+   own pool (mesh-switched.h mesh_switch_stage) and a landing copied out of it, so a lease is held only while a program
+   not wholly done names it (mesh_owner_names) */
 /* design/declared-programs.md: whether a program of client `owner` that is not wholly done (open, or closed with
    pieces whose done words are not yet raised) names bytes of `allocation`: its tables, its span tables or its spans (the
    bridge reads and posts them until it is done) */
@@ -501,10 +470,9 @@ int mesh_owner_names(struct hdr *m,uint64_t owner,struct mesh_dma_span allocatio
     for(uint32_t p=0;p<MESH_PROGRAMS;p++){
       const struct mesh_declared *d=x->program+p;
       if(atomic_load(&d->owner)!=owner)continue;
-      if(atomic_load(&d->closed)!=UINT64_MAX && atomic_load(&x->raised[0])>=atomic_load(&d->end[0]) &&
-         atomic_load(&x->raised[1])>=atomic_load(&d->end[1]))continue;
+      if(mesh_switch_done(m,d))continue;
       for(int way=0;way<2;way++){
-        const struct mesh_crossing *t=order_table(m,d,way);
+        const struct mesh_crossing *t=mesh_switch_table(m,d,way);
         if(!t)continue;
         if(mesh_span_overlaps(allocation,(struct mesh_dma_span){d->program.table[way],d->program.transfers[way]*sizeof *t}))return 1;
         for(uint64_t i=0;i<d->program.transfers[way];i++){
@@ -537,7 +505,7 @@ static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
     while(run<count-i &&
           (uint32_t)atomic_load_explicit(&mesh_page(m)[first+i+run].mapping,memory_order_acquire)==(uint64_t)page+(uint64_t)run*m->block)run++;
     const struct mesh_dma_span allocation={m->data_off+(uint64_t)page*m->pgsz,(uint64_t)run*m->block*m->pgsz};
-    if(mesh_interval_pinned(m,allocation) || mesh_owner_names(m,owner,allocation))return 1;
+    if(mesh_owner_names(m,owner,allocation))return 1;
     i+=run;
   }
   return 0;

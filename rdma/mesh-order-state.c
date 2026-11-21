@@ -1,10 +1,11 @@
-/* mesh-order-state: a read-only view of the region's orders and lanes (design/declared-programs.md), for a stalled
-   transfer: each live order's epochs, segments and declared programs (each one's steps issued, its tables' first
-   entries with their gate and done words as they stand), each direction's posting bound and pieces raised; and each
-   lane's units posted and done each way, with the piece its next unit to post and its next unit to complete are.  It
-   maps the region read-only and writes nothing.
+/* mesh-order-state: a read-only view of the region's switch and its programs (design/switched-multipath-dma.md), for a
+   stalled transfer: the pool (slots free, by state), each live lane (its peer, bytes queued, its outbox, SENDs
+   completed and their mean service and wait, landings), the view (each link's line and stamp), the weights (each
+   destination's distribution over the neighbours, the refreshes made), and each program toward each node (its key,
+   steps issued, closing, the next send piece staged, and per direction each transfer's executions complete, with its
+   gate and done words as they stand).  It maps the region read-only and writes nothing.
 
-   usage: mesh-order-state [TRANSFERS]   (TRANSFERS: the entries listed per program table, default 8) */
+   usage: mesh-order-state [TRANSFERS]   (TRANSFERS: the transfers listed per program table, default 8) */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -12,7 +13,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include "mesh-order.h"
+#include "mesh-switched.h"
 static uint64_t ld(const _Atomic uint64_t *w){ return atomic_load_explicit(w,memory_order_acquire); }
 static unsigned long long u(uint64_t v){ return (unsigned long long)v; }
 static void word(const struct hdr *m,const char *name,uint64_t at){
@@ -27,69 +28,61 @@ int main(int argc,char **argv){
   struct hdr *m=mmap(NULL,(size_t)st.st_size,PROT_READ,MAP_SHARED,fd,0);close(fd);
   if(m==MAP_FAILED){perror("mmap");return 3;}
   if(m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){fprintf(stderr,"mesh-order-state: not a region of layout %u\n",MESH_LAYOUT);return 4;}
+  const struct mesh_switch *sw=mesh_switch_of(m);
+  if(sw->magic!=MESH_SWITCH_MAGIC){printf("node %u: no switch made\n",m->node);return 0;}
+  uint32_t state[4]={0};
+  for(uint32_t s=0;s<sw->slots;s++){const uint32_t k=atomic_load(&sw->slot[s].state);if(k<4)state[k]++;}
+  printf("node %u: pool %u slots of %llu bytes: %llu free (stack), %u receiving, %u held, %u sending\n",m->node,sw->slots,u(sw->slot_bytes),
+         u(ld(&sw->free_count)),state[SLOT_RECEIVE],state[SLOT_HELD],state[SLOT_SENDING]);
+  for(uint32_t l=0;l<MESH_SWITCH_LANES;l++){
+    const struct mesh_switch_lane *x=sw->lane+l;
+    if(!atomic_load(&x->live) && !ld(&x->sends))continue;
+    const uint64_t sends=ld(&x->sends);float rate,wait;mesh_switch_unpack(ld(&x->estimate),&rate,&wait);
+    printf("  lane %u (port %u, lane %u): %s toward node %u, %llu bytes queued, outbox %llu, %llu SENDs (%.1f us service, %.1f us wait mean), "
+           "%llu landed, estimate %.2f GB/s\n",l,l/(2*MESH_LINK_STREAMS),l%(2*MESH_LINK_STREAMS),atomic_load(&x->live)?"live":"not live",
+           atomic_load(&x->peer),u(ld(&x->queued)),u(ld(&x->tail)-ld(&x->head)),u(sends),sends?(double)ld(&x->service)/sends/1e3:0,
+           sends?(double)ld(&x->wait)/sends/1e3:0,u(ld(&x->landed)),rate);
+  }
+  const struct mesh_switch_view *v=&sw->view;
+  printf("  view: %u nodes, %u links\n",v->nodes,v->links);
+  for(uint32_t l=0;l<v->links;l++){
+    float wait,spread;mesh_switch_unpack(ld(&v->link[l].line),&wait,&spread);
+    printf("    %u -> %u: %u cables, %.2f GB/s, %.1f us; line %.1f +- %.1f us, stamp %llu\n",v->link[l].from,v->link[l].to,v->link[l].cables,
+           v->link[l].rate,v->link[l].latency/1e3,wait/1e3,spread/1e3,u(ld(&v->link[l].stamp)));
+  }
+  const struct mesh_switch_weights *w=&sw->weights;
+  printf("  weights: %llu refreshes, %u neighbours\n",u(w->refreshes),w->deg);
+  for(uint32_t d=0;d<w->nodes && d<v->nodes;d++){
+    printf("    toward node %u:",v->node[d]);
+    for(uint32_t k=0;k<w->deg;k++)printf(" %u:%.2f",w->neighbour[k]<v->nodes?v->node[w->neighbour[k]]:0,w->w[d][k]);
+    printf("\n");
+  }
+  for(uint32_t g=0;g<MESH_SWITCH_LOGS;g++)if(ld(&sw->log[g].tail))
+    printf("  log %u: %llu records, %llu taken, %llu dropped\n",g,u(ld(&sw->log[g].tail)),u(ld(&sw->log[g].head)),u(ld(&sw->log[g].dropped)));
   for(uint32_t n=0;n<MESH_NODES;n++){
     const struct mesh_node *x=mesh_node_at(m,n);
     const uint32_t node=atomic_load(&x->node);
     if(!node)continue;
-    const uint32_t epochs=atomic_load(&x->epochs);
-    const uint64_t segments=ld(&x->segments);
-    printf("order %u toward node %u: live %u generation %llu epochs %u segments %llu agreed %llu declaring %llu restart %llu\n",n,node,
-           atomic_load(&x->live),u(ld(&x->generation)),epochs,u(segments),u(ld(&x->agreed)),u(ld(&x->declaring)),u(ld(&x->restart)));
-    for(int d=0;d<2;d++)printf("  %s: limit %llu raised %llu\n",d?"receive":"send",u(ld(&x->limit[d])),u(ld(&x->raised[d])));
-    for(uint32_t e=0;e<epochs && e<MESH_EPOCHS;e++){
-      const struct mesh_epoch *at=x->epoch+e;
-      printf("  epoch %u from %llu/%llu:",e,u(at->first[0]),u(at->first[1]));
-      for(uint32_t c=0;c<at->cables && c<MESH_PORTS;c++)printf(" port %u lanes %u wire %#llx;",at->cable[c].port,at->cable[c].lanes,u(at->cable[c].wire));
-      putchar('\n');
-    }
-    for(uint64_t s=segments>MESH_SEGMENTS?segments-MESH_SEGMENTS:0;s<segments;s++){
-      const struct mesh_segment *g=order_segment(x,s);
-      printf("  segment %llu from %llu/%llu round %llu/%llu rounds %lld:",u(s),u(g->start[0]),u(g->start[1]),u(g->round[0]),u(g->round[1]),
-             (long long)ld(&g->rounds));
-      for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++)printf(" program %u from execution %llu;",g->slot[k],u(g->base[k]));
-      putchar('\n');
-    }
+    printf("toward node %u: %s, bandwidth %llu\n",node,atomic_load(&x->live)?"live":"not live",u(ld(&x->bandwidth)));
     for(uint32_t p=0;p<MESH_PROGRAMS;p++){
       const struct mesh_declared *d=x->program+p;
-      if(!ld(&d->owner))continue;
-      printf("  program %u: owner %#llx key %llu period %u count %u issued %llu closed %lld end %lld/%lld\n",p,u(ld(&d->owner)),
-             u(d->program.key),d->program.period,d->program.count,u(ld(&d->issued)),(long long)ld(&d->closed),(long long)ld(&d->end[0]),
-             (long long)ld(&d->end[1]));
+      const uint64_t owner=ld(&d->owner);
+      if(!owner)continue;
+      printf("  program %u: owner %#llx key %#llx period %u issued %llu closed %lld claimed %llu%s\n",p,u(owner),u(d->program.key),d->program.period,
+             u(ld(&d->issued)),ld(&d->closed)==UINT64_MAX?-1LL:(long long)ld(&d->closed),u(ld(&d->claimed)),mesh_switch_done(m,d)?" (done)":"");
       for(int way=0;way<2;way++){
-        const struct mesh_crossing *t=order_table(m,d,way);
+        const struct mesh_crossing *t=mesh_switch_table(m,d,way);
+        if(!t || !d->progress[way])continue;
+        const struct mesh_switch_transfer *pr=(const struct mesh_switch_transfer *)((const char *)m+d->progress[way]);
         printf("    %s: %llu transfers, %llu pieces an execution\n",way?"receive":"send",u(d->program.transfers[way]),u(d->program.pieces[way]));
-        for(uint64_t i=0;t && i<d->program.transfers[way] && i<show;i++){
-          printf("      #%llu step %u first %llu units %llu gate %llu+%llu/execution done %llu+%llu/execution",u(i),t[i].step,u(t[i].first),
-                 u(t[i].units),u(t[i].gate_base),u(t[i].gate_step),u(t[i].done_value),u(t[i].done_step));
-          if(t[i].gates && mesh_region_holds(m,t[i].gate,t[i].gates*sizeof(struct mesh_gate_term),8)){
-            const struct mesh_gate_term *g=(const void *)((const char *)m+t[i].gate);
-            for(uint32_t k=0;k<t[i].gates;k++){word(m,"gate",g[k].word);printf(">=%llu",u(g[k].threshold));}
-          }else word(m,"gate",t[i].gate);
-          word(m,"done",t[i].done);
-          putchar('\n');
+        for(uint64_t i=0;i<d->program.transfers[way] && i<show;i++){
+          printf("      transfer %llu: %llu units, step %u, complete %llu",u(i),u(t[i].units),t[i].step,u(ld(&pr[i].complete)));
+          word(m,"gate",t[i].gates?0:t[i].gate);word(m,"done",t[i].done);
+          printf("\n");
         }
       }
     }
   }
-  for(uint32_t p=0;p<MESH_STREAMS;p++){
-    const struct mesh_lanes *l=mesh_lanes_at(m,p);
-    if(!atomic_load(&l->live))continue;
-    const uint32_t peer=atomic_load(&l->peer);
-    const struct mesh_node *x=NULL;
-    for(uint32_t n=0;n<MESH_NODES;n++)if(atomic_load(&mesh_node_at(m,n)->node)==peer)x=mesh_node_at(m,n);
-    const uint32_t epochs=x?atomic_load(&x->epochs):0;
-    const uint64_t sends=ld(&l->sends),send_ns=ld(&l->send_ns);
-    printf("lanes %u (port %u): peer %u child %u passes %llu sends %llu send_ns %llu (post -> done %.2f us)",p,p/MESH_LINK_STREAMS,
-           peer,atomic_load(&l->child),u(ld(&l->passes)),u(sends),u(send_ns),sends?(double)send_ns/(double)sends/1e3:0.0);
-    for(int way=0;way<2;way++)
-      for(int j=0;j<2;j++){
-        const uint32_t lane=(p%MESH_LINK_STREAMS)*2+(uint32_t)j;
-        const uint64_t posted=ld(&l->posts[way].posted[j]),done=ld(&l->posts[way].done[j]);
-        printf(" | %s lane %u posted %llu done %llu",way?"recv":"send",lane,u(posted),u(done));
-        if(x)printf(" (next piece %lld, first undone %lld)",(long long)order_unit_piece(x,epochs,way,p/MESH_LINK_STREAMS,lane,posted),
-                    (long long)order_unit_piece(x,epochs,way,p/MESH_LINK_STREAMS,lane,done));
-      }
-    putchar('\n');
-  }
+  munmap(m,(size_t)st.st_size);
   return 0;
 }

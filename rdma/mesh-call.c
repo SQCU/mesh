@@ -1,5 +1,5 @@
 #include "mesh-call.h"
-#include "mesh-order.h"
+#include "mesh-switched.h"
 #include "mesh-observe.h"
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +8,7 @@
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
 
-/* ---- The orders toward nodes (mesh-call.h; design/declared-programs.md) ----------------------------- */
+/* ---- The programs toward nodes (mesh-call.h; design/switched-multipath-dma.md) ---------------------------------- */
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
   for(uint32_t n=0;m && n<MESH_NODES && count<room;n++){
@@ -29,15 +29,17 @@ int mesh_order_open(struct mesh_ctx *context,uint32_t node,struct mesh_order *or
   }
   return ENOLINK;
 }
+/* the node's slot still names it: a program toward a node lives as long as its client (the map reaching the node
+   again or not changes nothing the program declared) */
 int mesh_order_live(struct mesh_ctx *context,const struct mesh_order *order){
   if(!context || !context->M || !order || order->slot>=MESH_NODES)return 0;
   const struct mesh_node *x=mesh_node_at(context->M,order->slot);
-  return atomic_load_explicit(&x->node,memory_order_acquire)==order->node && atomic_load_explicit(&x->live,memory_order_acquire) &&
+  return atomic_load_explicit(&x->node,memory_order_acquire)==order->node &&
          (uint32_t)atomic_load_explicit(&x->generation,memory_order_acquire)==order->generation;
 }
 /* whether client `owner` still holds its slot */
 static int client_live(struct hdr *m,uint64_t owner){
-  return owner && atomic_load_explicit(&mesh_client_at(m,owner)->owner,memory_order_acquire)==owner;
+  return owner && owner!=UINT64_MAX && atomic_load_explicit(&mesh_client_at(m,owner)->owner,memory_order_acquire)==owner;
 }
 /* whether the region holds `bytes` at `at`, 8-byte aligned */
 static int words_held(const struct hdr *m,uint64_t at,uint64_t bytes){ return mesh_region_holds(m,at,bytes,8); }
@@ -46,7 +48,7 @@ static int words_held(const struct hdr *m,uint64_t at,uint64_t bytes){ return me
    the region; the pieces an execution its units' sum */
 static int program_valid(const struct hdr *m,const struct mesh_declaration *p){
   if(!p->period || !p->count)return 0;
-  const uint64_t piece=order_piece_bytes(m);
+  const uint64_t piece=mesh_switch_piece(m);
   for(int d=0;d<2;d++){
     const uint64_t n=p->transfers[d];
     if(!n){if(p->pieces[d] || p->table[d])return 0;continue;}
@@ -69,134 +71,79 @@ static int program_valid(const struct hdr *m,const struct mesh_declaration *p){
   }
   return 1;
 }
-/* the node's declaring word taken for `client` (from a client gone, where one holds it); 0, or EBUSY */
-static int declaring_take(struct hdr *m,struct mesh_node *x,uint64_t client){
-  uint64_t held=0;
-  if(atomic_compare_exchange_strong_explicit(&x->declaring,&held,client,memory_order_acq_rel,memory_order_acquire))return 0;
-  if(!client_live(m,held) && atomic_compare_exchange_strong_explicit(&x->declaring,&held,client,memory_order_acq_rel,memory_order_acquire))return 0;
-  return EBUSY;
+/* a program slot made vacant once its program is closed and wholly done, or its client is gone: its progress pages
+   given back to the arena */
+static void slot_vacate(struct hdr *m,struct mesh_declared *d){
+  uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
+  if(!owner || owner==UINT64_MAX)return;
+  if(client_live(m,owner) && !mesh_switch_done(m,d))return;
+  if(!atomic_compare_exchange_strong_explicit(&d->owner,&owner,UINT64_MAX,memory_order_acq_rel,memory_order_relaxed))return;
+  if(d->pages)mesh_bits_clear(mesh_arena_bits(m),d->page,d->pages);
+  d->progress[0]=d->progress[1]=0;d->pages=0;
+  atomic_store_explicit(&d->owner,0,memory_order_release);
 }
-/* The one declaration step (mesh_declare, mesh_close), under the node's declaring word: the programs of the node's
-   last segment that close (this client's own, `only` that slot of them where it is one, and every one of a client gone), a restart asked where one of a client
-   gone holds pieces outstanding or ended mid-execution (its peer's count may differ: only a restart realigns the two
-   ends), program slots of programs closed and wholly done made vacant, the declared one (`program`, NULL none) given a
-   slot, and the next segment published (mesh-order.h order_compose, order_publish_segment) */
-static int declare_held(struct mesh_ctx *context,const struct mesh_order *order,struct mesh_node *x,const struct mesh_declaration *program,
-                        uint32_t only,struct mesh_run *run){
+/* Declared toward the order's node: a vacant program slot taken (UINT64_MAX while it is made, so no bridge reads it
+   half made), the program's progress leased from the arena and made, the declaration copied, the slot given to the
+   client.  This client's program there before it, if any, ends at the executions it issued (mesh_close).  Nothing is
+   agreed with the peer and nothing is sent: the receiving end finds this program by its key in the name of every
+   piece (mesh-switched.h mesh_switch_deliver) */
+int mesh_declare(struct mesh_ctx *context,const struct mesh_order *order,const struct mesh_declaration *program,struct mesh_run *run){
+  if(!context || !context->M || !context->client || !order || order->slot>=MESH_NODES || !program || !run)return EINVAL;
   struct hdr *m=context->M;
+  if(!program_valid(m,program))return EINVAL;
   if(!mesh_order_live(context,order))return ENOLINK;
-  const uint64_t segments=atomic_load_explicit(&x->segments,memory_order_acquire);
-  uint32_t closing=0,gone=0;
-  if(segments){
-    const struct mesh_segment *g=x->segment+(segments-1)%MESH_SEGMENTS;
-    for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-      const uint64_t owner=atomic_load_explicit(&x->program[g->slot[k]].owner,memory_order_acquire);
-      if(owner==context->client){if(only==MESH_PROGRAMS || only==g->slot[k])closing|=UINT32_C(1)<<g->slot[k];}
-      else if(!client_live(m,owner)){closing|=UINT32_C(1)<<g->slot[k];gone|=UINT32_C(1)<<g->slot[k];}
-    }
-    for(uint32_t k=0;gone && k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-      uint64_t rounds;
-      if(!(gone>>g->slot[k]&1))continue;
-      /* mid-execution (its peer's count may differ), or a piece of it that can never be posted (its gate shut, its
-         client gone: order_gate_shut); its pieces posted complete or fail through their own completions */
-      int outstanding=order_round_of(x,g,k,&rounds)!=0;
-      for(int d=0;!outstanding && d<2;d++)
-        outstanding=order_gate_shut(m,x,segments,g->slot[k],d,atomic_load_explicit(&x->raised[d],memory_order_acquire),
-                                    g->start[d]+rounds*g->round[d]);
-      if(outstanding){atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;}
-    }
-  }
-  /* a closed program of a client gone with a piece that can never be posted (its gate shut: a SEND its client never
-     published, e.g. a fused crossing's frame whose producer was never run) holds the queue pair that piece is on, so
-     every program after it would wait behind it for ever: the order restarts (a restart asked, as for a gone program
-     mid-execution) and this declaration fails as a value.  Its pieces posted or postable complete or fail through their
-     own completions, and the programs after them follow them on their queue pairs: nothing is waited for here */
-  for(uint32_t p=0;p<MESH_PROGRAMS;p++){
-    const struct mesh_declared *d=x->program+p;
-    const uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
-    if(!owner || client_live(m,owner) || atomic_load_explicit(&d->closed,memory_order_acquire)==UINT64_MAX)continue;
-    for(int k=0;k<2;k++)
-      if(order_gate_shut(m,x,segments,p,k,atomic_load_explicit(&x->raised[k],memory_order_acquire),atomic_load_explicit(&d->end[k],memory_order_acquire))){
-        atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;
-      }
-  }
+  struct mesh_node *x=mesh_node_at(m,order->slot);
   for(uint32_t p=0;p<MESH_PROGRAMS;p++){
     struct mesh_declared *d=x->program+p;
-    uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
-    if(owner && atomic_load_explicit(&d->closed,memory_order_acquire)!=UINT64_MAX &&
-       atomic_load_explicit(&x->raised[0],memory_order_acquire)>=atomic_load_explicit(&d->end[0],memory_order_acquire) &&
-       atomic_load_explicit(&x->raised[1],memory_order_acquire)>=atomic_load_explicit(&d->end[1],memory_order_acquire))
-      atomic_compare_exchange_strong_explicit(&d->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed);
+    if(atomic_load_explicit(&d->owner,memory_order_acquire)==context->client && atomic_load_explicit(&d->closed,memory_order_acquire)==UINT64_MAX){
+      const uint64_t issued=atomic_load_explicit(&d->issued,memory_order_acquire);
+      atomic_store_explicit(&d->closed,d->program.period?issued/d->program.period:0,memory_order_release);
+    }
+    slot_vacate(m,d);
   }
-  if(!program && !closing)return 0;
   uint32_t joining=MESH_PROGRAMS;
-  if(program){
-    for(uint32_t p=0;p<MESH_PROGRAMS && joining==MESH_PROGRAMS;p++){
-      uint64_t vacant=0;
-      if(atomic_compare_exchange_strong_explicit(&x->program[p].owner,&vacant,context->client,memory_order_acq_rel,memory_order_relaxed))joining=p;
-    }
-    if(joining==MESH_PROGRAMS)return ENOSPC;
-    struct mesh_declared *d=x->program+joining;
-    d->program=*program;
-    atomic_store_explicit(&d->issued,0,memory_order_relaxed);atomic_store_explicit(&d->closed,UINT64_MAX,memory_order_relaxed);
-    atomic_store_explicit(&d->end[0],UINT64_MAX,memory_order_relaxed);atomic_store_explicit(&d->end[1],UINT64_MAX,memory_order_relaxed);
+  for(uint32_t p=0;p<MESH_PROGRAMS && joining==MESH_PROGRAMS;p++){
+    uint64_t vacant=0;
+    if(atomic_compare_exchange_strong_explicit(&x->program[p].owner,&vacant,UINT64_MAX,memory_order_acq_rel,memory_order_relaxed))joining=p;
   }
-  struct order_next next;
-  int error=order_compose(x,closing,joining,&next);
-  if(!error && segments>=MESH_SEGMENTS && !order_segment_done(x,segments-MESH_SEGMENTS))error=ENOSPC;
-  if(error){
-    if(joining<MESH_PROGRAMS)atomic_store_explicit(&x->program[joining].owner,0,memory_order_release);
-    return error;
+  if(joining==MESH_PROGRAMS)return ENOSPC;
+  struct mesh_declared *d=x->program+joining;
+  const struct mesh_crossing *t[2]={NULL,NULL};uint64_t bytes[2]={0,0};
+  for(int k=0;k<2;k++)if(program->transfers[k]){
+    t[k]=(const struct mesh_crossing *)((const char *)m+program->table[k]);
+    bytes[k]=(mesh_switch_progress_bytes(t[k],program->transfers[k])+63)/64*64;
   }
-  if(segments){
-    const struct mesh_segment *g=x->segment+(segments-1)%MESH_SEGMENTS;
-    for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-      if(!(closing>>g->slot[k]&1))continue;
-      struct mesh_declared *d=x->program+g->slot[k];
-      atomic_store_explicit(&d->end[0],next.start[0],memory_order_relaxed);atomic_store_explicit(&d->end[1],next.start[1],memory_order_relaxed);
-      atomic_store_explicit(&d->closed,g->base[k]+next.rounds*d->program.count,memory_order_release);
-    }
-  }
-  order_publish_segment(x,segments,&next);
-  /* the bridge woken: it tells the peer the segment's digest (mesh-order.h order_segments_turn) */
+  const uint64_t page=(uint64_t)m->pgsz,pages=(bytes[0]+bytes[1]+page-1)/page;
+  const uint32_t first=pages?mesh_arena_alloc(context,(uint32_t)pages,1):0;
+  if(pages && first==MESH_ABSENT){atomic_store_explicit(&d->owner,0,memory_order_release);return ENOMEM;}
+  d->program=*program;
+  d->page=first;d->pages=(uint32_t)pages;
+  const uint64_t base=m->data_off+(uint64_t)first*page;
+  d->progress[0]=bytes[0]?base:0;d->progress[1]=bytes[1]?base+bytes[0]:0;
+  for(int k=0;k<2;k++)if(t[k])mesh_switch_progress_init(m,d,k,t[k],program->transfers[k]);
+  atomic_store_explicit(&d->issued,0,memory_order_relaxed);atomic_store_explicit(&d->closed,UINT64_MAX,memory_order_relaxed);
+  atomic_store_explicit(&d->claimed,0,memory_order_relaxed);
+  atomic_store_explicit(&d->owner,context->client,memory_order_release);
   mesh_notify(&m->control);
-  if(run)*run=(struct mesh_run){.order=*order,.program=joining,.issued=joining<MESH_PROGRAMS?&x->program[joining].issued:NULL};
+  *run=(struct mesh_run){.order=*order,.program=joining,.issued=&d->issued};
   return 0;
 }
-static int declare(struct mesh_ctx *context,const struct mesh_order *order,const struct mesh_declaration *program,uint32_t only,
-                   struct mesh_run *run){
-  if(!context || !context->M || !context->client || !order || order->slot>=MESH_NODES)return EINVAL;
-  struct hdr *m=context->M;
-  if(program && !program_valid(m,program))return EINVAL;
-  struct mesh_node *x=mesh_node_at(m,order->slot);
-  /* another client's declaration toward the node under way is awaited (declarations are made one at a time), at most
-     MESH_PLATFORM_NS */
-  int error;
-  for(const uint64_t until=mesh_clock_ns()+MESH_PLATFORM_NS;(error=declaring_take(m,x,context->client)) && mesh_clock_ns()<until;)
-    __asm__ volatile("yield");
-  if(error)return error;
-  error=declare_held(context,order,x,program,only,run);
-  uint64_t held=context->client;
-  atomic_compare_exchange_strong_explicit(&x->declaring,&held,0,memory_order_acq_rel,memory_order_relaxed);
-  return error;
-}
-int mesh_declare(struct mesh_ctx *context,const struct mesh_order *order,const struct mesh_declaration *program,struct mesh_run *run){
-  if(!program || !run)return EINVAL;
-  return declare(context,order,program,MESH_PROGRAMS,run);
-}
+/* the client's program ended at the executions it issued */
 int mesh_close(struct mesh_ctx *context,struct mesh_run *run){
-  if(!run || run->program>=MESH_PROGRAMS)return EINVAL;
-  return declare(context,&run->order,NULL,run->program,NULL);
+  if(!context || !context->M || !run || run->program>=MESH_PROGRAMS || run->order.slot>=MESH_NODES)return EINVAL;
+  struct mesh_declared *d=mesh_node_at(context->M,run->order.slot)->program+run->program;
+  if(atomic_load_explicit(&d->owner,memory_order_acquire)!=context->client)return 0;
+  const uint64_t issued=atomic_load_explicit(&d->issued,memory_order_acquire);
+  uint64_t open=UINT64_MAX;
+  atomic_compare_exchange_strong_explicit(&d->closed,&open,d->program.period?issued/d->program.period:0,memory_order_acq_rel,memory_order_relaxed);
+  slot_vacate(context->M,d);
+  return 0;
 }
 int mesh_run_done(struct mesh_ctx *context,const struct mesh_run *run){
   if(!context || !context->M || !run || run->program>=MESH_PROGRAMS || run->order.slot>=MESH_NODES)return 1;
-  if(!mesh_order_live(context,&run->order))return 1;
-  const struct mesh_node *x=mesh_node_at(context->M,run->order.slot);
-  const struct mesh_declared *d=x->program+run->program;
+  const struct mesh_declared *d=mesh_node_at(context->M,run->order.slot)->program+run->program;
   if(atomic_load_explicit(&d->owner,memory_order_acquire)!=context->client)return 1;
-  if(atomic_load_explicit(&d->closed,memory_order_acquire)==UINT64_MAX)return 0;
-  return atomic_load_explicit(&x->raised[0],memory_order_acquire)>=atomic_load_explicit(&d->end[0],memory_order_acquire) &&
-         atomic_load_explicit(&x->raised[1],memory_order_acquire)>=atomic_load_explicit(&d->end[1],memory_order_acquire);
+  return mesh_switch_done(context->M,d);
 }
 
 /* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the region has them */
