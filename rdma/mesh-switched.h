@@ -59,7 +59,8 @@
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)   /* a port's data lanes, MESH_LANE_FIRST on */
 #define MESH_SWITCH_N 8u                                     /* nodes the view holds */
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view holds */
-#define MESH_SWITCH_HEAD 4096u                               /* a slot's name: one frame */
+#define MESH_SWITCH_HEAD 1088u                               /* a slot's name, the piece's bytes after it */
+#define MESH_SWITCH_SHORT 2u                                 /* a short lane's frames (a link's first data lane, where it has two) */
 #define MESH_SWITCH_WINDOW 8u                                /* executions of a transfer in progress at once */
 #define MESH_SWITCH_RING 4096u                               /* a lane's outbox */
 #define MESH_SWITCH_SLOTS 4096u                              /* the pool's slots, at most */
@@ -89,7 +90,7 @@ struct mesh_switch_name {
   uint32_t wanted[MESH_SWITCH_N],nwanted;   /* the piece's destinations as staged: its pattern's (with `source`) */
   struct mesh_switch_line line[MESH_SWITCH_LINES];
 };
-_Static_assert(sizeof(struct mesh_switch_name)<=MESH_SWITCH_HEAD,"a name within its frame");
+_Static_assert(sizeof(struct mesh_switch_name)<=MESH_SWITCH_HEAD && MESH_SWITCH_HEAD%64==0,"a name within its head");
 
 /* ---- The region's switch (struct hdr switch_off; MESH_SWITCH_BYTES, mesh.h) ------------------------------------- */
 /* a link of the view: a directed node pair, its cables, rate (all of them, bytes a ns), latency (ns), and its line's
@@ -137,6 +138,7 @@ struct mesh_switch_lane {
   _Alignas(64) _Atomic uint32_t live,peer;
   _Atomic uint64_t queued,head,tail;
   _Atomic uint64_t sends,bytes,service,wait,landed,estimate;
+  _Atomic uint64_t frames;          /* every SEND's and receive's frames on the lane (TN3205: the two ends alike); 0 a whole slot */
 };
 struct mesh_switch_cell { _Atomic uint64_t sequence,slot; };
 /* a slot of the pool: its free-stack link, its references (SENDs posted of it and a delivery pending), and its
@@ -219,7 +221,12 @@ static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
 /* a piece's bytes at most (mesh-order.h's order_piece_bytes: one allocation block) and the slot that carries one */
 static inline uint64_t mesh_switch_piece(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
-static inline uint64_t mesh_switch_slot_bytes(const struct hdr *m){ return MESH_SWITCH_HEAD+(mesh_switch_piece(m)+4095)/4096*4096; }   /* whole frames of 4096 (mesh-bridge.h MESH_FRAME) */
+static inline uint64_t mesh_switch_slot_bytes(const struct hdr *m){ return (MESH_SWITCH_HEAD+mesh_switch_piece(m)+4095)/4096*4096; }   /* whole frames of 4096 (mesh-bridge.h MESH_FRAME) */
+/* the bytes every SEND on lane l carries (its frames: a short lane's MESH_SWITCH_SHORT, another's a whole slot) */
+static inline uint64_t mesh_switch_lane_bytes(const struct mesh_switch *sw,uint32_t l){
+  const uint64_t f=atomic_load_explicit(&sw->lane[l].frames,memory_order_relaxed);
+  return f && f*4096<sw->slot_bytes?f*4096:sw->slot_bytes;
+}
 
 /* the switch made new over `slots` slots of the pool at region offset `base` (the bridge's own arena pages) */
 static inline void mesh_switch_init(struct mesh_switch *sw,uint32_t slots,uint64_t slot_bytes,uint64_t base){
@@ -427,7 +434,13 @@ static inline uint64_t mesh_switch_lanes_mask(struct mesh_switch *sw,uint32_t pe
 }
 /* mesh_switch_lanes_toward over the lanes of `mask` alone (the refresh's: struct mesh_switch_weights `toward`), each
    read live again; every lane where `mask` is 0 */
+static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra,uint64_t need);
 static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra){
+  return mesh_switch_lanes_among_for(sw,mask,peer,fallback_rate,best,rate,extra,0);
+}
+/* among the lanes whose SENDs carry `need` bytes (0: any), the one of the least wait with `extra` bytes more, or with
+   its own SEND's bytes where `extra` is negative */
+static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra,uint64_t need){
   double least=INFINITY;*best=UINT32_MAX;*rate=0;
   const uint64_t every=~UINT64_C(0)>>(64-MESH_SWITCH_LANES);
   if(!mask)mask=every;
@@ -436,14 +449,16 @@ static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mas
     const uint32_t l=(uint32_t)__builtin_ctzll(mask);
     struct mesh_switch_lane *x=sw->lane+l;
     if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->peer,memory_order_relaxed)!=peer)continue;
+    const uint64_t carries=mesh_switch_lane_bytes(sw,l);
+    if(need>carries)continue;
     float r,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&r,&waited);
     const double each=r>0?r:fallback_rate>0?fallback_rate:1;
     *rate+=each;
-    const double wait=((double)atomic_load_explicit(&x->queued,memory_order_relaxed)+extra)/each;
+    const double wait=((double)atomic_load_explicit(&x->queued,memory_order_relaxed)+(extra<0?(double)carries:extra))/each;
     if(wait<least){least=wait;*best=l;}
   }
   /* none of the mask's lanes live: every lane looked at (one come up since the refresh) */
-  if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among(sw,every,peer,fallback_rate,best,rate,extra);
+  if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among_for(sw,every,peer,fallback_rate,best,rate,extra,need);
   return least;
 }
 static inline double mesh_switch_lanes_toward(struct mesh_switch *sw,uint32_t peer,double fallback_rate,uint32_t *best,double *rate){
@@ -558,7 +573,7 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
     const uint32_t nb=w->neighbour[k];
     const struct mesh_switch_link *x=nb<v->nodes?mesh_switch_link_of((struct mesh_switch_view *)v,v->self,v->node[nb]):NULL;
     /* the lane's wait with this piece's own bytes on it: its time to clear the lane (design: (backlog + bytes) / rate) */
-    wait[k]=nb<v->nodes?mesh_switch_lanes_among(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,(double)sw->slot_bytes):INFINITY;
+    wait[k]=nb<v->nodes?mesh_switch_lanes_among_for(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,-1,MESH_SWITCH_HEAD+(uint64_t)name->bytes):INFINITY;
     latency[k]=x?x->latency:0;
   }
   /* the policy's context: the piece's source and destinations as staged, the owed ones (view indices) */
@@ -1171,15 +1186,16 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
     float rate,waited;mesh_switch_unpack(atomic_load_explicit(&sw->lane[lane[g]].estimate,memory_order_relaxed),&rate,&waited);
     const double each=rate>0?rate:1;
     n->queued+=(float)((double)atomic_load_explicit(&sw->lane[lane[g]].queued,memory_order_relaxed)/each)+(float)(now>sw->slot[s].landed?now-sw->slot[s].landed:0);
-    n->transit+=(float)((double)sw->slot_bytes/each);
+    const uint64_t wire=mesh_switch_lane_bytes(sw,lane[g]);
+    n->transit+=(float)((double)wire/each);
     n->lines=nlines;memcpy(n->line,lines,nlines*sizeof *lines);
     atomic_store_explicit(&sw->slot[target].refs,1,memory_order_relaxed);
     atomic_store_explicit(&sw->slot[target].state,SLOT_SENDING,memory_order_relaxed);
     sw->slot[target].posted=now;sw->slot[target].lane=lane[g];
     if(!own)sw->slot[target].landed=sw->slot[s].landed;
-    atomic_fetch_add_explicit(&sw->lane[lane[g]].queued,sw->slot_bytes,memory_order_relaxed);
+    atomic_fetch_add_explicit(&sw->lane[lane[g]].queued,wire,memory_order_relaxed);
     if(mesh_switch_push(sw,lane[g],target)){handed|=own;continue;}
-    atomic_fetch_sub_explicit(&sw->lane[lane[g]].queued,sw->slot_bytes,memory_order_relaxed);
+    atomic_fetch_sub_explicit(&sw->lane[lane[g]].queued,wire,memory_order_relaxed);
     for(uint32_t i=0;i<owed;i++)if(group[g]>>i&1)kept[nkept++]=away[i];
     if(!own)mesh_switch_give(sw,target);else atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
   }

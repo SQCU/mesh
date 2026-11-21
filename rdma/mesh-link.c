@@ -126,6 +126,11 @@ static void link_failed(struct port *port,int64_t code,uint32_t domain){
 static inline struct mesh_switch *switch_of(void){ return mesh_switch_of(M); }
 static inline uint32_t switch_lane(const struct port *port,uint32_t j){ return port->index*2*MESH_LINK_STREAMS+j; }
 static inline uint64_t slot_frames(void){ return switch_of()->slot_bytes/MESH_FRAME; }
+/* lane j of the port's frames: a short lane (MESH_SWITCH_SHORT) its first where the link has two data lanes or more,
+   else a whole slot; both ends' plans alike, so both ends' lane j alike (TN3205) */
+static inline uint64_t lane_frames(const struct port *port,uint32_t j){
+  return !j && 2*plan_streams(port->link.plan)>=2 && MESH_SWITCH_SHORT<slot_frames()?MESH_SWITCH_SHORT:slot_frames();
+}
 static void switch_hold(struct port *port,uint32_t slot){
   struct link *l=&port->link;
   if(l->holds==l->held_room){
@@ -142,13 +147,13 @@ static void switch_receives(struct port *port,uint32_t j){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   const uint32_t lane=MESH_LANE_FIRST+j;struct lane_state *state=l->lane+lane;
-  const uint64_t frames=slot_frames(),most=state->frame_capacity/frames<64?state->frame_capacity/frames:64;
+  const uint64_t frames=lane_frames(port,j),most=state->frame_capacity/frames<64?state->frame_capacity/frames:64;
   const struct mesh_queue *queue=l->provider.queues+lane;
   while(state->posted-state->got<most){
     const uint32_t s=mesh_switch_take(sw);
     if(s==UINT32_MAX)return;
     atomic_store_explicit(&sw->slot[s].state,SLOT_RECEIVE,memory_order_relaxed);sw->slot[s].lane=switch_lane(port,j);
-    struct ibv_sge span=dma_span(port,mesh_switch_slot_span(sw,s));
+    struct ibv_sge span=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,frames*MESH_FRAME});
     struct ibv_recv_wr request={.wr_id=((uint64_t)lane<<48)|s,.sg_list=&span,.num_sge=1},*bad;
     const int error=queue->receive(queue->pair,&request,&bad);
     if(error){mesh_switch_give(sw,s);lane_lost(port,lane,error<0?-error:error);return;}
@@ -162,13 +167,13 @@ static void switch_sends(struct port *port,uint32_t j){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   const uint32_t lane=MESH_LANE_FIRST+j,at=switch_lane(port,j);struct lane_state *state=l->lane+lane;
-  const struct frames each={slot_frames()};
+  const struct frames each={lane_frames(port,j)};
   const struct mesh_queue *queue=l->provider.queues+lane;
   for(;;){
     if(state->sent-state->done>=MESH_LANE_UNITS || !gate_holds(l->gate+lane,each))return;
     const uint32_t s=mesh_switch_peek(sw,at);
     if(s==UINT32_MAX)return;
-    struct ibv_sge span=dma_span(port,mesh_switch_slot_span(sw,s));
+    struct ibv_sge span=dma_span(port,(struct mesh_dma_span){mesh_switch_slot_span(sw,s).offset,each.n*MESH_FRAME});
     struct ibv_send_wr request={.wr_id=gate_post(l->gate+lane,lane,each),.sg_list=&span,.num_sge=1,
                                 .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
     const int error=queue->send(queue->pair,&request,&bad);
@@ -200,7 +205,7 @@ static void link_send(struct port *port,uint32_t served){
     struct lane_state *state=l->lane+lane;
     const uint32_t j=lane-MESH_LANE_FIRST,unit=(uint32_t)(state->done&(MESH_LANE_UNITS-1));
     const uint64_t posted=state->sent_at[unit],start=posted>state->last?posted:state->last;
-    mesh_switch_sent(switch_of(),switch_lane(port,j),state->slot[unit],switch_of()->slot_bytes,posted,start,at);
+    mesh_switch_sent(switch_of(),switch_lane(port,j),state->slot[unit],lane_frames(port,j)*MESH_FRAME,posted,start,at);
     MESH_SWITCH_COUNT(switch_of(),port->index,sent,1);MESH_SWITCH_COUNT(switch_of(),port->index,send_ns,at-posted);
     state->last=at;state->done++;
     struct mesh_lanes *x=lanes_of(port,j/2);
@@ -237,10 +242,18 @@ static void link_receive(struct port *port,uint32_t served){
    claims it first) and switched, at most SWITCH_BURST a pass (the held ones retried after, switch_retry, once what
    was staged is posted) */
 #define SWITCH_BURST 16u
+#define SWITCH_CREDIT_PASSES 1024u
 static void switch_stage(struct port *port){
   struct mesh_switch *sw=switch_of();
   uint32_t staged=0;
-  const uint64_t at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  struct link *l=&port->link;
+  /* credits looked for where this child delivered since it last looked (a program's executions received move only
+     with deliveries; the child that delivers a whole execution's last piece looks), else every SWITCH_CREDIT_PASSES */
+  const uint64_t delivered=atomic_load_explicit(&sw->counters[port->index].delivered,memory_order_relaxed);
+  const int credits=delivered!=l->credit_delivered || ++l->credit_passes>=SWITCH_CREDIT_PASSES;
+  if(credits){l->credit_delivered=delivered;l->credit_passes=0;}
+  /* the clock read where a piece is made, not each pass */
+  uint64_t at=credits?clock_gettime_nsec_np(CLOCK_MONOTONIC):0;
   for(uint32_t n=0;n<MESH_NODES && staged<SWITCH_BURST;n++){
     struct mesh_node *x=mesh_node_at(M,n);
     if(!atomic_load_explicit(&x->node,memory_order_acquire))continue;
@@ -248,12 +261,11 @@ static void switch_stage(struct port *port){
       struct mesh_declared *d=x->program+p;
       if(!mesh_switch_owned(d))continue;
       uint32_t s;
-      if(mesh_switch_credit(M,sw,x,d,at,&s)){
+      if(credits && mesh_switch_credit(M,sw,x,d,at,&s)){
         MESH_SWITCH_COUNT(sw,port->index,credits,1);
         if(!mesh_switch_forward(M,sw,s,at,port->index))switch_hold(port,s);
       }
       for(int r;staged<SWITCH_BURST;){
-        const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
         if((r=mesh_switch_stage(M,sw,x,d,at,&s))!=1){
           if(r==-1)MESH_SWITCH_COUNT(sw,port->index,slot_waits,1);
           else if(r==-2)MESH_SWITCH_COUNT(sw,port->index,credit_waits,1);
@@ -261,6 +273,11 @@ static void switch_stage(struct port *port){
           break;
         }
         staged++;
+        const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        if(!at){
+          /* the piece's stamps (mesh_switch_stage's `now`) at the clock read now */
+          at=t0;sw->slot[s].staged=sw->slot[s].landed=at;((struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s))->born=at;
+        }
         MESH_SWITCH_COUNT(sw,port->index,staged,1);
         MESH_SWITCH_COUNT(sw,port->index,staged_dests,((struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s))->dests);
         if(!mesh_switch_forward(M,sw,s,at,port->index))switch_hold(port,s);
@@ -567,6 +584,7 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   for(uint32_t j=0;j<2*plan_streams(l->plan);j++){
     struct mesh_switch_lane *x=sw->lane+switch_lane(port,j);
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
+    atomic_store_explicit(&x->frames,lane_frames(port,j),memory_order_relaxed);
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
   l->holds=0;l->receives=0;
