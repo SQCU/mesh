@@ -134,7 +134,7 @@ float route_draw_score(const struct route_draw *d, const float *w, float *score)
 #include "../switched-world.h"
 
 int route_argmax;   /* route.h: the bridges' draws take their table's most probable split */
-struct piece { uint64_t key; uint32_t source, dest, transfer, span, op; float latency, queueing; };
+struct piece { uint64_t key; uint32_t source, dest, transfer, span, op; float latency, queueing; double at; uint32_t bytes; };
 struct draw { struct route_draw r; uint32_t context; uint64_t key; uint32_t source, dest, transfer, span; float logp; };
 struct drawlog { struct draw *d; uint32_t count, room; };
 struct route_sim {
@@ -176,7 +176,7 @@ static void on_record(void *ctx, const struct mesh_switch_record *r) {
     const int o = op_of_key(x, r->key);
     if (o < 0) return;
     if (x->npieces == x->pieceroom) { x->pieceroom = x->pieceroom ? 2 * x->pieceroom : 4096; x->pieces = realloc(x->pieces, x->pieceroom * sizeof *x->pieces); if (!x->pieces) abort(); }
-    x->pieces[x->npieces++] = (struct piece){r->key, r->source, r->node, r->transfer, r->span, (uint32_t)o, r->latency, r->queueing};
+    x->pieces[x->npieces++] = (struct piece){r->key, r->source, r->node, r->transfer, r->span, (uint32_t)o, r->latency, r->queueing, (double)r->at, r->bytes};
   }
 }
 
@@ -212,6 +212,7 @@ static int policy_splits(void *ctx, const struct mesh_switch_tokens *tok, float 
 /* every node's tables made from refresh `point`'s answer (-1: zero tables), through the bridge's policy refresh */
 static void publish(struct route_sim *x, int point) {
   const struct mesh_switch_policy policy = {x, NULL, policy_splits};
+  if (x->w->closed) return;
   x->pending = point;
   for (uint32_t v = 0; v < x->w->nodes; v++) {
     x->publishing = (int)v;
@@ -224,6 +225,7 @@ static void publish(struct route_sim *x, int point) {
 /* the run to `until`: the collectives arriving before it started as they arrive (a later one waits for a program
    slot where SW_OPS are live), every event before it */
 static void run_to(struct route_sim *x, double until) {
+  if (x->stopped && !x->w->closed && until > x->tend) { run_to(x, x->tend); sw_world_close(x->w); }   /* a training window posts nothing past its end */
   for (;;) {
     const int more = x->nextop < x->s.ops && (!x->stopped || x->s.op[x->nextop].arrival < x->tend);
     const double next = more ? (x->s.op[x->nextop].arrival > x->w->now ? x->s.op[x->nextop].arrival : x->w->now) : INFINITY;
@@ -326,6 +328,22 @@ void route_sim_answer(struct route_sim *x, const float *w) {
 }
 void route_sim_costs(const struct route_sim *x, struct route_costs *c) {
   memset(c, 0, sizeof *c);
+  if (x->stopped) {   /* a training window: the pieces staged in it as one transaction, their makespan over their own cut bound */
+    const struct route_fabric *f = &x->s.f;
+    double in[ROUTE_N] = {0}, out[ROUTE_N] = {0}, inr[ROUTE_N] = {0}, outr[ROUTE_N] = {0}, cut = 0, last = x->win.t0;
+    for (int l = 0; l < f->lanes; l++) { inr[f->to[l]] += f->rate[l]; outr[f->from[l]] += f->rate[l]; }
+    for (uint32_t p = 0; p < x->npieces; p++) {
+      const struct piece *q = &x->pieces[p];
+      if (q->at - q->latency < x->win.t0) continue;
+      const double fl = x->s.op[q->op].floor;
+      in[(q->dest - 1) % ROUTE_N] += q->bytes; out[(q->source - 1) % ROUTE_N] += q->bytes;
+      if (q->at > last) last = q->at;
+      c->latency += q->latency / fl; c->queueing += q->queueing / fl; c->pieces++;
+    }
+    for (int v = 0; v < ROUTE_N; v++) { if (inr[v] > 0 && in[v] / inr[v] > cut) cut = in[v] / inr[v]; if (outr[v] > 0 && out[v] / outr[v] > cut) cut = out[v] / outr[v]; }
+    if (c->pieces) { c->throughput = (last - x->win.t0) / (cut > x->s.unit ? cut : x->s.unit); c->ops = 1; c->latency /= c->pieces; c->queueing /= c->pieces; }
+    return;
+  }
   for (int o = 0; o < x->s.ops; o++)
     if (x->opstart[o] >= 0 && x->opend[o] >= 0) { c->throughput += (x->opend[o] - x->s.op[o].arrival) / x->s.op[o].floor; c->ops++; }
   for (uint32_t p = 0; p < x->npieces; p++) {

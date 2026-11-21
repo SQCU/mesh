@@ -63,7 +63,7 @@ struct sw_op {
 };
 struct sw_world {
   uint32_t nodes,ranks,nlinks,nlanes,ncompute,compute[MESH_SWITCH_N],rank_of[MESH_SWITCH_N];
-  struct sw_link link[64]; double duplex,copy_gbps,refresh_ns; int fixed,payload; uint32_t draws;
+  struct sw_link link[64]; double duplex,copy_gbps,refresh_ns; int fixed,payload,closed; uint32_t draws;   /* closed: sw_world_close */
   struct sw_node node[MESH_SWITCH_N];
   struct sw_lane lane[256];
   struct sw_event *heap; size_t events,room;
@@ -184,7 +184,7 @@ static inline void sw_world_reset(struct sw_world *w,const double *background,ui
     struct sw_lane *x=w->lane+l;x->head=x->tail=0;
     x->free_at=background?background[x->link]/w->link[x->link].rate:0;
   }
-  memset(w->op,0,sizeof w->op);w->nlive=0;w->events=0;w->now=0;w->next_refresh=0;w->seed=seed;memset(w->count,0,sizeof w->count);
+  memset(w->op,0,sizeof w->op);w->nlive=0;w->events=0;w->closed=0;w->now=0;w->next_refresh=0;w->seed=seed;memset(w->count,0,sizeof w->count);
   for(uint32_t i=0;i<w->nodes;i++)mesh_switch_refresh(w->node[i].sw,NULL,w->fixed?1:w->draws,1,seed^i,(double)w->node[i].sw->slot_bytes,w->fixed);
   if(!w->fixed){w->next_refresh=w->refresh_ns;sw_push(w,(struct sw_event){w->refresh_ns,SW_EV_REFRESH,0,0,0,0,0});}
 }
@@ -381,18 +381,23 @@ static inline void sw_post_lanes(struct sw_world *w,uint32_t a,double t){
 static inline void sw_bridge_pass(struct sw_world *w,uint32_t a,double t){
   struct sw_node *v=w->node+a;
   const double page=(double)SW_PAGE;
-  for(int again=1;again;){
+  /* as the bridge's port child (mesh-link.c switch_stage): what its programs release staged and switched, what it
+     holds retried; again while staging moves (a reduction's gate opened by what landed), the held ones retried once
+     more after a pass that moved some of them (each retry of a slot whose lanes are full costs a forward: not again
+     for nothing) */
+  for(int again=1,holds=1;again;){
     again=0;
     sw_client_pass(w,a,t);
-    uint32_t keep=0;
-    for(uint32_t i=0;i<v->nheld;i++){
+    uint32_t keep=0;int moved=0;
+    for(uint32_t i=0;holds && i<v->nheld;i++){
       const uint32_t s=v->held[i];
       const double before=v->cpu;
       sw_copy_cost(w,v,t,page);
       if(mesh_switch_forward(v->m,v->sw,s,(uint64_t)v->cpu,MESH_SWITCH_LOGS-1)<=0){v->held[keep++]=s;v->cpu=before;}
-      else again=1;
+      else moved=1;
     }
-    v->nheld=keep;
+    if(holds)v->nheld=keep;
+    holds=moved;again=moved;
     for(uint32_t n=0;n<MESH_NODES;n++){
       struct mesh_node *x=mesh_node_at(v->m,n);
       if(!atomic_load(&x->node))continue;
@@ -431,7 +436,7 @@ static inline void sw_step(struct sw_world *w,struct sw_event ev){
   if(ev.kind==SW_EV_REFRESH){
     for(uint32_t i=0;i<w->nodes;i++)mesh_switch_refresh(w->node[i].sw,NULL,w->draws,MESH_SWITCH_ETA,mesh_switch_mix(w->seed^(uint64_t)ev.t)^i,(double)w->node[i].sw->slot_bytes,0);
     for(uint32_t i=0;i<w->nodes;i++)sw_bridge_pass(w,i,ev.t);   /* what waited for the view to change */
-    int owed=w->events>0;for(uint32_t i=0;i<SW_OPS && !owed;i++)owed=w->op[i].live && w->op[i].end<0;
+    int owed=w->events>0;for(uint32_t i=0;i<SW_OPS && !owed && !w->closed;i++)owed=w->op[i].live && w->op[i].end<0;
     if(owed)sw_push(w,(struct sw_event){ev.t+w->refresh_ns,SW_EV_REFRESH,0,0,0,0,0});
     return;
   }
@@ -468,6 +473,15 @@ static inline void sw_pass_all(struct sw_world *w){
   if(!w->fixed && w->nlive){
     int refresh=0;for(size_t e=0;e<w->events;e++)refresh|=w->heap[e].kind==SW_EV_REFRESH;
     if(!refresh)sw_push(w,(struct sw_event){w->now+w->refresh_ns,SW_EV_REFRESH,0,0,0,0,0});
+  }
+}
+/* the clients post nothing more (a training window's end): every live program closed before its execution, so no
+   piece is staged again; what is staged or crossing still moves, and the refreshes go on while the wire does */
+static inline void sw_world_close(struct sw_world *w){
+  w->closed=1;
+  for(uint32_t i=0;i<w->nodes;i++)for(uint32_t n=0;n<MESH_NODES;n++){
+    struct mesh_node *x=mesh_node_at(w->node[i].m,n);
+    for(uint32_t p=0;p<MESH_PROGRAMS;p++)if(atomic_load(&x->program[p].owner))atomic_store(&x->program[p].claimed,x->program[p].program.pieces[0]);   /* its send cursor past its one execution: nothing more is staged; what lands is still delivered */
   }
 }
 /* every slot of every pool back (free, or posted as a receive) */
