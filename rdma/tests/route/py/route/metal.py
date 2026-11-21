@@ -81,7 +81,7 @@ class Kernel:
     """one kernel of a file as an MLX kernel; call with its inputs (name -> array), its outputs (name -> (shape,
     dtype)), the grid in threadgroups and the threads a threadgroup; returns the outputs in the kernel's order"""
 
-    def __init__(self, file, name, template=(), fast=False, tag=''):
+    def __init__(self, file, name, template=(), fast=False, tag='', defines=''):
         src = _sources.setdefault(file, Source(file))
         params, body = src.kernels[name]
         self.inputs, self.outputs, pro = [], [], []
@@ -100,7 +100,7 @@ class Kernel:
                 self.inputs.append(nm); pro.append(f'device const {base} *{nm} = (device const {base} *){nm}_;')
             else:
                 self.outputs.append(nm); pro.append(f'device {base} *{nm} = (device {base} *){nm}_;')
-        header = ('#pragma METAL fp contract(off)\n' if not fast else '') + '#define ROUTE_MLX 1\n#define ROUTE_TBL device const\n' + src.header
+        header = ('#pragma METAL fp contract(off)\n' if not fast else '') + '#define ROUTE_MLX 1\n#define ROUTE_TBL device const\n' + defines + src.header
         self.template = list(template)
         self.k = mx.fast.metal_kernel(name=f'{name}{tag}', input_names=[f'{n}_' for n in self.inputs], output_names=[f'{n}_' for n in self.outputs],
                                       source='\n'.join(pro) + '\n' + body, header=header,

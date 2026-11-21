@@ -79,7 +79,8 @@ def roofline(B=1024, K=4, R=262144, n=10):
           'effective_tops': round(eff / s / 1e12, 2), 'real_tops': round(2 * real_macs(B, K, R) / s / 1e12, 2), 'loss': [float(x) for x in np.array(loss)]})
     fb = to_mx(batch(B, 1, R, np.random.default_rng(2)))
     pos = mx.array(((np.arange(R) % B) * L + L - 1).astype(np.int32))
-    act = mx.compile(lambda: model.act(fb['lanes'], fb['mask'], fb['h0'], fb['tokens'], pos))
+    codes = model.codes(); mx.eval(codes)   # the actor's, a publish's
+    act = mx.compile(lambda: model.act(fb['lanes'], fb['mask'], fb['h0'], fb['tokens'], pos, codes))
     mx.eval(act())
     t = []
     for _ in range(n):

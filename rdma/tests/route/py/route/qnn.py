@@ -348,9 +348,14 @@ class Policy(nn.Module):
         st, nxt = lanes(wb, wq, wsc, lanes_, mask, h0, seed)[:2]
         return contexts(wb, wq, wsc, tokens, pos, seg, st, seed)[0], nxt
 
-    def act(self, lanes_, mask, h0, tokens, pos):
-        """the rollouts' forward (one refresh, nothing stored): w [R][FS], next [B][2][D]"""
-        _, wq, wsc = self.weights()
+    def codes(self):
+        """the weights' codes alone (an actor's, made once a publish)"""
+        return self.weights()[1:]
+
+    def act(self, lanes_, mask, h0, tokens, pos, codes=None):
+        """the rollouts' forward (one refresh, nothing stored; codes: an actor's, else made from the weights now):
+        w [R][FS], next [B][2][D]"""
+        wq, wsc = codes or self.codes()
         z = mx.zeros((1,), mx.uint32)
         st, nxt, _ = _lanes_fwd(wq, wsc, lanes_, mask, h0, z, False)
         return _ctx_fwd(wq, wsc, tokens, pos, st, 0, 1, z, False)[0], nxt
