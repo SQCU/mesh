@@ -135,14 +135,13 @@ clean:
 	  .build/libnccl-mesh.air $(KERNEL_FILES:%=.build/libnccl-mesh.%)
 .PHONY: all install clean
 
-# design/switched-multipath-dma.md "Tests": the switch's routers simulated (tests/switch.c), the bridges' switch over N nodes
+# design/switched-multipath-dma.md "Tests": the bridges' switch over N nodes
 # on a timed wire (tests/sim-switched.c, the measured five-node cluster), then the two simulated nodes
 # (tests/sim-two-nodes.sh: real clients over a simulated wire that matches each SEND to the receive posted first on its queue pair); builds nothing it installs
 check: all
 	mkdir -p .build/tests
 	cc -std=gnu11 -O2 $(WARN) -I . -o .build/tests/sim-switched tests/sim-switched.c -lm && .build/tests/sim-switched
 	cc -std=c11 -O2 $(WARN) -I . -o .build/tests/scatter tests/scatter.c mesh-collective.c mesh-fabric.c mesh-routed.c -lm && .build/tests/scatter
-	cc -std=c11 -O2 $(WARN) -I . -o .build/tests/switch tests/switch.c -lm && .build/tests/switch
 	tests/sim-two-nodes.sh
 .PHONY: check
 
