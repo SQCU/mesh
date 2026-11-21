@@ -1,12 +1,13 @@
 /* The routing policy's shared definitions (design/switched-multipath-dma.md). The parts that share them, each its own file
    and its own hardware:
-     sim.c         the environment: streams of collectives on a fabric, the max-plus FIFO recursion over pieces, the
-                   features, the draws, each draw's credit (CPU threads)
+     sim.c         the environment: streams of collectives on a fabric, run by the mesh bridges' own switching code
+                   (rdma/mesh-switched.h) over the timed wire (rdma/tests/switched-world.h); the features are the
+                   bridges' (mesh_switch_tokens_make), the draws the bridges' (CPU threads)
      policy.swift  the forward: two recurrent layers over every pending decision point's tokens, from each stream's
                    carried state, w for each context (GPU)
      learn.swift   the backward through each window's decision points, the weights' gradients, the optimizer (GPU)
      main.swift    the runtime that keeps the three busy
-     forward.c     the same forward on a CPU, for deployment beside the bridge (tests/switch.c's policy router uses it)
+     forward.c     the same forward on a CPU, for deployment in the bridge (struct mesh_switch_policy's splits)
 
    The action. A piece of pattern j (a source and a destination set) standing at node v and still owing destinations S
    draws a split: each d in S assigned one of v's out-lanes; the lanes given a nonempty share are sent on. A context is
@@ -86,9 +87,6 @@ struct route_state {
   double tau, wait[ROUTE_L], dup[ROUTE_L], togo[ROUTE_N][ROUTE_N], recv[ROUTE_J][ROUTE_N], inflight[ROUTE_N], left[ROUTE_J], pending[ROUTE_J], demand[ROUTE_J], posted, ops;
 };
 struct route_topology { uint32_t adj[ROUTE_N], srcmask; int deg[ROUTE_N], out[ROUTE_N][ROUTE_DEG], rev[ROUTE_L]; };
-/* a node's out-lanes at the instant of a draw: each one's earliest-cable wait and duplex share (the node's bridge knows
-   its own lanes exactly, at every draw, so a burst's draws see the queue the ones before them built) */
-struct route_live { double wait[ROUTE_DEG], dup[ROUTE_DEG]; };
 /* over the run's collectives that finished: completion over the floor; per piece: latency, queueing, over the floor */
 struct route_costs { double throughput, latency, queueing; int ops, pieces; };
 struct route_rng { uint64_t s; };
@@ -129,19 +127,14 @@ float *route_sim_w(struct route_sim *x, int point);   /* refresh `point`'s store
    record (first[n] the count); returns n, the distinct contexts. A record's row is its context's index i. */
 int route_sim_draw_count(const struct route_sim *x, int point);
 int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int *ctx, int *first);
-void route_sim_counts(const struct route_sim *x, uint64_t out[4]);   /* events, draws, table entries built, sends */
+void route_sim_counts(const struct route_sim *x, uint64_t out[4]);
+float route_sim_logp_gap(const struct route_sim *x);   /* the bridge's logged log-probabilities against split.h's under the answered w: the largest gap */   /* events, draws, table entries built, sends */
 
 /* The contexts of a stream's fabric, in the order the tokens and w are: (pattern, node, owed set) */
 int route_contexts(const struct route_stream *s, const struct route_topology *t, int *pattern, int *node, uint32_t *owed);
 void route_topology_make(const struct route_fabric *f, const struct route_stream *s, struct route_topology *t);
-/* A split drawn from context (v, S)'s table (w its policy vector), masked to the lanes that leave `visited` and reach
-   their share without coming back; u in [0, 1). Returns the token; the table's logits are built into `logits` (route_tokens(t, v, S)
-   floats). */
 int route_tokens(const struct route_topology *t, int v, uint32_t S);
-uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
-                     const struct route_live *live, const float *w, double u, float *logits);
-extern int route_argmax;   /* sim.c: set, every draw is its table's most probable allowed split */
-uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited);
+extern int route_argmax;   /* sim.c: set, the bridges' draws take their table's most probable split */
 
 /* The policy's forward on a CPU (forward.c): model.swift's int8 network (minGRU), its weights as stored, int8 codes
    (int8mm.h's format, written by the trainer's THETA_INT8): route_params_read loads them (0, or -1 on a bad file). One
@@ -214,24 +207,6 @@ static inline void route_context_token(const struct route_stream *s, const struc
   o[41] = (float)(__builtin_log(1 + st->tau / u) / 8); o[42] = (float)point / ROUTE_POINTS;
   o[43] = (float)(__builtin_log(1 + st->pending[j] / out / u));   /* the burst waiting to post, as time on the source's lanes */
   o[44] = (float)most; o[45] = 1; o[46] = 1; o[47] = (float)(__builtin_log(1 + st->demand[j] / ROUTE_PAGE) / 8);
-}
-/* a draw's record (split.h): each (destination, out-lane)'s arrival through the lane (v's lane at the draw's instant,
-   `live`, then the refresh's cost-to-go) and whether it reaches the destination without coming back to v; the allowed
-   lanes `mask`; made once, at the draw, and read by every split of it, the sampler's and the credit's */
-static inline void route_draw_make(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S,
-                                   const struct route_live *live, uint32_t mask, struct route_draw *r) {
-  for (int i = 0; i < ROUTE_N * ROUTE_DEG; i++) r->arrive[i] = 0;
-  r->valid = 0; r->mask = mask; r->S = S; r->token = 0; r->deg = (uint32_t)t->deg[v]; r->ntok = (uint32_t)route_tokens(t, v, S);
-  r->row = 0; r->unit = (float)s->unit; r->a1 = 0; r->a2 = 0;
-  for (int d = 0; d < ROUTE_N; d++) {
-    if (!(S >> d & 1)) continue;
-    for (int k = 0; k < t->deg[v]; k++) {
-      const int l = t->out[v][k], h = s->f.to[l];
-      double g = h == d ? 0 : st->togo[h][d]; if (g > 1e3 * s->unit) g = 1e3 * s->unit;
-      if (h == d || route_reaches(t, h, 1u << v, 1u << d)) r->valid |= 1u << (ROUTE_DEG * d + k);
-      r->arrive[ROUTE_DEG * d + k] = (float)(live->wait[k] + route_send1(s, l) * live->dup[k] + s->f.latency[l] + g);
-    }
-  }
 }
 #endif
 #endif

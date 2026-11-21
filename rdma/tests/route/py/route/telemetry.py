@@ -1,4 +1,4 @@
-"""The trainer's telemetry table (telemetry.h) read where it lies: the file is mapped read-only and sampled; a sample's
+"""The trainer's telemetry table (telemetry.h) read where it lies: the shared memory object is mapped read-only and sampled; a sample's
 record is the counters' rates since the last sample, the gauges, and the phases' seconds since the start. Nothing is
 written by the trainer to report them: the table is the store."""
 import mmap
@@ -21,7 +21,8 @@ def now():
 
 class Table:
     def __init__(self, path):
-        fd = os.open(path, os.O_RDONLY)
+        import _posixshmem   # the table is a POSIX shared memory object (telemetry.c: shm_open), never a file
+        fd = _posixshmem.shm_open(path, os.O_RDONLY, 0)
         try:
             self.map = mmap.mmap(fd, TABLE.itemsize, prot=mmap.PROT_READ)
         finally:

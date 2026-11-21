@@ -10,12 +10,12 @@ theta_seed = 20261119                   # theta's initialization, every rank's t
 data_seed = 20261119                    # the distribution's draws: data_seed and the rank
 theta_in = ""                           # continue from these parameters (fp32: NetLayout's or the earlier layout's)
 theta = ""                              # write the trained parameters (fp32, the optimizer's master copy)
-theta_int8 = ""                         # write the int8 weights as deployed (tests/switch.c's ROUTE_THETA)
+theta_int8 = ""                         # write the int8 weights as deployed (forward.c's route_params_read)
 argmax = false                          # every draw its table's most probable split (comparing trajectories)
 rank = 0
 world = 1
 mesh_id = ""                            # the bootstrap root's host:port (world > 1)
-telemetry = "/tmp/route-telemetry-{rank}"
+telemetry = "/route-telemetry-{rank}"     # a POSIX shared memory object (memory, never storage)
 library = "../libroute.dylib"
 metallib = "../route.metallib"
 

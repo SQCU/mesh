@@ -1,8 +1,10 @@
-/* telemetry.h's table: mapped from a file (MAP_SHARED), so route-stat reads the counters where they lie */
+/* telemetry.h's table: a POSIX shared memory object (shm_open: memory, never storage), mapped MAP_SHARED, so route-stat
+   reads the counters where they lie */
 #include "telemetry.h"
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -11,9 +13,10 @@ struct route_tel_file *route_tel = &private_table;
 
 uint64_t route_tel_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 int route_tel_open(const char *path, int rank, int world) {
-  const int fd = open(path, O_RDWR | O_CREAT, 0644);
+  const int fd = shm_open(path, O_RDWR | O_CREAT, 0600);   /* path: the object's name, "/route-telemetry-0" */
   if (fd < 0) return -1;
-  if (ftruncate(fd, sizeof(struct route_tel_file)) != 0) { close(fd); return -1; }
+  struct stat st;
+  if (fstat(fd, &st) != 0 || (st.st_size < (off_t)sizeof(struct route_tel_file) && ftruncate(fd, sizeof(struct route_tel_file)) != 0)) { close(fd); return -1; }
   void *m = mmap(0, sizeof(struct route_tel_file), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   if (m == MAP_FAILED) return -1;

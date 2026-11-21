@@ -3,7 +3,6 @@
   train       one rank's training: loop.train, the data flow (design/dataflow.png); a telemetry record every
               report.interval; rank 0's evaluations at evaluation.at
   evaluate    the measured cluster's table for run.theta_in (or the initial theta): each mode, kind and size
-  simcheck    tests/switch.c's fixed router on the measured cluster (us): the simulator against switch.c's own table
   cases       the distribution's draws: their rate, and what they are (state sources, fabrics, windows, streams)
   dump        every refresh's tokens of one collective simulated from a zero state, the CPU forward (forward.c, as
               switch.c's router) answering: tests/switch.c ROUTE_DUMP's format (--set dump.*: see DUMP)
@@ -29,7 +28,7 @@ from . import config, fabric, loop, native, telemetry
 from .native import const, dtype, ffi
 
 DUMP = {'kind': 1, 'size': 12582912, 'burst': 0, 'out': '/tmp/sim-all.bin', 'params': ''}
-MODES = [('policy', 0, 0), ('policy (burst)', 0, 1), ('spt', 2, 0), ('uniform', 3, 0), ('switch.c fixed', 4, 0)]
+MODES = [('policy', 0, 0), ('policy (burst)', 0, 1), ('spt', 2, 0), ('uniform', 3, 0)]
 
 
 def emit(rec):
@@ -116,14 +115,6 @@ def train(cfg, lib):
         emit({'record': 'saved', 'theta': r['theta'], 'theta_int8': r['theta_int8']})
     if r['world'] > 1:
         lib.route_exchange_close()
-
-
-def simcheck(cfg, lib):
-    """tests/switch.c's fixed router on the measured cluster, us (no network involved: mode 4)"""
-    measured = fabric.load(cfg['run']['fabric'])
-    learner = network(cfg, lib, 4, 1, loop.CX)
-    t = evaluation(cfg, lib, learner, measured, 'switch.c fixed', [('switch.c fixed', 4, 0)])
-    emit({'record': 'simcheck', 'us': {k: {s: v['us'] for s, v in t['switch.c fixed'][k].items()} for k in C.KINDS}})
 
 
 def describe(cfg, lib, n=4096):
@@ -430,8 +421,6 @@ def main(argv):
         train(cfg, lib)
     elif cmd == 'evaluate':
         evaluation(cfg, lib, network(cfg, lib, 4, 1, loop.CX), fabric.load(cfg['run']['fabric']), cfg['run']['theta_in'] or 'initial')
-    elif cmd == 'simcheck':
-        simcheck(cfg, lib)
     elif cmd == 'cases':
         describe(cfg, lib)
     elif cmd == 'dump':

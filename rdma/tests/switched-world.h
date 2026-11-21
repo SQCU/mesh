@@ -58,6 +58,7 @@ struct sw_op {
   uint64_t input[MESH_SWITCH_N],output[MESH_SWITCH_N],scratch[MESH_SWITCH_N][MESH_SWITCH_N],words[MESH_SWITCH_N],words_bytes;
   uint64_t blocks[MESH_SWITCH_N][4*MESH_SWITCH_N+8][2]; uint32_t nblocks[MESH_SWITCH_N];
   uint64_t next_reduce[MESH_SWITCH_N];
+  uint64_t owed;   /* receive units not yet delivered (its programs' receive pieces, less the pieces logged delivered) */
 };
 struct sw_world {
   uint32_t nodes,ranks,nlinks,nlanes,ncompute,compute[MESH_SWITCH_N],rank_of[MESH_SWITCH_N];
@@ -246,6 +247,7 @@ static inline void sw_declare(struct sw_world *w,struct sw_op *o,uint32_t a,uint
   memset(d,0,sizeof *d);
   d->program=(struct mesh_declaration){.key=o->key,.period=1,.count=1,.table={nt[0]?tables:0,nt[1]?tables+room*sizeof(struct mesh_crossing):0},
     .transfers={nt[0],nt[1]},.pieces={pieces[0],pieces[1]}};
+  o->owed+=pieces[1];
   for(int dd=0;dd<2;dd++)if(nt[dd]){d->progress[dd]=sw_op_alloc(w,o,a,mesh_switch_progress_bytes(t[dd],nt[dd]));mesh_switch_progress_init(v->m,d,dd,t[dd],nt[dd]);}
   atomic_store(&d->closed,1);atomic_store(&d->claimed,0);atomic_store(&d->issued,1);
   atomic_store(&d->owner,1);
@@ -284,19 +286,6 @@ static inline uint32_t sw_op_start(struct sw_world *w,int kind,int root,uint64_t
   return o;
 }
 
-/* whether op o is whole: every receiving program's last done word at its value, every owner's reduction done */
-static inline int sw_op_whole(struct sw_world *w,struct sw_op *o){
-  for(uint32_t ci=0;ci<w->ncompute;ci++){
-    const uint32_t a=w->compute[ci];
-    for(uint32_t n=0;n<MESH_NODES;n++){
-      struct mesh_node *x=mesh_node_at(w->node[a].m,n);
-      struct mesh_declared *d=x->program+o->slot;
-      if(!atomic_load(&d->owner) || d->program.key!=o->key)continue;
-      if(!mesh_switch_done(w->node[a].m,d))return 0;
-    }
-  }
-  return 1;
-}
 static inline void sw_op_end(struct sw_world *w,uint32_t i){
   struct sw_op *o=w->op+i;
   for(uint32_t ci=0;ci<w->ncompute;ci++){
@@ -315,7 +304,11 @@ static inline void sw_hold(struct sw_node *v,uint32_t s){
 static inline void sw_copy_cost(struct sw_world *w,struct sw_node *v,double t,double bytes){ if(v->cpu<t)v->cpu=t;v->cpu+=bytes/w->copy_gbps; }
 static inline void sw_drain(struct sw_world *w,uint32_t a){
   struct mesh_switch_record r;
-  while(mesh_switch_log_take(w->node[a].sw,MESH_SWITCH_LOGS-1,&r)){if(r.kind==MESH_LOG_DRAW)w->count[1]++;if(w->on_record)w->on_record(w->ctx,&r);}
+  while(mesh_switch_log_take(w->node[a].sw,MESH_SWITCH_LOGS-1,&r)){
+    if(r.kind==MESH_LOG_DRAW)w->count[1]++;
+    else if(r.kind==MESH_LOG_PIECE)for(uint32_t i=0;i<SW_OPS;i++)if(w->op[i].live && w->op[i].key==r.key && w->op[i].owed){w->op[i].owed--;break;}
+    if(w->on_record)w->on_record(w->ctx,&r);
+  }
 }
 /* an owner's reductions: page by page in order, once each partial of the page has landed */
 static inline void sw_client_pass(struct sw_world *w,uint32_t a,double t){
@@ -424,7 +417,7 @@ static inline void sw_bridge_pass(struct sw_world *w,uint32_t a,double t){
 static inline void sw_check_ops(struct sw_world *w,double t){
   for(uint32_t i=0;i<SW_OPS;i++){
     struct sw_op *o=w->op+i;
-    if(!o->live || !sw_op_whole(w,o))continue;
+    if(!o->live || o->end>=0 || o->owed)continue;   /* whole: every receive unit delivered (each counted once: the bitmaps) */
     double end=t;
     for(uint32_t ci=0;ci<w->ncompute;ci++)if(w->node[w->compute[ci]].cpu>end)end=w->node[w->compute[ci]].cpu;
     o->end=end;

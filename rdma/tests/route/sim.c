@@ -1,19 +1,3 @@
-/* The environment (route.h): a stream of collectives on a fabric, run by the max-plus FIFO recursion over discrete
-   pieces with tests/switch.c's semantics. Every lane is its cables, a pair's rate shared equally among them; a piece
-   crossing a lane takes whichever cable frees first: start = max(arrival, cable free), at the far node start + bytes /
-   cable rate + latency, the cable running at the duplex share of its rate while the reverse direction's same cable is
-   busy then; a node forwards a piece the moment it lands. Events leave in time order through switch.c's heap.
-
-   A collective arrives as flows (route.h's patterns); a flow posts its next released piece the moment its last has
-   started on the wire at its source (mode 4: every piece the moment it is released, as switch.c), so each piece's split
-   at its source is drawn when it leaves, like its splits downstream. An all-reduce's reduced page is released at its
-   owner when the page's last partial lands there.
-
-   The policy is asked for a table at each refresh of the run's window (route_window); a refresh's table is active from
-   its refresh (the first) or `lag` after it (the rest); before the first, the warm router routes. A piece landing at v
-   still owing S draws its split from context (j, v, S) of the active table, masked to the lanes that leave its path and
-   lead to their share without coming back (by rejection, then enumeration: the masked table exactly). Every draw from a
-   table is logged under its (refresh, context, mask) group, for the credit. */
 #include "route.h"
 #include <math.h>
 #include <stdio.h>
@@ -26,8 +10,6 @@ uint64_t route_next(struct route_rng *g) {
   z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull; z = (z ^ (z >> 27)) * 0x94d049bb133111ebull; return z ^ (z >> 31);
 }
 double route_uniform(struct route_rng *g) { return (double)(route_next(g) >> 11) / 9007199254740992.0; }
-static uint32_t mix(uint32_t h) { h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16; return h; }
-static double unit01(uint32_t h) { return (double)(mix(h) >> 8) / 16777216.0; }
 
 /* ---- streams ---- */
 static void delays(const struct route_fabric *f, double q, double (*dist)[ROUTE_N]) {   /* one q-byte piece's unloaded shortest delays */
@@ -119,42 +101,6 @@ int route_contexts(const struct route_stream *s, const struct route_topology *t,
   return n;
 }
 
-/* ---- tables and draws ---- */
-uint32_t route_allowed(const struct route_stream *s, const struct route_topology *t, int v, uint32_t S, uint32_t visited) {
-  const uint32_t avoid = visited | 1u << v; uint32_t mask = 0;
-  for (int d = 0; d < ROUTE_N; d++) {
-    if (!(S >> d & 1)) continue;
-    for (int k = 0; k < t->deg[v]; k++) {
-      const int h = s->f.to[t->out[v][k]];
-      if (!(avoid >> h & 1) && (h == d || route_reaches(t, h, avoid, 1u << d))) mask |= 1u << (ROUTE_DEG * d + k);
-    }
-  }
-  return mask;
-}
-int route_argmax;   /* route.h: draws take the table's most probable allowed split (a deterministic trajectory, for comparing runs) */
-/* a draw from its table: the softmax over its valid, allowed splits (split.h's set; their logits written to lg), inverse
-   CDF at u; with route_argmax the most probable. No split in the table: split 0 */
-static uint32_t draw_split(const struct route_draw *d, const float *w, double u, float *lg) {
-  const struct split_set a = split_set_of(d);
-  if (!a.n) return 0;
-  float most = -INFINITY; uint32_t best = 0;
-  struct split_walk k = split_walk_at(&a, 0, a.n);
-  for (uint32_t i = 0; k.left; i++, split_walk_next(&k)) {
-    const struct split sp = split_of(d, k.token);
-    lg[i] = split_logit(split_tanh(split_dot(&sp, w)));
-    if (lg[i] > most) { most = lg[i]; best = i; }
-  }
-  if (route_argmax) return split_set_token(&a, best);
-  double total = 0; for (uint32_t i = 0; i < a.n; i++) total += exp(lg[i] - most);
-  const double at = u * total; double acc = 0;
-  for (uint32_t i = 0; i < a.n; i++) { acc += exp(lg[i] - most); if (acc > at) return split_set_token(&a, i); }
-  return split_set_token(&a, best);
-}
-uint32_t route_split(const struct route_stream *s, const struct route_state *st, const struct route_topology *t, int v, uint32_t S, uint32_t visited,
-                     const struct route_live *live, const float *w, double u, float *logits) {
-  struct route_draw d; route_draw_make(s, st, t, v, S, live, route_allowed(s, t, v, S, visited), &d);
-  return draw_split(&d, w, u, logits);
-}
 float route_draw_score(const struct route_draw *d, const float *w, float *score) {
   const struct split_set a = split_set_of(d);
   struct split_lse acc; split_lse_init(&acc);
@@ -173,373 +119,253 @@ float route_draw_score(const struct route_draw *d, const float *w, float *score)
   return split_logit(tth) - (acc.m + logf(acc.s));
 }
 
-/* ---- one run ---- */
-enum { EV_ARRIVE, EV_POST, EV_OP, EV_ACTIVATE, EV_BURST };
-struct event { double t; int type, a; uint32_t node, owed, visited; };
-struct flow { int op, pattern, src, np, base, head, tail, phase2, idle; uint32_t dest; uint32_t delivered[ROUTE_N]; };
-struct draw { struct route_draw r; uint32_t context, piece; };
-struct drawlog { struct draw *d; uint32_t count, room; };   /* a refresh's draws, in the order made */
+
+/* ---- one run: the bridges' own code on the wire (tests/switched-world.h) ----
+   A run is a stream's collectives on its fabric, run by the bridges: each node a region served by mesh-switched.h,
+   the wire the hardware's.  At each refresh of the window the policy is asked for its tables: the decision's tokens
+   are the bridges' own (mesh_switch_tokens_make at every node: a lane's token made by its sending node, a context's
+   by the node it is at), and the answer reaches each bridge through struct mesh_switch_policy
+   (mesh_switch_policy_refresh, the deployed path), active from its refresh (the first) or `lag` after it.  Every
+   piece's split is the bridge's draw (mesh_switch_choose: split.h's table under its context's w); every draw the
+   bridge logs (struct mesh_switch_record: its route_draw, its context and the tables' refresh) is a record of the
+   refresh it drew from.  Before the first table, the warm router: 2 the bridges' fixed weights (the unloaded
+   shortest-delay neighbour), 3 every context's w zero (uniform over the allowed splits).  Modes 2 and 4 are the fixed
+   weights throughout, 3 the zero tables throughout.  Nothing is written anywhere but this memory. */
+#include "../switched-world.h"
+
+int route_argmax;   /* route.h: the bridges' draws take their table's most probable split */
+struct piece { uint64_t key; uint32_t source, dest, transfer, span, op; float latency, queueing; };
+struct draw { struct route_draw r; uint32_t context; uint64_t key; uint32_t source, dest, transfer, span; float logp; };
+struct drawlog { struct draw *d; uint32_t count, room; };
 struct route_sim {
   struct route_stream s; struct route_window win; struct route_topology t;
   int mode, nc, point, active, stopped; double tend;
   uint32_t key0, key;
-  int cj[ROUTE_CONTEXTS], cv[ROUTE_CONTEXTS], ctx[ROUTE_J][ROUTE_N][ROUTE_SETS]; uint32_t cS[ROUTE_CONTEXTS];
-  double free_at[ROUTE_L][ROUTE_CABLES];
-  struct event *heap; size_t events, room;
-  struct flow *flows; int nflows, flowroom;
-  int *ready;                                         /* each flow's released pieces, a queue [base, base + np) */
-  double *bytes, *release, *latency, *queued; int *flowof, *postpoint; int npieces, pieceroom;
-  int *partial;                                       /* an all-reduce's partials landed, by its reduced pieces */
-  double opend[ROUTE_OPS]; int opleft[ROUTE_OPS], opstarted[ROUTE_OPS];
-  struct route_state state[ROUTE_POINTS];
-  float *w;                                           /* [POINTS][CONTEXTS][FS], refresh k at k % POINTS */
-  float logits[3125];                                 /* a draw's table */
+  int cj[ROUTE_CONTEXTS], cv[ROUTE_CONTEXTS]; uint32_t cS[ROUTE_CONTEXTS];
+  int local[ROUTE_N][MESH_SWITCH_CONTEXTS]; uint32_t nlocal[ROUTE_N];   /* a node's context -> the stream's */
+  struct sw_world *w; struct sw_link links[ROUTE_L]; uint32_t nlinks, ranks; double duplex;
+  int nextop, opslot[SW_OPS]; double opstart[ROUTE_OPS], opend[ROUTE_OPS];
+  int pending; double pending_at;                     /* an answer waiting for its activation */
+  float *wt;                                          /* [POINTS][CONTEXTS][FS] */
   struct drawlog log[ROUTE_POINTS];
+  struct piece *pieces; uint32_t npieces, pieceroom;
+  struct mesh_switch_tokens tok;
+  int publishing;                                     /* the node whose tables mesh_switch_policy_refresh is making */
   uint64_t count[4];
-  double lastarrival;                                 /* the latest delivery of a piece posted in the window */
-  struct { int f, i; double t; } *burst; int bursts, burstat, burstroom;   /* the policy's burst posts, in release order */
 };
 
-static void push(struct route_sim *x, struct event e) {   /* tests/switch.c's heap */
-  if (x->events == x->room) { x->room = x->room ? 2 * x->room : 4096; x->heap = realloc(x->heap, x->room * sizeof *x->heap); if (!x->heap) abort(); }
-  size_t i = x->events++;
-  while (i && x->heap[(i - 1) / 2].t > e.t) { x->heap[i] = x->heap[(i - 1) / 2]; i = (i - 1) / 2; }
-  x->heap[i] = e;
+static void on_op(void *ctx, uint32_t slot, double end) {
+  struct route_sim *x = ctx; const int o = x->opslot[slot];
+  if (o >= 0) { x->opend[o] = end; x->opslot[slot] = -1; }
 }
-static struct event pop(struct route_sim *x) {
-  struct event top = x->heap[0], last = x->heap[--x->events];
-  size_t i = 0;
-  for (;;) {
-    size_t c = 2 * i + 1;
-    if (c >= x->events) break;
-    if (c + 1 < x->events && x->heap[c + 1].t < x->heap[c].t) c++;
-    if (x->heap[c].t >= last.t) break;
-    x->heap[i] = x->heap[c]; i = c;
+static int op_of_key(const struct route_sim *x, uint64_t key) {
+  for (uint32_t i = 0; i < SW_OPS; i++) if (x->w->op[i].key == key && x->opslot[i] >= 0) return x->opslot[i];
+  return -1;
+}
+static void on_record(void *ctx, const struct mesh_switch_record *r) {
+  struct route_sim *x = ctx;
+  if (r->kind == MESH_LOG_DRAW) {
+    if (r->context == UINT32_MAX || x->active < 0 || x->mode != 0) return;   /* the weights drew, not the policy's tables */
+    const uint32_t v = r->node - 1;
+    if (v >= ROUTE_N || r->context >= x->nlocal[v] || x->local[v][r->context] < 0) return;
+    struct drawlog *g = &x->log[r->point % ROUTE_POINTS];
+    if (g->count == g->room) { g->room = g->room ? 2 * g->room : 256; g->d = realloc(g->d, g->room * sizeof *g->d); if (!g->d) abort(); }
+    g->d[g->count++] = (struct draw){r->draw, (uint32_t)x->local[v][r->context], r->key, r->source, r->dest, r->transfer, r->span, r->logp};
+    x->count[2] += split_set_of(&r->draw).n;
+  } else if (r->kind == MESH_LOG_PIECE) {
+    const int o = op_of_key(x, r->key);
+    if (o < 0) return;
+    if (x->npieces == x->pieceroom) { x->pieceroom = x->pieceroom ? 2 * x->pieceroom : 4096; x->pieces = realloc(x->pieces, x->pieceroom * sizeof *x->pieces); if (!x->pieces) abort(); }
+    x->pieces[x->npieces++] = (struct piece){r->key, r->source, r->node, r->transfer, r->span, (uint32_t)o, r->latency, r->queueing};
   }
-  if (x->events) x->heap[i] = last;
-  return top;
 }
 
 struct route_sim *route_sim_new(void) {
   struct route_sim *x = calloc(1, sizeof *x);
   if (!x) abort();
-  x->w = calloc((size_t)ROUTE_POINTS * ROUTE_CONTEXTS * ROUTE_FS, sizeof(float));
-  x->partial = calloc((size_t)ROUTE_OPS * ROUTE_N * ROUTE_PAGE_PIECES, sizeof(int));
-  if (!x->w || !x->partial) abort();
+  x->wt = calloc((size_t)ROUTE_POINTS * ROUTE_CONTEXTS * ROUTE_FS, sizeof(float));
+  if (!x->wt) abort();
   return x;
 }
 void route_sim_free(struct route_sim *x) {
   for (int k = 0; k < ROUTE_POINTS; k++) free(x->log[k].d);
-  free(x->heap); free(x->w); free(x->partial); free(x->flows); free(x->ready);
-  free(x->bytes); free(x->release); free(x->latency); free(x->queued); free(x->flowof); free(x->postpoint); free(x->burst); free(x);
+  if (x->w) sw_world_free(x->w);
+  free(x->wt); free(x->pieces); free(x);
 }
 int route_sim_points(const struct route_sim *x) { return x->point + 1; }
 int route_sim_contexts(const struct route_sim *x) { return x->nc; }
-float *route_sim_w(struct route_sim *x, int point) { return x->w + (size_t)(point % ROUTE_POINTS) * ROUTE_CONTEXTS * ROUTE_FS; }
-void route_sim_counts(const struct route_sim *x, uint64_t out[4]) { memcpy(out, x->count, sizeof x->count); }
-
-static int pattern_of(const struct route_sim *x, int src, uint32_t dest) {
-  for (int j = 0; j < x->s.patterns; j++) if (x->s.source[j] == src && x->s.dest[j] == dest) return j;
-  abort();
-}
-static int new_flow(struct route_sim *x, int op, int src, uint32_t dest, int np) {
-  if (x->nflows == x->flowroom) { x->flowroom = x->flowroom ? 2 * x->flowroom : 64; x->flows = realloc(x->flows, x->flowroom * sizeof *x->flows); if (!x->flows) abort(); }
-  if (x->npieces + np > x->pieceroom) {
-    while (x->npieces + np > x->pieceroom) x->pieceroom = x->pieceroom ? 2 * x->pieceroom : 8192;
-    const size_t m = (size_t)x->pieceroom;
-    x->bytes = realloc(x->bytes, m * sizeof(double)); x->release = realloc(x->release, m * sizeof(double)); x->latency = realloc(x->latency, m * sizeof(double));
-    x->queued = realloc(x->queued, m * sizeof(double)); x->flowof = realloc(x->flowof, m * sizeof(int));
-    x->postpoint = realloc(x->postpoint, m * sizeof(int)); x->ready = realloc(x->ready, m * sizeof(int));
-    if (!x->bytes || !x->release || !x->latency || !x->queued || !x->flowof || !x->postpoint || !x->ready) abort();
-  }
-  const int f = x->nflows++;
-  struct flow *q = &x->flows[f];
-  memset(q, 0, sizeof *q);
-  q->op = op; q->src = src; q->dest = dest; q->np = np; q->base = x->npieces; q->pattern = pattern_of(x, src, dest); q->phase2 = -1; q->idle = 1;
-  for (int i = 0; i < np; i++) { const int p = q->base + i; x->release[p] = INFINITY; x->latency[p] = 0; x->queued[p] = 0; x->flowof[p] = f; x->postpoint[p] = -2; }
-  x->npieces += np;
-  return f;
-}
-static double split_send(struct route_sim *x, double t, int v, uint32_t S, uint32_t visited, int p);
-static void release(struct route_sim *x, int f, int i, double t) {   /* piece i of flow f is ready at its source */
-  struct flow *q = &x->flows[f];
-  if (x->stopped && t >= x->tend) return;   /* a training window posts nothing past its end */
-  x->release[q->base + i] = t;
-  if (x->mode == 4) {   /* posted the moment it is ready, as switch.c */
-    q->head++; x->postpoint[q->base + i] = -1; split_send(x, t, q->src, q->dest, 0, q->base + i); return;
-  }
-  if (x->mode == 0 && x->win.burst) {   /* the same, after a refresh at that instant (as switch.c's): queued in release order, posted at t */
-    if (x->bursts == x->burstroom) { x->burstroom = x->burstroom ? 2 * x->burstroom : 1024; x->burst = realloc(x->burst, x->burstroom * sizeof *x->burst); if (!x->burst) abort(); }
-    if (x->bursts == x->burstat || x->burst[x->bursts - 1].t != t) push(x, (struct event){t, EV_BURST, 0, 0, 0, 0});
-    x->burst[x->bursts].f = f; x->burst[x->bursts].i = i; x->burst[x->bursts].t = t; x->bursts++;
-    return;
-  }
-  x->ready[q->base + q->tail++] = i;
-  if (q->idle) { q->idle = 0; push(x, (struct event){t, EV_POST, f, 0, 0, 0}); }
-}
-static void op_start(struct route_sim *x, int o, double t) {   /* a collective's flows */
-  const struct route_op *op = &x->s.op[o]; const struct route_fabric *f = &x->s.f;
-  const int n = f->ncompute, P = op->size > ROUTE_PAGE ? (int)ceil(op->size / ROUTE_PAGE) : 1;
-  uint32_t all = 0; for (int k = 0; k < n; k++) all |= 1u << f->compute[k];
-  x->opstarted[o] = 1; x->opleft[o] = 0; x->opend[o] = INFINITY;
-  const double last = op->size - ROUTE_PAGE * (P - 1);
-  if (op->kind == ROUTE_ALLGATHER || op->kind == ROUTE_SCATTER) {
-    for (int k = 0; k < n; k++) {
-      const int r = f->compute[k];
-      if (op->kind == ROUTE_SCATTER && r == op->root) continue;
-      const int src = op->kind == ROUTE_SCATTER ? op->root : r; const uint32_t dest = op->kind == ROUTE_SCATTER ? 1u << r : all & ~(1u << r);
-      const int fl = new_flow(x, o, src, dest, P);
-      for (int i = 0; i < P; i++) x->bytes[x->flows[fl].base + i] = i + 1 < P ? ROUTE_PAGE : last;
-      const int skip = (int)(op->done * P);   /* pages already delivered */
-      x->opleft[o] += (P - skip) * __builtin_popcount(dest);
-      x->flows[fl].head = x->flows[fl].tail = skip;
-      for (int i = skip; i < P; i++) release(x, fl, i, t);
-    }
-  } else {   /* all-reduce: page p's owner compute[p mod n]; partials to it, then the reduced page from it */
-    int partials[ROUTE_N][ROUTE_N];
-    for (int ko = 0; ko < n; ko++) {
-      const int owner = f->compute[ko], np = (P - ko + n - 1) / n;
-      for (int kr = 0; kr < n; kr++) partials[kr][ko] = -1;
-      if (np <= 0) continue;
-      const int red = new_flow(x, o, owner, all & ~(1u << owner), np);
-      for (int i = 0; i < np; i++) { const int p = ko + i * n; x->bytes[x->flows[red].base + i] = p + 1 < P ? ROUTE_PAGE : last; x->partial[((size_t)o * ROUTE_N + ko) * ROUTE_PAGE_PIECES + i] = 0; }
-      x->opleft[o] += np * (n - 1);
-      for (int kr = 0; kr < n; kr++) {
-        if (kr == ko) continue;
-        const int fl = new_flow(x, o, f->compute[kr], 1u << owner, np);
-        x->flows[fl].phase2 = red; partials[kr][ko] = fl;
-        for (int i = 0; i < np; i++) x->bytes[x->flows[fl].base + i] = x->bytes[x->flows[red].base + i];
-        x->opleft[o] += np;
-      }
-    }
-    const int skip = (int)(op->done * P);   /* pages already reduced and delivered */
-    for (int ko = 0; ko < n; ko++) {
-      const int done = (skip - ko + n - 1) / n > 0 ? (skip - ko + n - 1) / n : 0;
-      for (int kr = 0; kr < n; kr++) if (partials[kr][ko] >= 0) { x->flows[partials[kr][ko]].head = x->flows[partials[kr][ko]].tail = done; x->opleft[o] -= done; }
-      for (int fl = 0; fl < x->nflows; fl++) if (x->flows[fl].op == o && x->flows[fl].src == f->compute[ko] && x->flows[fl].phase2 < 0 && __builtin_popcount(x->flows[fl].dest) > 1) {
-        x->flows[fl].head = x->flows[fl].tail = done; x->opleft[o] -= done * (n - 1);
-      }
-    }
-    for (int kr = 0; kr < n; kr++) for (int p = skip; p < P; p++) if (p % n != kr) release(x, partials[kr][p % n], p / n, t);   /* switch.c's order: rank, then page */
-  }
+float *route_sim_w(struct route_sim *x, int point) { return x->wt + (size_t)(point % ROUTE_POINTS) * ROUTE_CONTEXTS * ROUTE_FS; }
+void route_sim_counts(const struct route_sim *x, uint64_t out[4]) {
+  out[0] = x->w ? x->w->count[0] : 0; out[1] = x->w ? x->w->count[1] : 0; out[2] = x->count[2]; out[3] = x->w ? x->w->count[3] : 0;
 }
 
-static void log_draw(struct route_sim *x, uint32_t c, uint32_t piece, const struct route_draw *r) {
-  struct drawlog *g = &x->log[x->active % ROUTE_POINTS];
-  if (g->count == g->room) { g->room = g->room ? 2 * g->room : 256; g->d = realloc(g->d, g->room * sizeof *g->d); if (!g->d) abort(); }
-  g->d[g->count++] = (struct draw){*r, c, piece};
+/* the policy, as the bridge calls it: node `publishing`'s contexts' w, from the answered refresh's table (zero: uniform) */
+static int policy_splits(void *ctx, const struct mesh_switch_tokens *tok, float w[MESH_SWITCH_CONTEXTS][SPLIT_FS]) {
+  struct route_sim *x = ctx; const int v = x->publishing;
+  const float *table = x->pending >= 0 ? route_sim_w(x, x->pending) : NULL;
+  for (uint32_t c = 0; c < tok->contexts; c++) {
+    const int g = c < x->nlocal[v] ? x->local[v][c] : -1;
+    if (table && g >= 0) memcpy(w[c], table + (size_t)g * ROUTE_FS, ROUTE_FS * sizeof(float)); else memset(w[c], 0, sizeof w[c]);
+  }
+  return 0;
 }
-
-/* piece p at node v at time t, owing S, its path through `visited`: its split, drawn and sent. Returns the earliest
-   start of its sends. */
-static double split_send(struct route_sim *x, double t, int v, uint32_t S, uint32_t visited, int p) {
-  const struct route_fabric *f = &x->s.f; const struct flow *q = &x->flows[x->flowof[p]];
-  const int deg = x->t.deg[v], j = q->pattern;
-  const uint32_t mask = route_allowed(&x->s, &x->t, v, S, visited);
-  struct route_live live;   /* v's own lanes now */
-  for (int k = 0; k < deg; k++) {
-    const int l = x->t.out[v][k], rl = x->t.rev[l]; double w = INFINITY; int busy = 0;
-    for (int c = 0; c < f->cables[l]; c++) { const double q = x->free_at[l][c] > t ? x->free_at[l][c] - t : 0; if (q < w) w = q; }
-    if (rl >= 0) for (int c = 0; c < f->cables[rl]; c++) busy = busy || x->free_at[rl][c] > t;
-    live.wait[k] = w; live.dup[k] = busy ? f->duplex : 1;
+/* every node's tables made from refresh `point`'s answer (-1: zero tables), through the bridge's policy refresh */
+static void publish(struct route_sim *x, int point) {
+  const struct mesh_switch_policy policy = {x, NULL, policy_splits};
+  x->pending = point;
+  for (uint32_t v = 0; v < x->w->nodes; v++) {
+    x->publishing = (int)v;
+    mesh_switch_policy_refresh(x->w->node[v].m, x->w->node[v].sw, &policy, (uint64_t)x->w->now, point < 0 ? 0 : (uint64_t)point, route_argmax, &x->tok);
   }
-  const int router = x->mode == 0 ? (x->active >= 0 ? 0 : x->win.warm) : x->mode;
-  const uint32_t seed = (router == 0 ? x->key : x->key0) ^ (uint32_t)p * 0x9e3779b1u ^ (uint32_t)v * 0x85ebca6bu ^ S * 0xc2b2ae35u;
-  uint32_t tok = 0, place = 1;
-  if (router == 2 || router == 4) {   /* the shortest-path tree's split */
-    for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) {
-      int y = d; while (f->from[x->s.spt[j][y]] != v) y = f->from[x->s.spt[j][y]];
-      int k = 0; while (x->t.out[v][k] != x->s.spt[j][y]) k++;
-      tok += (uint32_t)k * place; place *= (uint32_t)deg;
-    }
-  } else if (router == 3) {   /* each destination a lane uniformly among the allowed */
-    for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) {
-      const int m = __builtin_popcount(mask >> (ROUTE_DEG * d) & 31);
-      int target = (int)(unit01(seed ^ (uint32_t)d * 0x27d4eb2du) * m), k = 0;
-      if (target >= m) target = m - 1;
-      for (; k < deg; k++) if (mask >> (ROUTE_DEG * d + k) & 1) { if (!target) break; target--; }
-      tok += (uint32_t)k * place; place *= (uint32_t)deg;
-    }
-  } else {   /* a draw from the active table */
-    const int c = x->ctx[j][v][S];
-    struct route_draw r; route_draw_make(&x->s, &x->state[x->active % ROUTE_POINTS], &x->t, v, S, &live, mask, &r);
-    tok = r.token = draw_split(&r, route_sim_w(x, x->active) + (size_t)c * ROUTE_FS, unit01(seed), x->logits);
-    log_draw(x, (uint32_t)c, (uint32_t)p, &r); x->count[1]++; x->count[2] += split_set_of(&r).n;
-  }
-  uint32_t share[ROUTE_DEG] = {0}, y = tok;
-  for (int d = 0; d < ROUTE_N; d++) if (S >> d & 1) { share[y % (uint32_t)deg] |= 1u << d; y /= (uint32_t)deg; }
-  double first = INFINITY;
-  for (int k = 0; k < deg; k++) {
-    if (!share[k]) continue;
-    const int l = x->t.out[v][k], h = f->to[l], rl = x->t.rev[l];
-    int cb = 0; for (int r = 1; r < f->cables[l]; r++) if (x->free_at[l][r] < x->free_at[l][cb]) cb = r;
-    const double start = x->free_at[l][cb] > t ? x->free_at[l][cb] : t;
-    const int both = rl >= 0 && cb < f->cables[rl] && x->free_at[rl][cb] > start;
-    const double time = x->bytes[p] / (f->rate[l] / f->cables[l] * (both ? f->duplex : 1));
-    x->free_at[l][cb] = start + time; x->queued[p] += start - t;
-    if (start < first) first = start;
-    push(x, (struct event){start + time + f->latency[l], EV_ARRIVE, p, (uint32_t)h, share[k], visited | 1u << v}); x->count[3]++;
-  }
-  return first;
+  x->pending = -1;
+  if (point >= 0 && point > x->active) x->active = point;
+  sw_pass_all(x->w);
 }
-static void advance(struct route_sim *x, double until) {   /* every event before `until`, in time order (one at a refresh's
-                                                             own time follows the refresh, as in tests/switch.c) */
-  const struct route_fabric *f = &x->s.f;
-  while (x->events && (x->heap[0].t < until || isinf(until) || (x->heap[0].t == until && (x->heap[0].type == EV_OP || x->heap[0].type == EV_ACTIVATE)))) {
-    /* at the refresh's own time: a collective issued then is known to it (its pieces post after it), and a table
-       activated then is active (neither changes what the refresh reads) */
-    const struct event e = pop(x); x->count[0]++;
-    if (e.type == EV_OP) { if (!x->stopped || x->s.op[e.a].arrival < x->tend) op_start(x, e.a, e.t); continue; }
-    if (e.type == EV_ACTIVATE) { if (e.a > x->active) x->active = e.a; continue; }
-    if (e.type == EV_BURST) {   /* every queued burst post released by now, in release order */
-      while (x->burstat < x->bursts && x->burst[x->burstat].t <= e.t) {
-        const int fl = x->burst[x->burstat].f, i = x->burst[x->burstat].i; x->burstat++;
-        struct flow *q = &x->flows[fl];
-        q->head++; x->postpoint[q->base + i] = x->active >= 0 ? x->active : -1; split_send(x, e.t, q->src, q->dest, 0, q->base + i);
-      }
-      if (x->burstat == x->bursts) x->burstat = x->bursts = 0;
+/* the run to `until`: the collectives arriving before it started as they arrive (a later one waits for a program
+   slot where SW_OPS are live), every event before it */
+static void run_to(struct route_sim *x, double until) {
+  for (;;) {
+    const int more = x->nextop < x->s.ops && (!x->stopped || x->s.op[x->nextop].arrival < x->tend);
+    const double next = more ? (x->s.op[x->nextop].arrival > x->w->now ? x->s.op[x->nextop].arrival : x->w->now) : INFINITY;
+    if (next >= until) { sw_run_until(x->w, until); return; }
+    sw_run_until(x->w, next);
+    const struct route_op *op = &x->s.op[x->nextop];
+    const uint32_t slot = sw_op_start(x->w, op->kind, op->root, (uint64_t)op->size, op->done, x->w->now, 0);
+    if (slot == UINT32_MAX) {   /* SW_OPS live: on once one ends */
+      if (!x->w->events) abort();
+      sw_run_until(x->w, x->w->heap[0].t + 1e-9);
       continue;
     }
-    if (e.type == EV_POST) {   /* the flow's next released piece leaves its source; the next once it has started */
-      for (;;) {
-        struct flow *q = &x->flows[e.a];
-        if (q->head == q->tail || (x->stopped && e.t >= x->tend)) { q->idle = 1; break; }
-        const int p = q->base + x->ready[q->base + q->head++];
-        x->postpoint[p] = x->mode == 0 && x->active >= 0 ? x->active : -1;
-        const double first = split_send(x, e.t, q->src, q->dest, 0, p);
-        if (x->mode != 4) { q = &x->flows[e.a]; push(x, (struct event){first > e.t ? first : e.t, EV_POST, e.a, 0, 0, 0}); break; }
-      }
-      continue;
-    }
-    const int p = e.a; uint32_t S = e.owed; struct flow *q = &x->flows[x->flowof[p]];
-    if (S >> e.node & 1) {   /* delivered */
-      const struct route_op *op = &x->s.op[q->op];
-      if (x->postpoint[p] >= 0 && e.t > x->lastarrival) x->lastarrival = e.t;
-      x->latency[p] += (e.t - x->release[p]) / op->floor / __builtin_popcount(q->dest);
-      q->delivered[e.node]++; S &= ~(1u << e.node);
-      if (--x->opleft[q->op] == 0) x->opend[q->op] = e.t;
-      if (q->phase2 >= 0) {   /* a partial at its owner: the reduced page once all n - 1 are in */
-        const int i = p - q->base, n = f->ncompute, red = q->phase2;
-        int ko = 0; while (f->compute[ko] != (int)e.node) ko++;
-        if (++x->partial[((size_t)q->op * ROUTE_N + ko) * ROUTE_PAGE_PIECES + i] == n - 1) release(x, red, i, e.t);
-      }
-    }
-    if (S) split_send(x, e.t, (int)e.node, S, e.visited, p);
+    x->opslot[slot] = x->nextop; x->opstart[x->nextop] = x->w->now; x->nextop++;
+    sw_pass_all(x->w);
   }
 }
 
+static int same_fabric(const struct route_sim *x, const struct route_fabric *f) {
+  if (!x->w || x->w->nodes != (uint32_t)f->nodes || x->nlinks != (uint32_t)f->lanes || x->duplex != f->duplex) return 0;
+  uint32_t ranks = 0; for (int k = 0; k < f->ncompute; k++) ranks |= 1u << f->compute[k];
+  if (ranks != x->ranks) return 0;
+  for (int l = 0; l < f->lanes; l++)
+    if (x->links[l].from != (uint32_t)f->from[l] || x->links[l].to != (uint32_t)f->to[l] || x->links[l].cables != (uint32_t)f->cables[l] ||
+        x->links[l].rate != f->rate[l] || x->links[l].latency != f->latency[l]) return 0;
+  return 1;
+}
 void route_sim_begin(struct route_sim *x, const struct route_stream *s, const struct route_window *w, int mode, uint32_t key0, uint32_t key) {
   x->s = *s; x->win = *w; x->mode = mode; x->key0 = key0; x->key = key;
   route_topology_make(&s->f, s, &x->t);
-  memset(x->ctx, 0xff, sizeof x->ctx);
   int pj[ROUTE_CONTEXTS], pv[ROUTE_CONTEXTS]; uint32_t pS[ROUTE_CONTEXTS];
   x->nc = route_contexts(s, &x->t, pj, pv, pS);
   if (x->nc < 0) abort();
-  for (int c = 0; c < x->nc; c++) { x->cj[c] = pj[c]; x->cv[c] = pv[c]; x->cS[c] = pS[c]; x->ctx[pj[c]][pv[c]][pS[c]] = c; }
+  for (int c = 0; c < x->nc; c++) { x->cj[c] = pj[c]; x->cv[c] = pv[c]; x->cS[c] = pS[c]; }
+  if (!same_fabric(x, &s->f)) {
+    if (x->w) sw_world_free(x->w);
+    x->nlinks = (uint32_t)s->f.lanes; x->duplex = s->f.duplex; x->ranks = 0;
+    for (int k = 0; k < s->f.ncompute; k++) x->ranks |= 1u << s->f.compute[k];
+    for (int l = 0; l < s->f.lanes; l++) x->links[l] = (struct sw_link){(uint32_t)s->f.from[l], (uint32_t)s->f.to[l], (uint32_t)s->f.cables[l], s->f.rate[l], s->f.latency[l]};
+    x->w = sw_world_new((uint32_t)s->f.nodes, x->ranks, x->links, x->nlinks, s->f.duplex, 512, 160, 0);
+    x->w->on_record = on_record; x->w->ctx = x; x->w->on_op = on_op; x->w->op_ctx = x;
+    /* each node's contexts (the bridge's enumeration) against the stream's */
+    for (uint32_t v = 0; v < x->w->nodes && v < ROUTE_N; v++) {
+      struct mesh_switch_context keys[MESH_SWITCH_CONTEXTS];
+      x->nlocal[v] = mesh_switch_contexts(&x->w->node[v].sw->view, keys);
+      for (uint32_t c = 0; c < x->nlocal[v]; c++) {
+        x->local[v][c] = -1;
+        for (int g = 0; g < x->nc; g++)
+          if (x->cv[g] == (int)v && (uint32_t)s->source[x->cj[g]] == keys[c].source && s->dest[x->cj[g]] == keys[c].wanted && x->cS[g] == keys[c].owed) { x->local[v][c] = g; break; }
+      }
+    }
+  }
   for (int k = 0; k < ROUTE_POINTS; k++) x->log[k].count = 0;
-  x->events = 0; x->nflows = 0; x->npieces = 0; x->point = -1; x->active = -1; memset(x->count, 0, sizeof x->count); x->lastarrival = 0; x->bursts = x->burstat = 0;
+  x->npieces = 0; x->point = -1; x->active = -1; x->pending = -1; x->nextop = 0; x->count[2] = 0;
+  for (uint32_t i = 0; i < SW_OPS; i++) x->opslot[i] = -1;
+  for (int o = 0; o < s->ops; o++) { x->opstart[o] = -1; x->opend[o] = -1; }
   x->tend = w->points > 0 ? w->t0 + w->points * w->dt : INFINITY; x->stopped = w->points > 0 && mode == 0;
-  for (int l = 0; l < ROUTE_L; l++) for (int c = 0; c < ROUTE_CABLES; c++) x->free_at[l][c] = l < s->f.lanes ? s->background[l] / s->f.rate[l] : 0;
-  for (int o = 0; o < s->ops; o++) { x->opstarted[o] = 0; x->opend[o] = INFINITY; push(x, (struct event){s->op[o].arrival, EV_OP, o, 0, 0, 0}); }
+  const int router = mode == 0 ? w->warm : mode;
+  x->w->fixed = router == 2 || router == 4;
+  double background[ROUTE_L]; for (int l = 0; l < s->f.lanes; l++) background[l] = s->background[l];
+  sw_world_reset(x->w, background, (uint64_t)key0 << 32 | key);
+  if (router == 3) publish(x, -1);
+  x->active = -1;
 }
 
 int route_sim_decide(struct route_sim *x, struct route_decision *d, float *tokens) {
   const int k = x->point + 1;
   const double tau = x->win.t0 + k * x->win.dt;
-  if (x->mode != 0 || (x->win.points > 0 && k >= x->win.points)) { advance(x, INFINITY); return 0; }
-  advance(x, tau);
-  if (x->win.points == 0 && k > 0 && !x->events) return 0;
+  if (x->mode != 0 || (x->win.points > 0 && k >= x->win.points)) {
+    if (x->pending >= 0) { run_to(x, x->pending_at); publish(x, x->pending); }
+    run_to(x, INFINITY); return 0;
+  }
+  if (x->pending >= 0 && x->pending_at <= tau) { run_to(x, x->pending_at); publish(x, x->pending); }
+  run_to(x, tau);
+  if (x->win.points == 0 && k > 0 && !x->w->events && x->nextop >= x->s.ops) return 0;
   x->point = k;
   const struct route_fabric *f = &x->s.f;
-  struct route_state *st = &x->state[k % ROUTE_POINTS];   /* the fabric then */
-  memset(st, 0, sizeof *st);
-  st->tau = tau;
-  for (int l = 0; l < f->lanes; l++) {
-    double w = INFINITY; int busy = 0;
-    for (int c = 0; c < f->cables[l]; c++) { const double q = x->free_at[l][c] - tau > 0 ? x->free_at[l][c] - tau : 0; if (q < w) w = q; }
-    const int rl = x->t.rev[l];
-    if (rl >= 0) for (int c = 0; c < f->cables[rl]; c++) busy = busy || x->free_at[rl][c] > tau;
-    st->wait[l] = w; st->dup[l] = busy ? f->duplex : 1;
-  }
-  for (size_t e = 0; e < x->events; e++) if (x->heap[e].type == EV_ARRIVE) { st->inflight[x->heap[e].node] += x->bytes[x->heap[e].a]; st->posted += x->bytes[x->heap[e].a]; }
-  for (int a = 0; a < ROUTE_N; a++) for (int c = 0; c < ROUTE_N; c++) st->togo[a][c] = a == c ? 0 : INFINITY;
-  for (int l = 0; l < f->lanes; l++) { const double h = route_hop(&x->s, st, l); if (h < st->togo[f->from[l]][f->to[l]]) st->togo[f->from[l]][f->to[l]] = h; }
-  for (int m = 0; m < ROUTE_N; m++) for (int a = 0; a < ROUTE_N; a++) for (int c = 0; c < ROUTE_N; c++) if (st->togo[a][m] + st->togo[m][c] < st->togo[a][c]) st->togo[a][c] = st->togo[a][m] + st->togo[m][c];
-  double total[ROUTE_J] = {0}, unposted[ROUTE_J] = {0}, got[ROUTE_J][ROUTE_N] = {{0}};
-  for (int fl = 0; fl < x->nflows; fl++) {   /* each pattern's live flows: what is left to post, waiting, what each destination has */
-    const struct flow *q = &x->flows[fl];
-    if (!isinf(x->opend[q->op])) continue;
-    total[q->pattern] += q->np; unposted[q->pattern] += q->np - q->head;
-    for (int r = q->head; r < q->tail; r++) st->pending[q->pattern] += x->bytes[q->base + x->ready[q->base + r]];
-    for (int b = x->burstat; b < x->bursts; b++) if (x->burst[b].f == fl) st->pending[q->pattern] += x->bytes[q->base + x->burst[b].i];   /* burst posts not yet made */
-    for (int r = 0; r < q->np; r++) st->demand[q->pattern] += x->bytes[q->base + r];
-    for (int dd = 0; dd < ROUTE_N; dd++) got[q->pattern][dd] += q->delivered[dd];
-  }
-  for (int o = 0; o < x->s.ops; o++) if (x->opstarted[o] && isinf(x->opend[o])) st->ops += 1;
-  for (int j = 0; j < x->s.patterns; j++) {
-    st->left[j] = total[j] > 0 ? unposted[j] / total[j] : 0;
-    for (int dd = 0; dd < ROUTE_N; dd++) st->recv[j][dd] = total[j] > 0 ? got[j][dd] / total[j] : 0;
-  }
+  memset(d, 0, sizeof *d);
   d->point = (unsigned)k; d->lanes = (unsigned)f->lanes; d->contexts = (unsigned)x->nc;
-  for (int l = 0; l < ROUTE_L; l++) route_lane_token(&x->s, st, &x->t, l, d->lane[l]);
-  for (int c = 0; c < x->nc; c++) route_context_token(&x->s, st, &x->t, x->cj[c], x->cv[c], x->cS[c], k, tokens + (size_t)c * ROUTE_IN);
+  memset(tokens, 0, (size_t)x->nc * ROUTE_IN * sizeof(float));
+  for (uint32_t v = 0; v < x->w->nodes; v++) {
+    mesh_switch_tokens_make(x->w->node[v].m, x->w->node[v].sw, (uint64_t)x->w->now, (uint64_t)k, &x->tok);
+    for (uint32_t i = 0; i < x->tok.lanes; i++) if (x->tok.link_of[i] < ROUTE_L) memcpy(d->lane[x->tok.link_of[i]], x->tok.lane[i], sizeof d->lane[0]);
+    for (uint32_t c = 0; c < x->tok.contexts && c < x->nlocal[v]; c++) {
+      const int g = x->local[v][c];
+      if (g >= 0) memcpy(tokens + (size_t)g * ROUTE_IN, x->tok.context[c], ROUTE_IN * sizeof(float));
+    }
+  }
   return 1;
 }
 void route_sim_answer(struct route_sim *x, const float *w) {
   const int k = x->point;
   if (w) memcpy(route_sim_w(x, k), w, (size_t)x->nc * ROUTE_FS * sizeof(float));
-  if (k == 0) x->active = 0;
-  else push(x, (struct event){x->state[k % ROUTE_POINTS].tau + x->win.lag, EV_ACTIVATE, k, 0, 0, 0});
+  else memset(route_sim_w(x, k), 0, (size_t)x->nc * ROUTE_FS * sizeof(float));
+  if (k == 0) {
+    if (x->w->fixed) {   /* off the warm router's fixed weights: the bridges' refreshes from now */
+      x->w->fixed = 0; sw_push(x->w, (struct sw_event){x->w->now + x->w->refresh_ns, SW_EV_REFRESH, 0, 0, 0, 0, 0});
+    }
+    publish(x, 0);
+  } else { x->pending = k; x->pending_at = x->win.t0 + k * x->win.dt + x->win.lag; }
 }
 void route_sim_costs(const struct route_sim *x, struct route_costs *c) {
   memset(c, 0, sizeof *c);
-  if (x->stopped) {   /* a training window: its posted pieces as one transaction, their makespan over their own floor */
-    const struct route_fabric *f = &x->s.f;
-    double in[ROUTE_N] = {0}, out[ROUTE_N] = {0}, inr[ROUTE_N] = {0}, outr[ROUTE_N] = {0}, cut = 0;
-    for (int l = 0; l < f->lanes; l++) { inr[f->to[l]] += f->rate[l]; outr[f->from[l]] += f->rate[l]; }
-    for (int p = 0; p < x->npieces; p++) {
-      if (x->postpoint[p] < 0) continue;
-      const struct flow *q = &x->flows[x->flowof[p]];
-      out[q->src] += x->bytes[p];
-      for (int d = 0; d < ROUTE_N; d++) if (q->dest >> d & 1) in[d] += x->bytes[p];
-      c->latency += x->latency[p]; c->queueing += x->queued[p] / x->s.op[q->op].floor; c->pieces++;
-    }
-    for (int v = 0; v < ROUTE_N; v++) { if (inr[v] > 0 && in[v] / inr[v] > cut) cut = in[v] / inr[v]; if (outr[v] > 0 && out[v] / outr[v] > cut) cut = out[v] / outr[v]; }
-    if (c->pieces) { c->throughput = (x->lastarrival - x->win.t0) / (cut > x->s.unit ? cut : x->s.unit); c->ops = 1; c->latency /= c->pieces; c->queueing /= c->pieces; }
-    return;
+  for (int o = 0; o < x->s.ops; o++)
+    if (x->opstart[o] >= 0 && x->opend[o] >= 0) { c->throughput += (x->opend[o] - x->s.op[o].arrival) / x->s.op[o].floor; c->ops++; }
+  for (uint32_t p = 0; p < x->npieces; p++) {
+    const double fl = x->s.op[x->pieces[p].op].floor;
+    c->latency += x->pieces[p].latency / fl; c->queueing += x->pieces[p].queueing / fl; c->pieces++;
   }
-  const double t0 = x->mode == 0 ? x->win.t0 : 0, t1 = x->mode == 0 ? x->tend : INFINITY;
-  for (int o = 0; o < x->s.ops; o++)   /* the collectives live in the window */
-    if (x->opstarted[o] && isfinite(x->opend[o]) && x->s.op[o].arrival < t1 && x->opend[o] >= t0) { c->throughput += (x->opend[o] - x->s.op[o].arrival) / x->s.op[o].floor; c->ops++; }
-  for (int p = 0; p < x->npieces; p++)
-    if (x->postpoint[p] >= (x->mode == 0 ? 0 : -1)) { c->latency += x->latency[p]; c->queueing += x->queued[p] / x->s.op[x->flows[x->flowof[p]].op].floor; c->pieces++; }
   if (c->ops) c->throughput /= c->ops;
   if (c->pieces) { c->latency /= c->pieces; c->queueing /= c->pieces; }
 }
 
-int route_sim_draw_count(const struct route_sim *x, int point) {
-  return (int)x->log[point % ROUTE_POINTS].count;
-}
+int route_sim_draw_count(const struct route_sim *x, int point) { return (int)x->log[point % ROUTE_POINTS].count; }
 static int by_context(void *x, const void *a, const void *b) {   /* BSD qsort_r: the context, then the order made */
   const struct draw *g = x;
   const uint32_t ca = g[*(const uint32_t *)a].context, cb = g[*(const uint32_t *)b].context;
   return ca < cb ? -1 : ca > cb ? 1 : (*(const uint32_t *)a < *(const uint32_t *)b ? -1 : 1);
 }
+static int by_piece(const void *a, const void *b) {
+  const struct piece *p = a, *q = b;
+  if (p->key != q->key) return p->key < q->key ? -1 : 1;
+  if (p->source != q->source) return p->source < q->source ? -1 : 1;
+  if (p->dest != q->dest) return p->dest < q->dest ? -1 : 1;
+  if (p->transfer != q->transfer) return p->transfer < q->transfer ? -1 : 1;
+  return p->span < q->span ? -1 : p->span > q->span;
+}
+/* refresh `point`'s draws by context; each one's advantages: its piece's latency and queueing (as delivered to the
+   draw's first destination, over its collective's floor) against the mean of the other pieces of its collective
+   from the same source, over the run's pieces */
 int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int *ctx, int *first) {
-  int n = 0, top = -1;
-  for (int p = 0; p < x->npieces; p++) { n += x->postpoint[p] >= 0; if (x->postpoint[p] > top) top = x->postpoint[p]; }
-  if (!n) n = 1;
-  const int width = top + 2;   /* each (flow, refresh posted at)'s sums, as route_sim_credit's */
-  double *sums = calloc((size_t)x->nflows * width * 3 + 1, sizeof(double));
+  qsort(x->pieces, x->npieces, sizeof *x->pieces, by_piece);
+  /* each (collective, source)'s sums */
+  double *sums = calloc((size_t)ROUTE_OPS * ROUTE_N * 3 + 1, sizeof(double));
+  if (!sums) abort();
+  for (uint32_t p = 0; p < x->npieces; p++) {
+    const struct piece *q = &x->pieces[p]; const double fl = x->s.op[q->op].floor;
+    double *e = sums + ((size_t)q->op * ROUTE_N + (q->source - 1) % ROUTE_N) * 3; e[0] += q->latency / fl; e[1] += q->queueing / fl; e[2] += 1;
+  }
+  const double n = x->npieces ? (double)x->npieces : 1;
   const struct drawlog *g = &x->log[point % ROUTE_POINTS];
   uint32_t *order = malloc((g->count + 1) * sizeof(uint32_t));
-  if (!sums || !order) abort();
-  for (int p = 0; p < x->npieces; p++) {
-    const int q = x->postpoint[p];
-    if (q < -1) continue;
-    double *e = sums + ((size_t)x->flowof[p] * width + q + 1) * 3;
-    e[0] += x->latency[p]; e[1] += x->queued[p]; e[2] += 1;
-  }
+  if (!order) abort();
   for (uint32_t i = 0; i < g->count; i++) order[i] = i;
   qsort_r(order, g->count, sizeof *order, g->d, by_context);
   int at = 0, rows = 0;
@@ -548,18 +374,31 @@ int route_sim_draws(struct route_sim *x, int point, struct route_draw *out, int 
     const int c = (int)d->context;
     if (!rows || ctx[rows - 1] != c) { ctx[rows] = c; first[rows] = at; rows++; }
     struct route_draw *r = &out[at++];
-    *r = d->r; r->row = (uint32_t)(rows - 1);
-    const int p = (int)d->piece, q0 = x->postpoint[p];
-    if (q0 >= -1) {
-      const double *e = sums + ((size_t)x->flowof[p] * width + q0 + 1) * 3;
+    *r = d->r; r->row = (uint32_t)(rows - 1); r->a1 = 0; r->a2 = 0;
+    const struct piece want = {d->key, d->source, d->dest, d->transfer, d->span, 0, 0, 0};
+    const struct piece *q = bsearch(&want, x->pieces, x->npieces, sizeof *x->pieces, by_piece);
+    if (q) {
+      const double fl = x->s.op[q->op].floor; const double *e = sums + ((size_t)q->op * ROUTE_N + (q->source - 1) % ROUTE_N) * 3;
       if (e[2] > 1) {
-        const double fl0 = x->s.op[x->flows[x->flowof[p]].op].floor;
-        r->a1 = (float)((x->latency[p] - (e[0] - x->latency[p]) / (e[2] - 1)) / n);
-        r->a2 = (float)((x->queued[p] - (e[1] - x->queued[p]) / (e[2] - 1)) / fl0 / n);
+        r->a1 = (float)((q->latency / fl - (e[0] - q->latency / fl) / (e[2] - 1)) / n);
+        r->a2 = (float)((q->queueing / fl - (e[1] - q->queueing / fl) / (e[2] - 1)) / n);
       }
     }
   }
   first[rows] = at;
   free(sums); free(order);
   return rows;
+}
+
+/* the largest gap between a draw's log-probability as the bridge drew it and split.h's under its refresh's w (the
+   trainer's: route_draw_score): 0 where the behaviour is the policy's table exactly */
+float route_sim_logp_gap(const struct route_sim *x) {
+  float gap = 0, score[ROUTE_FS];
+  for (int k = 0; k <= x->point && k < ROUTE_POINTS; k++)
+    for (uint32_t i = 0; i < x->log[k].count; i++) {
+      const struct draw *d = &x->log[k].d[i];
+      const float lp = route_draw_score(&d->r, x->wt + ((size_t)k * ROUTE_CONTEXTS + d->context) * ROUTE_FS, score);
+      if (fabsf(lp - d->logp) > gap) gap = fabsf(lp - d->logp);
+    }
+  return gap;
 }

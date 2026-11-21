@@ -3,5 +3,5 @@
 route.metallib
 train
 stages
-switch-policy
 route-stat
+envcheck
