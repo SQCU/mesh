@@ -174,7 +174,9 @@ static void switch_sends(struct port *port,uint32_t j){
     const int error=queue->send(queue->pair,&request,&bad);
     if(error){l->gate[lane].posted.n-=each.n;lane_lost(port,lane,error<0?-error:error);return;}
     mesh_switch_pop(sw,at);
-    state->sent_at[state->sent&(MESH_LANE_UNITS-1)]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint64_t posted=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posted>sw->slot[s].posted?posted-sw->slot[s].posted:0);
+    state->sent_at[state->sent&(MESH_LANE_UNITS-1)]=posted;
     state->slot[state->sent&(MESH_LANE_UNITS-1)]=s;
     __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;
     atomic_store_explicit(&lanes_of(port,j/2)->posts[0].posted[j&1],state->sent,memory_order_relaxed);
@@ -199,6 +201,7 @@ static void link_send(struct port *port,uint32_t served){
     const uint32_t j=lane-MESH_LANE_FIRST,unit=(uint32_t)(state->done&(MESH_LANE_UNITS-1));
     const uint64_t posted=state->sent_at[unit],start=posted>state->last?posted:state->last;
     mesh_switch_sent(switch_of(),switch_lane(port,j),state->slot[unit],switch_of()->slot_bytes,posted,start,at);
+    MESH_SWITCH_COUNT(switch_of(),port->index,sent,1);MESH_SWITCH_COUNT(switch_of(),port->index,send_ns,at-posted);
     state->last=at;state->done++;
     struct mesh_lanes *x=lanes_of(port,j/2);
     atomic_store_explicit(&x->send_ns,atomic_load_explicit(&x->send_ns,memory_order_relaxed)+(at-posted),memory_order_relaxed);
@@ -244,10 +247,23 @@ static void switch_stage(struct port *port){
       struct mesh_declared *d=x->program+p;
       if(!mesh_switch_owned(d))continue;
       uint32_t s;
-      if(mesh_switch_credit(M,sw,x,d,at,&s) && !mesh_switch_forward(M,sw,s,at,port->index))switch_hold(port,s);
-      while(staged<SWITCH_BURST && mesh_switch_stage(M,sw,x,d,at,&s)==1){
-        staged++;
+      if(mesh_switch_credit(M,sw,x,d,at,&s)){
+        MESH_SWITCH_COUNT(sw,port->index,credits,1);
         if(!mesh_switch_forward(M,sw,s,at,port->index))switch_hold(port,s);
+      }
+      for(int r;staged<SWITCH_BURST;){
+        const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        if((r=mesh_switch_stage(M,sw,x,d,at,&s))!=1){
+          if(r==-1)MESH_SWITCH_COUNT(sw,port->index,slot_waits,1);
+          else if(r==-2)MESH_SWITCH_COUNT(sw,port->index,credit_waits,1);
+          else if(r==-3)MESH_SWITCH_COUNT(sw,port->index,window_waits,1);
+          break;
+        }
+        staged++;
+        MESH_SWITCH_COUNT(sw,port->index,staged,1);
+        MESH_SWITCH_COUNT(sw,port->index,staged_dests,((struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s))->dests);
+        if(!mesh_switch_forward(M,sw,s,at,port->index))switch_hold(port,s);
+        MESH_SWITCH_COUNT(sw,port->index,stage_ns,clock_gettime_nsec_np(CLOCK_MONOTONIC)-t0);
       }
     }
   }
@@ -272,11 +288,20 @@ static void port_pass(struct port *port,uint64_t *told){
   struct link *l=&port->link;
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   const uint32_t lanes=2*plan_streams(l->plan);
+  struct mesh_switch *sw=switch_of();
+  uint64_t t[6];t[0]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   if(served)link_receive(port,served);
+  t[1]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_receives(port,j);
+  t[2]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   if(served>>MESH_LANE_FIRST)switch_stage(port);
+  t[3]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_sends(port,j);
+  t[4]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   if(served)link_send(port,served);
+  t[5]=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  MESH_SWITCH_COUNT(sw,port->index,passes,1);MESH_SWITCH_COUNT(sw,port->index,pass_ns,t[5]-t[0]);
+  for(int k=0;k<5;k++)MESH_SWITCH_COUNT(sw,port->index,part_ns[k],t[k+1]-t[k]);
   struct mesh_lanes *counted=lanes_of(port,0);
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
@@ -868,7 +893,9 @@ static void *switch_watch(void *unused){
   uint64_t seed=mesh_switch_mix((uint64_t)getpid()^clock_ns());
   while(!stop){
     switch_view();
+    const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
     mesh_switch_refresh(sw,NULL,SWITCH_DRAWS,SWITCH_ETA,seed=mesh_switch_mix(seed),(double)sw->slot_bytes,0);
+    MESH_SWITCH_COUNT(sw,MESH_PORTS,refreshes,1);MESH_SWITCH_COUNT(sw,MESH_PORTS,refresh_ns,clock_gettime_nsec_np(CLOCK_MONOTONIC)-t0);
     pthread_mutex_lock(&switch_lock);
     uint32_t kept=0;const uint64_t at=clock_ns();
     for(uint32_t i=0;i<switch_holds;i++)if(!mesh_switch_forward(M,sw,switch_held[i],at,MESH_PORTS))switch_held[kept++]=switch_held[i];

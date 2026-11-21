@@ -155,6 +155,25 @@ struct mesh_switch_record {
                                             policy refresh its split table is from, its first destination */
 };
 struct mesh_switch_log { _Alignas(64) _Atomic uint64_t head; _Alignas(64) _Atomic uint64_t tail,dropped; struct mesh_switch_record record[MESH_SWITCH_LOG]; };
+/* where a crossing's time goes, counted in memory (never storage) by each process of the switch, one writer a set (a
+   port child's at its port's index, the parent's at MESH_PORTS, the simulator's after), read by mesh-switch-stat:
+   - a progress pass: its count, its time, and each part's (receive completions, receives posted, staging and the held
+     retried, SENDs posted, SEND completions);
+   - staging: pieces staged and their destinations, the time staging and switching them took, and the stagings put off
+     by the credit window, by the transfer's window, or for want of a slot;
+   - switching (mesh_switch_forward): calls, their time, groups made, slot copies, calls that left a piece held;
+   - the wire: SENDs posted and their wait from the push onto the outbox to the post, SENDs completed and their time
+     from post to completion;
+   - receiving: pieces landed, destinations delivered here, their wait from landing to delivery, by hops (1, 2, 3+);
+   - credits made and taken, and the refreshes and their time */
+struct mesh_switch_counters {
+  _Alignas(64) _Atomic uint64_t passes,pass_ns,part_ns[5];
+  _Atomic uint64_t staged,staged_dests,stage_ns,credit_waits,window_waits,slot_waits;
+  _Atomic uint64_t forwards,forward_ns,groups,copies,kept;
+  _Atomic uint64_t posts,post_wait_ns,sent,send_ns;
+  _Atomic uint64_t landed,delivered,deliver_wait_ns,hops[4];
+  _Atomic uint64_t credits,credits_taken,refreshes,refresh_ns,spare[8];
+};
 struct mesh_switch {
   uint32_t magic,slots;
   uint64_t slot_bytes,slot_base;    /* a slot's bytes (MESH_SWITCH_HEAD and a piece, whole frames) and the pool's region offset */
@@ -168,8 +187,12 @@ struct mesh_switch {
   struct mesh_switch_slot slot[MESH_SWITCH_SLOTS];
   struct mesh_switch_cell ring[MESH_SWITCH_LANES][MESH_SWITCH_RING];
   struct mesh_switch_log log[MESH_SWITCH_LOGS];
+  struct mesh_switch_counters counters[MESH_SWITCH_LOGS];
 };
 _Static_assert(sizeof(struct mesh_switch)<=MESH_SWITCH_BYTES,"the switch within its region bytes");
+/* a counter of ring `ring`'s writer moved by v (one writer a ring: a load and a store, no read-modify-write) */
+#define MESH_SWITCH_COUNT(sw,ring,field,v) do{ if((ring)<MESH_SWITCH_LOGS){ _Atomic uint64_t *c_=&(sw)->counters[ring].field; \
+  atomic_store_explicit(c_,atomic_load_explicit(c_,memory_order_relaxed)+(uint64_t)(v),memory_order_relaxed);} }while(0)
 static inline struct mesh_switch *mesh_switch_of(struct hdr *m){ return (struct mesh_switch *)((char *)m+m->switch_off); }
 static inline unsigned char *mesh_switch_slot_at(struct hdr *m,const struct mesh_switch *sw,uint32_t s){
   return (unsigned char *)m+sw->slot_base+(uint64_t)s*sw->slot_bytes;
@@ -943,15 +966,15 @@ static inline void mesh_switch_credit_take(struct hdr *m,const struct mesh_switc
    Program p toward node x's next send piece, where it may move and its transfer's window holds it: claimed (its
    cursor moved by one compare-exchange, so exactly one process stages it), copied into a free slot after its name,
    its send-side unit counted (its done word rising).  The slot, one reference held, in *slot.  1 staged; 0 none; -1 no
-   free slot */
+   free slot; -2 ready but past the credit window; -3 ready but past its transfer's window */
 static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
   const struct mesh_crossing *table=mesh_switch_table(m,p,0);
   if(!table || !p->progress[0])return 0;
   const uint64_t n=atomic_load_explicit(&p->claimed,memory_order_acquire);
   uint64_t e,span;uint32_t t;
   if(!mesh_switch_locate(p,table,0,n,&e,&t,&span) || !mesh_switch_ready(m,p,table+t,0,e,span))return 0;
-  if(e>=atomic_load_explicit(&mesh_switch_progress(m,p,0)[t].complete,memory_order_acquire)+MESH_SWITCH_WINDOW ||
-     e>=atomic_load_explicit(&p->credit,memory_order_acquire)+mesh_switch_ahead(sw,p))return 0;
+  if(e>=atomic_load_explicit(&mesh_switch_progress(m,p,0)[t].complete,memory_order_acquire)+MESH_SWITCH_WINDOW)return -3;
+  if(e>=atomic_load_explicit(&p->credit,memory_order_acquire)+mesh_switch_ahead(sw,p))return -2;
   const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span];
   const uint32_t s=mesh_switch_take(sw);
   if(s==UINT32_MAX)return -1;
@@ -1044,8 +1067,11 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
   struct mesh_switch_dest kept[MESH_SWITCH_N],away[MESH_SWITCH_N];uint32_t nkept=0,owed=0;
   for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++){
     if(name->dest[i].node!=self){away[owed++]=name->dest[i];continue;}
-    if(name->kind==MESH_PIECE_CREDIT){mesh_switch_credit_take(m,name);continue;}
+    if(name->kind==MESH_PIECE_CREDIT){mesh_switch_credit_take(m,name);MESH_SWITCH_COUNT(sw,ring,credits_taken,1);continue;}
     if(mesh_switch_deliver(m,name,name->dest+i,at+MESH_SWITCH_HEAD,NULL)){
+      MESH_SWITCH_COUNT(sw,ring,delivered,1);
+      MESH_SWITCH_COUNT(sw,ring,deliver_wait_ns,now>sw->slot[s].landed?now-sw->slot[s].landed:0);
+      MESH_SWITCH_COUNT(sw,ring,hops[name->hops<3?name->hops:3],1);
       if(logging){
         struct mesh_switch_record r;memset(&r,0,sizeof r);
         r.kind=MESH_LOG_PIECE;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;
@@ -1075,13 +1101,14 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
   struct mesh_switch_line lines[MESH_SWITCH_LINES];uint32_t nlines=0;
   if(groups)nlines=mesh_switch_lines_give(sw,lines);
   int handed=0;
+  MESH_SWITCH_COUNT(sw,ring,forwards,1);MESH_SWITCH_COUNT(sw,ring,groups,groups);
   for(uint32_t g=groups;g-->0;){
     /* the last group (g 0) goes in the slot itself where no destination stays owed here */
     const int own=!g && !nkept;
     const uint32_t target=own?s:mesh_switch_take(sw);
     if(target==UINT32_MAX){for(uint32_t i=0;i<owed;i++)if(group[g]>>i&1)kept[nkept++]=away[i];continue;}
     unsigned char *to=mesh_switch_slot_at(m,sw,target);
-    if(!own)memcpy(to+MESH_SWITCH_HEAD,at+MESH_SWITCH_HEAD,sw->slot_bytes-MESH_SWITCH_HEAD);
+    if(!own){memcpy(to+MESH_SWITCH_HEAD,at+MESH_SWITCH_HEAD,sw->slot_bytes-MESH_SWITCH_HEAD);MESH_SWITCH_COUNT(sw,ring,copies,1);}
     struct mesh_switch_name *n=(struct mesh_switch_name *)to;
     *n=sending;n->dests=0;
     for(uint32_t i=0;i<owed;i++)if(group[g]>>i&1)n->dest[n->dests++]=away[i];
@@ -1107,6 +1134,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
   if(handed)return 1;
   if(!nkept){mesh_switch_release(sw,s);return 1;}
   /* still held: the name as it came, its owed destinations alone */
+  MESH_SWITCH_COUNT(sw,ring,kept,1);
   *name=sending;name->dests=nkept;memcpy(name->dest,kept,nkept*sizeof *kept);
   return 0;
 }
@@ -1114,6 +1142,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
 static inline int mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32_t lane,uint32_t s,uint64_t now,uint32_t ring){
   struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(m,sw,s);
   atomic_fetch_add_explicit(&sw->lane[lane].landed,1,memory_order_relaxed);
+  MESH_SWITCH_COUNT(sw,ring,landed,1);
   sw->slot[s].landed=now;
   atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
   atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
