@@ -2440,6 +2440,17 @@ static ncclResult_t scheduled_program(struct call *c, const struct entry *entry,
   const int status = mesh_scatter_schedule(n, link, links, group, groups, comm->page, &send, &count, &piece, &makespan, &bound);
   const uint64_t solve = mesh_clock_ns() - t0;
   if (status) { free(link); free(group); return fail(status == ENOMEM ? ncclSystemError : ncclInvalidUsage, "the scatter's schedule: %s", strerror(status)); }
+  /* design/switched-multipath-dma.md: the bridges relay, by name, as a piece moves; a rank does not store and forward.
+     The communicator's map joins every two ranks (each pair one link), so each send the schedule gives a relaying rank
+     is sent by the piece's source itself, over the link from the source to that send's head: every piece goes from its
+     source to each rank that needs it as one move, its order and its rounds the schedule's.  (A rank's relay waited on
+     its own landing before its send could stage, then took the bridges' hops again: a TP-4 crossing at 6 KB 95 us against 51.5 without.) */
+  for (uint32_t k = 0; k < count; k++) {
+    const uint32_t source = what == MESH_ALLGATHER ? group[send[k].group].source : entry->program.root, head = link[send[k].link].to;
+    if (link[send[k].link].from == source) continue;
+    for (uint32_t l = 0; l < links; l++)
+      if (link[l].from == source && link[l].to == head) { send[k].link = l; break; }
+  }
   /* the parts: every piece a send names, in each segment's order (an all-gather's segment its source rank's; a
      broadcast's one), each weighed by its bytes */
   uint64_t (*part)[3] = calloc((size_t)count + 1, sizeof *part);
