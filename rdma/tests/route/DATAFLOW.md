@@ -66,6 +66,28 @@ Every 2D product is int8 x int8 -> int32 (int8mm.h: a 12-bit power-of-two grid, 
 gates' and the rms's numerics, shared with forward.c (deploy: bit for bit). stages.swift measures the products
 against the roofline and the forward's build-up stage by stage.
 
+## The learner in the PyTorch dialect (py/route/qnn.py: MLX)
+
+The trainer's learning side is qnn.py: modules (QLinear, MinGRU, Policy), a loss (surrogate), a compiled step
+(Learner: gradient, apply). The network's ops are the tile kernels above as MLX ops (metal.py: each `kernel void` of
+a .metal file an mx.fast.metal_kernel with the kernel's own body, the file its header, ROUTE_MLX and ROUTE_TBL (tables in
+device memory) defined, contraction off: forward.c's bits):
+
+- codes (opt.metal codes): W's forward and dgrad codes, straight through;
+- lanes (lanes_fwd; VJP lanes_bwd, the reverse affine scan, and the wgrad op), contexts (ctx_fwd; VJP ctx_bwd,
+  states_grad and the wgrad op), wgrad (gemm_wg), surrogate (VJP: the credit, credit_draws and credit_rows);
+- the three tasks: the parameters as three copies (a leading task axis), one value_and_grad; each op's forward runs
+  once, each backward its kernel with T = 3 (Grad.T: dY's rows a task);
+- Learner.gradient: a microbatch's three gradients times its rows into the accumulator (with its squared norms and the
+  count); Learner.apply: one exchange of it all (qnn.Exchange: libroute's route_exchange_sum on libnccl-mesh; world 1:
+  none), the rows-weighted mean, UPGrad (upgrad.h on one GPU thread), Adam, V pinned; every statistic from the summed
+  values, so every rank's are the same.
+
+loop.Learner runs it in the trainer: loop.HostBatch is a slot of the data ring (page-aligned host arrays the
+simulators export into, given to MLX by DLPack without a copy, padded to bucket sizes so few steps compile; the rows
+and draws past the batch's counts are the kernels' invalid ones, so the gradient is the batch's, bit for bit); theta is
+published into the rollouts' actor through a staging network.
+
 ## Checks (python -m route ...)
 
 - simcheck: the switch.c fixed router's table on the measured cluster.
@@ -74,3 +96,8 @@ against the roofline and the forward's build-up stage by stage.
   codes against int8mm.h's CPU definition (probes); the int8 network against the fp32 reference.
 - ./stages route.metallib: the kept products bit for bit against a CPU mirror, their rates against the roofline,
   the forward's stages.
+- qnn-deploy: forward.c against qnn's forward on the same codes (bit for bit); qnn-check: qnn's three task gradients
+  against the fp32 reference (the modules in fp32, MLX's autodiff); qnn-padding: a padded batch against itself;
+  qnn-exchange: gradient / apply's semantics over three ranks in one process; qnn-i8mm: the generic product exact;
+  qnn-roofline: the compiled step and the forward at the trainer's sizes, each call evaluated; qnn-xbench: the exchange
+  over the mesh. python -m route.qnnparts: the step piece by piece.

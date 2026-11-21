@@ -13,14 +13,14 @@
                         latency and queueing advantages); its VJP the credit (credit_draws, credit_rows: split.h)
            Each backward takes T tasks at once: the parameters as T copies (a leading task axis: the step's three), the
            forward run once, each backward its kernel with T = 3 (mx.vmap re-traces a custom function's forward, which
-           a Metal kernel cannot be). And quantize / i8mm, the generic int8 x int8 ->
-           int32 product (matmul2d), its VJP int8 products too.
+           a Metal kernel cannot be). And quantize / i8mm, the generic int8 x int8 -> int32 product (matmul2d), its
+           VJP int8 products too.
   modules  QLinear (W = g V/|V| a row, bias; called: the fp32 reference product), MinGRU (gates, the recurrence, the
            feed-forward: the fp32 reference), Policy (the int8 network on the fused ops; reference(): the same function
            in fp32 from the modules)
   loss     surrogate: per task, sum over draws of coefficient x stop(ratio) x log pi(token)
-  step     the three tasks' gradients (task copies of the parameters, one value_and_grad), UPGrad's weights from their Gram matrix (upgrad.h), Adam, V's rows
-           pinned; microbatches accumulated (gradient) and one exchange a step (apply: the sums, rows and microbatch
+  step     the three tasks' gradients (task copies of the parameters, one value_and_grad), UPGrad's weights from
+           their Gram matrix (upgrad.h), Adam, V's rows pinned; microbatches accumulated (gradient) and one exchange a step (apply: the sums, rows and microbatch
            norms, identical statistics at every rank); all compiled with mx.compile
 
 Arrays are values the array library makes; modules hold parameters; nothing allocates by hand."""
