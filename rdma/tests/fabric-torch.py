@@ -18,8 +18,6 @@ store = dist.TCPStore(os.environ['MASTER_ADDR'], int(os.environ['MASTER_PORT']),
                      timeout=datetime.timedelta(seconds=60))
 group = ProcessGroupMesh(rank, size, store)
 fabric = Fabric.of(group.comm)
-parts = {f'route:{a}:{b}': [1 if len(p) == 1 else 7 for p in paths] for (a, b), paths in fabric.paths.items()}
-fabric.install(group.comm, parts)
 count = 1048593
 producer = _stream.pipeline(fused.steps() + """
 kernel void produce(device uchar *out [[buffer(0)]], constant uint2 &p [[buffer(1)]],

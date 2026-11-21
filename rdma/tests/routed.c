@@ -1,5 +1,4 @@
 #include "mesh-plan.h"
-#include "mesh-write-routes.h"
 #include <assert.h>
 #include <errno.h>
 #include <stdint.h>
@@ -347,11 +346,6 @@ static void shortest_ring(void){
   assert(!mesh_routed_compile(&f,direct,offsets,logical,initialized,16384,&physical));
   for(uint32_t r=0;r<R;r++)assert(physical.rank[r].buffers==initialized[r]);
   mesh_routed_free(&physical);
-  struct mesh_paths *every=NULL;assert(!mesh_write_routes_default(&f,&every));
-  assert(!mesh_routed_compile(&f,every,offsets,logical,initialized,16384,&physical));
-  uint32_t relays=0;for(uint32_t r=0;r<R;r++)relays+=physical.rank[r].buffers>initialized[r];
-  assert(relays);
-  mesh_routed_free(&physical);mesh_write_routes_free(every,R);
   free(segment);free(first);free(shares);free(move);free(logical);
 }
 

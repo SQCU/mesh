@@ -11,26 +11,8 @@ static void checked(ncclResult_t result){
   if(result){fprintf(stderr,"%s\n",ncclGetLastError(NULL));exit(2);}
 }
 
-static void paths(const struct mesh_fabric *f,uint32_t at,uint32_t destination,uint32_t seen,uint32_t *walk,
-                  uint32_t depth,uint32_t *first,uint32_t *cable,double *weights,uint32_t *count){
-  if(at==destination){
-    assert(*count<256);
-    memcpy(cable+first[*count],walk,depth*sizeof *walk);
-    first[*count+1]=first[*count]+depth;
-    weights[*count]=log(depth==1?1.0:7.0);
-    (*count)++;
-    return;
-  }
-  for(uint32_t e=0;e<f->cables;e++){
-    const struct mesh_cable *c=f->cable+e;
-    if(c->node[0]!=at && c->node[1]!=at)continue;
-    const uint32_t other=c->node[c->node[0]==at];
-    if(seen&(1u<<other))continue;
-    walk[depth]=e;
-    paths(f,other,destination,seen|(1u<<other),walk,depth+1,first,cable,weights,count);
-  }
-}
-
+/* every ordered pair's one-way WRITE, each declared from its source to its destination alone: the bridges switch its
+   pieces over the cables and relays as they move (no route is installed) */
 static void writes(ncclComm_t comm,const struct mesh_fabric *f,int rank,size_t count,int *input){
   assert(f->nodes<=8);
   const int pairs=(int)(f->nodes*(f->nodes-1));
@@ -40,11 +22,6 @@ static void writes(ncclComm_t comm,const struct mesh_fabric *f,int rank,size_t c
   for(int t=0;t<iterations;t++)checked(ncclMemAlloc((void **)&sources[t],count*sizeof *input));
   for(uint32_t source=0;source<f->nodes;source++)for(uint32_t destination=0;destination<f->nodes;destination++){
     if(source==destination)continue;
-    uint32_t first[257]={0},cable[2048],walk[8],n=0;
-    double weights[256];
-    paths(f,source,destination,1u<<source,walk,0,first,cable,weights,&n);
-    const struct mesh_paths routes={n,first,cable,weights};
-    checked(ncclMeshCommWriteRoutes(comm,(int)source,(int)destination,&routes));
     calls[at]=(ncclMeshCall){.what=ncclMeshCallWrite,.count=count,.type=ncclInt32,.peer=(int)source,
       .destination=(int)destination,.group=0,.repeat=1};
     for(int t=0;t<iterations;t++)checked(ncclMemAlloc((void **)&landing[t][at],count*sizeof *input));at++;

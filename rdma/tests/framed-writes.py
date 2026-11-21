@@ -11,8 +11,6 @@ def main():
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     group = dist.group.WORLD
     fabric = Fabric.of(group.comm)
-    fabric.install(group.comm, {f'route:{a}:{b}': [1] * len(paths)
-                               for (a, b), paths in fabric.paths.items()})
     channels = len(fabric.adjacent[group.rank()])
     frame_bytes, frames = group.page * 32, 7
     elements = frame_bytes // 4

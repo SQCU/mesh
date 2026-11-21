@@ -138,8 +138,6 @@ def main():
         covered = sorted({cable for path in paths for cable in path})
         if covered != list(range(len(fabric.cables))):
             raise ValueError('the three-rank 0-to-1 path set must include every discovered cable')
-        # A configuration operand to the library, not a private path executor.
-        fabric.install(comm.comm, {'route:0:1': [1.0] * len(paths)})
         sample = QueueSample(comm.comm, comm.rank)
         initial = sample.read()
         builders = (mapped_case, reversed_case, registration_case)

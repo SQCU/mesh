@@ -105,8 +105,6 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.route_operands(), {'forward': {'route:0:1': [1, 2]},
                                              'reverse': {'route:0:1': [1, 2]}})
         self.assertEqual(set(c.parts), {'compute', 'flow:forward/route:0:1', 'flow:reverse/route:0:1'})
-        with self.assertRaisesRegex(ValueError, 'name its declared communicator'):
-            c.install_routes(None)
 
     def test_competing_online_interfaces_are_removed(self):
         self.assertFalse(hasattr(allocate, 'Balancer'))

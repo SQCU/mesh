@@ -5,7 +5,7 @@
 #include "mesh.h"
 #include "mesh-span-plan.h"
 #include "mesh-row-span-plan.h"
-#include "mesh-write-routes.h"
+
 #include "nccl-mesh-metal.h"
 #include <errno.h>
 #include <math.h>
@@ -308,7 +308,7 @@ struct ncclComm {
   ncclMeshScheduleStats schedule;
   struct mesh_fabric fabric;
   uint32_t *endpoint;
-  struct mesh_paths *writes;
+  struct mesh_paths *edges;
   double *write_release;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
@@ -433,8 +433,8 @@ static void comm_free(struct ncclComm *comm) {
   for (uint32_t h = 0; h < comm->count; h++)
     for (int direction = 0; direction < 2; direction++) mesh_byte_account_destroy(comm->channels[h].payload + direction);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
-  for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
-  free(comm->writes);
+  for (int p = 0; comm->edges && p < comm->nranks * comm->nranks; p++) paths_free(&comm->edges[p]);
+  free(comm->edges);
   free(comm->write_release);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
@@ -559,10 +559,8 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
 
 /* the communicator's table on its map: its configured forms first, in their order (compile_form), then the caller's
    programs where it listed some (ncclMeshCommInitRank), else, along the caller's paths (checked against the map) or
-   else the map's links packed (mesh_trees_pack: every member's trees at once for the all-reduce, the reduce-scatter and
-   the all-gather, each root's alone for its reduce and broadcast, every link in use and each tree's part its flow's
-   share, so a part crosses every route and the routes end together [Garg & Konemann 1998; Blink, Wang et al. 2020]),
-   the all-reduce two-phase (the reduce-scatter and then the all-gather over every pair [Patarasuk & Yuan 2009]), the
+   else each root's star (mesh_trees_shortest on the map that joins every pair: no route is compiled, the bridges
+   switch every piece as it moves, design/switched-multipath-dma.md), the all-reduce two-phase (the reduce-scatter and then the all-gather over every pair [Patarasuk & Yuan 2009]), the
    reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, each
    tree's part one entry, a relay sending on each page as it lands (present_group, forwards), of any size (mesh_compile;
    mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a
@@ -588,20 +586,15 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
       return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
     if (!comm->paths.count) {
-      uint32_t *root = calloc((size_t)n * n * 2 + 1, sizeof *root), *parent = calloc((size_t)n * n * n * 2 + 1, sizeof *parent);
-      double *weight = calloc((size_t)n * n * 2 + 1, sizeof *weight);
-      uint64_t *only = calloc(n / 64 + 1, sizeof *only);
+      /* each root's star on the map that joins every pair (fabric_discover): every part goes from its source to each
+         rank that needs it as one logical step; the bridges switch its pieces over cables and relays as they move */
+      uint32_t *root = calloc((size_t)n * 2 + 1, sizeof *root), *parent = calloc((size_t)n * n * 2 + 1, sizeof *parent);
+      double *weight = calloc((size_t)n * 2 + 1, sizeof *weight);
       comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
-      comm->rooted = (struct mesh_trees){n, 0, root + (size_t)n * n, parent + (size_t)n * n * n, weight + (size_t)n * n};
-      if (!root || !parent || !weight || !only) { free(only); return fail(ncclSystemError, "out of memory"); }
-      comm->trees.count = mesh_trees_pack(&comm->map, NULL, 0, n, root, parent, weight);
-      for (uint32_t r = 0; r < n; only[r / 64] = 0, r++) {
-        only[r / 64] = 1ull << r % 64;
-        const struct mesh_trees *at = &comm->rooted;
-        comm->rooted.count += mesh_trees_pack(&comm->map, only, 0, n, (uint32_t *)at->root + at->count, (uint32_t *)at->parent + (size_t)at->count * n,
-                                              (double *)at->log_weight + at->count);
-      }
-      free(only);
+      comm->rooted = (struct mesh_trees){n, 0, root + n, parent + (size_t)n * n, weight + n};
+      if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
+      comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight);
+      comm->rooted.count = mesh_trees_shortest(&comm->map, root + n, parent + (size_t)n * n, weight + n);
       along = &comm->trees;
       rooted = &comm->rooted;
     }
@@ -795,35 +788,6 @@ ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double *seconds) {
   plan_free(comm, comm->plan); comm->plan = NULL;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
-}
-
-ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths *paths) {
-  if (!comm || source < 0 || destination < 0 || mesh_paths_check(&comm->fabric, (uint32_t)source, (uint32_t)destination, paths))
-    return fail(ncclInvalidArgument, "one-way write paths must connect their endpoints over distinct nodes");
-  const uint32_t P = paths->count, E = paths->first[P];
-  uint32_t *first = malloc((P + 1) * sizeof *first), *cable = malloc(E * sizeof *cable);
-  double *weights = malloc(P * sizeof *weights);
-  if (!first || !cable || !weights) { free(first); free(cable); free(weights); return fail(ncclSystemError, "out of memory"); }
-  memcpy(first, paths->first, (P + 1) * sizeof *first); memcpy(cable, paths->cable, E * sizeof *cable);
-  memcpy(weights, paths->log_weight, P * sizeof *weights);
-  pthread_mutex_lock(&group_lock);
-  if (!comm->writes) comm->writes = calloc((size_t)comm->nranks * comm->nranks, sizeof *comm->writes);
-  if (!comm->writes) {
-    pthread_mutex_unlock(&group_lock); free(first); free(cable); free(weights);
-    return fail(ncclSystemError, "out of memory");
-  }
-  struct mesh_paths *to = comm->writes + source * comm->nranks + destination;
-  paths_free(to); *to = (struct mesh_paths){P, first, cable, weights};
-  plan_free(comm, comm->plan); comm->plan = NULL;
-  pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
-}
-
-ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths **paths) {
-  if (!comm || !paths || source < 0 || destination < 0 || source >= comm->nranks || destination >= comm->nranks || source == destination)
-    return fail(ncclInvalidArgument, "route inspection requires distinct endpoints of the physical communicator");
-  *paths = comm->writes ? comm->writes + (size_t)source * comm->nranks + destination : NULL;
-  return *paths ? ncclSuccess : fail(ncclInvalidUsage, "the communicator has no realized physical routes");
 }
 
 /* the program a call of `bytes` runs: its communicator's table's first entry of its collective (and root, a rooted
@@ -1045,14 +1009,15 @@ static int ranks_joined(const struct mesh_link_map *map, uint32_t *apart) {
   return joined;
 }
 
-/* design/whole-function.md#fabric: the communicator's map, one source: the bridges' whole map (mesh_map's, as its
+/* design/switched-multipath-dma.md: the communicator's map, one source: the bridges' whole map (mesh_map's, as its
    rank 0 read it in its report: every rank's is compared with it, and a rank whose bridge holds another map fails the
-   init alike at every rank, EXDEV) over its members (mesh_map_members, the rule mesh_map reads the records by): its
-   nodes the ranks, the whole map's other nodes its relays, a link a cable (parallel cables parallel links), each at the
-   bandwidth the records give, and the whole map's table.  The fabric is the map's: a channel each pair of ranks a link
-   of the map joins (the bridges' order between their nodes, whose cables beneath it are the bridge's own: its bandwidth
-   the sum of the pair's parallel links'), its identity the pair of nodes, alike at every member.  A relay holds no
-   rank, and no tree or route crosses one (mesh-plan.h mesh_link_map_ranks) */
+   init alike at every rank, EXDEV).  The bridges switch every piece over cables and relays as it moves, so the map the
+   communicator plans on joins every two of its ranks (no tree and no route of it crosses a relay or a rank between
+   two others: what moves is the program's, how it moves the bridges'), each pair at the widest bottleneck of the whole
+   map's routes between their nodes (parallel cables summed, relays such as the Mac mini included): the most one piece
+   stream between them can carry.  The fabric is the map's: a channel each pair of ranks, its identity the pair of
+   nodes, alike at every member, and each pair's one edge (`edges`: the pair's own channel, of weight 1) is what a
+   WRITE's and a collective's logical step lowers onto (mesh_write_compile, mesh_routed_compile) */
 static int fabric_discover(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
   const struct report_map *w = &reports[0].whole;
@@ -1063,45 +1028,59 @@ static int fabric_discover(struct ncclComm *comm, const struct report *reports) 
         memcmp(x->link, w->link, w->links * sizeof *w->link) || memcmp(x->bandwidth, w->bandwidth, w->links * sizeof *w->bandwidth))
       return EXDEV;
   }
-  uint32_t wl[REPORT_LINKS][2], wn[MESH_NODES];
-  uint64_t wb[REPORT_LINKS];
-  memcpy(wl, w->link, sizeof wl); memcpy(wb, w->bandwidth, sizeof wb); memcpy(wn, w->node, sizeof wn);
-  const struct mesh_link_map whole = {.kind = MESH_LINKS_GRAPH, .nodes = w->nodes, .links = w->links, .link = wl, .bandwidth = wb, .mark = wn};
+  /* the widest bottleneck between every two of the whole map's nodes (a pair's parallel links summed) */
+  const uint32_t W = w->nodes;
+  uint64_t wide[MESH_NODES][MESH_NODES];
+  memset(wide, 0, sizeof wide);
+  for (uint32_t l = 0; l < w->links; l++) {
+    const uint32_t a = w->link[l][0], b = w->link[l][1];
+    if (a >= W || b >= W || a == b) continue;
+    const uint64_t bw = w->bandwidth[l] ? w->bandwidth[l] : UINT64_C(40000000000);
+    wide[a][b] += bw; wide[b][a] += bw;
+  }
+  for (uint32_t k = 0; k < W; k++) for (uint32_t a = 0; a < W; a++) for (uint32_t b = 0; b < W; b++) {
+    const uint64_t via = wide[a][k] < wide[k][b] ? wide[a][k] : wide[k][b];
+    if (a != b && via > wide[a][b]) wide[a][b] = via;
+  }
   uint32_t *index = calloc((size_t)n + 1, sizeof *index);
   if (!index) return ENOMEM;
   for (uint32_t r = 0; r < n; r++) {
-    index[r] = w->nodes;
-    for (uint32_t k = 0; k < w->nodes; k++) if (w->node[k] == reports[r].node) index[r] = k;
+    index[r] = W;
+    for (uint32_t k = 0; k < W; k++) if (w->node[k] == reports[r].node) index[r] = k;
+    if (index[r] == W) { free(index); return ENOTCONN; }
   }
-  const uint32_t T = n + w->nodes, L = w->links + (uint32_t)((size_t)T * T);
+  const uint32_t L = n * (n - 1) / 2;
   struct mesh_link_map *map = &comm->map;
-  *map = (struct mesh_link_map){.nodes = T, .links = L, .link = calloc((size_t)L + 1, sizeof *map->link),
-    .bandwidth = calloc((size_t)L + 1, sizeof *map->bandwidth), .next = calloc((size_t)T * T + 1, sizeof *map->next),
-    .mark = calloc((size_t)T + 1, sizeof *map->mark)};
-  if (!map->link || !map->bandwidth || !map->next || !map->mark) { free(index); return ENOMEM; }
-  const int made = mesh_map_members(&whole, index, n, NULL, map);
-  free(index);
-  if (made < 0) return -made;
-  if (!map->relays) { free(map->next); map->next = NULL; }
-  struct mesh_cable *cables = calloc((size_t)n * n + 1, sizeof *cables);
-  if (!cables) return ENOMEM;
+  *map = (struct mesh_link_map){.kind = MESH_LINKS_GRAPH, .nodes = n, .links = 0, .link = calloc((size_t)L + 1, sizeof *map->link),
+    .bandwidth = calloc((size_t)L + 1, sizeof *map->bandwidth), .mark = calloc((size_t)n + 1, sizeof *map->mark)};
+  struct mesh_cable *cables = calloc((size_t)L + 1, sizeof *cables);
+  if (!map->link || !map->bandwidth || !map->mark || !cables) { free(index); free(cables); return ENOMEM; }
+  for (uint32_t r = 0; r < n; r++) map->mark[r] = reports[r].node;
   comm->fabric = (struct mesh_fabric){n, 0, cables};
   for (uint32_t a = 0; a < n; a++) for (uint32_t b = a + 1; b < n; b++) {
-    uint64_t bandwidth = 0;
-    uint32_t parallel = 0;
-    for (uint32_t l = 0; l < map->links; l++)
-      if ((map->link[l][0] == a && map->link[l][1] == b) || (map->link[l][0] == b && map->link[l][1] == a)) { bandwidth += map->bandwidth[l]; parallel++; }
-    if (!parallel) continue;
+    const uint64_t bandwidth = wide[index[a]][index[b]];
+    if (!bandwidth) { free(index); return ENOTCONN; }
+    map->link[map->links][0] = a; map->link[map->links][1] = b; map->bandwidth[map->links++] = bandwidth;
     const uint32_t x = reports[a].node, y = reports[b].node, lo = x < y ? x : y, hi = x < y ? y : x;
-    cables[comm->fabric.cables++] = (struct mesh_cable){((uint64_t)lo << 32) | hi, bandwidth ? bandwidth : parallel, {a, b}};
+    cables[comm->fabric.cables++] = (struct mesh_cable){((uint64_t)lo << 32) | hi, bandwidth, {a, b}};
   }
+  free(index);
   qsort(cables, comm->fabric.cables, sizeof *cables, cable_order);
   comm->endpoint = malloc(((size_t)comm->fabric.cables + 1) * sizeof *comm->endpoint);
   if (!comm->endpoint) return ENOMEM;
   for (uint32_t e = 0; e < comm->fabric.cables; e++) comm->endpoint[e] = UINT32_MAX;
   int checked = mesh_fabric_check(&comm->fabric);
-  if (!checked) checked = ranks_joined(map, NULL);
-  if (!checked) checked = mesh_write_routes_default(&comm->fabric, &comm->writes);
+  /* each ordered pair's one edge: its channel */
+  if (!checked && !(comm->edges = calloc((size_t)n * n + 1, sizeof *comm->edges))) checked = ENOMEM;
+  for (uint32_t e = 0; !checked && e < comm->fabric.cables; e++)
+    for (int way = 0; way < 2; way++) {
+      const uint32_t s = cables[e].node[way], d = cables[e].node[1 - way];
+      uint32_t *first = malloc(2 * sizeof *first), *cable = malloc(sizeof *cable);
+      double *weight = malloc(sizeof *weight);
+      if (!first || !cable || !weight) { free(first); free(cable); free(weight); checked = ENOMEM; break; }
+      first[0] = 0; first[1] = 1; cable[0] = e; weight[0] = 0;
+      comm->edges[(size_t)s * n + d] = (struct mesh_paths){1, first, cable, weight};
+    }
   return checked;
 }
 
@@ -2292,7 +2271,7 @@ static size_t piece_bytes(const struct mesh_step *step) { return step->piece.ele
 /* design/whole-function.md#one-way-writes */
 static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
-  const struct mesh_paths *paths = comm->writes ? comm->writes + c->root * comm->nranks + c->target - 1 : NULL;
+  const struct mesh_paths *paths = comm->edges ? comm->edges + c->root * comm->nranks + c->target - 1 : NULL;
   const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count};
   const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
     paths, operand, comm->page, NULL, 0);
@@ -2324,7 +2303,7 @@ static ncclResult_t bind_routed_steps(struct call *c, const uint32_t *first, con
                                        const uint32_t *initialized) {
   struct ncclComm *comm = c->comm;
   struct mesh_routed_program physical = {0};
-  const int status = mesh_routed_compile(&comm->fabric, comm->writes, first, logical, initialized, comm->page, &physical);
+  const int status = mesh_routed_compile(&comm->fabric, comm->edges, first, logical, initialized, comm->page, &physical);
   ncclResult_t result = status ? fail(ncclInvalidUsage, "physical collective lowering for %s: %s", comm->name, strerror(status)) : ncclSuccess;
   if (!result) {
     struct mesh_routed_rank *rank = physical.rank + comm->rank;
@@ -2765,7 +2744,7 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
   size_t room = 0;
   for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
     const struct call *c = list + i;
-    const struct mesh_paths *paths = comm->writes + c->root * comm->nranks + c->target - 1;
+    const struct mesh_paths *paths = comm->edges + c->root * comm->nranks + c->target - 1;
     const int n = mesh_write_compile(&comm->fabric, (uint32_t)r, (uint32_t)c->root, (uint32_t)c->target - 1,
       paths, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count}, comm->page, NULL, 0);
     if (n < 0 || (size_t)n > UINT32_MAX - room) return fail(ncclInvalidUsage, "write schedule extent");
@@ -2782,7 +2761,7 @@ static ncclResult_t order_writes(const struct ncclComm *comm, const struct call 
   uint32_t count = 0;
   for (size_t i = 0; i < calls; i++) for (int r = 0; r < comm->nranks; r++) {
     const struct call *c = list + i;
-    const struct mesh_paths *paths = comm->writes + c->root * comm->nranks + c->target - 1;
+    const struct mesh_paths *paths = comm->edges + c->root * comm->nranks + c->target - 1;
     const int n = mesh_write_compile(&comm->fabric, (uint32_t)r, (uint32_t)c->root, (uint32_t)c->target - 1,
       paths, (struct mesh_operand){(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count}, comm->page, transfers, (uint32_t)room);
     if (n < 0) { result = fail(ncclInternalError, "write schedule realization"); goto done; }

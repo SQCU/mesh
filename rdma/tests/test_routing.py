@@ -49,23 +49,6 @@ class RoutingTests(unittest.TestCase):
                      (fabric.cables[e]['bits_per_second'] / 8) for e in range(4)]
             self.assertLess(max(times) - min(times), 1e-7)
 
-    def test_solver_override_keeps_all_parallel_and_relay_paths(self):
-        fabric = self.fabric()
-        installed = []
-        ffi = SimpleNamespace(new=lambda _type, value: value)
-        native = SimpleNamespace(ncclMeshCommWriteRoutes=lambda *args: installed.append(args))
-        # The default table belongs to the native communicator. An override of
-        # one commodity must not replace other pairs or consult pointer identity.
-        with patch.dict(sys.modules, mesh=SimpleNamespace(ffi=ffi, lib=native, check=lambda _: None)):
-            weights = list(range(1, len(fabric.paths[1, 0]) + 1))
-            fabric.install('comm', {'route:1:0': weights})
-        self.assertEqual(len(installed), 1)
-        comm, source, destination, routes = installed[0]
-        self.assertEqual((comm, source, destination), ('comm', 1, 0))
-        paths = [routes['cable'][a:b] for a, b in zip(routes['first'], routes['first'][1:])]
-        self.assertEqual(paths, fabric.paths[1, 0])
-        self.assertEqual(routes['log_weight'], [math.log(x) for x in weights])
-
     def held(self, topology, destroyed, attached):
         path = pathlib.Path(__file__).resolve().parents[1] / 'torch-mesh/torch_mesh/backend.py'
         cls = next(node for node in ast.parse(path.read_text()).body

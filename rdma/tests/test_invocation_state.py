@@ -45,8 +45,7 @@ class InvocationState(unittest.TestCase):
              patch.object(module.partition, '_attach', side_effect=lambda *_args: events.append(('attach', _args[-1]))), \
              patch.object(module.partition, 'plan', side_effect=lambda *_args: events.append(('declare', _args[-1]))), \
              patch.object(module.partition, '_replan', side_effect=lambda *_: events.append('redeclare')), \
-             patch.object(WholeFunctionController, 'from_comm', return_value=controller), \
-             patch.object(WholeFunctionController, 'install_routes', side_effect=lambda *_: events.append('routes')):
+             patch.object(WholeFunctionController, 'from_comm', return_value=controller):
             state = Path(directory) / 'sequence.json'
             first = Invocation(mesh, 'tp', workload, state)
             first.realize(['input-broadcast', 'all-17-ticks'], prepare=lambda: events.append('prepared'))
@@ -64,8 +63,8 @@ class InvocationState(unittest.TestCase):
             second = Invocation(mesh, 'tp', workload, state)
             self.assertEqual(events[-1], ('attach', saved['proposal']['parts']['tp']))
             self.assertEqual(second.controller.state(), saved)
-            self.assertEqual(events[:5], [('declare', ['input-broadcast', 'all-17-ticks']),
-                                         'retire-generations', 'routes', 'redeclare', ('active', False)])
+            self.assertEqual(events[:4], [('declare', ['input-broadcast', 'all-17-ticks']),
+                                         'retire-generations', 'redeclare', ('active', False)])
             with self.assertRaisesRegex(ValueError, 'another complete function'):
                 Invocation(mesh, 'tp', {**workload, 'steps': 18}, state)
 

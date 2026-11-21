@@ -39,7 +39,7 @@ HEAD = r'''
 struct fixture_context { struct hdr *M; };
 struct attach { struct fixture_context context; };
 struct ncclComm { int rank,nranks; const char *name; uint64_t page;
-  struct mesh_fabric fabric; struct mesh_paths *writes; struct attach *attach; uint32_t count; };
+  struct mesh_fabric fabric; struct mesh_paths *edges; struct attach *attach; uint32_t count; };
 void *metal_contents(void *buffer) { return buffer; }
 '''
 
@@ -269,7 +269,7 @@ int main(void){
   attachment.context.M=calloc(1,1u<<20);assert(attachment.context.M);
   attachment.context.M->length=1u<<20;attachment.context.M->data_off=4096;
   for(uint32_t r=0;r<N;r++)comms[r]=(struct ncclComm){.rank=(int)r,.nranks=N,.name="member fixture",.page=1,
-      .fabric=fabric,.writes=paths,.attach=&attachment};
+      .fabric=fabric,.edges=paths,.attach=&attachment};
   const uint64_t weighted=lower_and_run(MESH_REDUCE,0); /* root3 has no source operand */
   double saved[N*N];memcpy(saved,tree_weights,count*sizeof *saved);
   for(uint32_t t=0;t<count;t++)tree_weights[t]=-3*tree_weights[t];
@@ -313,14 +313,12 @@ class NativeMembers(unittest.TestCase):
         cases = CASES
         head = HEAD
         if live:
-            head += '#include "mesh-write-routes.h"\n'
             start = simulation.index('enum { N=')
             end = simulation.index('static const struct mesh_fabric')
-            simulation = simulation[:start] + '''enum { N=3, E=6, ELEMENTS=131101 };
+            # the communicator's fabric as fabric_discover makes it: a channel each pair of ranks, each pair's one edge
+            simulation = simulation[:start] + '''enum { N=3, E=3, ELEMENTS=131101 };
 static const struct mesh_cable cables[E]={
-  {1,80000000000ull,{0,1}},{2,80000000000ull,{0,1}},
-  {3,80000000000ull,{0,1}},{4,80000000000ull,{0,1}},
-  {5,80000000000ull,{0,2}},{6,80000000000ull,{1,2}}
+  {1,320000000000ull,{0,1}},{5,80000000000ull,{0,2}},{6,80000000000ull,{1,2}}
 };
 ''' + simulation[end:]
             cases = cases[:cases.index('int main(void){')] + r'''
@@ -330,16 +328,15 @@ int main(void){
   struct mesh_link_map map={.kind=MESH_LINKS_GRAPH,.nodes=N,.links=E,.link=link,.bandwidth=capacity};
   uint32_t count=mesh_trees_pack(&map,NULL,0,N,tree_roots,tree_parents,tree_weights);assert(count);
   selected.trees=(struct mesh_trees){N,count,tree_roots,tree_parents,tree_weights};
-  struct mesh_paths *defaults=NULL;assert(!mesh_write_routes_default(&fabric,&defaults));
-  memcpy(paths,defaults,sizeof paths);free(defaults);
+  static uint32_t first2[2]={0,1},edge[E];static double zero[1]={0};
+  for(uint32_t e=0;e<E;e++){edge[e]=e;for(int w=0;w<2;w++){const uint32_t s=cables[e].node[w],d=cables[e].node[1-w];paths[s*N+d]=(struct mesh_paths){1,first2,edge+e,zero};}}
   attachment.context.M=calloc(1,1u<<24);assert(attachment.context.M);
   attachment.context.M->length=1u<<24;attachment.context.M->data_off=4096;
   for(uint32_t r=0;r<N;r++)comms[r]=(struct ncclComm){.rank=(int)r,.nranks=N,.name="live fixture",.page=16384,
-      .fabric=fabric,.writes=paths,.attach=&attachment};
+      .fabric=fabric,.edges=paths,.attach=&attachment};
   input_mask=output_mask=7;lower_and_run(MESH_ALLREDUCE,0);
   input_mask=3;output_mask=4;lower_and_run(MESH_ALLREDUCE,1);
   input_mask=3;output_mask=5;lower_and_run(MESH_ALLREDUCE,0);
-  for(uint32_t p=0;p<N*N;p++){free((void*)paths[p].first);free((void*)paths[p].cable);free((void*)paths[p].log_weight);}
   free(attachment.context.M);puts("live ragged masked Avg PASS");return 0;
 }
 '''

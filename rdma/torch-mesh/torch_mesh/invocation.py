@@ -42,7 +42,7 @@ class Invocation:
             partition._attach(mesh, name, list(map(int, parts)))
 
     def realize(self, groups, prepare=None):
-        """Declare the complete input-to-output graph and install its route vector."""
+        """Declare the complete input-to-output graph (no route is installed: the bridges switch every piece)."""
         partition.plan(self.mesh, self.name, groups)
         if self.controller is None:
             operand = partition.operand(self.mesh, self.name)
@@ -58,7 +58,6 @@ class Invocation:
             self.controller.topology['demands'] = [[a, b, count] for (a, b), count in self.group.plan_demands().items()]
         self.proposal = self.controller.proposal()
         self.group.reset_fused_configuration()
-        self.controller.install_routes(self.group.comm, self.proposal)
         partition._replan(self.mesh, self.name)
         self.group.plan_active(False)
         self.preparations = prepare

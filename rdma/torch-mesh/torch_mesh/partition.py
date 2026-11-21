@@ -1172,7 +1172,6 @@ def evaluations(mesh, name, count, *, workload=None, controller=None):
                     samples=[{} for _ in range(n)], observed=0, stale=0)
         if controller.topology is not None:
             group.reset_fused_configuration()
-            controller.install_routes(group.comm, proposal)
             _replan(mesh, name)
     elif (held['controller'].workload != workload
           or controller is not None and held['controller'] is not controller):
@@ -1243,7 +1242,6 @@ def _balance(mesh, name, held, group):
     parts, o = list(map(int, next_proposal['parts'][name])), operand(mesh, name)
     if controller.topology is not None:
         group.reset_fused_configuration()
-        controller.install_routes(group.comm, next_proposal)
     if parts != o.parts.tolist():
         _attach(mesh, name, parts)
         _relay(mesh, name)

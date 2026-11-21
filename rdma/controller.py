@@ -153,22 +153,8 @@ class WholeFunctionController:
         return {name: {key[len(prefix):]: list(values) for key, values in parts.items() if key.startswith(prefix)}
                 for name in self.topology['graphs'] for prefix in (f'flow:{name}/',)}
 
-    def install_routes(self, comm, proposal=None, graph=None):
-        if self.topology is None:
-            raise ValueError('route installation requires declared physical topology')
-        from routing import Fabric
-        if 'graphs' in self.topology:
-            if graph not in self.topology['graphs']:
-                raise ValueError('route installation must name its declared communicator')
-            topology, weights = self.topology['graphs'][graph], self.route_operands(proposal)[graph]
-        else:
-            topology, weights = self.topology, self.route_operands(proposal)
-        fabric = Fabric(topology['nodes'], topology['cables'])
-        fabric.install(comm, weights)
-
     def realize(self, comm, calls, proposal=None):
         """Install vector and recompile its full graph; refresh changed TP demand."""
-        self.install_routes(comm, proposal)
         entries = declare(comm, calls)
         fabric, demands = function_demands(comm)
         if fabric.nodes != self.topology['nodes'] or fabric.cables != self.topology['cables']:

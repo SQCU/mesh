@@ -1000,12 +1000,8 @@ ncclResult_t ncclMeshCommNodes(ncclComm_t comm, uint32_t* nodes, int room);
 /* design/whole-function.md#interface */
 struct mesh_fabric;
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
-struct mesh_paths;
-ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths);
-/* Configuration-time inspection of the installed paths, including actual log
-   weights. The borrowed value remains valid until that pair is reconfigured or
-   the communicator is destroyed. Execution does not query routing policy. */
-ncclResult_t ncclMeshCommWritePaths(ncclComm_t comm, int source, int destination, const struct mesh_paths** paths);
+/* design/switched-multipath-dma.md: no route table is installed or inspected: the bridges switch every piece over
+   cables and relays as it moves (mesh-switched.h); the communicator's fabric is a channel each pair of ranks */
 /* Realization metadata only, before function execution: each rank's fixed
    bytes gathered into rank-major reports. Uses the retained configuration
    channel, with the communicator's deadline; never a payload receipt. */
