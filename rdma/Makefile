@@ -1,7 +1,7 @@
 # design/transport.md: the node's images, built in .build by `all`, which installs nothing; `install` renames
 # each that changed into rdma/, in this order: the libraries first, the bridge's binary last, then libnccl-mesh with its
 # kernels (install-nccl, below)
-IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib mesh-stat mesh-order-state mesh-cluster mesh-heartbeat mesh-flow
+IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib mesh-stat mesh-order-state mesh-switch-log mesh-cluster mesh-heartbeat mesh-flow
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt)
@@ -157,6 +157,10 @@ mesh-c: mesh_c_build.py mesh-plan.h nccl.h
 .build/mesh-order-state: mesh-order-state.c mesh-switched.h mesh.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-order-state.c
+# the switch's records for the routing policy's trainer, drained into shard files (mesh-switch-log.c)
+.build/mesh-switch-log: mesh-switch-log.c mesh-switched.h mesh.h Makefile
+	mkdir -p .build
+	cc -O2 $(WARN) -o $@ mesh-switch-log.c
 .build/mesh-cluster: mesh-cluster.c mesh-observe.h mesh.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-cluster.c
