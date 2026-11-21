@@ -46,7 +46,7 @@ static inline void ffn_back(thread float (&x)[2][8], threadgroup float *S, threa
       put_s(S, c, row, du[s]);
     }
     tg_barrier();
-    ycodes(S, X, cm, H + 4096, c, gq, gs, gu, E, task, jj, RT, row0, seedc);
+    ycodes(S, X, cm, H, c, gq, gs, gu, E, task, jj, RT, row0, seedc);
     dgrad_block(x, du, mu, jj, false, S, X, Bq, sB, H, wq, wsc, c, seedr, row0, E);
   }
 }
@@ -72,7 +72,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
   tg_barrier();
   float x[2][8];
   for (uint s = 0; s < 2; s++) s_get(S, row_of(c, s), c, x[s]);
-  ycodes(S, X, cm, H + 4096, c, gq, gs, gr.m[M_OUT], FS, task, 0, RT, g0, seed_of(p.seed, S_OUT + 64, task));
+  ycodes(S, X, cm, H, c, gq, gs, gr.m[M_OUT], FS, task, 0, RT, g0, seed_of(p.seed, S_OUT + 64, task));
   quant(x, S, X, H, c, A, sA, seed_of(p.seed, S_OUT, task), g0, 64, 0);
   bool live[2]; int ref[2];
   for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); live[s] = row < nv; ref[s] = live[s] ? refid[row] : 0; }
@@ -95,7 +95,7 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
     const uint sd = l ? S_DOWN1 : S_DOWN0, su = l ? S_UP1 : S_UP0, sz = l ? S_ZH1 : S_ZH0;
     // x: dL/dx_{l+1}: down's dY; its codes; the feed-forward back: dxm
     tg_barrier();
-    vcodes(x, S, X, cm, H + 4096, c, gq, gs, gr.m[down], D, task, 0, RT, g0, seed_of(p.seed, sd + 64, task));
+    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[down], D, task, 0, RT, g0, seed_of(p.seed, sd + 64, task));
     quant(x, S, X, H, c, A, sA, seed_of(p.seed, sd, task), g0, 64, 0);
     ffn_back(x, S, A, X, Bq, sA, sB, cm, nw.m[up], nw.m[down], wq, wsc, H, c, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[up], task, RT, g0,
              seed_of(p.seed, su + 64, task), seed_of(p.seed, su, task));
@@ -134,13 +134,13 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
       }
       tg_barrier(); }
     // the gates' gradients: zh's dY (z, then h~), its dgrad: dx_l = dxm + dzc zh
-    vcodes(dz, S, X, cm, H + 4096, c, gq, gs, gr.m[zh], 2 * D, task, 0, RT, g0, seed_of(p.seed, sz + 64, task));
-    vcodes(dc, S, X, cm, H + 4096, c, gq, gs, gr.m[zh], 2 * D, task, 1, RT, g0, seed_of(p.seed, sz + 64, task));
+    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[zh], 2 * D, task, 0, RT, g0, seed_of(p.seed, sz + 64, task));
+    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[zh], 2 * D, task, 1, RT, g0, seed_of(p.seed, sz + 64, task));
     dgrad_block(x, dz, nw.m[zh], 0, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, sz, task), g0, 128);
     dgrad_block(x, dc, nw.m[zh], 1, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, sz, task), g0, 128);
   }
   // dx0: inp's dY
-  vcodes(x, S, X, cm, H + 4096, c, gq, gs, gr.m[M_INP], D, task, 0, RT, g0, seed_of(p.seed, S_INP + 64, task));
+  vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_INP], D, task, 0, RT, g0, seed_of(p.seed, S_INP + 64, task));
 }
 
 // the reverse recurrence over a tile's two groups of 32 positions (scan.h), a SIMD group 8 channels, a lane a position
@@ -221,12 +221,12 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     tg_barrier();
     float dz[2][8], dc[2][8], x[2][8];
     gates_back(S, c, mask, lzc, lh, h0, 1, row0, p, dz, dc);
-    vcodes(dz, S, X, cm, H + 4096, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH1 + 64, task));
-    vcodes(dc, S, X, cm, H + 4096, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH1 + 64, task));
+    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH1 + 64, task));
+    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[M_ZH1], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH1 + 64, task));
     dgrad_block(x, dz, nw.m[M_ZH1], 0, true, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH1, task), row0, 128);
     dgrad_block(x, dc, nw.m[M_ZH1], 1, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH1, task), row0, 128);
     // x1's gradient: down0's dY; layer 0's feed-forward back
-    vcodes(x, S, X, cm, H + 4096, c, gq, gs, gr.m[M_DOWN0], D, task, 0, RT, row0, seed_of(p.seed, S_LDOWN0 + 64, task));
+    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_DOWN0], D, task, 0, RT, row0, seed_of(p.seed, S_LDOWN0 + 64, task));
     quant(x, S, X, H, c, A, sA, seed_of(p.seed, S_LDOWN0, task), row0, 64, 0);
     ffn_back(x, S, A, X, Bq, sA, sB, cm, nw.m[M_UP0], nw.m[M_DOWN0], wq, wsc, H, c, lu + size_t(row0) * 6, 6, TM, gq, gs, gr.m[M_UP0], task, RT, row0,
              seed_of(p.seed, S_LUP0 + 64, task), seed_of(p.seed, S_LUP0, task));
@@ -236,10 +236,10 @@ kernel void lanes_bwd(device const float *mask [[buffer(0)]], device const float
     scan_back(S, carry[0], inj[0], true, c, mask, lzc, 0, row0, p);
     tg_barrier();
     gates_back(S, c, mask, lzc, lh, h0, 0, row0, p, dz, dc);
-    vcodes(dz, S, X, cm, H + 4096, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH0 + 64, task));
-    vcodes(dc, S, X, cm, H + 4096, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH0 + 64, task));
+    vcodes(dz, S, X, cm, H, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 0, RT, row0, seed_of(p.seed, S_LZH0 + 64, task));
+    vcodes(dc, S, X, cm, H, c, gq, gs, gr.m[M_ZH0], 2 * D, task, 1, RT, row0, seed_of(p.seed, S_LZH0 + 64, task));
     dgrad_block(x, dz, nw.m[M_ZH0], 0, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH0, task), row0, 128);
     dgrad_block(x, dc, nw.m[M_ZH0], 1, false, S, X, Bq, sB, H, wq, wsc, c, seed_of(p.seed, S_LZH0, task), row0, 128);
-    vcodes(x, S, X, cm, H + 4096, c, gq, gs, gr.m[M_INP], D, task, 0, RT, row0, seed_of(p.seed, S_LINP + 64, task));
+    vcodes(x, S, X, cm, H, c, gq, gs, gr.m[M_INP], D, task, 0, RT, row0, seed_of(p.seed, S_LINP + 64, task));
   }
 }

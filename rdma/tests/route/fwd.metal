@@ -25,7 +25,7 @@ static inline void ffn(thread float (&x)[2][8], threadgroup float *S, threadgrou
       for (uint k = 0; k < 8; k++) u[s][k] = max(u[s][k], 0.0f);
       if (ST) { const uint wd = mask_word(u[s], c); if (c.li % 4 == 0 && row < nv) mw[row * mstride + 2 * jj + c.li / 4] = wd; put_s(S, c, row, u[s]); }
     }
-    if (ST) { tg_barrier(); xcodes(S, X, cm, H + 4096, c, gq, gs, g, 192, jj, RT, row0); }
+    if (ST) { tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, g, 192, jj, RT, row0); }
     quant(u, S, X, H, c, Bq, sB, 0, 0, 0, 0);
     chunk(Bq, 64, wq + md.wf + 64 * jj, md.kf, S); tg_barrier();
     for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); epilogue(S, c, row, sB[row], wsc + md.wfs, nullptr, 0, x[s], true); }
@@ -57,7 +57,7 @@ kernel void lanes_fwd(device const float *lanes [[buffer(0)]], device const floa
     tg_barrier();
     float x[2][8];
     for (uint s = 0; s < 2; s++) s_get(S, row_of(c, s), c, x[s]);
-    if (STORE) xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[M_INP], 64, 0, RT, row0);
+    if (STORE) xcodes(S, X, cm, H, c, gq, gs, gr.m[M_INP], 64, 0, RT, row0);
     else tg_barrier();
     quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
     { const MatW m = nw.m[M_INP];
@@ -65,7 +65,7 @@ kernel void lanes_fwd(device const float *lanes [[buffer(0)]], device const floa
       for (uint s = 0; s < 2; s++) epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + m.wfs, wsc + m.b, 0, x[s], false); }
     for (uint l = 0; l < 2; l++) {
       tg_barrier();
-      if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[l ? M_ZH1 : M_ZH0], 64, 0, RT, row0); }
+      if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[l ? M_ZH1 : M_ZH0], 64, 0, RT, row0); }
       quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
       // zh_l: z (chunk 0), h~ (chunk 1), fp16; packed into S for the scan
       const MatW m = nw.m[l ? M_ZH1 : M_ZH0];
@@ -116,7 +116,7 @@ kernel void lanes_fwd(device const float *lanes [[buffer(0)]], device const floa
       }
       if (l == 1) break;
       tg_barrier();
-      if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[M_UP0], 64, 0, RT, row0); }
+      if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[M_UP0], 64, 0, RT, row0); }
       quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
       if (STORE) ffn<true>(x, S, A, X, Bq, sA, sB, cm, nw.m[M_UP0], nw.m[M_DOWN0], wq, wsc, H, c, lu + size_t(row0) * 6, 6, TM, gq, gs, gr.m[M_DOWN0], RT, row0);
       else ffn<false>(x, S, A, X, Bq, sA, sB, cm, nw.m[M_UP0], nw.m[M_DOWN0], wq, wsc, H, c, lu + size_t(row0) * 6, 6, TM, gq, gs, gr.m[M_DOWN0], RT, row0);
@@ -151,7 +151,7 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
   tg_barrier();
   float x[2][8];
   for (uint s = 0; s < 2; s++) s_get(S, row_of(c, s), c, x[s]);
-  if (STORE) xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[M_INP], 64, 0, RT, g0);
+  if (STORE) xcodes(S, X, cm, H, c, gq, gs, gr.m[M_INP], 64, 0, RT, g0);
   else tg_barrier();
   quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
   { const MatW m = nw.m[M_INP];
@@ -161,7 +161,7 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
   for (uint l = 0; l < 2; l++) {
     const uint zh = l ? M_ZH1 : M_ZH0, up = l ? M_UP1 : M_UP0, down = l ? M_DOWN1 : M_DOWN0;
     tg_barrier();
-    if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[zh], 64, 0, RT, g0); }
+    if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[zh], 64, 0, RT, g0); }
     quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
     // gates (fp16), then one step from the refresh's state: h = hp + z (h~ - hp), xm = x + h; the states read before
     // the gates' product (its time covers their latency)
@@ -184,7 +184,7 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
       } }
     if (STAGE == 2) { stage_out(x, c, r0, p.R, w); return; }
     tg_barrier();
-    if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[up], 64, 0, RT, g0); }
+    if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[up], 64, 0, RT, g0); }
     quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
     if (STORE) ffn<true>(x, S, A, X, Bq, sA, sB, cm, nw.m[up], nw.m[down], wq, wsc, H, c, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[down], RT, g0);
       else ffn<false>(x, S, A, X, Bq, sA, sB, cm, nw.m[up], nw.m[down], wq, wsc, H, c, cu + size_t(r0) * 12 + 6 * l, 12, nv, gq, gs, gr.m[down], RT, g0);
@@ -208,7 +208,7 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
   tg_barrier();
   if (STORE) {   // n's wgrad X codes (out's): n into S again
     for (uint s = 0; s < 2; s++) { float n[8]; for (uint k = 0; k < 8; k++) n[k] = x[s][k] * inv[s]; put_s(S, c, row_of(c, s), n); }
-    tg_barrier(); xcodes(S, X, cm, H + 4096, c, gq, gs, gr.m[M_OUT], 64, 0, RT, g0);
+    tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[M_OUT], 64, 0, RT, g0);
   }
   { const MatW m = nw.m[M_OUT];
     chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();

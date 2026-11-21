@@ -177,12 +177,17 @@ static inline void quant(thread const float (&v)[2][8], threadgroup float *S, th
 // ---- the column pass: the wgrad codes of S's 64 columns (the tile's 64 rows, two blocks), scale k (4: X's, 8: dY's)
 // into xt + column RT + row0 (row0 the tile's global row; the first `valid` columns), scales sc[b scs + column] (block
 // b of the tile), sums (if given) the blocks' column sums at the same place; stochastic index column RT + row0 + row.
-// S is spent (it holds S^T after); ends at a barrier
-static inline void colcodes(threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *Hb, Lanes c, device int8_t *xt, uint RT, uint row0,
+// A SIMD group its eight columns, both blocks, no threadgroup barrier but the last (S and X spent): a column's rows
+// li + 8 k over its eight lanes (68 words a row: a load's 32 lanes on 32 banks), its block's absmax, the grid into the
+// SIMD group's X [32 rows][16 = (column, block)], the rotation along the rows Y^T = X^T H32 on the matrix units (the
+// SIMD group's product: (column, block) rows, a block's 32 rows its columns), Y's absmax a row by the reduction, the
+// codes four consecutive rows a word
+typedef matmul2d<matmul2d_descriptor(16, 32, 32, true, false), execution_simdgroup> OpC;
+static inline void colcodes(threadgroup float *S, threadgroup half *X, threadgroup float *cm, device const half *H, Lanes c, device int8_t *xt, uint RT, uint row0,
                             device float *sc, uint scs, device float *sums, uint valid, float kscale, uint seed) {
-  // a column's rows li + 8 k (k < 4: block 0), over its eight lanes (68 words a row: a load's 32 lanes on 32 banks)
+  threadgroup half *Xs = X + 512 * c.sg; threadgroup float *cs = cm + 16 * c.sg;
   for (uint s = 0; s < 2; s++) {
-    const uint col = 8 * c.sg + 4 * s + c.q;
+    const uint cl = 4 * s + c.q, col = 8 * c.sg + cl;
     float v[8];
     for (uint k = 0; k < 8; k++) v[k] = S[(c.li + 8 * k) * LD + col];
     float m0[2] = {0, 0};
@@ -195,21 +200,40 @@ static inline void colcodes(threadgroup float *S, threadgroup half *X, threadgro
       if (c.li == 0 && col < valid) { sums[col] = t[0]; sums[scs + col] = t[1]; }
     }
     const float g0 = i8_grid_inverse(m0[0]), g1 = i8_grid_inverse(m0[1]);
-    for (uint k = 0; k < 8; k++) X[(c.li + 8 * k) * LX + col] = half(i8_grid(v[k], k < 4 ? g0 : g1));
-    if (c.li == 0) { cm[col] = m0[0]; cm[64 + col] = m0[1]; }
+    for (uint k = 0; k < 8; k++) Xs[(c.li + 8 * (k % 4)) * 16 + cl + 8 * (k / 4)] = half(i8_grid(v[k], k < 4 ? g0 : g1));
+    if (c.li == 0) { cs[cl] = m0[0]; cs[8 + cl] = m0[1]; }
   }
-  tg_barrier(); hcol(X, Hb, S); tg_barrier();
-  // S^T's rows (the columns): eight consecutive rows a lane, a block four lanes
-  for (uint s = 0; s < 2; s++) {
-    const uint col = row_of(c, s), b = c.li / 4;
-    float y[8]; s_get(S, col, c, y);
-    float m = 0;
-    for (uint k = 0; k < 8; k++) m = max(m, abs(y[k]));
-    m = max(m, simd_shuffle_xor(m, ushort(1))); m = max(m, simd_shuffle_xor(m, ushort(2)));
-    if (col < valid) {
-      const float inv = i8_inverse(m);
-      *(device uint2 *)(xt + size_t(col) * RT + row0 + 8 * c.li) = pack8(y, inv, seed, col * RT + row0 + 8 * c.li);
-      if (c.li % 4 == 0) sc[b * scs + col] = i8_scale(m, cm[64 * b + col], kscale);
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  TgH tX(Xs, dextents<int32_t, 2>(16, 32));
+  DevH tH((device half *)H, dextents<int32_t, 2>(32, 32), array<int32_t, 2>{1, 64});
+  OpC op;
+  auto y = op.template get_destination_cooperative_tensor<TgH, DevH, float>();
+  op.run(tX, tH, y);
+  auto g = op.template get_destination_cooperative_tensor<TgH, DevH, float>();
+  for (ushort i = 0; i < y.get_capacity(); i++) g[i] = abs(y[i]);
+  auto rm = op.template get_row_reduction_destination_cooperative_tensor<TgH, DevH, float>();
+  reduce_rows(g, rm, reduction_operation::max, 0.0f);
+  // lane l: rows (column, block) m = mr, mr + 8, block rows n = nb + 0..3, nb + 16..19
+  const uint mr = ((c.lane >> 1) & 3) | ((c.lane >> 4) << 2), nb = 4 * (c.lane & 1) + 8 * ((c.lane >> 3) & 1), col = 8 * c.sg + mr;
+  if (col < valid) {
+    for (uint b = 0; b < 2; b++) {
+      const float m = rm[b], inv = i8_inverse(m);
+      if ((c.lane & 9) == 0) sc[b * scs + col] = i8_scale(m, cs[mr + 8 * b], kscale);
+      for (uint h = 0; h < 2; h++) {
+        const ushort i = ushort(4 * b + 8 * h); const uint n = 32 * b + nb + 16 * h, at = col * RT + row0 + n;
+        uint w = 0;
+        if (seed) {
+          for (uint k = 0; k < 4; k += 2) {
+            const uint hh = i8_mix(seed ^ (((at + k) >> 1) * 0x9e3779b1u));
+            const float c0 = clamp(floor(y[i + k] * inv + float(hh & 0xffffu) * (1.0f / 65536.0f)), -127.0f, 127.0f);
+            const float c1 = clamp(floor(y[i + k + 1] * inv + float(hh >> 16) * (1.0f / 65536.0f)), -127.0f, 127.0f);
+            w |= (uint(uchar(int8_t(c0))) | (uint(uchar(int8_t(c1))) << 8)) << (8 * k);
+          }
+        } else {
+          for (uint k = 0; k < 4; k++) w |= uint(uchar(int8_t(rint(y[i + k] * inv)))) << (8 * k);
+        }
+        *(device uint *)(xt + size_t(col) * RT + row0 + n) = w;
+      }
     }
   }
   tg_barrier();
