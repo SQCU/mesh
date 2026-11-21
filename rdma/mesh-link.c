@@ -746,14 +746,20 @@ static void link_heard(struct port *port,const struct message *heard){
 #define SWITCH_DRAWS 32u
 #define SWITCH_ETA 0.5f
 /* the programs' slot toward `node`, made (generation 1, no program) as the map first holds the node; MESH_ABSENT where
-   every slot holds another node */
+   every slot holds another node (the event loop's pairing and the refresh thread's view both make slots: one at a
+   time) */
+static pthread_mutex_t slot_lock=PTHREAD_MUTEX_INITIALIZER;
 static uint32_t order_slot(uint32_t node){
+  pthread_mutex_lock(&slot_lock);
   uint32_t n=0,vacant=MESH_ABSENT;
   for(;n<MESH_NODES && atomic_load(&mesh_node_at(M,n)->node)!=node;n++)if(vacant==MESH_ABSENT && !atomic_load(&mesh_node_at(M,n)->node))vacant=n;
-  if(n==MESH_NODES && (n=vacant)==MESH_ABSENT){say("bridge: no program slot for node %u (mesh.h MESH_NODES)\n",node);return MESH_ABSENT;}
+  if(n==MESH_NODES && (n=vacant)==MESH_ABSENT){
+    pthread_mutex_unlock(&slot_lock);say("bridge: no program slot for node %u (mesh.h MESH_NODES)\n",node);return MESH_ABSENT;
+  }
   struct mesh_node *x=mesh_node_at(M,n);
   if(!atomic_load(&x->generation))atomic_store(&x->generation,1);
   atomic_store_explicit(&x->node,node,memory_order_release);
+  pthread_mutex_unlock(&slot_lock);
   return n;
 }
 /* the slots the switch's lanes hold queued and not completed (struct hdr `busy`) */
@@ -823,7 +829,7 @@ static void switch_view(void){
     uint64_t bandwidth=0;
     for(uint32_t p=0;p<port_count;p++)if(ports[p].link.state==LINK_UP && ports[p].peer==nodes[i])bandwidth+=ports[p].bandwidth;
     atomic_store(&x->bandwidth,bandwidth);
-    if(!atomic_load(&x->live)){atomic_store_explicit(&x->live,1,memory_order_release);record_changed();}
+    atomic_store_explicit(&x->live,1,memory_order_release);   /* no record names it: the event loop's alone */
   }
 }
 /* a slot that was on its way out a lane no longer live switched again: its last hop undone (the lane's peer off its
