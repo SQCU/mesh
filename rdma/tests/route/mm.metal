@@ -18,6 +18,9 @@
 using namespace metal;
 using namespace mpp::tensor_ops;
 #include "int8mm.h"
+#ifndef ROUTE_TBL
+#define ROUTE_TBL constant
+#endif
 
 struct GP { uint M, N, K, bias; };
 template <int TM, int TN, int SG, bool NN>
@@ -42,14 +45,16 @@ static inline void gemm(device int8_t *a, device int8_t *b, device const float *
 #define GEMM(name, TM, TN, SG, NN) kernel void name##_##TM##x##TN##_##SG(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)]], \
   device const float *sa [[buffer(2)]], device const float *sb [[buffer(3)]], device float *out [[buffer(4)]], device const float *bias [[buffer(5)]], \
   constant GP &p [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]]) { gemm<TM, TN, SG, NN>(a, b, sa, sb, out, bias, p, tg); }
+#ifndef ROUTE_MLX   // the Metal library's instances (the MLX ops read gemm_wg)
 GEMM(gemm_nt, 64, 32, 4, false) GEMM(gemm_nt, 64, 64, 4, false) GEMM(gemm_nt, 64, 128, 4, false) GEMM(gemm_nt, 128, 64, 8, false)
+#endif
 GEMM(gemm_nn, 64, 32, 4, true) GEMM(gemm_nn, 64, 64, 4, true) GEMM(gemm_nn, 64, 128, 4, true) GEMM(gemm_nn, 128, 64, 8, true)
 
 // wgrad: blocks b0 + [z per, (z + 1) per) of I8_WBLOCK rows (within [b0, b1)); scales sa [K / blk][M], sb [K / blk][N]; partial [z][M][N].
 // TRANSPOSED: operands [M][K], [N][K] (gemm_wg), else [K][M], [K][N] (gemm_tn)
 struct WP { uint M, N, K, per, b0, b1, p0, p1; };   // K: the operands' row length (their stride); blocks [b0, b1)
 template <int TM, int TN, int SG, bool TRANSPOSED>
-static inline void wgrad(device int8_t *a, device int8_t *b, device const float *sa, device const float *sb, device float *partial, constant WP &p, uint3 tg) {
+static inline void wgrad(device int8_t *a, device int8_t *b, device const float *sa, device const float *sb, device float *partial, ROUTE_TBL WP &p, uint3 tg) {
   const int M = p.M, N = p.N, K = p.K, m0 = tg.y * TM, n0 = tg.x * TN, z = tg.z;
   auto A = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(a, TRANSPOSED ? dextents<int32_t, 2>(K, M) : dextents<int32_t, 2>(M, K));
   auto B = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(b, TRANSPOSED ? dextents<int32_t, 2>(K, N) : dextents<int32_t, 2>(N, K));
@@ -74,11 +79,13 @@ static inline void wgrad(device int8_t *a, device int8_t *b, device const float 
   auto O = tensor<device float, dextents<int32_t, 2>, tensor_inline>(partial + size_t(z) * M * N, dextents<int32_t, 2>(N, M));
   acc.store(O.slice(n0, m0));
 }
-#define WGRAD(name, TM, TN, SG, T) kernel void name##_##TM##x##TN##_##SG(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)]], \
+#define WGRAD(name, TM, TN, SG, T) kernel void name##_##TM##x##TN##_##SG(device const int8_t *a [[buffer(0)]], device const int8_t *b [[buffer(1)]], \
   device const float *sa [[buffer(2)]], device const float *sb [[buffer(3)]], device float *partial [[buffer(4)]], constant WP &p [[buffer(5)]], \
-  uint3 tg [[threadgroup_position_in_grid]]) { wgrad<TM, TN, SG, T>(a, b, sa, sb, partial, p, tg); }
+  uint3 tg [[threadgroup_position_in_grid]]) { wgrad<TM, TN, SG, T>((device int8_t *)a, (device int8_t *)b, sa, sb, partial, p, tg); }
+#ifndef ROUTE_MLX   // the Metal library's instances (the MLX ops read gemm_wg)
 WGRAD(gemm_tn, 64, 32, 4, false) WGRAD(gemm_tn, 64, 64, 4, false) WGRAD(gemm_tn, 128, 64, 8, false)
 WGRAD(gemm_wg, 64, 32, 4, true) WGRAD(gemm_wg, 64, 64, 4, true) WGRAD(gemm_wg, 128, 64, 8, true)
+#endif
 
 // roofline.swift's kernel: C [M][N] int32 = A [M][K] . B [N][K]^T
 template <int TM, int TN, int SG>
@@ -97,4 +104,12 @@ static inline void roof(device int8_t *a, device int8_t *b, device int32_t *out,
 }
 #define ROOF(TM, TN, SG) kernel void roof_##TM##x##TN##_##SG(device int8_t *a [[buffer(0)]], device int8_t *b [[buffer(1)]], device int32_t *out [[buffer(4)]], \
   constant GP &p [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]]) { roof<TM, TN, SG>(a, b, out, p, tg); }
+#ifndef ROUTE_MLX   // the Metal library's instances (the MLX ops read gemm_wg)
 ROOF(64, 32, 4) ROOF(64, 64, 4) ROOF(64, 128, 4) ROOF(128, 64, 8)
+#endif
+
+// the trainer's wgrad instance (qnn.py's wgrad op; gemm_wg_64x64_4 written out, as the MLX ops read kernels by name)
+kernel void gemm_wg(device const int8_t *a [[buffer(0)]], device const int8_t *b [[buffer(1)]], device const float *sa [[buffer(2)]], device const float *sb [[buffer(3)]],
+                    device float *partial [[buffer(4)]], constant WP &p [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]]) {
+  wgrad<64, 64, 4, true>((device int8_t *)a, (device int8_t *)b, sa, sb, partial, p, tg);
+}

@@ -1,10 +1,27 @@
 """The routing policy in the PyTorch dialect (MLX on Apple GPUs): ops, modules, loss, step.
 
-  ops      quantize (int8mm.h: 64-block Walsh-Hadamard rotation as a product, absmax/127 codes) and i8mm, the int8 x
-           int8 -> int32 product: a Metal matmul2d kernel registered as an MLX op, its VJP int8 products too
-  modules  QLinear (W = g V/|V| a row, bias), MinGRU (gates, the recurrence, the feed-forward), Policy
-  loss     surrogate: the clipped importance-weighted score-function objective whose gradient is the credit
-  step     nn.value_and_grad + optim.Adam, compiled with mx.compile
+  ops      the tile kernels (fwd.metal, bwd.metal, credit.metal, opt.metal, mm.metal: tile.h's tiles on int8mm.h's
+           numerics) as MLX ops, each with its VJP:
+             codes      the weights' int8 codes (forward rows, dgrad columns) from W (straight through)
+             lanes      the fused lane op: a run's lanes through inp, both layers' gates and the recurrence (scan.h's
+                        affine scan), layer 0's feed-forward; the states each refresh leaves. VJP: lanes_bwd (the
+                        reverse scan), the wgrad op
+             contexts   the fused context-row chain op: a tile of contexts through every layer and the readout: w.
+                        VJP: ctx_bwd, the states' gradients (states_grad), the wgrad op
+             wgrad      dW = dY^T X over 32-row blocks of column codes (gemm_wg), exact int32 a block, fp32 across
+             surrogate  the (unclipped, as credit.metal) importance-weighted score-function objective a task (three: the throughput,
+                        latency and queueing advantages); its VJP the credit (credit_draws, credit_rows: split.h)
+           Each backward takes T tasks at once: the parameters as T copies (a leading task axis: the step's three), the
+           forward run once, each backward its kernel with T = 3 (mx.vmap re-traces a custom function's forward, which
+           a Metal kernel cannot be). And quantize / i8mm, the generic int8 x int8 ->
+           int32 product (matmul2d), its VJP int8 products too.
+  modules  QLinear (W = g V/|V| a row, bias; called: the fp32 reference product), MinGRU (gates, the recurrence, the
+           feed-forward: the fp32 reference), Policy (the int8 network on the fused ops; reference(): the same function
+           in fp32 from the modules)
+  loss     surrogate: per task, sum over draws of coefficient x stop(ratio) x log pi(token)
+  step     the three tasks' gradients (task copies of the parameters, one value_and_grad), UPGrad's weights from their Gram matrix (upgrad.h), Adam, V's rows
+           pinned; microbatches accumulated (gradient) and one exchange a step (apply: the sums, rows and microbatch
+           norms, identical statistics at every rank); all compiled with mx.compile
 
 Arrays are values the array library makes; modules hold parameters; nothing allocates by hand."""
 import math
@@ -13,13 +30,193 @@ from functools import partial
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+import numpy as np
+from mlx.utils import tree_flatten, tree_unflatten
 
-D, E, IN, FS = 64, 192, 48, 40
+from . import metal
+
+D, E, IN, FS, L, TM, WB = 64, 192, 48, 40, 32, 64, 32
+TASKS = 3
+
+
+def pad64(n):
+    return -(-n // 64) * 64
+
+
+# ---- the layout: the matrices (tile.h's order), the flat weights vector the ops take, the kernels' tables ----
+MATS = [('inp', D, IN, True), ('zh0', 2 * D, D, True), ('up0', E, D, True), ('down0', D, E, True),
+        ('zh1', 2 * D, D, True), ('up1', E, D, True), ('down1', D, E, True), ('out', FS, D, False)]
+LANE_MATS = (0, 1, 2, 3, 4)   # the lanes' (layer 1's lanes: their states only)
+
+
+def _layout():
+    net, items_r, items_c, at, q, f = [], [], [], 0, 0, 0
+    woff = []
+    for i, (_, rows, cols, bias) in enumerate(MATS):
+        kb, kf = pad64(rows), pad64(cols)
+        v = at; at += rows * cols; g = at; at += rows if bias else 0
+        woff.append((v, g))
+        net += [q, f, f + kb, q + kb * kf, f + 2 * kb, rows, cols, kf, kb, kf, v, g]
+        q += 2 * kb * kf; f += 2 * kb + kf
+        items_r += [(i, r) for r in range(kb)]; items_c += [(i, c) for c in range(kf)]
+    return np.array(net, np.uint32), np.array(items_r + items_c, np.uint32).ravel(), len(items_r), at, q, f, woff
+
+
+NET, ITEMS, NROWS, NW, NQ, NF, WOFF = _layout()
+_H = np.array([[-1.0 if bin(i & j).count('1') % 2 else 1.0 for j in range(64)] for i in range(64)], np.float16)
+
+
+def _grad_table(RT, T):
+    """tile.h's Grad for one op's codes (X: its forward's, Y: its backward's, each its own arrays) over RT rows"""
+    blocks, t, xq, xf, yq, yf = RT // WB, [], 0, 0, 0, 0
+    for _, rows, cols, _ in MATS:
+        M, kf = T * rows, pad64(cols)
+        t += [yq, xq, yf, xf, yf + blocks * M, 0, 0, 0]
+        xq += kf * RT; xf += blocks * kf; yq += pad64(M) * RT; yf += 2 * blocks * M
+    return np.array(t + [RT, T, 0, 0], np.uint32), (xq, xf), (yq, yf)
+
+
+def _klp(K):
+    return L if K == 1 else pad64(K * L)
+
+
+def _fp(B, K, R, RL, Rp, seed):
+    """tile.h's FP: runs, refreshes, a run's lane rows, contexts, the lane rows' offset (0: each op its own codes), the
+    seed (an array: it changes every step), the contexts' room, lane tiles a threadgroup"""
+    k = _klp(K)
+    head = mx.array([B, K, k, R, RL], mx.uint32); tail = mx.array([Rp, 1 if K == 1 else k // 64], mx.uint32)
+    return mx.concatenate([head, seed.reshape(1).astype(mx.uint32), tail])
+
+
+_K = {}
+
+
+def _kernel(file, name, **kw):
+    key = (file, name) + tuple(sorted(kw.items()))
+    if key not in _K:
+        _K[key] = metal.Kernel(file, name, **kw)
+    return _K[key]
+
+
+def _c(a):
+    return mx.array(a)
+
 
 # ---- ops ----
-_H64 = (lambda h: h)(None)
+def weight_codes(wb):
+    """the weights' codes from W itself (opt.metal codes): wq (forward codes [pad64(rows)][kf] a matrix, dgrad codes
+    [kf][pad64(rows)]), wsc (scales, biases)"""
+    o = _kernel('opt.metal', 'codes')({'w': wb, 'nw': _c(NET), 'items': _c(ITEMS), 'n': mx.array([len(ITEMS) // 2, NROWS], mx.uint32)},
+                                      {'wq': ((NQ,), mx.int8), 'wsc': ((NF,), mx.float32)}, (-(-(len(ITEMS) // 2) * 32 // 256),), 256)
+    return o['wq'], o['wsc']
 
 
+def _wgrad(gq, gs, gqx, gsx, table, i, RT, T, b1):
+    """the wgrad op: matrix i's dW [T][rows][cols] = dY^T X over blocks [0, b1) of 32 rows (exact int32 a block,
+    scaled, fp32 across: gemm_wg), and db [T][rows] its dY's column sums"""
+    _, rows, cols, bias = MATS[i]
+    yt, xt, sy, sx, dbp = (int(x) for x in table[8 * i:8 * i + 5])
+    M, kf, blocks, per = T * rows, pad64(cols), RT // WB, 128
+    nz = -(-b1 // per)
+    part = _kernel('mm.metal', 'gemm_wg')({'a': gq[yt:yt + pad64(M) * RT], 'b': gqx[xt:xt + kf * RT], 'sa': gs[sy:sy + blocks * M], 'sb': gsx[sx:sx + blocks * kf],
+                                                   'p': mx.array([M, kf, RT, per, 0, b1, 0, 0], mx.uint32)},
+                                                  {'partial': ((nz * M * kf,), mx.float32)}, (kf // 64, -(-M // 64), nz), 128)['partial']
+    dW = part.reshape(nz, T, rows, kf).sum(0)[:, :, :cols]
+    db = gs[dbp:dbp + b1 * M].reshape(b1, T, rows).sum(0) if bias else None
+    return dW, db
+
+
+def _dwb(parts, T):
+    """the flat weights' cotangent [T][NW] from each matrix's (dW, db) (None: a matrix the op does not use)"""
+    out = []
+    for i, (_, rows, cols, bias) in enumerate(MATS):
+        dW, db = parts.get(i, (None, None))
+        out.append(dW.reshape(T, rows * cols) if dW is not None else mx.zeros((T, rows * cols)))
+        if bias:
+            out.append(db if db is not None else mx.zeros((T, rows)))
+    return mx.concatenate(out, 1)
+
+
+# the fused lane op: lanes [B][K][L][IN], mask [B][K][L], h0 [B][2][D] -> st [B K][2][D] (each refresh's last
+# states), next [B][2][D]; what its backward reads besides
+def _lanes_fwd(wq, wsc, lanes, mask, h0, seed, store):
+    B, K = lanes.shape[:2]; k = _klp(K); RL = pad64(B * k)
+    table, (xq, xf), _ = _grad_table(RL, 1)
+    n = lambda size, dt: ((size if store else 1,), dt)
+    o = _kernel('fwd.metal', 'lanes_fwd', template=(('STORE', store), ('STAGE', 0)), tag='_s' if store else '')(
+        {'lanes': lanes, 'mask': mask, 'h0': h0, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': _fp(B, K, 0, RL, 0, seed), 'gr': _c(table), 'H': _c(_H)},
+        {'st': ((B * K * 2 * D,), mx.float32), 'next': ((B * 2 * D,), mx.float32), 'gq': n(xq, mx.int8), 'gs': n(xf, mx.float32),
+         'lzc': n(RL * 4 * D, mx.float16), 'lh': n(RL * 2 * D, mx.float32), 'lu': n(RL * 6, mx.uint32)},
+        ((B + 1) // 2 if K == 1 else B,), 256)
+    return o['st'].reshape(B * K, 2, D), o['next'].reshape(B, 2, D), o
+
+
+def _lanes_back_impl(dst, wq, wsc, mask, h0, seed, gqx, gsx, lzc, lh, lu):
+    T = dst.shape[0]; B, K = mask.shape[:2]; k = _klp(K); RL = pad64(B * k)
+    table, _, (yq, yf) = _grad_table(RL, T)
+    o = _kernel('bwd.metal', 'lanes_bwd')(
+        {'mask': mask, 'h0': h0, 'lzc': lzc, 'lh': lh, 'lu': lu, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': _fp(B, K, 0, RL, 0, seed), 'gr': _c(table),
+         'dst': dst.reshape(-1), 'H': _c(_H)},
+        {'gq': ((yq,), mx.int8), 'gs': ((yf,), mx.float32)}, ((B + 1) // 2 if K == 1 else B, T), 256)
+    parts = {i: _wgrad(o['gq'], o['gs'], gqx, gsx, table, i, RL, T, RL // WB) for i in LANE_MATS}
+    return _dwb(parts, T)
+
+
+@mx.custom_function
+def lanes(wb, wq, wsc, lanes_, mask, h0, seed):
+    """wb [T][NW]: the weights a task (T copies, equal: the step's tasks; the forward is computed once, from wq and wsc,
+    their codes) -> st [T][B K][2][D] (the same a task), next [B][2][D]; the VJP takes the T tasks' cotangents at once"""
+    st, nxt, o = _lanes_fwd(wq, wsc, lanes_, mask, h0, seed, True)
+    return mx.broadcast_to(st[None], (wb.shape[0],) + st.shape), nxt, o['gq'], o['gs'], o['lzc'], o['lh'], o['lu']
+
+
+@lanes.vjp
+def _(primals, cots, outs):
+    wb, wq, wsc, lanes_, mask, h0, seed = primals
+    dwb = _lanes_back_impl(cots[0], wq, wsc, mask, h0, seed, *outs[2:])
+    return dwb, mx.zeros_like(wq), mx.zeros_like(wsc), mx.zeros_like(lanes_), mx.zeros_like(mask), mx.zeros_like(h0), mx.zeros_like(seed)
+
+
+# the fused context-row chain op: tokens [R][IN], pos [R] (a context's state: its refresh's last lane row, pos / L the
+# refresh), seg [B K][2] (each refresh's contexts' rows), st -> w [R][FS]
+def _ctx_fwd(wq, wsc, tokens, pos, st, B, K, seed, store):
+    R = tokens.shape[0]; Rp = pad64(R)
+    table, (xq, xf), _ = _grad_table(Rp, 1)
+    n = lambda size, dt: ((size if store else 1,), dt)
+    o = _kernel('fwd.metal', 'ctx_fwd', template=(('STORE', store), ('STAGE', 0)), tag='_s' if store else '')(
+        {'tokens': tokens, 'pos': pos, 'st': st, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': _fp(B, K, R, 0, Rp, seed), 'gr': _c(table), 'H': _c(_H)},
+        {'w': ((R * FS,), mx.float32), 'gq': n(xq, mx.int8), 'gs': n(xf, mx.float32), 'czc': n(R * 4 * D, mx.float16), 'cu': n(R * 12, mx.uint32),
+         'cn': n(R * D, mx.float32), 'cinv': n(R, mx.float32)}, (-(-R // TM),), 256)
+    return o['w'].reshape(R, FS), o
+
+
+def _ctx_back_impl(dw, wq, wsc, pos, seg, st, seed, gqx, gsx, czc, cu, cn, cinv):
+    T, R = dw.shape[:2]; Rp = pad64(R); BK = seg.shape[0]
+    table, _, (yq, yf) = _grad_table(Rp, T)
+    p = _fp(BK, 1, R, 0, Rp, seed)   # B K refreshes as states_grad reads them (its B K)
+    o = _kernel('bwd.metal', 'ctx_bwd')(
+        {'dw': dw.reshape(-1), 'pos': pos, 'st': st, 'czc': czc, 'cu': cu, 'nw': _c(NET), 'wq': wq, 'wsc': wsc, 'p': p, 'gr': _c(table), 'cn': cn, 'cinv': cinv, 'H': _c(_H)},
+        {'gq': ((yq,), mx.int8), 'gs': ((yf,), mx.float32), 'dhp': ((T * 2 * Rp * D,), mx.float32)}, (-(-R // TM), T), 256)
+    dst = _kernel('bwd.metal', 'states_grad')({'dhp': o['dhp'], 'seg': seg.reshape(-1), 'p': p}, {'dst': ((T * BK * 2 * D,), mx.float32)}, (T * BK,), 2 * D)['dst']
+    parts = {i: _wgrad(o['gq'], o['gs'], gqx, gsx, table, i, Rp, T, -(-R // WB)) for i in range(len(MATS))}
+    return _dwb(parts, T), dst.reshape(T, BK, 2, D)
+
+
+@mx.custom_function
+def contexts(wb, wq, wsc, tokens, pos, seg, st, seed):
+    """wb [T][NW], st [T][B K][2][D] (a task each, equal: the forward once) -> w [T][R][FS]; the VJP the T tasks'"""
+    w, o = _ctx_fwd(wq, wsc, tokens, pos, st[0], 0, 1, seed, True)
+    return mx.broadcast_to(w[None], (wb.shape[0],) + w.shape), o['gq'], o['gs'], o['czc'], o['cu'], o['cn'], o['cinv']
+
+
+@contexts.vjp
+def _(primals, cots, outs):
+    wb, wq, wsc, tokens, pos, seg, st, seed = primals
+    dwb, dst = _ctx_back_impl(cots[0], wq, wsc, pos, seg, st[0], seed, *outs[1:])
+    return (dwb, mx.zeros_like(wq), mx.zeros_like(wsc), mx.zeros_like(tokens), mx.zeros_like(pos), mx.zeros_like(seg), dst, mx.zeros_like(seed))
+
+
+# ---- the generic int8 product (qnn's first op, kept: its own quantization, a 64-block Walsh-Hadamard as a product) ----
 def _hadamard(n):
     h = mx.array([[1.0]])
     while h.shape[0] < n:
@@ -27,14 +224,14 @@ def _hadamard(n):
     return h / math.sqrt(n)
 
 
-_H = _hadamard(64)
+_H64 = _hadamard(64)
 
 
 def quantize(x):
     """rows (last axis, padded to 64-blocks) rotated by the 64-point Hadamard (a product), int8 codes, a scale a row"""
     k = x.shape[-1]; kp = -(-k // 64) * 64
     x = mx.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, kp - k)]) if kp != k else x
-    y = (x.reshape(-1, kp // 64, 64) @ _H).reshape(-1, kp)
+    y = (x.reshape(-1, kp // 64, 64) @ _H64).reshape(-1, kp)
     s = mx.maximum(mx.max(mx.abs(y), axis=-1, keepdims=True), 1e-30) / 127.0
     return mx.clip(mx.round(y / s), -127, 127).astype(mx.int8), s
 
@@ -58,7 +255,7 @@ _mm = mx.fast.metal_kernel(
 """)
 
 
-def _i8(qa, qb):
+def i8(qa, qb):
     """int8 [M][K] x int8 [N][K]^T -> int32 [M][N] on the matrix units (64x64 tiles, M and N padded to whole tiles)"""
     M, K = qa.shape; N = qb.shape[0]; Mp, Np = -(-M // 64) * 64, -(-N // 64) * 64
     qa = mx.pad(qa, [(0, Mp - M), (0, 0)]) if Mp != M else qa
@@ -73,7 +270,7 @@ def i8mm(x, w):
     """x [..., K] @ w [N, K]^T, both through int8 codes: an exact int32 sum, scaled back"""
     lead = x.shape[:-1]
     qx, sx = quantize(x.reshape(-1, x.shape[-1])); qw, sw = quantize(w)
-    return (_i8(qx, qw).astype(mx.float32) * sx * sw.T).reshape(*lead, w.shape[0])
+    return (i8(qx, qw).astype(mx.float32) * sx * sw.T).reshape(*lead, w.shape[0])
 
 
 @i8mm.vjp
@@ -92,14 +289,19 @@ class QLinear(nn.Module):
         if bias:
             self.b = mx.zeros((rows,))
 
-    def __call__(self, x):
-        W = self.g[:, None] * self.V / mx.linalg.norm(self.V, axis=1, keepdims=True)
-        y = i8mm(x, W)
+    def weight(self):   # (a leading task axis: the step's per-task copies)
+        return self.g[..., None] * self.V / mx.linalg.norm(self.V, axis=-1, keepdims=True)
+
+    def __call__(self, x):   # the fp32 reference product
+        y = x @ self.weight().T
         return y + self.b if 'b' in self else y
+
+    def pin(self):
+        self.V = self.V / mx.linalg.norm(self.V, axis=1, keepdims=True)
 
 
 class MinGRU(nn.Module):
-    """a layer: gates z, h~ from x; the recurrence over positions; the feed-forward on x + h"""
+    """a layer: gates z, h~ from x; the recurrence over positions; the feed-forward on x + h (fp32: the reference)"""
     def __init__(self):
         super().__init__()
         self.zh, self.up, self.down = QLinear(2 * D, D), QLinear(E, D), QLinear(D, E)
@@ -111,55 +313,171 @@ class MinGRU(nn.Module):
     def ffn(self, xm):
         return xm + self.down(nn.relu(self.up(xm)))
 
-    def sequence(self, x, mask, h0):   # lanes [runs][L][D]: every position's state, then the feed-forward
+    def sequence(self, x, mask, h0):   # lanes [runs][positions][D]: every position's state
         z, c = self.gates(x); h, hs = h0, []
         for t in range(x.shape[1]):
             mz = mask[:, t, None] * z[:, t]; h = (1 - mz) * h + mz * c[:, t]; hs.append(h)
-        H = mx.stack(hs, 1)
-        return self.ffn(x + H), H
+        return mx.stack(hs, 1)
 
-    def step(self, x, h):              # context rows: one step from their run's state
+    def step(self, x, h):              # context rows: one step from their refresh's state
         z, c = self.gates(x)
         return self.ffn(x + h + z * (c - h))
 
 
 class Policy(nn.Module):
+    """the int8 network (the fused ops) and, as reference(), the same function in fp32 from the modules"""
     def __init__(self):
         super().__init__()
         self.inp, self.layers, self.out = QLinear(D, IN), [MinGRU(), MinGRU()], QLinear(FS, D, bias=False)
 
-    def __call__(self, lanes, mask, h0, tokens, pos):
-        x, xc, last = self.inp(lanes), self.inp(tokens), []
+    def mats(self):
+        return [self.inp] + [m for l in self.layers for m in (l.zh, l.up, l.down)] + [self.out]
+
+    def weights(self):
+        """the flat weights vector the ops take [T][NW] (each matrix's W, then its bias; T: the parameters' leading task
+        axis, or 1) and its codes"""
+        lead = self.out.g.shape[:-1]
+        wb = mx.concatenate([x.reshape(*lead, -1) for m in self.mats() for x in ([m.weight()] + ([m.b] if 'b' in m else []))], -1).reshape(-1, NW)
+        wq, wsc = weight_codes(mx.stop_gradient(wb[0]))
+        return wb, wq, wsc
+
+    def __call__(self, lanes_, mask, h0, tokens, pos, seg, seed):
+        """a learning batch: B runs' K refreshes (lanes [B][K][L][IN], mask [B][K][L], h0 [B][2][D]), R contexts
+        (tokens [R][IN], pos [R], seg [B K][2]) -> w [T][R][FS] (T: the parameters' task copies, or 1), next [B][2][D]"""
+        wb, wq, wsc = self.weights()
+        st, nxt = lanes(wb, wq, wsc, lanes_, mask, h0, seed)[:2]
+        return contexts(wb, wq, wsc, tokens, pos, seg, st, seed)[0], nxt
+
+    def act(self, lanes_, mask, h0, tokens, pos):
+        """the rollouts' forward (one refresh, nothing stored): w [R][FS], next [B][2][D]"""
+        _, wq, wsc = self.weights()
+        z = mx.zeros((1,), mx.uint32)
+        st, nxt, _ = _lanes_fwd(wq, wsc, lanes_, mask, h0, z, False)
+        return _ctx_fwd(wq, wsc, tokens, pos, st, 0, 1, z, False)[0], nxt
+
+    def reference(self, lanes_, mask, h0, tokens, pos):
+        """the same function in fp32 (the modules' own products)"""
+        B, K = lanes_.shape[:2]
+        x = self.inp(lanes_.reshape(B, K * L, IN)); m = mask.reshape(B, K * L); xc = self.inp(tokens); ref = pos // L
         for l, layer in enumerate(self.layers):
-            x, H = layer.sequence(x, mask, h0[:, l])
-            last.append(H[:, -1]); xc = layer.step(xc, H[pos, -1])
+            H = layer.sequence(x, m, h0[:, l])
+            st = H[:, L - 1::L].reshape(B * K, D)
+            if l == 0:
+                x = layer.ffn(x + H)
+            xc = layer.step(xc, st[ref])
         n = xc * mx.rsqrt(mx.mean(xc * xc, axis=-1, keepdims=True) + 1e-6)
-        return self.out(n), mx.stack(last, 1)
+        return self.out(n)
+
+    def pin(self):
+        for m in self.mats():
+            m.pin()
 
 
-# ---- loss ----
-def surrogate(w, phi, token, logp_b, adv, clip=10.0):
-    """draws' splits phi [draws][splits][FS] against their rows' w: log pi(token); clipped ratio x advantage"""
-    logits = 10.0 * mx.tanh(mx.einsum('dsf,df->ds', phi, w) / math.sqrt(FS))
-    lp = mx.take_along_axis(logits - mx.logsumexp(logits, axis=-1, keepdims=True), token[:, None], axis=-1)[:, 0]
-    ratio = mx.clip(mx.exp(mx.stop_gradient(lp) - logp_b), 1 / clip, clip)
-    return -mx.mean(ratio * adv * lp)
+# ---- loss: the surrogate, its VJP the credit ----
+DRAW_WORDS = 40   # struct route_draw: 160 bytes
+
+
+@mx.custom_function
+def surrogate(w, wbeh, draws, first, scale0, scale):
+    """draws [ND][40] (struct route_draw's words; first [R + 1] a row's first) under w [3][R][FS] (task t's under
+    w[t]: the step's task copies, equal; the credit computed once) and the rows' behaviour w (wbeh: the behaviour
+    w they were drawn under): per task, sum over draws of c_t x stop(ratio) x log pi(token) (c: task 0 the row's
+    scale0, tasks 1, 2 the draw's a1, a2 times scale) -> [3]; besides, its gradient dL/dw [3][R][FS] (the credit)"""
+    R, ND = w.shape[1], draws.shape[0]
+    o = _kernel('credit.metal', 'credit_draws', fast=True)({'draws': draws.reshape(-1), 'wb': wbeh.reshape(-1), 'wc': w[0].reshape(-1), 'n': mx.array([ND], mx.uint32)},
+                                                         {'diff': ((ND * FS,), mx.float32), 'll': ((ND,), mx.float32), 'lp': ((ND,), mx.float32)},
+                                                         (max(1, -(-ND * 8 // 256)),), 256)
+    dw = _kernel('credit.metal', 'credit_rows', fast=True)({'diff': o['diff'], 'draws': draws.reshape(-1), 'first': first, 'scale0': scale0,
+                                                         'p': mx.concatenate([mx.array([R, 0], mx.uint32), scale.reshape(1).view(mx.uint32), mx.array([0], mx.uint32)])},
+                                                        {'dw': ((3 * R * FS,), mx.float32)}, (-(-3 * R * FS // 256),), 256)['dw']
+    f = draws[:, 36:40].view(mx.float32); row = draws[:, 36]
+    v = mx.exp(o['ll']) * o['lp']
+    loss = mx.stack([(scale0[row] * v).sum(), scale * (f[:, 2] * v).sum(), scale * (f[:, 3] * v).sum()])
+    return loss, dw.reshape(3, R, FS)
+
+
+@surrogate.vjp
+def _(primals, cots, outs):
+    w, wbeh, draws, first, scale0, scale = primals
+    dw = cots[0][:, None, None] * outs[1]
+    return dw, mx.zeros_like(wbeh), mx.zeros_like(draws), mx.zeros_like(first), mx.zeros_like(scale0), mx.zeros_like(scale)
 
 
 # ---- step ----
-def trainer(model, rate):
-    opt = optim.Adam(learning_rate=rate)
+_UP = mx.fast.metal_kernel(name='upgrad', input_names=['G'], output_names=['alpha'], header='#include <metal_stdlib>\n' + metal._inline('upgrad.h', set()) + '\n',
+                           source='if (thread_position_in_grid.x == 0) { float g[9], a[3]; for (int i = 0; i < 9; i++) g[i] = G[i]; upgrad3(g, a); for (int i = 0; i < 3; i++) alpha[i] = a[i]; }')
 
-    def loss(model, batch):
-        w, _ = model(batch['lanes'], batch['mask'], batch['h0'], batch['tokens'], batch['pos'])
-        return surrogate(w[batch['row']], batch['phi'], batch['token'], batch['logp_b'], batch['adv'])
 
-    grad_fn = nn.value_and_grad(model, loss)
-    state = [model.state, opt.state]
+def upgrad(G):
+    """UPGrad's task weights from the Gram matrix of the three gradients (upgrad.h, one GPU thread)"""
+    return _UP(inputs=[G.reshape(-1)], output_shapes=[(3,)], output_dtypes=[mx.float32], grid=(1, 1, 1), threadgroup=(1, 1, 1))[0]
 
-    @partial(mx.compile, inputs=state, outputs=state)
-    def step(batch):
-        value, grads = grad_fn(model, batch)
-        opt.update(model, grads)
-        return value
-    return step, state
+
+BATCH = ('lanes', 'mask', 'h0', 'tokens', 'pos', 'seg', 'w', 'draws', 'first', 'scale0', 'scale')
+
+
+class Learner:
+    """the learning step on a Policy: gradient(batch, acc) adds a microbatch's three task gradients, times its rows,
+    into acc (flat: [3][P] then rows, the microbatches' squared norms (3), their count); apply(acc, exchange) takes
+    the step from the exchanged sum: the rows-weighted mean, UPGrad, Adam, V pinned; step(batch) both at once.
+    exchange: the ranks' sum of a flat array (one rank: none)."""
+
+    def __init__(self, model, rate, seed=1):
+        self.model, self.opt = model, optim.Adam(learning_rate=rate, betas=[0.9, 0.999], eps=1e-8, bias_correction=True)
+        self.rng = {'seed': mx.array([seed], mx.uint32)}   # the backward's stochastic rounding, a seed a step
+        self.names = [k for k, _ in tree_flatten(model.trainable_parameters())]
+        self.P = sum(v.size for _, v in tree_flatten(model.trainable_parameters()))
+        self.state = [model.state, self.opt.state, self.rng]
+        self.gradient = mx.compile(self._gradient, inputs=self.state, outputs=self.state)
+        self._finish = mx.compile(self._apply, inputs=self.state, outputs=self.state)
+
+    def grads(self, b):
+        """the three tasks' gradients [3][P] and losses [3]: the parameters as three copies (a leading task axis), the
+        surrogate's three losses summed, one value_and_grad: the forward once, each backward its kernel with T = 3"""
+        model, params = self.model, tree_flatten(self.model.trainable_parameters())
+        names = [k for k, _ in params]
+        seed = self.rng['seed']
+
+        def f(p3):
+            model.update(tree_unflatten(list(zip(names, p3))))
+            w, _ = model(b['lanes'], b['mask'], b['h0'], b['tokens'], b['pos'], b['seg'], seed)
+            loss = surrogate(w, b['w'], b['draws'], b['first'], b['scale0'], b['scale'])[0]
+            return loss.sum(), loss
+        (_, loss), g = mx.value_and_grad(f)([mx.broadcast_to(v[None], (TASKS,) + v.shape) for _, v in params])
+        model.update(tree_unflatten(params))
+        return mx.concatenate([x.reshape(TASKS, -1) for x in g], 1), loss
+
+    def _gradient(self, b, acc):
+        J, loss = self.grads(b)
+        rows = mx.array(b['tokens'].shape[0], mx.float32)
+        n = (J * J).sum(1)
+        tail = mx.concatenate([rows[None], n, mx.ones((1,)), mx.zeros((3,))]) * (rows > 0)
+        self.rng['seed'] = (self.rng['seed'] * 1664525 + 1013904223) | 1
+        return acc + mx.concatenate([(rows * J).reshape(-1), tail]), loss
+
+    def zero(self):
+        return mx.zeros((TASKS * self.P + 8,))
+
+    def _apply(self, acc):
+        tail = acc[TASKS * self.P:]; rows = tail[0]; k = mx.where(rows > 0, 1.0 / rows, 0.0)
+        g = acc[:TASKS * self.P].reshape(TASKS, self.P) * k
+        alpha = upgrad(g @ g.T)
+        d = alpha @ g
+        out, at = [], 0
+        for name, v in tree_flatten(self.model.trainable_parameters()):
+            out.append((name, d[at:at + v.size].reshape(v.shape))); at += v.size
+        self.opt.update(self.model, tree_unflatten(out))
+        self.model.pin()
+        cnt = tail[4]
+        return mx.concatenate([rows[None], mx.where(cnt > 0, tail[1:4] / cnt, 0.0), cnt[None], mx.where(cnt > 0, rows / cnt, 0.0)[None], (g * g).sum(1), alpha])
+
+    def apply(self, acc, exchange=None):
+        """the step on the accumulated sum: exchanged (the sums, the rows and the microbatches' squared norms and count in
+        one exchange), then the mean, UPGrad, Adam, pin. Returns the statistics, identical at every rank: [0] total rows,
+        [1..3] the mean microbatch squared norm (a task each), [4] the microbatches, [5] their mean rows, [6..8] the
+        rows-weighted mean's squared norms, [9..11] UPGrad's weights"""
+        return self._finish(exchange(acc) if exchange else acc)
+
+    def step(self, b, exchange=None):
+        acc, loss = self.gradient(b, self.zero())
+        return self.apply(acc, exchange), loss

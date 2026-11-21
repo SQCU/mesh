@@ -13,6 +13,7 @@
               network against the fp32 reference)
   bench       one forward and one learning step of the training's sizes, kernel by kernel
   xbench      the exchange alone (world > 1): N rounds (0: declare and close, a dead run's programs flushed)
+  qnn-roofline | qnn-deploy | qnn-check | qnn-i8mm   qnn.py's (MLX ops) measurements and gates (qnnchecks.py)
   stat        telemetry records of tables (FILE...) where they lie
   cluster     python -m route cluster {build|train|xbench|stat} ...: every host of cluster.hosts (cluster.py)"""
 import json
@@ -404,6 +405,17 @@ def main(argv):
     if cmd == 'cluster':
         from . import cluster
         cluster.main(cfg, rest[1:], sets); return
+    if cmd.startswith('qnn-'):
+        from . import qnnchecks as Q
+        if cmd == 'qnn-roofline':
+            Q.roofline(cfg['capacity']['learn_runs'], cfg['capacity']['refreshes'], cfg['capacity']['forward_rows'])
+        elif cmd == 'qnn-check':
+            Q.check()
+        elif cmd == 'qnn-i8mm':
+            Q.i8mm_exact()
+        elif cmd == 'qnn-deploy':
+            Q.deploy(native.load(cfg['run']['library']), ffi)
+        return
     lib = native.load(cfg['run']['library'])
     lib.route_argmax = 1 if cfg['run']['argmax'] else 0
     if cmd == 'train':
