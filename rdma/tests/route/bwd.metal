@@ -19,8 +19,8 @@ static inline void dgrad_block(thread float (&x)[2][8], thread const float (&v)[
                                threadgroup int8_t *Bq, threadgroup float *sB, device const half *H, device const int8_t *wq, device const float *wsc, Lanes c,
                                uint seed, uint row0, uint cols) {
   quant(v, S, X, H, c, Bq, sB, seed, row0, cols, 64 * jj);
-  chunk(Bq, 64, wq + m.wb + 64 * jj, m.kb, S); tg_barrier();
-  for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); epilogue(S, c, row, sB[row], wsc + m.wbs, nullptr, 0, x[s], !first); }
+  const ColV cv1 = colv(wsc + m.wbs, nullptr, 0, c); chunk(Bq, 64, wq + m.wb + 64 * jj, m.kb, S); tg_barrier();
+  for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); epilogue(S, c, row, sB[row], cv1, x[s], !first); }
   tg_barrier();
 }
 // the wgrad codes of v (put into S first)
@@ -36,11 +36,11 @@ static inline void ffn_back(thread float (&x)[2][8], threadgroup float *S, threa
                             threadgroup float *sB, threadgroup float *cm, MatW mu, MatW md, device const int8_t *wq, device const float *wsc, device const half *H, Lanes c,
                             device const uint *mw, uint mstride, uint nv, device int8_t *gq, device float *gs, MatG gu, uint task, uint RT, uint row0, uint seedc, uint seedr) {
   for (uint jj = 0; jj < 3; jj++) {
-    chunk(A, 64, wq + md.wb + 64 * jj * md.kb, md.kb, S); tg_barrier();
+    const ColV cv2 = colv(wsc + md.wbs, nullptr, jj, c); chunk(A, 64, wq + md.wb + 64 * jj * md.kb, md.kb, S); tg_barrier();
     float du[2][8];
     for (uint s = 0; s < 2; s++) {
       const uint row = row_of(c, s);
-      epilogue(S, c, row, sA[row], wsc + md.wbs, nullptr, jj, du[s], false);
+      epilogue(S, c, row, sA[row], cv2, du[s], false);
       device const uint *m = mw + (row < nv ? row : 0) * mstride;
       for (uint k = 0; k < 8; k++) if (row >= nv || !mask_bit(m, 64 * jj + 8 * c.li + k)) du[s][k] = 0;
       put_s(S, c, row, du[s]);
@@ -78,10 +78,10 @@ kernel void ctx_bwd(device const float *dw [[buffer(0)]], device const int *pos 
   for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); live[s] = row < nv; ref[s] = live[s] ? refid[row] : 0; }
   // the readout back: dn = dw out, then rms's backward dx2 = inv (dn - n mean(dn . n))
   { const MatW m = nw.m[M_OUT];
-    chunk(A, 64, wq + m.wb, m.kb, S); tg_barrier();
+    const ColV cv3 = colv(wsc + m.wbs, nullptr, 0, c); chunk(A, 64, wq + m.wb, m.kb, S); tg_barrier();
     for (uint s = 0; s < 2; s++) {
       const uint row = row_of(c, s), r = r0 + row;
-      float dn[8]; epilogue(S, c, row, sA[row], wsc + m.wbs, nullptr, 0, dn, false);
+      float dn[8]; epilogue(S, c, row, sA[row], cv3, dn, false);
       float nn[8], q = 0;
       if (live[s]) { device const float4 *n4 = (device const float4 *)(cn + size_t(r) * D + 8 * c.li); const float4 a = n4[0], b = n4[1]; for (uint k = 0; k < 4; k++) { nn[k] = a[k]; nn[4 + k] = b[k]; } }
       else for (uint k = 0; k < 8; k++) nn[k] = 0;

@@ -106,17 +106,21 @@ static inline void s_get(threadgroup const float *S, uint row, Lanes c, thread f
 static inline void put_s(threadgroup float *S, Lanes c, uint row, thread const float *v) {
   threadgroup float4 *o = (threadgroup float4 *)(S + row * LD + 8 * c.li); o[0] = float4(v[0], v[1], v[2], v[3]); o[1] = float4(v[4], v[5], v[6], v[7]);
 }
-// a row slot's eight values of chunk j through the epilogue: i8_out(sum, sa, sb[n], bias[n]) (n = 64 j + 8 li + k), or
-// with acc i8_acc into v
-static inline void epilogue(threadgroup const float *S, Lanes c, uint row, float sa, device const float *sb, device const float *bias, uint j, thread float *v, bool acc) {
-  const uint n0 = 64 * j + 8 * c.li;
-  const float4 s0 = *(device const float4 *)(sb + n0), s1 = *(device const float4 *)(sb + n0 + 4);
-  float4 b0 = 0, b1 = 0;
-  if (bias) { b0 = *(device const float4 *)(bias + n0); b1 = *(device const float4 *)(bias + n0 + 4); }
+// a chunk's column vectors, the thread's eight columns (n = 64 j + 8 li + k): the scales sb, the bias (if given), loaded
+// before the product is issued (its time covers their latency), once for both row slots
+struct ColV { float4 s0, s1, b0, b1; };
+static inline ColV colv(device const float *sb, device const float *bias, uint j, Lanes c) {
+  const uint n0 = 64 * j + 8 * c.li; ColV v;
+  v.s0 = *(device const float4 *)(sb + n0); v.s1 = *(device const float4 *)(sb + n0 + 4);
+  if (bias) { v.b0 = *(device const float4 *)(bias + n0); v.b1 = *(device const float4 *)(bias + n0 + 4); } else { v.b0 = 0; v.b1 = 0; }
+  return v;
+}
+// a row slot's eight values through the epilogue: i8_out(sum, sa, sb[n], bias[n]), or with acc i8_acc into v
+static inline void epilogue(threadgroup const float *S, Lanes c, uint row, float sa, thread const ColV &cv, thread float *v, bool acc) {
   const threadgroup int4 *x = (const threadgroup int4 *)((const threadgroup int *)S + row * LD + 8 * c.li);
   const int4 x0 = x[0], x1 = x[1];
-  if (acc) { for (uint k = 0; k < 4; k++) { v[k] = i8_acc(x0[k], sa, s0[k], v[k]); v[4 + k] = i8_acc(x1[k], sa, s1[k], v[4 + k]); } }
-  else { for (uint k = 0; k < 4; k++) { v[k] = i8_out(x0[k], sa, s0[k], b0[k]); v[4 + k] = i8_out(x1[k], sa, s1[k], b1[k]); } }
+  if (acc) { for (uint k = 0; k < 4; k++) { v[k] = i8_acc(x0[k], sa, cv.s0[k], v[k]); v[4 + k] = i8_acc(x1[k], sa, cv.s1[k], v[4 + k]); } }
+  else { for (uint k = 0; k < 4; k++) { v[k] = i8_out(x0[k], sa, cv.s0[k], cv.b0[k]); v[4 + k] = i8_out(x1[k], sa, cv.s1[k], cv.b1[k]); } }
 }
 static inline float max8(float m) { m = max(m, simd_shuffle_xor(m, ushort(1))); m = max(m, simd_shuffle_xor(m, ushort(2))); return max(m, simd_shuffle_xor(m, ushort(4))); }
 // quantizing a row's block, its first half: the absmax m0 (returned), the grid into X; isum (if given): the grid

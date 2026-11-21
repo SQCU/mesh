@@ -17,18 +17,18 @@ static inline void ffn(thread float (&x)[2][8], threadgroup float *S, threadgrou
   for (uint s = 0; s < 2; s++) { const float4 b0 = *(device const float4 *)(wsc + md.b + 8 * c.li), b1 = *(device const float4 *)(wsc + md.b + 8 * c.li + 4);
     for (uint k = 0; k < 4; k++) { x[s][k] += b0[k]; x[s][4 + k] += b1[k]; } }   // the residual plus the bias, then the blocks
   for (uint jj = 0; jj < 3; jj++) {
-    chunk(A, 64, wq + mu.wf + jj * 64 * mu.kf, mu.kf, S); tg_barrier();
+    const ColV cv1 = colv(wsc + mu.wfs, wsc + mu.b, jj, c); chunk(A, 64, wq + mu.wf + jj * 64 * mu.kf, mu.kf, S); tg_barrier();
     float u[2][8];
     for (uint s = 0; s < 2; s++) {
       const uint row = row_of(c, s);
-      epilogue(S, c, row, sA[row], wsc + mu.wfs, wsc + mu.b, jj, u[s], false);
+      epilogue(S, c, row, sA[row], cv1, u[s], false);
       for (uint k = 0; k < 8; k++) u[s][k] = max(u[s][k], 0.0f);
       if (ST) { const uint wd = mask_word(u[s], c); if (c.li % 4 == 0 && row < nv) mw[row * mstride + 2 * jj + c.li / 4] = wd; put_s(S, c, row, u[s]); }
     }
     if (ST) { tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, g, 192, jj, RT, row0); }
     quant(u, S, X, H, c, Bq, sB, 0, 0, 0, 0);
-    chunk(Bq, 64, wq + md.wf + 64 * jj, md.kf, S); tg_barrier();
-    for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); epilogue(S, c, row, sB[row], wsc + md.wfs, nullptr, 0, x[s], true); }
+    const ColV cv2 = colv(wsc + md.wfs, nullptr, 0, c); chunk(Bq, 64, wq + md.wf + 64 * jj, md.kf, S); tg_barrier();
+    for (uint s = 0; s < 2; s++) { const uint row = row_of(c, s); epilogue(S, c, row, sB[row], cv2, x[s], true); }
     tg_barrier();
   }
 }
@@ -61,8 +61,8 @@ kernel void lanes_fwd(device const float *lanes [[buffer(0)]], device const floa
     else tg_barrier();
     quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
     { const MatW m = nw.m[M_INP];
-      chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
-      for (uint s = 0; s < 2; s++) epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + m.wfs, wsc + m.b, 0, x[s], false); }
+      const ColV cv11 = colv(wsc + m.wfs, wsc + m.b, 0, c); chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
+      for (uint s = 0; s < 2; s++) epilogue(S, c, row_of(c, s), sA[row_of(c, s)], cv11, x[s], false); }
     for (uint l = 0; l < 2; l++) {
       tg_barrier();
       if (STORE) { for (uint s = 0; s < 2; s++) put_s(S, c, row_of(c, s), x[s]); tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[l ? M_ZH1 : M_ZH0], 64, 0, RT, row0); }
@@ -70,11 +70,11 @@ kernel void lanes_fwd(device const float *lanes [[buffer(0)]], device const floa
       // zh_l: z (chunk 0), h~ (chunk 1), fp16; packed into S for the scan
       const MatW m = nw.m[l ? M_ZH1 : M_ZH0];
       float z[2][8], h[2][8];
-      chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
-      for (uint s = 0; s < 2; s++) { epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + m.wfs, wsc + m.b, 0, z[s], false); for (uint k = 0; k < 8; k++) z[s][k] = float(half(act_sigmoid(z[s][k]))); }
+      const ColV cv12 = colv(wsc + m.wfs, wsc + m.b, 0, c); chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
+      for (uint s = 0; s < 2; s++) { epilogue(S, c, row_of(c, s), sA[row_of(c, s)], cv12, z[s], false); for (uint k = 0; k < 8; k++) z[s][k] = float(half(act_sigmoid(z[s][k]))); }
       tg_barrier();
-      chunk(A, 64, wq + m.wf + 64 * m.kf, m.kf, S); tg_barrier();
-      for (uint s = 0; s < 2; s++) { epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + m.wfs, wsc + m.b, 1, h[s], false); for (uint k = 0; k < 8; k++) h[s][k] = float(half(act_tanh(h[s][k]))); }
+      const ColV cv13 = colv(wsc + m.wfs, wsc + m.b, 1, c); chunk(A, 64, wq + m.wf + 64 * m.kf, m.kf, S); tg_barrier();
+      for (uint s = 0; s < 2; s++) { epilogue(S, c, row_of(c, s), sA[row_of(c, s)], cv13, h[s], false); for (uint k = 0; k < 8; k++) h[s][k] = float(half(act_tanh(h[s][k]))); }
       tg_barrier();
       for (uint s = 0; s < 2; s++) {
         const uint row = row_of(c, s);
@@ -155,8 +155,8 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
   else tg_barrier();
   quant(x, S, X, H, c, A, sA, 0, 0, 0, 0);
   { const MatW m = nw.m[M_INP];
-    chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
-    for (uint s = 0; s < 2; s++) epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + m.wfs, wsc + m.b, 0, x[s], false); }
+    const ColV cv14 = colv(wsc + m.wfs, wsc + m.b, 0, c); chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
+    for (uint s = 0; s < 2; s++) epilogue(S, c, row_of(c, s), sA[row_of(c, s)], cv14, x[s], false); }
   if (STAGE == 1) { stage_out(x, c, r0, p.R, w); return; }
   for (uint l = 0; l < 2; l++) {
     const uint zh = l ? M_ZH1 : M_ZH0, up = l ? M_UP1 : M_UP0, down = l ? M_DOWN1 : M_DOWN0;
@@ -170,13 +170,13 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
       for (uint k = 0; k < 4; k++) { hp[s][k] = a[k]; hp[s][4 + k] = b[k]; } }
     { const MatW m = nw.m[zh];
       float z[2][8];
-      chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
-      for (uint s = 0; s < 2; s++) { epilogue(S, c, row_of(c, s), sA[row_of(c, s)], wsc + m.wfs, wsc + m.b, 0, z[s], false); for (uint k = 0; k < 8; k++) z[s][k] = float(half(act_sigmoid(z[s][k]))); }
+      const ColV cv15 = colv(wsc + m.wfs, wsc + m.b, 0, c); chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
+      for (uint s = 0; s < 2; s++) { epilogue(S, c, row_of(c, s), sA[row_of(c, s)], cv15, z[s], false); for (uint k = 0; k < 8; k++) z[s][k] = float(half(act_sigmoid(z[s][k]))); }
       tg_barrier();
-      chunk(A, 64, wq + m.wf + 64 * m.kf, m.kf, S); tg_barrier();
+      const ColV cv3 = colv(wsc + m.wfs, wsc + m.b, 1, c); chunk(A, 64, wq + m.wf + 64 * m.kf, m.kf, S); tg_barrier();
       for (uint s = 0; s < 2; s++) {
         const uint row = row_of(c, s);
-        float hh[8]; epilogue(S, c, row, sA[row], wsc + m.wfs, wsc + m.b, 1, hh, false);
+        float hh[8]; epilogue(S, c, row, sA[row], cv3, hh, false);
         for (uint k = 0; k < 8; k++) { hh[k] = float(half(act_tanh(hh[k]))); x[s][k] += fma(z[s][k], hh[k] - hp[s][k], hp[s][k]); }
         if (STORE && row < nv) { device half *o = czc + (size_t(r0 + row) * 2 + l) * 2 * D + 8 * c.li;
           *(device half4 *)o = half4(z[s][0], z[s][1], z[s][2], z[s][3]); *(device half4 *)(o + 4) = half4(z[s][4], z[s][5], z[s][6], z[s][7]);
@@ -211,10 +211,10 @@ kernel void ctx_fwd(device const float *tokens [[buffer(0)]], device const int *
     tg_barrier(); xcodes(S, X, cm, H, c, gq, gs, gr.m[M_OUT], 64, 0, RT, g0);
   }
   { const MatW m = nw.m[M_OUT];
-    chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
+    const ColV cv4 = colv(wsc + m.wfs, nullptr, 0, c); chunk(A, 64, wq + m.wf, m.kf, S); tg_barrier();
     for (uint s = 0; s < 2; s++) {
       const uint row = row_of(c, s), r = r0 + row;
-      float y[8]; epilogue(S, c, row, sA[row] * inv[s], wsc + m.wfs, nullptr, 0, y, false);
+      float y[8]; epilogue(S, c, row, sA[row] * inv[s], cv4, y, false);
       if (r < p.R && c.li < 5) { device float4 *o = (device float4 *)(w + size_t(r) * FS + 8 * c.li); o[0] = float4(y[0], y[1], y[2], y[3]); o[1] = float4(y[4], y[5], y[6], y[7]); }
     } }
 }
