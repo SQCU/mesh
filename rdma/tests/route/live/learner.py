@@ -5,13 +5,16 @@ carried in-band (each hop's queueing and residence on its own clock, the wire's 
 baseline of its (node, context, size); the policy gradient of each context's w (live.c live_grad) taken by Adam; every
 node's tables sent back to its agent, which publishes them into its bridge. Memory and sockets only.
 
-usage: python learner.py PORT AGENTS LIB   (stdin, a word a line: learn | freeze | prior | withdraw | stats)"""
+usage: python learner.py PORT AGENTS LIB [SAMPLE]   (stdin, a word a line: learn | freeze | prior | withdraw | publish | stats)"""
 import ctypes, os, selectors, socket, struct, sys, time
 import numpy as np
 
 port, agents, libpath = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+SAMPLE = int(sys.argv[4]) if len(sys.argv) > 4 else 16
 lib = ctypes.CDLL(libpath)
 lib.live_grad.restype = ctypes.c_uint32
+lib.live_fabric.restype = ctypes.c_uint32
+if lib.live_attach(): sys.exit('learner: no bridge region of this build here (the fabric the floors are over)')
 P = ctypes.c_void_p
 STEP, AGE, MOST, LR, CLIP = 0.1, 1.0, 40000, float(os.environ.get('LIVE_LR', '0.02')), 4.0
 DRAW = np.dtype([('arrive', '<f4', 30), ('valid', '<u4'), ('mask', '<u4'), ('S', '<u4'), ('token', '<u4'), ('deg', '<u4'),
@@ -55,14 +58,17 @@ while len(nodes) < agents:
     print(f'agent {x.id}: {len(x.keys)} contexts, view {x.view}', flush=True)
 view = next(iter(nodes.values())).view
 index = {int(n): i for i, n in enumerate(view)}
+_in = (ctypes.c_double * 8)(); _out = (ctypes.c_double * 8)(); _unit = ctypes.c_double(0)
+lib.live_fabric(_in, _out, ctypes.byref(_unit))
+CAP_IN, CAP_OUT, UNIT = np.array(_in[:len(view)]), np.array(_out[:len(view)]), _unit.value
 assert all(x.view == view for x in nodes.values()), 'agents of different views'
 sel.register(sys.stdin, selectors.EVENT_READ, None)
 
 mode = 'learn'
 draws, pieces = [], []          # arrays of REC, with their arrival time here
 base = {}                       # (node, context, bucket) -> [mean, var, count]
-stats = dict(draws=0, joined=0, pieces=0, steps=0, lat=[], ent=[], g=[])
-gsum = []
+stats = dict(draws=0, joined=0, pieces=0, steps=0, thr=[], lat=[], que=[], alpha=[], g=[])
+run_thr = {}
 last_step = last_stat = time.monotonic()
 
 
@@ -82,80 +88,128 @@ def flush(x):
 
 
 def step(now):
+    """The trainer's loss (rdma/tests/route/sim.c route_sim_costs, route_sim_draws; route.h ROUTE_TASKS), live:
+    a transaction is a program's execution (key, execution), its rollouts the program's other executions; once its
+    sampled pieces' landings are in (AGE after its first), its three costs, each over its floor (its cut bound on the
+    fabric's capacities, at least the view's unit: the tasks' gradients commensurate across sizes, no size class):
+      throughput  its makespan: at each destination the first landing's carried cost and the destination's own clock
+                  from first to last landing, the latest destination's;
+      latency     each piece's carried cost to each destination it owed (at presence);
+      queueing    the queueing it carried there;
+    each draw's advantage a task: throughput against the key's other executions (leave-one-out), latency and queueing
+    its piece's against the other pieces of the same (transaction, source); three gradients (score x advantage, live.c
+    live_grad), UPGrad's weights from their Gram matrix (live.c live_upgrad), Adam descending."""
     global draws, pieces
-    if not draws: return
+    if not draws or not pieces: return
     D = np.concatenate([d for d, _ in draws]); Dt = np.concatenate([np.full(len(d), t) for d, t in draws])
-    Pc = np.concatenate([p for p, _ in pieces]) if pieces else np.zeros(0, REC)
-    Pt = np.concatenate([np.full(len(p), t) for p, t in pieces]) if pieces else np.zeros(0)
-    # the deliveries by (piece, destination's view index)
-    pdi = np.array([index.get(int(n), 7) for n in Pc['dest']], np.uint64) if len(Pc) else np.zeros(0, np.uint64)
-    pk = pid(Pc) * np.uint64(8) + pdi if len(Pc) else np.zeros(0, np.uint64)
-    order = np.argsort(pk, kind='stable'); pks = pk[order]; plat = Pc['latency'][order]
-    dk = pid(D)
-    S = D['draw']['S']
-    total = np.zeros(len(D)); count = np.zeros(len(D)); want = np.zeros(len(D))
-    for d in range(len(view)):
-        has = (S >> np.uint32(d)) & np.uint32(1) == 1
-        want += has
-        q = dk * np.uint64(8) + np.uint64(d)
-        at = np.searchsorted(pks, q); ok = has & (at < len(pks))
-        ok[ok] &= pks[at[ok]] == q[ok]
-        total[ok] += plat[at[ok]]; count[ok] += 1
-    done = (count == want) & (want > 0)
-    late = ~done & (now - Dt > AGE)
-    use = done | (late & (count > 0))
-    lat = np.where(count > 0, total / np.maximum(count, 1), np.nan)
-    # the rest kept for the next step (their deliveries not here yet); deliveries kept AGE
-    keep = ~use & ~late
-    kd, kt = D[keep], Dt[keep]
+    Pc = np.concatenate([p for p, _ in pieces]); Pt = np.concatenate([np.full(len(p), t) for p, t in pieces])
+    tid = lambda r: r['key'] * np.uint64(0x9E3779B97F4A7C15) ^ r['execution']
+    Ptid, Dtid = tid(Pc), tid(D)
+    # a transaction's age: since its first landing here
+    ut, inv = np.unique(Ptid, return_inverse=True)
+    first_seen = np.full(len(ut), np.inf); np.minimum.at(first_seen, inv, Pt)
+    final_t = ut[now - first_seen >= AGE]
+    if not len(final_t):
+        return
+    pf = np.isin(Ptid, final_t); df = np.isin(Dtid, final_t)
+    P_, D_ = Pc[pf], D[df]
+    # keep the rest for later steps (bounded)
+    kd, kt = D[~df], Dt[~df]
     if len(kd) > 4 * MOST: kd, kt = kd[-4 * MOST:], kt[-4 * MOST:]
-    draws = [(kd, t) for t in [kt.min()]] if len(kd) else []
-    pkeep = now - Pt <= AGE
-    pieces = [(Pc[pkeep], now)] if pkeep.any() else []
-    U = D[use]; L = lat[use]
-    if not len(U): return
-    stats['joined'] += len(U); stats['lat'].append(L)
-    if len(U) > MOST: pick = np.random.default_rng().choice(len(U), MOST, replace=False); U, L = U[pick], L[pick]
-    bucket = np.minimum(np.log2(np.maximum(U['bytes'], 1)).astype(np.int64), 24)
-    gk = (U['node'].astype(np.int64) << 32) | (U['context'].astype(np.int64) << 8) | bucket
-    keys, inv = np.unique(gk, return_inverse=True)
-    # the baselines as they stood (each group's mean and variance), the advantage against them, then each group's
-    # running mean and variance moved by this step's draws of it
-    mean = np.array([base.get(int(k), (np.nan, np.nan, 0))[0] for k in keys]); var = np.array([base.get(int(k), (0, 0, 0))[1] for k in keys])
-    seen = np.array([base.get(int(k), (0, 0, 0))[2] for k in keys])
-    cnt = np.bincount(inv, minlength=len(keys)); bm = np.bincount(inv, L, len(keys)) / cnt
-    bv = np.bincount(inv, (L - bm[inv]) ** 2, len(keys)) / cnt
-    fresh = seen == 0
-    mean[fresh] = bm[fresh]; var[fresh] = bv[fresh] + 1.0
-    sd = np.sqrt(np.maximum(var, 1.0))
-    adv = np.where(seen[inv] >= 8, np.clip((mean[inv] - L) / sd[inv], -3, 3), 0.0).astype(np.float32)
-    e = np.where(seen >= 50, 0.05, 1.0 / (seen + 1))
-    nm = mean + e * (bm - mean); nv = (1 - e) * (var + e * (bm - mean) ** 2) + e * bv
-    for k, a, b, c in zip(keys.tolist(), nm.tolist(), nv.tolist(), (seen + cnt).tolist()): base[k] = (a, b, c)
+    draws = [(kd, now)] if len(kd) else []
+    pieces = [(Pc[~pf], now)] if (~pf).any() else []
+    if not len(P_) or not len(D_): return
+    # each transaction's floor: its cut bound over the sampled bytes (scaled by the sample) and the fabric's capacities
+    T, ti = np.unique(tid(P_), return_inverse=True)
+    di = np.array([index.get(int(n), 0) for n in P_['dest']]); si = np.array([index.get(int(n), 0) for n in P_['source']])
+    nv = len(view)
+    bin_ = np.zeros((len(T), nv)); bout = np.zeros((len(T), nv))
+    np.add.at(bin_, (ti, di), P_['bytes'] * float(SAMPLE)); np.add.at(bout, (ti, si), P_['bytes'] * float(SAMPLE))
+    cut = np.maximum((bin_ / np.maximum(CAP_IN, 1e-9)).max(1), (bout / np.maximum(CAP_OUT, 1e-9)).max(1))
+    floor = np.maximum(cut, UNIT)
+    # throughput: the makespan, the latest destination's (first landing's carried cost + its own clock first to last)
+    key_td = ti * nv + di
+    g, gi = np.unique(key_td, return_inverse=True)
+    at = P_['at'].astype(np.float64)
+    first = np.full(len(g), np.inf); last = np.full(len(g), -np.inf); np.minimum.at(first, gi, at); np.maximum.at(last, gi, at)
+    lat_first = np.zeros(len(g)); o = np.lexsort((at, gi)); firsts = o[np.r_[True, gi[o][1:] != gi[o][:-1]]]
+    lat_first[gi[firsts]] = P_['latency'][firsts]
+    done_d = lat_first + (last - first)
+    make = np.zeros(len(T)); np.maximum.at(make, g // nv, done_d)
+    c_thr = make / floor
+    # a piece's latency and queueing to a destination, over its transaction's floor
+    c_lat = P_['latency'] / floor[ti]; c_que = P_['queueing'] / floor[ti]
+    # the draws joined with their pieces' landings at the destinations they owed
+    pk = pid(P_) * np.uint64(8) + di.astype(np.uint64)
+    order = np.argsort(pk, kind='stable'); pks = pk[order]
+    dk = pid(D_); S = D_['draw']['S']
+    lat = np.zeros(len(D_)); que = np.zeros(len(D_)); cnt = np.zeros(len(D_))
+    for d in range(nv):
+        has = (S >> np.uint32(d)) & np.uint32(1) == 1
+        q = dk * np.uint64(8) + np.uint64(d)
+        j = np.searchsorted(pks, q); ok = has & (j < len(pks))
+        ok[ok] &= pks[j[ok]] == q[ok]
+        lat[ok] += c_lat[order[j[ok]]]; que[ok] += c_que[order[j[ok]]]; cnt[ok] += 1
+    use = cnt > 0
+    D_, lat, que, cnt = D_[use], lat[use] / cnt[use], que[use] / cnt[use], cnt[use]
+    if not len(D_): return
+    dT = np.searchsorted(T, tid(D_))
+    # throughput's advantage: against the key's other executions (leave-one-out), else the key's running mean
+    a_thr = np.zeros(len(D_))
+    Tkeys = np.zeros(len(T), np.uint64)
+    np.maximum.at(Tkeys, ti, P_['key'])
+    for k in np.unique(Tkeys):
+        m = Tkeys == k; ct = c_thr[m]; n = m.sum()
+        mean_other = (ct.sum() - ct) / (n - 1) if n > 1 else np.full(n, run_thr.get(int(k), ct[0]))
+        adv_t = np.zeros(len(T)); adv_t[m] = ct - mean_other
+        sel = Tkeys[dT] == k
+        a_thr[sel] = adv_t[dT[sel]]
+        run_thr[int(k)] = 0.9 * run_thr.get(int(k), float(ct.mean())) + 0.1 * float(ct.mean())
+    # latency and queueing: against the other pieces of the same (transaction, source), leave-one-out
+    gs = ti * nv + si
+    gsu, gsi = np.unique(gs, return_inverse=True)
+    s1 = np.bincount(gsi, c_lat, len(gsu)); s2 = np.bincount(gsi, c_que, len(gsu)); sn = np.bincount(gsi, minlength=len(gsu)).astype(float)
+    dsrc = np.array([index.get(int(n), 0) for n in D_['source']])
+    dg = np.searchsorted(gsu, dT * nv + dsrc); dg = np.minimum(dg, len(gsu) - 1)
+    okg = gsu[dg] == dT * nv + dsrc
+    rest = np.maximum(sn[dg] - cnt, 1)
+    a_lat = np.where(okg & (sn[dg] > cnt), lat - (s1[dg] - lat * cnt) / rest, 0.0)
+    a_que = np.where(okg & (sn[dg] > cnt), que - (s2[dg] - que * cnt) / rest, 0.0)
+    stats['joined'] += len(D_); stats['thr'].append(c_thr); stats['lat'].append(lat); stats['que'].append(que)
     if mode != 'learn': return
+    # three gradients over every node's tables, UPGrad's weights, Adam descending
+    J = []
+    for adv in (a_thr, a_lat, a_que):
+        parts = []
+        for nid, x in nodes.items():
+            sel_ = D_['node'] == nid
+            gx = np.zeros_like(x.w)
+            if sel_.any():
+                u = D_[sel_]; rows = np.ascontiguousarray(u['context'].astype(np.uint32)); ok = rows < len(x.keys)
+                u, rows = u[ok], rows[ok]; a = np.ascontiguousarray(adv[sel_][ok].astype(np.float32))
+                dr = np.ascontiguousarray(u['draw']); beh = np.ascontiguousarray(u['logp']); lp = np.zeros(len(u), np.float32)
+                lib.live_grad(dr.ctypes.data_as(P), ctypes.c_uint32(DRAW.itemsize), beh.ctypes.data_as(P), ctypes.c_uint32(len(u)),
+                              rows.ctypes.data_as(P), a.ctypes.data_as(P), x.w.ctypes.data_as(P), gx.ctypes.data_as(P), ctypes.c_float(CLIP),
+                              lp.ctypes.data_as(P))
+            parts.append(gx.ravel() / max(len(D_), 1))
+        J.append(np.concatenate(parts))
+    J = np.array(J, np.float32)
+    G = np.ascontiguousarray((J @ J.T).astype(np.float32)); alpha = np.zeros(3, np.float32)
+    lib.live_upgrad(G.ctypes.data_as(P), alpha.ctypes.data_as(P))
+    gall = (alpha[:, None] * J).sum(0)
+    stats['alpha'].append(alpha.copy())
+    off = 0
     for nid, x in nodes.items():
-        sel_ = U['node'] == nid
-        if not sel_.any(): continue
-        u = U[sel_]; a = np.ascontiguousarray(adv[sel_])
-        rows = np.ascontiguousarray(u['context'].astype(np.uint32))
-        ok = rows < len(x.keys)
-        if not ok.all(): u, a, rows = u[ok], a[ok], rows[ok]
-        dr = np.ascontiguousarray(u['draw']); beh = np.ascontiguousarray(u['logp'])
-        g = np.zeros_like(x.w); now_lp = np.zeros(len(u), np.float32)
-        lib.live_grad(dr.ctypes.data_as(P), ctypes.c_uint32(DRAW.itemsize), beh.ctypes.data_as(P), ctypes.c_uint32(len(u)),
-                      rows.ctypes.data_as(P), a.ctypes.data_as(P), x.w.ctypes.data_as(P), g.ctypes.data_as(P), ctypes.c_float(CLIP),
-                      now_lp.ctypes.data_as(P))
-        stats['ent'].append(-now_lp[np.isfinite(now_lp)])
-        per = np.bincount(rows, minlength=len(x.keys)).astype(np.float32)[:, None]
-        g /= np.maximum(per, 1)
-        stats['g'].append(g[:, 35:38].sum(0))
+        gx = gall[off:off + x.w.size].reshape(x.w.shape); off += x.w.size
         x.t += 1
-        x.m = 0.9 * x.m + 0.1 * g; x.v = 0.999 * x.v + 0.001 * g * g
+        x.m = 0.9 * x.m + 0.1 * gx; x.v = 0.999 * x.v + 0.001 * gx * gx
         mh = x.m / (1 - 0.9 ** x.t); vh = x.v / (1 - 0.999 ** x.t)
-        x.w += (LR * mh / (np.sqrt(vh) + 1e-6)).astype(np.float32)
+        x.w -= (LR * mh / (np.sqrt(vh) + 1e-6)).astype(np.float32)
         np.clip(x.w, -60, 60, out=x.w)
         x.point += 1
         send(x, b'W', struct.pack('<Q', x.point) + x.w.tobytes())
+    # the sign of each task's gradient on the arrival features, consistent or not (the credit's signal)
+    stats['g'].append(np.array([J[t].reshape(-1, 40)[:, 35].sum() for t in range(3)]))
     stats['steps'] += 1
 
 
@@ -206,20 +260,14 @@ try:
         now = time.monotonic()
         if now - last_step >= STEP:
             step(now); last_step = now
-        if now - last_stat >= 1.0:
-            L = np.concatenate(stats['lat']) if stats['lat'] else np.zeros(0)
-            E = np.concatenate(stats['ent']) if stats['ent'] else np.zeros(0)
-            print(f'{time.strftime("%H:%M:%S")} {mode}: draws {stats["draws"]} pieces {stats["pieces"]} joined {stats["joined"]} '
-                  f'steps {stats["steps"]}; piece cost us mean {np.nanmean(L) / 1e3 if len(L) else 0:.1f} '
-                  f'p50 {np.nanpercentile(L, 50) / 1e3 if len(L) else 0:.1f} p90 {np.nanpercentile(L, 90) / 1e3 if len(L) else 0:.1f}; '
-                  f'-logp {E.mean() if len(E) else 0:.2f}; dropped {sum(x.dropped for x in nodes.values())}', flush=True)
-            gsum.extend(stats['g'])
-            if len(gsum) >= 200:
-                G = np.array(gsum)
-                print(f'  gradient on (latest, mean arrival, share) over {len(G)} node-steps: mean {G.mean(0).round(4).tolist()} '
-                      f'sd {G.std(0).round(4).tolist()} negative {(G < 0).mean(0).round(2).tolist()}', flush=True)
-                gsum.clear()
-            stats.update(draws=0, joined=0, pieces=0, steps=0, lat=[], ent=[], g=[]); last_stat = now
+        if now - last_stat >= 10.0:
+            cat = lambda k: np.concatenate(stats[k]) if stats[k] else np.zeros(1)
+            A = np.array(stats['alpha']) if stats['alpha'] else np.zeros((1, 3)); Gs = np.array(stats['g']) if stats['g'] else np.zeros((1, 3))
+            print(f'{time.strftime("%H:%M:%S")} {mode}: draws {stats["draws"]} landings {stats["pieces"]} joined {stats["joined"]} steps {stats["steps"]}; '
+                  f'costs over floor: throughput {cat("thr").mean():.2f} latency {cat("lat").mean():.2f} queueing {cat("que").mean():.2f}; '
+                  f'UPGrad weights {A.mean(0).round(2).tolist()}; arrival-gradient negative {(Gs < 0).mean(0).round(2).tolist()}; '
+                  f'dropped {sum(x.dropped for x in nodes.values())}', flush=True)
+            stats.update(draws=0, joined=0, pieces=0, steps=0, thr=[], lat=[], que=[], alpha=[], g=[]); last_stat = now
 except (KeyboardInterrupt, ConnectionError) as e:
     print(f'learner ends: {e!r}', flush=True)
 finally:

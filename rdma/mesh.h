@@ -29,13 +29,13 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    bandwidth, so a pair's parallel cables are parallel links of every map made from the records (mesh_map).  142
    (design/switched-multipath-dma.md): every SEND is one slot of a node's pool, its piece's name then its frame, of one
    frame count (mesh-switched.h); no piece is placed on a queue pair ahead of time, and ORDER and SEGMENT are gone */
-#define MESH_VERSION 153u
+#define MESH_VERSION 154u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node); 158 adds the segments
    both ends agree (struct mesh_node `agreed`); 159 the switch (struct hdr `switch_off`, mesh-switched.h) and programs'
    progress, no epochs and no segments */
-#define MESH_LAYOUT 173u
+#define MESH_LAYOUT 174u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes it
    holds an order toward (struct mesh_node) and its client slots; and the bytes of the bridge's own pages, which it
@@ -48,7 +48,7 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 /* the switch's bytes (mesh-switched.h struct mesh_switch: the node's lanes, its pool's slots, their outboxes, the view,
    the weights and the trainer's log rings) */
-#define MESH_SWITCH_BYTES (UINT64_C(24)<<20)
+#define MESH_SWITCH_BYTES (UINT64_C(64)<<20)
 #define MESH_RETIRING (UINT64_C(1)<<63)
 _Static_assert(38+25<=63,"an owner word");
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */

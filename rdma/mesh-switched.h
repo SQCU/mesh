@@ -66,7 +66,7 @@
 #define MESH_SWITCH_RING 4096u                               /* a lane's outbox */
 #define MESH_SWITCH_SLOTS 4096u                              /* the pool's slots, at most */
 #define MESH_SWITCH_LINES 24u                                /* lines a name carries */
-#define MESH_SWITCH_LOG 2048u                                /* records a process's log ring */
+#define MESH_SWITCH_LOG 8192u                                /* records a process's log ring */
 #define MESH_SWITCH_LOGS (MESH_PORTS+2u)                     /* a ring a port child, the parent's, the simulator's */
 #define MESH_SWITCH_CONTEXTS 256u
 #define MESH_SWITCH_KIN 64u                                  /* programs whose kin (same key, other nodes) a thread keeps */
@@ -867,6 +867,12 @@ static inline void mesh_switch_log_put(struct mesh_switch *sw,uint32_t ring,cons
   g->record[tail%MESH_SWITCH_LOG]=*r;
   atomic_store_explicit(&g->tail,tail+1,memory_order_release);
 }
+/* whether piece `name`'s records are made: `logging` 0 none, k one piece in k, chosen by the piece's identity (source,
+   key, piece), so every node records the same pieces and a recorded piece's draws at every hop join its landings */
+static inline int mesh_switch_sampled(const struct mesh_switch *sw,const struct mesh_switch_name *name){
+  const uint32_t k=atomic_load_explicit(&sw->logging,memory_order_relaxed);
+  return k && (k==1 || mesh_switch_mix(name->piece^name->key*0x9e3779b97f4a7c15ULL^(uint64_t)name->source<<40)%k==0);
+}
 /* the next record of ring `ring`, 0 none (one consumer: mesh-switch-log, the simulator) */
 static inline int mesh_switch_log_take(struct mesh_switch *sw,uint32_t ring,struct mesh_switch_record *r){
   struct mesh_switch_log *g=sw->log+ring;
@@ -1343,7 +1349,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
        (!wp || (mesh_switch_owned(wp) && wp->program.key==name->key)))return 0;
     sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;
   }
-  const int logging=atomic_load_explicit(&sw->logging,memory_order_relaxed);
+  const int logging=mesh_switch_sampled(sw,name);
   struct mesh_switch_dest kept[MESH_SWITCH_N],away[MESH_SWITCH_N];uint32_t nkept=0,owed=0;
   uint64_t waits=0,wait_value=0,wait_program=0;
   /* `control` read before any program is looked for, so a declaration after the look moves it past this value */
@@ -1356,16 +1362,6 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
       MESH_SWITCH_COUNT(sw,ring,delivered,1);
       MESH_SWITCH_COUNT(sw,ring,deliver_wait_ns,now>sw->slot[s].landed?now-sw->slot[s].landed:0);
       MESH_SWITCH_COUNT(sw,ring,hops[name->hops<3?name->hops:3],1);
-      if(logging){
-        struct mesh_switch_record r;memset(&r,0,sizeof r);
-        r.kind=MESH_LOG_PIECE;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;
-        /* its cost as it carried it: each hop's queueing and residence on that hop's own clock, the wire's time, and its
-           wait here (no clock of another node) */
-        r.latency=name->queued+name->transit+(float)(now>sw->slot[s].landed?now-sw->slot[s].landed:0);r.dest=self;r.context=UINT32_MAX;r.piece=name->piece;
-        r.queueing=name->queued;r.floor=name->floor;r.source=name->source;r.transfer=name->dest[i].transfer;r.bytes=name->bytes;
-        /* a record a unit the piece carried */
-        for(uint32_t u=0;u<(name->dest[i].units?name->dest[i].units:1u);u++){r.span=name->dest[i].span+u;mesh_switch_log_put(sw,ring,&r);}
-      }
     }else if(mesh_switch_gone(m,name)){
       MESH_SWITCH_COUNT(sw,ring,orphans,1);
     }else{
@@ -1455,6 +1451,19 @@ static inline int mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32
   atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
   if(name->magic!=MESH_SWITCH_MAGIC){mesh_switch_release(sw,s);return 1;}
   mesh_switch_lines_take(sw,name);
+  /* a piece's presence at each of its destinations here, recorded as it lands: the cost it carried in-band (each hop's
+     queueing and residence on that hop's own clock, the wire's time); its copy into the receiving program's span is
+     the consumer's, made once that program asks (mesh_switch_deliver), never part of the transfer */
+  if(name->kind==MESH_PIECE_DATA && mesh_switch_sampled(sw,name))
+    for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++){
+      if(name->dest[i].node!=m->node)continue;
+      struct mesh_switch_record r;memset(&r,0,sizeof r);
+      r.kind=MESH_LOG_PIECE;r.node=m->node;r.key=name->key;r.execution=name->execution;r.at=now;
+      r.latency=name->queued+name->transit;r.queueing=name->queued;r.floor=name->floor;r.source=name->source;
+      const uint32_t units=name->dest[i].units?name->dest[i].units:1u;
+      r.transfer=name->dest[i].transfer;r.bytes=name->bytes/units;r.dest=m->node;r.context=UINT32_MAX;r.piece=name->piece;
+      for(uint32_t u=0;u<units;u++){r.span=name->dest[i].span+u;mesh_switch_log_put(sw,ring,&r);}   /* a record a unit it carries */
+    }
   return mesh_switch_forward(m,sw,s,now,ring);
 }
 

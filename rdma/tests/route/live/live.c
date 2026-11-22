@@ -8,6 +8,7 @@
    and the learner, through the same library, scores draws (route_draw_score: d logp / d w at a context's w, split.h)
    and sums their policy gradients. Arrays only; the schedule is the Python's. */
 #include "../../../mesh-switched.h"
+#include "../upgrad.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -57,7 +58,23 @@ void live_withdraw(void) {
   x->active = 0;
   atomic_fetch_add_explicit(&x->serial, 1, memory_order_release);
 }
-void live_logging(int on) { atomic_store_explicit(&SW->logging, on ? 1u : 0u, memory_order_release); }
+/* the records on, one piece in `sample` (mesh_switch_sampled: the same pieces at every node), or off (0) */
+void live_logging(uint32_t sample) { atomic_store_explicit(&SW->logging, sample, memory_order_release); }
+/* the fabric the floors are over (rdma/tests/route/sim.c route_sim_costs): each view node's capacity in and out (bytes a
+   ns, its links summed) and the view's unit (the slowest pair of ranks' unloaded delay for one page, ns) */
+uint32_t live_fabric(double *in, double *out, double *unit) {
+  struct mesh_switch_view v; mesh_switch_view_read(SW, &v);
+  for (uint32_t i = 0; i < v.nodes; i++) in[i] = out[i] = 0;
+  for (uint32_t l = 0; l < v.links; l++) {
+    const uint32_t a = mesh_switch_index(&v, v.link[l].from), b = mesh_switch_index(&v, v.link[l].to);
+    if (a < v.nodes) out[a] += v.link[l].rate;
+    if (b < v.nodes) in[b] += v.link[l].rate;
+  }
+  *unit = mesh_switch_unit(&v, (double)mesh_switch_piece(M));
+  return v.nodes;
+}
+/* UPGrad's weights of the three tasks from their Gram matrix (upgrad.h, as the trainer's optimizer) */
+void live_upgrad(const float *G, float *alpha) { upgrad3(G, alpha); }
 /* up to `most` records from every ring into out; *dropped the rings' drops so far */
 uint32_t live_drain(struct mesh_switch_record *out, uint32_t most, uint64_t *dropped) {
   uint32_t n = 0; uint64_t d = 0;

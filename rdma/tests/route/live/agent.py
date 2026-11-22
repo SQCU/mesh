@@ -3,11 +3,12 @@ bridge's split tables (the prior, w = 0, until the learner sends one), turns the
 the learner as they come; on SIGTERM or the learner's end, the records off and the tables withdrawn (the bridge's own
 rule routes again). Memory and the socket only: nothing is written anywhere.
 
-usage: python agent.py LEARNER_HOST PORT LIB     (LIB: live.c built as a shared library)"""
+usage: python agent.py LEARNER_HOST PORT LIB [SAMPLE]     (LIB: live.c built as a shared library)"""
 import ctypes, signal, socket, struct, sys, time
 import numpy as np
 
 host, port, libpath = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+SAMPLE = int(sys.argv[4]) if len(sys.argv) > 4 else 16   # one piece in SAMPLE recorded, the same pieces at every node
 lib = ctypes.CDLL(libpath)
 lib.live_attach.restype = ctypes.c_int
 lib.live_record_bytes.restype = ctypes.c_uint32
@@ -58,7 +59,7 @@ def end(*_):
     global stop
     stop = True
 signal.signal(signal.SIGTERM, end); signal.signal(signal.SIGINT, end)
-lib.live_logging(1)
+lib.live_logging(ctypes.c_uint32(SAMPLE))
 sock.setblocking(False)
 inbox = bytearray()
 try:
