@@ -13,7 +13,7 @@ port, agents, libpath = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 lib = ctypes.CDLL(libpath)
 lib.live_grad.restype = ctypes.c_uint32
 P = ctypes.c_void_p
-STEP, AGE, LR, CLIP = 0.1, 1.0, float(os.environ.get('LIVE_LR', '0.02')), 4.0
+STEP, AGE, MOST, LR, CLIP = 0.1, 1.0, 40000, float(os.environ.get('LIVE_LR', '0.02')), 4.0
 DRAW = np.dtype([('arrive', '<f4', 30), ('valid', '<u4'), ('mask', '<u4'), ('S', '<u4'), ('token', '<u4'), ('deg', '<u4'),
                  ('ntok', '<u4'), ('row', '<u4'), ('unit', '<f4'), ('a1', '<f4'), ('a2', '<f4')])
 REC = np.dtype([('kind', '<u4'), ('node', '<u4'), ('key', '<u8'), ('execution', '<u8'), ('at', '<u8'), ('draw', DRAW),
@@ -36,7 +36,7 @@ class Node:
         self.keys = np.frombuffer(hello[12 + 4 * nn:], np.uint32).reshape(-1, 4)
         n = len(self.keys)
         self.w = np.zeros((n, 40), np.float32); self.m = np.zeros_like(self.w); self.v = np.zeros_like(self.w); self.t = 0
-        self.inbox = bytearray(); self.dropped = 0; self.point = 0
+        self.inbox = bytearray(); self.dropped = 0; self.point = 0; self.out = b''; self.out_ctl = b''; self.out_w = None
 
 
 sel = selectors.DefaultSelector()
@@ -66,7 +66,18 @@ last_step = last_stat = time.monotonic()
 
 
 def send(x, kind, payload):
-    x.sock.setblocking(True); x.sock.sendall(struct.pack('<cI', kind, len(payload)) + payload); x.sock.setblocking(False)
+    m = struct.pack('<cI', kind, len(payload)) + payload
+    if kind == b'W': x.out_w = m          # only the latest table matters: an older one not yet sent is replaced
+    else: x.out_ctl += m
+
+
+def flush(x):
+    if not x.out and (x.out_ctl or x.out_w):
+        x.out = x.out_ctl + (x.out_w or b''); x.out_ctl = b''; x.out_w = None
+    while x.out:
+        try: k = x.sock.send(x.out)
+        except BlockingIOError: return
+        x.out = x.out[k:]
 
 
 def step(now):
@@ -95,22 +106,31 @@ def step(now):
     lat = np.where(count > 0, total / np.maximum(count, 1), np.nan)
     # the rest kept for the next step (their deliveries not here yet); deliveries kept AGE
     keep = ~use & ~late
-    draws = [(D[keep], now)] if keep.any() else []
+    kd, kt = D[keep], Dt[keep]
+    if len(kd) > 4 * MOST: kd, kt = kd[-4 * MOST:], kt[-4 * MOST:]
+    draws = [(kd, t) for t in [kt.min()]] if len(kd) else []
     pkeep = now - Pt <= AGE
     pieces = [(Pc[pkeep], now)] if pkeep.any() else []
     U = D[use]; L = lat[use]
     if not len(U): return
     stats['joined'] += len(U); stats['lat'].append(L)
-    bucket = np.minimum(np.log2(np.maximum(U['bytes'], 1)).astype(int), 24)
-    adv = np.zeros(len(U), np.float32)
-    for i in range(len(U)):
-        k = (int(U['node'][i]), int(U['context'][i]), int(bucket[i]))
-        b = base.get(k)
-        if b is None: b = base[k] = [float(L[i]), float(L[i]) ** 2 * 0.25 + 1.0, 0]
-        sd = max(b[1], 1.0) ** 0.5
-        adv[i] = np.clip((b[0] - L[i]) / sd, -3, 3) if b[2] >= 8 else 0.0
-        e = 0.02 if b[2] >= 50 else 1.0 / (b[2] + 1)
-        dlt = L[i] - b[0]; b[0] += e * dlt; b[1] = (1 - e) * (b[1] + e * dlt * dlt); b[2] += 1
+    if len(U) > MOST: pick = np.random.default_rng().choice(len(U), MOST, replace=False); U, L = U[pick], L[pick]
+    bucket = np.minimum(np.log2(np.maximum(U['bytes'], 1)).astype(np.int64), 24)
+    gk = (U['node'].astype(np.int64) << 32) | (U['context'].astype(np.int64) << 8) | bucket
+    keys, inv = np.unique(gk, return_inverse=True)
+    # the baselines as they stood (each group's mean and variance), the advantage against them, then each group's
+    # running mean and variance moved by this step's draws of it
+    mean = np.array([base.get(int(k), (np.nan, np.nan, 0))[0] for k in keys]); var = np.array([base.get(int(k), (0, 0, 0))[1] for k in keys])
+    seen = np.array([base.get(int(k), (0, 0, 0))[2] for k in keys])
+    cnt = np.bincount(inv, minlength=len(keys)); bm = np.bincount(inv, L, len(keys)) / cnt
+    bv = np.bincount(inv, (L - bm[inv]) ** 2, len(keys)) / cnt
+    fresh = seen == 0
+    mean[fresh] = bm[fresh]; var[fresh] = bv[fresh] + 1.0
+    sd = np.sqrt(np.maximum(var, 1.0))
+    adv = np.where(seen[inv] >= 8, np.clip((mean[inv] - L) / sd[inv], -3, 3), 0.0).astype(np.float32)
+    e = np.where(seen >= 50, 0.05, 1.0 / (seen + 1))
+    nm = mean + e * (bm - mean); nv = (1 - e) * (var + e * (bm - mean) ** 2) + e * bv
+    for k, a, b, c in zip(keys.tolist(), nm.tolist(), nv.tolist(), (seen + cnt).tolist()): base[k] = (a, b, c)
     if mode != 'learn': return
     for nid, x in nodes.items():
         sel_ = U['node'] == nid
@@ -180,6 +200,7 @@ try:
                     p = r[r['kind'] == 2]
                     if len(d): draws.append((d.copy(), now)); stats['draws'] += len(d)
                     if len(p): pieces.append((p.copy(), now)); stats['pieces'] += len(p)
+        for x in nodes.values(): flush(x)
         now = time.monotonic()
         if now - last_step >= STEP:
             step(now); last_step = now
@@ -195,5 +216,6 @@ except (KeyboardInterrupt, ConnectionError) as e:
     print(f'learner ends: {e!r}', flush=True)
 finally:
     for x in nodes.values():
-        try: send(x, b'D', b'')
+        try:
+            x.sock.setblocking(True); x.sock.sendall(struct.pack('<cI', b'D', 0))
         except Exception: pass
