@@ -1093,7 +1093,12 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
      unit: a 36 KB SEND carrying 16 KB) */
   struct mesh_dma_span unit[MESH_SWITCH_UNITS];unit[0]=bytes;
   uint32_t units=1;uint64_t total=valid?bytes.bytes:0;
-  while(valid && units<MESH_SWITCH_UNITS){
+  /* packed only where the transfer's units left fill every live lane of this node twice even packed: a small transfer's
+     units go one a SEND, over as many lanes at once (the 24 KB all-gather's two units in one SEND: 26.5 -> 29.9 us) */
+  uint32_t live=0;
+  for(uint32_t k=0;k<MESH_SWITCH_LANES;k++)live+=atomic_load_explicit(&sw->lane[k].live,memory_order_relaxed)!=0;
+  const int pack=table[t].units-span>=2u*MESH_SWITCH_UNITS*(live?live:1);
+  while(valid && pack && units<MESH_SWITCH_UNITS){
     uint64_t e2,span2;uint32_t t2;
     const struct mesh_dma_span next=span+units<table[t].units?((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span+units]:(struct mesh_dma_span){0,0};
     if(span+units>=table[t].units || !mesh_switch_locate(p,table,0,n+units,&e2,&t2,&span2) || e2!=e || t2!=t || span2!=span+units ||
