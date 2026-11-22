@@ -41,12 +41,10 @@ static void hold(struct node *v,uint32_t s){
   if(v->holds==v->room){v->room=v->room?2*v->room:256;v->held=realloc(v->held,v->room*sizeof *v->held);if(!v->held)exit(1);}
   v->held[v->holds++]=s;
 }
-/* a slot that was on its way out a lost cable switched again: its last hop undone, held for forwarding */
-static void again(struct node *v,uint32_t s){
-  struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(v->m,v->sw,s);
-  if(name->magic==MESH_SWITCH_MAGIC && name->hops)name->hops--;
-  atomic_store(&v->sw->slot[s].refs,1);atomic_store(&v->sw->slot[s].state,SLOT_HELD);
-  hold(v,s);
+/* a SEND of slot s on lane l of a lost cable: what it carried held for forwarding (mesh_switch_again) */
+static void again(struct node *v,uint32_t s,uint32_t l){
+  const uint32_t t=mesh_switch_again(v->m,v->sw,s,l);
+  if(t!=UINT32_MAX)hold(v,t);
 }
 static void cable_lose(uint32_t c){
   if(down[c])return;
@@ -57,8 +55,8 @@ static void cable_lose(uint32_t c){
     const uint32_t l=lane_of(c,j);
     atomic_store(&v->sw->lane[l].live,0);
     struct qp *q=&qp[d][c][j];
-    for(;q->sends_head<q->sends_tail;q->sends_head++)again(v,q->send[q->sends_head%MESH_SWITCH_RING]);
-    for(uint32_t s;(s=mesh_switch_peek(v->sw,l))!=UINT32_MAX;){mesh_switch_pop(v->sw,l);again(v,s);}
+    for(;q->sends_head<q->sends_tail;q->sends_head++)again(v,q->send[q->sends_head%MESH_SWITCH_RING],l);
+    for(uint32_t s;(s=mesh_switch_peek(v->sw,l))!=UINT32_MAX;){mesh_switch_pop(v->sw,l);again(v,s,l);}
     atomic_store(&v->sw->lane[l].queued,0);
     for(;q->head<q->tail;q->head++)mesh_switch_give(r->sw,q->receive[q->head%(POSTED*4)]);
   }

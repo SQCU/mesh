@@ -989,13 +989,11 @@ static void switch_view(void){
     atomic_store_explicit(&x->live,1,memory_order_release);   /* no record names it: the event loop's alone */
   }
 }
-/* a slot that was on its way out a lane no longer live switched again: its last hop undone (the lane's peer off its
-   path), held here and forwarded by the refresh */
-static void switch_again(struct mesh_switch *sw,uint32_t s){
-  struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s);
-  if(name->magic==MESH_SWITCH_MAGIC && name->hops)name->hops--;
-  atomic_store(&sw->slot[s].refs,1);atomic_store(&sw->slot[s].state,SLOT_HELD);
-  switch_keep(s);
+/* a SEND of slot s on a lane no longer live (pushed or posted, never to complete): what it carried held here and
+   forwarded by the refresh (mesh_switch_again) */
+static void switch_again(struct mesh_switch *sw,uint32_t s,uint32_t lane){
+  const uint32_t t=mesh_switch_again(M,sw,s,lane);
+  if(t!=UINT32_MAX)switch_keep(t);
 }
 /* a port's child gone: its lanes' receives given back, their outboxes and their SENDs not completed switched again,
    the pieces it held taken here; its lanes' queues 0 */
@@ -1005,15 +1003,19 @@ static void switch_reclaim(struct port *port){
   for(uint32_t j=0;j<2*MESH_LINK_STREAMS;j++){
     const uint32_t lane=switch_lane(port,j);
     atomic_store(&sw->lane[lane].live,0);
-    for(uint32_t s;(s=mesh_switch_peek(sw,lane))!=UINT32_MAX;){mesh_switch_pop(sw,lane);switch_again(sw,s);}
+    for(uint32_t s;(s=mesh_switch_peek(sw,lane))!=UINT32_MAX;){mesh_switch_pop(sw,lane);switch_again(sw,s,lane);}
     atomic_store(&sw->lane[lane].queued,0);
   }
   for(uint32_t s=0;s<sw->slots;s++){
     const uint32_t lane=sw->slot[s].lane,state=atomic_load(&sw->slot[s].state);
     const int ours=lane/(2*MESH_LINK_STREAMS)==port->index;
-    if(state==SLOT_RECEIVE && ours)mesh_switch_give(sw,s);
-    else if(state==SLOT_SENDING && ours)switch_again(sw,s);
-    else if(state==SLOT_HELD && sw->slot[s].owner==port->index+1){sw->slot[s].owner=0;switch_keep(s);}
+    if(state==SLOT_RECEIVE && ours){mesh_switch_give(sw,s);continue;}
+    if(state==SLOT_HELD && sw->slot[s].owner==port->index+1){sw->slot[s].owner=0;switch_keep(s);}
+    /* its SENDs posted on the port's lanes and never completed */
+    for(uint32_t j=0;j<2*MESH_LINK_STREAMS;j++){
+      const uint32_t l=switch_lane(port,j);
+      for(uint32_t k=atomic_load(&sw->slot[s].on[l]);k--;)switch_again(sw,s,l);
+    }
   }
   pthread_mutex_unlock(&switch_lock);
 }
