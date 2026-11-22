@@ -61,7 +61,8 @@ sel.register(sys.stdin, selectors.EVENT_READ, None)
 mode = 'learn'
 draws, pieces = [], []          # arrays of REC, with their arrival time here
 base = {}                       # (node, context, bucket) -> [mean, var, count]
-stats = dict(draws=0, joined=0, pieces=0, steps=0, lat=[], ent=[])
+stats = dict(draws=0, joined=0, pieces=0, steps=0, lat=[], ent=[], g=[])
+gsum = []
 last_step = last_stat = time.monotonic()
 
 
@@ -147,6 +148,7 @@ def step(now):
         stats['ent'].append(-now_lp[np.isfinite(now_lp)])
         per = np.bincount(rows, minlength=len(x.keys)).astype(np.float32)[:, None]
         g /= np.maximum(per, 1)
+        stats['g'].append(g[:, 35:38].sum(0))
         x.t += 1
         x.m = 0.9 * x.m + 0.1 * g; x.v = 0.999 * x.v + 0.001 * g * g
         mh = x.m / (1 - 0.9 ** x.t); vh = x.v / (1 - 0.999 ** x.t)
@@ -211,7 +213,13 @@ try:
                   f'steps {stats["steps"]}; piece cost us mean {np.nanmean(L) / 1e3 if len(L) else 0:.1f} '
                   f'p50 {np.nanpercentile(L, 50) / 1e3 if len(L) else 0:.1f} p90 {np.nanpercentile(L, 90) / 1e3 if len(L) else 0:.1f}; '
                   f'-logp {E.mean() if len(E) else 0:.2f}; dropped {sum(x.dropped for x in nodes.values())}', flush=True)
-            stats.update(draws=0, joined=0, pieces=0, steps=0, lat=[], ent=[]); last_stat = now
+            gsum.extend(stats['g'])
+            if len(gsum) >= 200:
+                G = np.array(gsum)
+                print(f'  gradient on (latest, mean arrival, share) over {len(G)} node-steps: mean {G.mean(0).round(4).tolist()} '
+                      f'sd {G.std(0).round(4).tolist()} negative {(G < 0).mean(0).round(2).tolist()}', flush=True)
+                gsum.clear()
+            stats.update(draws=0, joined=0, pieces=0, steps=0, lat=[], ent=[], g=[]); last_stat = now
 except (KeyboardInterrupt, ConnectionError) as e:
     print(f'learner ends: {e!r}', flush=True)
 finally:
