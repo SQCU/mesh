@@ -30,7 +30,7 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    (design/switched-multipath-dma.md): every SEND is one slot of a node's pool, its piece's name then its frame, of one
    frame count (mesh-switched.h); no piece is placed on a queue pair ahead of time, and ORDER and SEGMENT are gone.
    160: a slot goes out unchanged on every lane its destinations are split over, each destination naming its next
-   node, and SENDs carry the credits due toward their receivers (mesh-switched.h) */
+   node (mesh-switched.h) */
 #define MESH_VERSION 160u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
