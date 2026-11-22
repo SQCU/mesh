@@ -9,6 +9,7 @@
 #include "nccl-mesh-metal.h"
 #include <errno.h>
 #include <math.h>
+#define MESH_CROSSING_NS 8000.0   /* a crossing's alpha: a two-rank 6 KB all-gather stream, 8.06 us a transaction (2026-11-22) */
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -599,7 +600,7 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
       rooted = &comm->rooted;
     }
   }
-  size_t room = comm->listed ? (size_t)comm->listed : 3 + 2 * (size_t)n;
+  size_t room = comm->listed ? (size_t)comm->listed : 4 + 2 * (size_t)n;
   for (uint32_t f = 0; f < comm->form_count; f++) room += has_root(comm->forms[f].collective) && comm->forms[f].root < 0 ? n : 1;
   if (!(comm->entries = calloc(room + 1, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
   for (uint32_t f = 0; f < comm->form_count; f++) {
@@ -611,6 +612,27 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     comm->entries[comm->programs++].below = comm->given[e].below;
   }
   if (comm->listed) return ncclSuccess;
+  /* the all-reduce single-phase below the size where its extra bytes cost more than the two-phase's second crossing
+     (the 3-vector: latency = alpha + bytes / B): single-phase sends (n-1) S a rank, the reduce-scatter and all-gather
+     2 (n-1) S / n over two dependent crossings, so single-phase is the faster while alpha > (n-1)(n-2) S / (n B), S below
+     alpha n B / ((n-1)(n-2)), every size at two ranks.  B a rank's own cables' bandwidth, the least rank's; alpha a
+     crossing's, MESH_CROSSING_NS (measured: a two-rank 6 KB all-gather stream, 8.06 us a transaction) */
+  {
+    uint64_t below = UINT64_MAX;
+    if (n > 2) {
+      double least = INFINITY;
+      for (uint32_t r = 0; r < n; r++) {
+        double bits = 0;
+        for (uint32_t k = 0; k < comm->fabric.cables; k++)
+          if (comm->fabric.cable[k].node[0] == r || comm->fabric.cable[k].node[1] == r) bits += (double)comm->fabric.cable[k].bandwidth;
+        if (bits > 0 && bits < least) least = bits;
+      }
+      const double B = isfinite(least) ? least / 8e9 : 5.0;   /* bytes a ns */
+      below = (uint64_t)(MESH_CROSSING_NS * n * B / ((double)(n - 1) * (n - 2)));
+    }
+    if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 1, below))
+      return fail(ncclInternalError, "the single-phase all-reduce along the communicator's trees does not compile");
+  }
   if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 0) ||
       compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
