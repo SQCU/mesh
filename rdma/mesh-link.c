@@ -343,7 +343,7 @@ static void switch_stage(struct port *port){
         const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
         if(!at){
           /* the piece's stamps (mesh_switch_stage's `now`) at the clock read now */
-          at=t0;sw->slot[s].staged=sw->slot[s].landed=at;((struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s))->born=at;
+          at=t0;sw->slot[s].staged=sw->slot[s].landed=at;
         }
         MESH_SWITCH_COUNT(sw,port->index,staged,1);
         MESH_SWITCH_COUNT(sw,port->index,staged_dests,((struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s))->dests);

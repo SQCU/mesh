@@ -89,7 +89,7 @@ struct mesh_switch_name {
   uint32_t path[MESH_SWITCH_N];     /* the nodes visited, in order: `hops` + 1 of them */
   struct mesh_switch_dest dest[MESH_SWITCH_N];
   float queued,transit,floor,cost;  /* ns: queueing so far, wire time so far, the unloaded delay, unused */
-  uint64_t born;                    /* the source's clock when it was staged (ns) */
+  uint64_t piece;                   /* the piece's identity at its source: its program's claim index (unique a key) */
   uint32_t wanted[MESH_SWITCH_N],nwanted;   /* the piece's destinations as staged: its pattern's (with `source`) */
   /* the lines follow the payload, in its SEND's last frame's slack (mesh_switch_lines_at): `lines` of them */
 };
@@ -171,6 +171,8 @@ struct mesh_switch_record {
   uint32_t source,transfer,span,bytes;
   uint32_t context,point,dest,padding;   /* the draw's context at its node (UINT32_MAX: none, the weights drew), the
                                             policy refresh its split table is from, its first destination */
+  uint64_t piece;                   /* the piece's identity (its name's piece: with source and key, the same at every hop and
+                                       destination) */
 };
 struct mesh_switch_log { _Alignas(64) _Atomic uint64_t head; _Alignas(64) _Atomic uint64_t tail,dropped; struct mesh_switch_record record[MESH_SWITCH_LOG]; };
 /* where a crossing's time goes, counted in memory (never storage) by each process of the switch, one writer a set (a
@@ -1129,7 +1131,7 @@ static inline int mesh_switch_stage_in(struct hdr *m,struct mesh_switch *sw,stru
   memset(name,0,sizeof *name);
   *name=(struct mesh_switch_name){.magic=MESH_SWITCH_MAGIC,.source=m->node,.key=p->program.key,.execution=e,
     .bytes=(uint32_t)total,.hops=0,.dests=1,.from=m->node};
-  name->path[0]=m->node;name->born=now;
+  name->path[0]=m->node;name->piece=n;
   name->dest[0]=(struct mesh_switch_dest){atomic_load_explicit(&x->node,memory_order_relaxed),t,(uint32_t)span,1};
   for(uint32_t u=0,off=0;valid && u<units;off+=(uint32_t)unit[u].bytes,u++)memcpy(at+MESH_SWITCH_HEAD+off,(const char *)m+unit[u].offset,unit[u].bytes);
   atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
@@ -1357,7 +1359,9 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
       if(logging){
         struct mesh_switch_record r;memset(&r,0,sizeof r);
         r.kind=MESH_LOG_PIECE;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;
-        r.latency=name->born && now>name->born?(float)(now-name->born):name->queued+name->transit;r.dest=self;r.context=UINT32_MAX;
+        /* its cost as it carried it: each hop's queueing and residence on that hop's own clock, the wire's time, and its
+           wait here (no clock of another node) */
+        r.latency=name->queued+name->transit+(float)(now>sw->slot[s].landed?now-sw->slot[s].landed:0);r.dest=self;r.context=UINT32_MAX;r.piece=name->piece;
         r.queueing=name->queued;r.floor=name->floor;r.source=name->source;r.transfer=name->dest[i].transfer;r.bytes=name->bytes;
         /* a record a unit the piece carried */
         for(uint32_t u=0;u<(name->dest[i].units?name->dest[i].units:1u);u++){r.span=name->dest[i].span+u;mesh_switch_log_put(sw,ring,&r);}
@@ -1392,7 +1396,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
       struct mesh_switch_record r;memset(&r,0,sizeof r);
       r.kind=MESH_LOG_DRAW;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;r.draw=draw;r.logp=logp;
       r.source=name->source;r.transfer=away[0].transfer;r.span=away[0].span;r.bytes=name->bytes;
-      r.context=context;r.point=(uint32_t)point;r.dest=away[0].node;
+      r.context=context;r.point=(uint32_t)point;r.dest=away[0].node;r.piece=name->piece;
       mesh_switch_log_put(sw,ring,&r);
     }
   }
