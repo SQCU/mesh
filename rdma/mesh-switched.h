@@ -1143,6 +1143,20 @@ static inline void mesh_switch_credit_take(struct hdr *m,uint32_t from,uint64_t 
     while(was<execution && !atomic_compare_exchange_weak_explicit(&p->credit,&was,execution,memory_order_acq_rel,memory_order_relaxed)){}
   }
 }
+/* a credit carried toward node `peer` that will not arrive (its SEND not pushed, or its lane lost): its program's
+   `credited` moved back where nothing told more since, so a credit is due again at once (an explicit one at the
+   latest: mesh_switch_late), and the program marked for the next SEND there */
+static inline void mesh_switch_untell(struct hdr *m,struct mesh_switch *sw,uint32_t peer,const struct mesh_switch_told *told){
+  struct mesh_node *x=mesh_switch_order(m,peer);
+  for(uint32_t k=0;x && k<MESH_PROGRAMS;k++){
+    struct mesh_declared *p=x->program+k;
+    if(!mesh_switch_owned(p) || p->program.key!=told->key || !p->progress[1])continue;
+    const uint64_t late=mesh_switch_late(sw,p);
+    uint64_t was=told->execution;
+    atomic_compare_exchange_strong_explicit(&p->credited,&was,told->execution>=late?told->execution-late:0,memory_order_acq_rel,memory_order_relaxed);
+    atomic_fetch_or_explicit(sw->due+(uint32_t)(x-mesh_node_at(m,0)),UINT32_C(1)<<k,memory_order_relaxed);
+  }
+}
 /* the credits due toward node `peer` (mesh_switch_step) carried by a SEND to it, in its name, as many as it has room for:
    each told once (the compare-exchange on `credited` that a credit SEND of its own also makes) */
 static inline void mesh_switch_tell(struct hdr *m,struct mesh_switch *sw,uint32_t peer,struct mesh_switch_name *name){
@@ -1484,9 +1498,18 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
       mesh_switch_log_put(sw,ring,&r);
     }
   }
+  /* one group a peer: a receiver owes every destination naming it, so two lanes toward one peer would each carry all of them */
+  for(uint32_t g=0;g<groups;g++){
+    const uint32_t peer=atomic_load_explicit(&sw->lane[lane[g]].peer,memory_order_relaxed);
+    for(uint32_t h=g+1;h<groups;)
+      if(atomic_load_explicit(&sw->lane[lane[h]].peer,memory_order_relaxed)==peer){group[g]|=group[h];groups--;lane[h]=lane[groups];group[h]=group[groups];}
+      else h++;
+  }
   if(groups){
-    /* the shared parts, no SEND of the slot out: its sender, the lines (as many as the least of its lanes' frames
-       hold) and the credits due toward its groups' peers */
+    /* the shared parts, no SEND of the slot out: its sender, the destinations it no longer owes named no one's (an
+       earlier SEND of the slot carried them), the lines (as many as the least of its lanes' frames hold) and the
+       credits due toward its groups' peers */
+    for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(!(owed>>i&1))name->dest[i].next=UINT32_MAX;
     name->from=self;name->told=0;
     uint64_t least=sw->slot_bytes;
     for(uint32_t g=0;g<groups;g++){const uint64_t w=mesh_switch_lane_bytes(sw,lane[g]);if(w<least)least=w;}
@@ -1513,6 +1536,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
     atomic_fetch_sub_explicit(&sw->slot[s].on[l],1,memory_order_relaxed);
     atomic_fetch_sub_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
     for(uint32_t j=0;j<naway;j++)if(group[g]>>j&1){struct mesh_switch_dest *d=name->dest+away[j];d->next=self;d->queued-=queued;d->transit-=transit;kept|=UINT32_C(1)<<away[j];}
+    for(uint32_t i=0;i<name->told && i<MESH_SWITCH_TOLD;i++)if(name->credit[i].to==peer){mesh_switch_untell(m,sw,peer,name->credit+i);name->credit[i].to=UINT32_MAX;}
   }
   sw->slot[s].owed=kept;
   if(!kept){atomic_store_explicit(&sw->slot[s].state,SLOT_SENDING,memory_order_relaxed);mesh_switch_release(sw,s);return 1;}
@@ -1564,6 +1588,8 @@ static inline uint32_t mesh_switch_again(struct hdr *m,struct mesh_switch *sw,ui
   struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(m,sw,s);
   const uint32_t peer=atomic_load_explicit(&sw->lane[lane].peer,memory_order_relaxed),self=m->node;
   atomic_fetch_sub_explicit(&sw->slot[s].on[lane],1,memory_order_relaxed);
+  if(name->magic==MESH_SWITCH_MAGIC)
+    for(uint32_t i=0;i<name->told && i<MESH_SWITCH_TOLD;i++)if(name->credit[i].to==peer){mesh_switch_untell(m,sw,peer,name->credit+i);name->credit[i].to=UINT32_MAX;}
   uint32_t mask=0;
   if(name->magic==MESH_SWITCH_MAGIC)for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(name->dest[i].next==peer)mask|=UINT32_C(1)<<i;
   if(!mask){mesh_switch_release(sw,s);return UINT32_MAX;}
