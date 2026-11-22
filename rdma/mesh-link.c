@@ -446,6 +446,7 @@ static void *port_progress(void *argument){
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
   atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
   uint64_t told=atomic_load_explicit(&port->seen,memory_order_relaxed);
+  mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_lanes_among_for) */
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     /* while the port's guard stands, or its link serves no lane, no pass (no post on any queue pair of its device) and
        no lane read: the thread waits on the guard word (design/transport.md B13: a guarded call in the driver costs no

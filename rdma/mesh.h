@@ -29,7 +29,7 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    bandwidth, so a pair's parallel cables are parallel links of every map made from the records (mesh_map).  142
    (design/switched-multipath-dma.md): every SEND is one slot of a node's pool, its piece's name then its frame, of one
    frame count (mesh-switched.h); no piece is placed on a queue pair ahead of time, and ORDER and SEGMENT are gone */
-#define MESH_VERSION 158u
+#define MESH_VERSION 159u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).
    156 replaces the node orders' rings with declared programs and segments (struct mesh_node); 158 adds the segments

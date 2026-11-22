@@ -473,6 +473,10 @@ static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mas
 }
 /* among the lanes whose SENDs carry `need` bytes (0: any), the one of the least wait with `extra` bytes more, or with
    its own SEND's bytes where `extra` is negative */
+/* the calling thread's own port (a port child's progress thread, mesh-link.c port_progress; UINT32_MAX elsewhere): of
+   lanes whose waits are equal, one of its own port's is posted by this thread in this pass, any other's waits for its
+   own child's pass (the handoff through the outbox) */
+static __thread uint32_t mesh_switch_home=UINT32_MAX;
 static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra,uint64_t need){
   double least=INFINITY;*best=UINT32_MAX;*rate=0;
   const uint64_t every=~UINT64_C(0)>>(64-MESH_SWITCH_LANES);
@@ -500,8 +504,9 @@ static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t
     const uint64_t carries=mesh_switch_lane_bytes(sw,l);
     if(need>carries)continue;
     const double wait=(queued[c]+(extra<0?(double)carries:extra))/each;
-    if(wait<least || (wait==least && *best!=UINT32_MAX &&
-                      atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)<atomic_load_explicit(&sw->lane[*best].queued,memory_order_relaxed))){least=wait;*best=l;}
+    const int home=c==mesh_switch_home,best_home=*best!=UINT32_MAX && *best/(2*MESH_LINK_STREAMS)==mesh_switch_home;
+    if(wait<least || (wait==least && *best!=UINT32_MAX && (home>best_home || (home==best_home &&
+                      atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)<atomic_load_explicit(&sw->lane[*best].queued,memory_order_relaxed))))){least=wait;*best=l;}
   }
   /* none of the mask's lanes live: every lane looked at (one come up since the refresh) */
   if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among_for(sw,every,peer,fallback_rate,best,rate,extra,need);
