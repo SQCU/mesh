@@ -155,6 +155,9 @@ struct mesh_switch_slot {
   /* a held slot whose one destination here waits for its client: the word it waits on (region offset, 0 none) and the
      value that word must reach; retried in full only once it has (mesh_switch_forward) */
   uint64_t wait_word,wait_value;
+  /* the program that word is its (region offset of its mesh_declared, 0 none: the region's `control`, a declaration's):
+     a wait ends where that program is no longer the one of the piece's key (closed and vacated: the piece is dropped) */
+  uint64_t wait_program;
 };
 /* the trainer's records (rdma/tests/route): a draw (split.h struct route_draw and its behaviour log-probability), a
    piece delivered (its latency and queueing over its floor) or an execution completed at a node (its span of local
@@ -190,6 +193,8 @@ struct mesh_switch_counters {
   _Atomic uint64_t credits,credits_taken,refreshes,refresh_ns;
   _Atomic uint64_t unplaced[8];     /* deliveries put off, by why (mesh_switch_unplaced) */
   _Atomic uint64_t post_call_ns;    /* the posts' own time (the provider's post_send) */
+  _Atomic uint64_t orphans;         /* destinations here dropped: their program gone (vacated, or replaced in its slot), or closed before
+                                       the piece's execution (mesh_switch_gone) */
 };
 struct mesh_switch {
   uint32_t magic,slots;
@@ -1192,22 +1197,29 @@ static inline int mesh_switch_deliver(struct hdr *m,const struct mesh_switch_nam
    program yet, or the window) */
 static inline uint64_t mesh_switch_waits_on(const struct hdr *m,const struct mesh_declared *p,const struct mesh_switch_name *name,
                                            const struct mesh_switch_dest *dest,uint64_t *value){
-  const struct mesh_crossing *table=p?mesh_switch_table(m,p,1):NULL;
+  if(!p)return 0;   /* no program yet: the caller waits on `control` as it read it before looking (mesh_switch_forward) */
+  const struct mesh_crossing *table=mesh_switch_table(m,p,1);
   if(!table || dest->transfer>=p->program.transfers[1])return 0;
   const struct mesh_crossing *t=table+dest->transfer;
   const uint64_t e=name->execution,step=e*p->program.period+t->step;
   if(atomic_load_explicit(&p->issued,memory_order_acquire)<=step){*value=step+1;return (uint64_t)((const char *)&p->issued-(const char *)m);}
-  if(!t->gate)return 0;
-  const uint64_t add=e*t->gate_step;   /* a receive's gate: mesh_switch_ready at d 1 */
-  if(!t->gates){
-    const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire);
-    if(v!=UINT64_MAX && v<t->gate_base+add){*value=t->gate_base+add;return t->gate;}
-    return 0;
+  if(t->gate){
+    const uint64_t add=e*t->gate_step;   /* a receive's gate: mesh_switch_ready at d 1 */
+    if(!t->gates){
+      const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire);
+      if(v!=UINT64_MAX && v<t->gate_base+add){*value=t->gate_base+add;return t->gate;}
+    }else{
+      const struct mesh_gate_term *g=(const void *)((const char *)m+t->gate);
+      for(uint32_t k=0;k<t->gates;k++){
+        const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+g[k].word),memory_order_acquire);
+        if(v!=UINT64_MAX && v<g[k].threshold+add){*value=g[k].threshold+add;return g[k].word;}
+      }
+    }
   }
-  const struct mesh_gate_term *g=(const void *)((const char *)m+t->gate);
-  for(uint32_t k=0;k<t->gates;k++){
-    const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+g[k].word),memory_order_acquire);
-    if(v!=UINT64_MAX && v<g[k].threshold+add){*value=g[k].threshold+add;return g[k].word;}
+  /* past the transfer's window: its executions done (`complete`) must reach e - W + 1 */
+  const struct mesh_switch_transfer *progress=mesh_switch_progress((struct hdr *)m,p,1)+dest->transfer;
+  if(e>=atomic_load_explicit(&progress->complete,memory_order_acquire)+MESH_SWITCH_WINDOW){
+    *value=e-MESH_SWITCH_WINDOW+1;return (uint64_t)((const char *)&progress->complete-(const char *)m);
   }
   return 0;
 }
@@ -1235,6 +1247,26 @@ static inline uint32_t mesh_switch_unplaced(const struct hdr *m,const struct mes
   return 7;
 }
 
+/* whether a destination here can never be placed: its program, at the piece's source's node slot, was declared and has
+   gone (its slot vacated with the key still in it, or given to another program since: `prior`), or it closed before the
+   piece's execution.  A program not declared yet is not gone (a piece may land before its receiver declares): keys are
+   never reused (nccl-mesh.c: the communicator's name and the process's declaration count), so a key seen gone stays gone */
+static inline int mesh_switch_gone(const struct hdr *m,const struct mesh_switch_name *name){
+  const struct mesh_node *x=mesh_switch_order((struct hdr *)m,name->source);
+  if(!x)return 0;
+  for(uint32_t k=0;k<MESH_PROGRAMS;k++){
+    const struct mesh_declared *p=x->program+k;
+    const uint64_t owner=atomic_load_explicit(&p->owner,memory_order_acquire);
+    if(owner==UINT64_MAX)continue;
+    if(p->prior==name->key)return 1;
+    if(p->program.key!=name->key)continue;
+    if(!owner || !p->progress[1])return 1;
+    const uint64_t closed=atomic_load_explicit(&p->closed,memory_order_acquire);
+    if(closed!=UINT64_MAX && name->execution>=closed)return 1;
+  }
+  return 0;
+}
+
 /* ---- The forward: a held slot's destinations here delivered, the rest switched onto lanes --------------------------
    Slot s holds a piece (staged here, or landed).  Its destinations at this node are delivered, the others split
    (mesh_switch_choose), every group in a copy of the slot but the last, which goes in the slot itself where nothing
@@ -1248,12 +1280,16 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
   const uint32_t self=m->node;
   /* a slot held for its client's word: one load, until the word reaches its value */
   if(sw->slot[s].wait_word){
-    if(atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+sw->slot[s].wait_word),memory_order_acquire)<sw->slot[s].wait_value)return 0;
-    sw->slot[s].wait_word=0;
+    const struct mesh_declared *wp=sw->slot[s].wait_program?(const struct mesh_declared *)((const char *)m+sw->slot[s].wait_program):NULL;
+    if(atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+sw->slot[s].wait_word),memory_order_acquire)<sw->slot[s].wait_value &&
+       (!wp || (mesh_switch_owned(wp) && wp->program.key==name->key)))return 0;
+    sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;
   }
   const int logging=atomic_load_explicit(&sw->logging,memory_order_relaxed);
   struct mesh_switch_dest kept[MESH_SWITCH_N],away[MESH_SWITCH_N];uint32_t nkept=0,owed=0;
-  uint64_t waits=0,wait_value=0;
+  uint64_t waits=0,wait_value=0,wait_program=0;
+  /* `control` read before any program is looked for, so a declaration after the look moves it past this value */
+  const uint64_t control=atomic_load_explicit(&m->control,memory_order_acquire);
   for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++){
     if(name->dest[i].node!=self){away[owed++]=name->dest[i];continue;}
     if(name->kind==MESH_PIECE_CREDIT){mesh_switch_credit_take(m,name);MESH_SWITCH_COUNT(sw,ring,credits_taken,1);continue;}
@@ -1270,9 +1306,13 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
         /* a record a unit the piece carried */
         for(uint32_t u=0;u<(name->dest[i].units?name->dest[i].units:1u);u++){r.span=name->dest[i].span+u;mesh_switch_log_put(sw,ring,&r);}
       }
+    }else if(mesh_switch_gone(m,name)){
+      MESH_SWITCH_COUNT(sw,ring,orphans,1);
     }else{
       kept[nkept++]=name->dest[i];
-      waits=mesh_switch_waits_on(m,found,name,name->dest+i,&wait_value);
+      if(found)waits=mesh_switch_waits_on(m,found,name,name->dest+i,&wait_value);
+      else{waits=(uint64_t)((const char *)&m->control-(const char *)m);wait_value=control+1;}
+      wait_program=found?(uint64_t)((const char *)found-(const char *)m):0;
       if(!waits)MESH_SWITCH_COUNT(sw,ring,unplaced[mesh_switch_unplaced(m,name,name->dest+i)],1);
     }
   }
@@ -1340,7 +1380,7 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
   /* still held: the name as it came, its owed destinations alone; where its one destination left is here, waiting on
      its client's word, the word kept for the retries */
   MESH_SWITCH_COUNT(sw,ring,kept,1);
-  if(nkept==1 && kept[0].node==self && waits){sw->slot[s].wait_word=waits;sw->slot[s].wait_value=wait_value;}
+  if(nkept==1 && kept[0].node==self && waits){sw->slot[s].wait_word=waits;sw->slot[s].wait_value=wait_value;sw->slot[s].wait_program=wait_program;}
   *name=sending;name->dests=nkept;memcpy(name->dest,kept,nkept*sizeof *kept);
   return 0;
 }
@@ -1349,7 +1389,7 @@ static inline int mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32
   struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(m,sw,s);
   atomic_fetch_add_explicit(&sw->lane[lane].landed,1,memory_order_relaxed);
   MESH_SWITCH_COUNT(sw,ring,landed,1);
-  sw->slot[s].landed=now;sw->slot[s].wait_word=0;
+  sw->slot[s].landed=now;sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;
   atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
   atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
   if(name->magic!=MESH_SWITCH_MAGIC){mesh_switch_release(sw,s);return 1;}

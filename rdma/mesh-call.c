@@ -81,6 +81,8 @@ static void slot_vacate(struct hdr *m,struct mesh_declared *d){
   if(d->pages)mesh_bits_clear(mesh_arena_bits(m),d->page,d->pages);
   d->progress[0]=d->progress[1]=0;d->pages=0;
   atomic_store_explicit(&d->owner,0,memory_order_release);
+  /* the pieces of its key still held at this node are gone now: their waits on `control` end (mesh-switched.h) */
+  mesh_notify(&m->control);
 }
 /* Declared toward the order's node: a vacant program slot taken (UINT64_MAX while it is made, so no bridge reads it
    half made), the program's progress leased from the arena and made, the declaration copied, the slot given to the
@@ -116,6 +118,7 @@ int mesh_declare(struct mesh_ctx *context,const struct mesh_order *order,const s
   const uint64_t page=(uint64_t)m->pgsz,pages=(bytes[0]+bytes[1]+page-1)/page;
   const uint32_t first=pages?mesh_arena_alloc(context,(uint32_t)pages,1):0;
   if(pages && first==MESH_ABSENT){atomic_store_explicit(&d->owner,0,memory_order_release);return ENOMEM;}
+  d->prior=d->program.key;
   d->program=*program;
   d->page=first;d->pages=(uint32_t)pages;
   const uint64_t base=m->data_off+(uint64_t)first*page;
@@ -123,6 +126,9 @@ int mesh_declare(struct mesh_ctx *context,const struct mesh_order *order,const s
   for(int k=0;k<2;k++)if(t[k])mesh_switch_progress_init(m,d,k,t[k],program->transfers[k]);
   atomic_store_explicit(&d->issued,0,memory_order_relaxed);atomic_store_explicit(&d->closed,UINT64_MAX,memory_order_relaxed);
   atomic_store_explicit(&d->claimed,0,memory_order_relaxed);
+  /* the receive window anew (mesh-switched.h mesh_switch_credit): a slot's last program's credit, kept, let a sender
+     run unbounded ahead of its receiver until the receiver's pool held nothing but later executions (every pool wedged) */
+  atomic_store_explicit(&d->credit,0,memory_order_relaxed);atomic_store_explicit(&d->credited,0,memory_order_relaxed);
   atomic_store_explicit(&d->owner,context->client,memory_order_release);
   mesh_notify(&m->control);
   *run=(struct mesh_run){.order=*order,.program=joining,.issued=&d->issued};

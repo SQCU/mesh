@@ -155,6 +155,7 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    the port first pairs, MESH_ABSENT none: mesh.h struct mesh_lanes `rows`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
+#define SWITCH_BUCKETS 64u
 struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,lanes;
@@ -171,6 +172,13 @@ struct link {
      mesh_switch_forward) */
   uint32_t receives;
   uint32_t *held,holds,held_room;
+  /* the held slots that wait on a word (mesh-switched.h mesh_switch_slot wait_word: their client's issue or gate, their
+     transfer's window, the region's `control` for a program not yet declared), by that word and its program: a pass
+     loads each bucket's word once and touches its slots only once the word reaches the least value they wait for, so a
+     pass costs the buckets, not the slots held (a receiver holding thousands of early pieces spent its passes in
+     mesh_switch_forward retrying each) */
+  struct held_bucket { uint64_t word,program,key,least; uint32_t *slot; uint64_t *value; uint32_t n,room; } bucket[SWITCH_BUCKETS];
+  uint32_t buckets;
   /* the child's deliveries when it last looked for credits due, and its passes since (mesh-link.c switch_stage) */
   uint64_t credit_delivered,credit_passes;
   /* the program slots owned when the child last looked (node slot x MESH_PROGRAMS + program), looked at again every

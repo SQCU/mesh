@@ -133,6 +133,33 @@ static inline uint64_t lane_frames(const struct port *port,uint32_t j){
 }
 static void switch_hold(struct port *port,uint32_t slot){
   struct link *l=&port->link;
+  struct mesh_switch *sw=switch_of();
+  const uint64_t word=sw->slot[slot].wait_word,program=sw->slot[slot].wait_program;
+  if(word){
+    uint32_t b=0,free=SWITCH_BUCKETS;
+    for(;b<l->buckets;b++){
+      if(l->bucket[b].word==word && l->bucket[b].program==program)break;
+      if(!l->bucket[b].word && free==SWITCH_BUCKETS)free=b;
+    }
+    if(b==l->buckets){
+      if(free<SWITCH_BUCKETS)b=free;else if(l->buckets<SWITCH_BUCKETS)b=l->buckets++;
+    }
+    struct held_bucket *k=b<l->buckets?l->bucket+b:NULL;
+    if(k && !k->word){k->word=word;k->program=program;k->n=0;k->least=UINT64_MAX;
+      k->key=((const struct mesh_switch_name *)mesh_switch_slot_at(M,sw,slot))->key;}
+    if(k && k->n==k->room){
+      const uint32_t room=k->room?2*k->room:64;
+      uint32_t *s=realloc(k->slot,room*sizeof *s);uint64_t *v=s?realloc(k->value,room*sizeof *v):NULL;
+      if(s)k->slot=s;
+      if(v){k->value=v;k->room=room;}else k=NULL;
+    }
+    if(k){
+      k->slot[k->n]=slot;k->value[k->n]=sw->slot[slot].wait_value;k->n++;
+      if(sw->slot[slot].wait_value<k->least)k->least=sw->slot[slot].wait_value;
+      sw->slot[slot].owner=port->index+1;
+      return;
+    }
+  }
   if(l->holds==l->held_room){
     const uint32_t room=l->held_room?2*l->held_room:256;
     uint32_t *grown=realloc(l->held,room*sizeof *grown);
@@ -326,15 +353,50 @@ static void switch_stage(struct port *port){
     }
   }
 }
-/* the pieces this child holds (a destination here not ready, no lane yet) retried */
+/* the pieces this child holds (a destination here not ready, no lane yet) retried: those with no word each pass, those
+   waiting on a word only once it reaches their value (or their program is no longer theirs) */
 static void switch_retry(struct port *port){
   struct link *l=&port->link;
-  if(!l->holds)return;
   struct mesh_switch *sw=switch_of();
-  const uint64_t at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  uint32_t kept=0;
-  for(uint32_t i=0;i<l->holds;i++)if(!mesh_switch_forward(M,sw,l->held[i],at,port->index))l->held[kept++]=l->held[i];
-  l->holds=kept;
+  uint64_t at=0;
+  if(l->holds){
+    at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint32_t holds=l->holds;uint32_t kept=0;
+    l->holds=0;   /* a slot that now waits on a word goes to its bucket (switch_hold); one that waits on none, back here */
+    for(uint32_t i=0;i<holds;i++){
+      const uint32_t s=l->held[i];
+      if(mesh_switch_forward(M,sw,s,at,port->index))continue;
+      if(sw->slot[s].wait_word)switch_hold(port,s);else l->held[kept++]=s;
+    }
+    /* switch_hold appended no slot here (every one with no word was kept in place above) */
+    l->holds=kept;
+  }
+  for(uint32_t b=0;b<l->buckets;b++){
+    struct held_bucket *k=l->bucket+b;
+    if(!k->word)continue;
+    const struct mesh_declared *p=k->program?(const struct mesh_declared *)((const char *)M+k->program):NULL;
+    const int valid=!p || (mesh_switch_owned(p) && p->program.key==k->key);
+    const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)M+k->word),memory_order_acquire);
+    if(valid && v<k->least)continue;
+    if(!at)at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    uint32_t n=k->n,kept=0;uint64_t least=UINT64_MAX;
+    k->n=0;   /* a slot kept waiting here goes back in place; one that waits elsewhere now, to its bucket */
+    for(uint32_t i=0;i<n;i++){
+      const uint32_t s=k->slot[i];const uint64_t want=k->value[i];
+      if(valid && want>v){k->slot[kept]=s;k->value[kept++]=want;if(want<least)least=want;continue;}
+      if(mesh_switch_forward(M,sw,s,at,port->index))continue;
+      if(sw->slot[s].wait_word==k->word && sw->slot[s].wait_program==k->program){
+        const uint64_t w=sw->slot[s].wait_value;k->slot[kept]=s;k->value[kept++]=w;if(w<least)least=w;
+      }else{
+        /* elsewhere: held in place of this bucket's count, which switch_hold must not see as its own yet */
+        const uint32_t was=k->n;k->n=kept;const uint64_t word=k->word;k->word=~0ull;
+        switch_hold(port,s);
+        k->word=word;kept=k->n;k->n=was;
+      }
+    }
+    k->n=kept;k->least=least;
+    if(!kept)k->word=0;
+  }
 }
 
 /* the progress thread's tell (the epoch it has seen, the guard it holds at), its raiser woken (port_wait) */
@@ -629,6 +691,7 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
   l->holds=0;l->receives=0;
+  for(uint32_t b=0;b<l->buckets;b++){l->bucket[b].n=0;l->bucket[b].word=0;}
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
