@@ -67,9 +67,8 @@ uint32_t live_fabric(double *in, double *out, double *unit) {
   for (uint32_t i = 0; i < v.nodes; i++) in[i] = out[i] = 0;
   for (uint32_t l = 0; l < v.links; l++) {
     const uint32_t a = mesh_switch_index(&v, v.link[l].from), b = mesh_switch_index(&v, v.link[l].to);
-    const double r = mesh_switch_link_rate(v.link + l);   /* as measured, where it is */
-    if (a < v.nodes) out[a] += r;
-    if (b < v.nodes) in[b] += r;
+    if (a < v.nodes) out[a] += v.link[l].rate;
+    if (b < v.nodes) in[b] += v.link[l].rate;
   }
   *unit = mesh_switch_unit(&v, (double)mesh_switch_piece(M));
   return v.nodes;
