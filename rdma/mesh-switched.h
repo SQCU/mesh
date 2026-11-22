@@ -1086,6 +1086,12 @@ static inline int mesh_switch_credit_in(struct hdr *m,struct mesh_switch *sw,str
   return 1;
 }
 static inline int mesh_switch_credit(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
+  /* no credit due, read without entering (as mesh_switch_stage) */
+  if(!mesh_switch_owned(p) || !p->progress[1])return 0;
+  {
+    const uint64_t received=mesh_switch_received(m,p),told=atomic_load_explicit(&p->credited,memory_order_acquire);
+    if(received==UINT64_MAX || received<told+(mesh_switch_ahead(sw,p)+1)/2)return 0;
+  }
   if(!mesh_switch_enter(p,p->program.key))return 0;
   const int r=mesh_switch_credit_in(m,sw,x,p,now,slot);
   mesh_switch_leave(p);
@@ -1197,6 +1203,16 @@ static inline int mesh_switch_stage_in(struct hdr *m,struct mesh_switch *sw,stru
 }
 
 static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
+  /* nothing to stage, read without entering: every port child looks at every program every pass, and the entry's
+     read-modify-write on `users` bounced each program's line between them; a read made garbage by a vacate meanwhile
+     only sends this to the entered path, which reads again */
+  if(!mesh_switch_owned(p) || !p->progress[0])return 0;
+  {
+    const struct mesh_crossing *table=mesh_switch_table(m,p,0);
+    uint64_t e,span;uint32_t t;
+    if(!table || !mesh_switch_locate(p,table,0,atomic_load_explicit(&p->claimed,memory_order_acquire),&e,&t,&span) ||
+       !mesh_switch_ready(m,p,table+t,0,e,span))return 0;
+  }
   if(!mesh_switch_enter(p,p->program.key))return 0;
   const int r=mesh_switch_stage_in(m,sw,x,p,now,slot);
   mesh_switch_leave(p);

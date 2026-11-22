@@ -410,6 +410,10 @@ static void port_tell(_Atomic uint64_t *word,uint64_t value){
    completions (link_send), the pass counted (`passes`).  It tells the port's epoch it began at (a conclusion around a
    stuck call moves it: ports_stalled) */
 static void port_pass(struct port *port,uint64_t *told){
+  /* one pass in 1024 timed (counters part_ns[0] its time summed, part_ns[1] how many): a pass's length is a piece's wait
+     from its push onto this child's outbox to its post */
+  static __thread uint32_t timing;
+  const uint64_t pass0=!(++timing&1023)?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   const uint64_t epoch=atomic_load(&port->epoch);
   struct link *l=&port->link;
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
@@ -426,6 +430,7 @@ static void port_pass(struct port *port,uint64_t *told){
   }
   if(served)link_send(port,served);
   MESH_SWITCH_COUNT(switch_of(),port->index,passes,1);   /* the pass time is the wall time over these (the thread spins) */
+  if(pass0){MESH_SWITCH_COUNT(switch_of(),port->index,part_ns[0],clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-pass0);MESH_SWITCH_COUNT(switch_of(),port->index,part_ns[1],1);}
   struct mesh_lanes *counted=lanes_of(port,0);
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
   if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
