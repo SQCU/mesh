@@ -98,7 +98,9 @@ _Static_assert(sizeof(struct mesh_switch_name)<=MESH_SWITCH_HEAD && MESH_SWITCH_
 /* ---- The region's switch (struct hdr switch_off; MESH_SWITCH_BYTES, mesh.h) ------------------------------------- */
 /* a link of the view: a directed node pair, its cables, rate (all of them, bytes a ns), latency (ns), and its line's
    wait and spread (two floats in one word) with the line's stamp */
-struct mesh_switch_link { uint32_t from,to,cables,ends; double rate,latency; _Atomic uint64_t line,stamp; };   /* ends: the view indices, from | to << 8 */
+struct mesh_switch_link { uint32_t from,to,cables,ends; double rate,latency; _Atomic uint64_t line,stamp,measured; };   /* ends: the view indices, from | to << 8;
+   measured: the link's rate as its sender measures it (bytes a ns, every cable: its lanes' completions), carried to every
+   node in the lines (0 until measured: the configured rate stands in) */
 struct mesh_switch_view {
   _Atomic uint64_t serial;          /* odd while the parent writes it */
   uint32_t self,nodes,links,ranks; /* ranks: the view nodes that run collectives' ranks, bits over view indices (0: all) */
@@ -233,6 +235,12 @@ static inline void mesh_switch_raise(void *m,uint64_t at,uint64_t value){
 }
 static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x,&a,4);memcpy(&y,&b,4);return (uint64_t)x|(uint64_t)y<<32; }
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
+/* a link's rate as the fabric is, not as configured: its sender's measurement where there is one (the live fabric as the
+   features' input: a split's arrival estimates, the cost-to-go, the unit) */
+static inline double mesh_switch_link_rate(const struct mesh_switch_link *x){
+  float r,unused;mesh_switch_unpack(atomic_load_explicit(&x->measured,memory_order_relaxed),&r,&unused);
+  return r>0?(double)r:x->rate;
+}
 /* a piece's bytes at most (mesh-order.h's order_piece_bytes: one allocation block) and the slot that carries one */
 static inline uint64_t mesh_switch_piece(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
 static inline uint64_t mesh_switch_slot_bytes(const struct hdr *m){ return (MESH_SWITCH_HEAD+MESH_SWITCH_UNITS*mesh_switch_piece(m)+4095)/4096*4096; }   /* whole frames of 4096 (mesh-bridge.h MESH_FRAME) */
@@ -336,8 +344,8 @@ static inline void mesh_switch_view_set(struct mesh_switch *sw,uint32_t self,con
     uint32_t j=k;while(j && sorted[j-1]>nodes[i]){sorted[j]=sorted[j-1];j--;}
     sorted[j]=nodes[i];k++;
   }
-  uint64_t lines[MESH_SWITCH_LINKS],stamps[MESH_SWITCH_LINKS];uint32_t from[MESH_SWITCH_LINKS],to[MESH_SWITCH_LINKS],held=v->links;
-  for(uint32_t l=0;l<held;l++){lines[l]=atomic_load(&v->link[l].line);stamps[l]=atomic_load(&v->link[l].stamp);from[l]=v->link[l].from;to[l]=v->link[l].to;}
+  uint64_t lines[MESH_SWITCH_LINKS],stamps[MESH_SWITCH_LINKS],measured[MESH_SWITCH_LINKS];uint32_t from[MESH_SWITCH_LINKS],to[MESH_SWITCH_LINKS],held=v->links;
+  for(uint32_t l=0;l<held;l++){lines[l]=atomic_load(&v->link[l].line);stamps[l]=atomic_load(&v->link[l].stamp);measured[l]=atomic_load(&v->link[l].measured);from[l]=v->link[l].from;to[l]=v->link[l].to;}
   atomic_fetch_add_explicit(&v->serial,1,memory_order_acq_rel);
   v->self=self;v->nodes=k;memcpy(v->node,sorted,k*sizeof *sorted);
   v->links=0;
@@ -345,8 +353,9 @@ static inline void mesh_switch_view_set(struct mesh_switch *sw,uint32_t self,con
     struct mesh_switch_link *x=v->link+v->links++;
     x->from=links[l].from;x->to=links[l].to;x->cables=links[l].cables?links[l].cables:1;x->rate=links[l].rate;x->latency=links[l].latency;
     x->ends=(mesh_switch_index(v,x->from)&255)|(mesh_switch_index(v,x->to)&255)<<8;
-    uint64_t line=0,stamp=0;
-    for(uint32_t h=0;h<held;h++)if(from[h]==x->from && to[h]==x->to){line=lines[h];stamp=stamps[h];}
+    uint64_t line=0,stamp=0,rate=0;   /* a link kept keeps its line and its measured rate; a new one is measured anew */
+    for(uint32_t h=0;h<held;h++)if(from[h]==x->from && to[h]==x->to){line=lines[h];stamp=stamps[h];rate=measured[h];}
+    atomic_store_explicit(&x->measured,rate,memory_order_relaxed);
     atomic_store_explicit(&x->line,line,memory_order_relaxed);atomic_store_explicit(&x->stamp,stamp,memory_order_relaxed);
   }
   /* each node's reach avoiding each set: a breadth-first search over the links' ends */
@@ -428,7 +437,9 @@ static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_swi
     uint64_t was=atomic_load_explicit(&x->stamp,memory_order_relaxed);
     while(a->stamp>was)
       if(atomic_compare_exchange_weak_explicit(&x->stamp,&was,a->stamp,memory_order_relaxed,memory_order_relaxed)){
-        atomic_store_explicit(&x->line,mesh_switch_pack(a->wait,a->spread),memory_order_relaxed);break;
+        atomic_store_explicit(&x->line,mesh_switch_pack(a->wait,a->spread),memory_order_relaxed);
+        if(a->rate>0)atomic_store_explicit(&x->measured,mesh_switch_pack(a->rate,0),memory_order_relaxed);
+        break;
       }
   }
 }
@@ -441,14 +452,14 @@ static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,struct mesh
   for(uint32_t l=0;l<v->links && n<MESH_SWITCH_LINES;l++){
     const struct mesh_switch_link *x=v->link+l;
     float wait,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&wait,&spread);
-    if(x->from==v->self)line[n++]=(struct mesh_switch_line){x->from,x->to,stamp,wait,spread,(float)x->rate,(float)x->latency};
+    if(x->from==v->self)line[n++]=(struct mesh_switch_line){x->from,x->to,stamp,wait,spread,(float)mesh_switch_link_rate(x),(float)x->latency};
   }
   for(uint32_t l=0;l<v->links && n<MESH_SWITCH_LINES;l++){
     const struct mesh_switch_link *x=v->link+l;
     const uint64_t s=atomic_load_explicit(&x->stamp,memory_order_relaxed);
     if(x->from==v->self || !s)continue;
     float wait,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&wait,&spread);
-    line[n++]=(struct mesh_switch_line){x->from,x->to,s,wait,spread,(float)x->rate,(float)x->latency};
+    line[n++]=(struct mesh_switch_line){x->from,x->to,s,wait,spread,(float)mesh_switch_link_rate(x),(float)x->latency};
   }
 
   return n;
@@ -617,7 +628,7 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
     const uint32_t nb=w->neighbour[k];
     const struct mesh_switch_link *x=nb<v->nodes?mesh_switch_link_of((struct mesh_switch_view *)v,v->self,v->node[nb]):NULL;
     /* the lane's wait with this piece's own bytes on it: its time to clear the lane (design: (backlog + bytes) / rate) */
-    wait[k]=nb<v->nodes?mesh_switch_lanes_among_for(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,-1,MESH_SWITCH_HEAD+(uint64_t)name->bytes):INFINITY;
+    wait[k]=nb<v->nodes?mesh_switch_lanes_among_for(sw,w->toward[k],v->node[nb],x?mesh_switch_link_rate(x)/x->cables:0,best_lane+k,rate+k,-1,MESH_SWITCH_HEAD+(uint64_t)name->bytes):INFINITY;
     latency[k]=x?x->latency:0;
   }
   /* the policy's context: the piece's source and destinations as staged, the owed ones (view indices) */
@@ -771,9 +782,9 @@ static inline void mesh_switch_state_make(struct mesh_switch *sw,const struct me
   for(uint32_t l=0;l<v->links;l++){
     const struct mesh_switch_link *x=v->link+l;
     float wait,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&wait,&spread);
-    if(x->from==v->self){uint32_t best;double rate;const double now=mesh_switch_lanes_toward(sw,x->to,x->rate/x->cables,&best,&rate);
+    if(x->from==v->self){uint32_t best;double rate;const double now=mesh_switch_lanes_toward(sw,x->to,mesh_switch_link_rate(x)/x->cables,&best,&rate);
                          wait=best==UINT32_MAX?INFINITY:(float)now;spread=0;}
-    s->hop[l]=wait+page/(x->rate/x->cables)+x->latency;s->spread[l]=spread;
+    s->hop[l]=wait+page/(mesh_switch_link_rate(x)/x->cables)+x->latency;s->spread[l]=spread;
     if(x->from==v->self && isfinite(wait) && s->deg<MESH_SWITCH_N){const uint32_t b=mesh_switch_index(v,x->to);s->neighbour[s->deg]=b;s->first[s->deg]=s->hop[l];s->deg++;}
   }
   double at[MESH_SWITCH_N];
@@ -811,7 +822,7 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
   struct mesh_switch_state s;mesh_switch_state_make(sw,&v,page,&s);
   float target[MESH_SWITCH_N][MESH_SWITCH_N];memset(target,0,sizeof target);
   if(fixed){
-    for(uint32_t l=0;l<v.links;l++)s.hop[l]=page/(v.link[l].rate/v.link[l].cables)+v.link[l].latency;
+    for(uint32_t l=0;l<v.links;l++)s.hop[l]=page/(mesh_switch_link_rate(v.link+l)/v.link[l].cables)+v.link[l].latency;
     for(uint32_t k=0;k<s.deg;k++)for(uint32_t l=0;l<v.links;l++)if(v.link[l].from==v.self && mesh_switch_index(&v,v.link[l].to)==s.neighbour[k])s.first[k]=s.hop[l];
     for(uint32_t l=0;l<v.links;l++)s.spread[l]=0;
     mesh_switch_thompson(&s,1,seed,target);
@@ -849,8 +860,18 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
     if(v.link[l].from!=v.self)continue;
     struct mesh_switch_link *x=mesh_switch_link_of(&sw->view,v.link[l].from,v.link[l].to);
     if(!x)continue;
-    uint32_t best;double rate;double now=mesh_switch_lanes_toward(sw,x->to,x->rate/x->cables,&best,&rate);
+    uint32_t best;double rate;double now=mesh_switch_lanes_toward(sw,x->to,mesh_switch_link_rate(x)/x->cables,&best,&rate);
     if(!isfinite(now))now=0;
+    /* its rate measured: a cable's the best of its lanes' completion estimates (a cable's lanes share it), the cables summed */
+    double cable[MESH_PORTS]={0},measured=0;
+    for(uint32_t k=0;k<MESH_SWITCH_LANES;k++){
+      if(!atomic_load_explicit(&sw->lane[k].live,memory_order_relaxed) || atomic_load_explicit(&sw->lane[k].peer,memory_order_relaxed)!=x->to)continue;
+      float r,waited;mesh_switch_unpack(atomic_load_explicit(&sw->lane[k].estimate,memory_order_relaxed),&r,&waited);
+      const uint32_t port=k/(2*MESH_LINK_STREAMS);
+      if(port<MESH_PORTS && r>cable[port])cable[port]=r;
+    }
+    for(uint32_t q=0;q<MESH_PORTS;q++)measured+=cable[q];
+    if(measured>0)atomic_store_explicit(&x->measured,mesh_switch_pack((float)measured,0),memory_order_relaxed);
     float was,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&was,&spread);
     spread=spread+((float)fabs(now-was)-spread)/4;
     atomic_store_explicit(&x->line,mesh_switch_pack((float)now,spread),memory_order_relaxed);
@@ -1471,7 +1492,7 @@ static inline int mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32
    The features' time unit: the slowest pair of ranks' shortest unloaded delay for one page (route.h's stream unit) */
 static inline double mesh_switch_unit(const struct mesh_switch_view *v,double page){
   double hop[MESH_SWITCH_LINKS],at[MESH_SWITCH_N],unit=0;
-  for(uint32_t l=0;l<v->links;l++)hop[l]=v->link[l].latency+page/(v->link[l].rate/v->link[l].cables);
+  for(uint32_t l=0;l<v->links;l++)hop[l]=v->link[l].latency+page/(mesh_switch_link_rate(v->link+l)/v->link[l].cables);
   const uint32_t ranks=mesh_switch_ranks(v);
   for(uint32_t a=0;a<v->nodes;a++){
     if(!(ranks>>a&1))continue;
@@ -1498,7 +1519,7 @@ static inline void mesh_switch_tokens_make(struct hdr *m,struct mesh_switch *sw,
   s.f.nodes=(int)(v.nodes<ROUTE_N?v.nodes:ROUTE_N);s.f.lanes=(int)(v.links<ROUTE_L?v.links:ROUTE_L);s.f.duplex=1;
   for(int l=0;l<s.f.lanes;l++){
     const struct mesh_switch_link *x=v.link+l;
-    s.f.from[l]=(int)mesh_switch_index(&v,x->from);s.f.to[l]=(int)mesh_switch_index(&v,x->to);s.f.cables[l]=(int)x->cables;s.f.rate[l]=x->rate;s.f.latency[l]=x->latency;
+    s.f.from[l]=(int)mesh_switch_index(&v,x->from);s.f.to[l]=(int)mesh_switch_index(&v,x->to);s.f.cables[l]=(int)x->cables;s.f.rate[l]=mesh_switch_link_rate(x);s.f.latency[l]=x->latency;
   }
   for(uint32_t a=0;a<v.nodes && a<ROUTE_N;a++)if(ranks>>a&1)s.f.compute[s.f.ncompute++]=(int)a;
   s.unit=mesh_switch_unit(&v,page);
@@ -1515,7 +1536,7 @@ static inline void mesh_switch_tokens_make(struct hdr *m,struct mesh_switch *sw,
   for(int l=0;l<s.f.lanes;l++){
     const struct mesh_switch_link *x=v.link+l;
     float wait,spread;mesh_switch_unpack(atomic_load_explicit(&sw->view.link[l].line,memory_order_relaxed),&wait,&spread);
-    if(x->from==v.self){uint32_t best;double rate;const double now_=mesh_switch_lanes_toward(sw,x->to,x->rate/x->cables,&best,&rate);wait=best==UINT32_MAX?0:(float)now_;}
+    if(x->from==v.self){uint32_t best;double rate;const double now_=mesh_switch_lanes_toward(sw,x->to,mesh_switch_link_rate(x)/x->cables,&best,&rate);wait=best==UINT32_MAX?0:(float)now_;}
     st.wait[l]=wait;st.dup[l]=1;
   }
   for(uint32_t a=0;a<ROUTE_N;a++)for(uint32_t b=0;b<ROUTE_N;b++)st.togo[a][b]=a<v.nodes && b<v.nodes?(a==b?0:w.togo[a][b]):1e12;

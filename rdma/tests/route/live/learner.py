@@ -16,6 +16,7 @@ lib.live_grad.restype = ctypes.c_uint32
 lib.live_fabric.restype = ctypes.c_uint32
 if lib.live_attach(): sys.exit('learner: no bridge region of this build here (the fabric the floors are over)')
 P = ctypes.c_void_p
+STATE_F = 35   # split.h: features 35..37 the state ones (latest, mean arrival; share), 0..34 lane identities
 STEP, AGE, MOST, LR, CLIP = 0.1, 1.0, 40000, float(os.environ.get('LIVE_LR', '0.02')), 4.0
 DRAW = np.dtype([('arrive', '<f4', 30), ('valid', '<u4'), ('mask', '<u4'), ('S', '<u4'), ('token', '<u4'), ('deg', '<u4'),
                  ('ntok', '<u4'), ('row', '<u4'), ('unit', '<f4'), ('a1', '<f4'), ('a2', '<f4')])
@@ -191,6 +192,11 @@ def step(now):
                 lib.live_grad(dr.ctypes.data_as(P), ctypes.c_uint32(DRAW.itemsize), beh.ctypes.data_as(P), ctypes.c_uint32(len(u)),
                               rows.ctypes.data_as(P), a.ctypes.data_as(P), x.w.ctypes.data_as(P), gx.ctypes.data_as(P), ctypes.c_float(CLIP),
                               lp.ctypes.data_as(P))
+            # a context's table holds no route: only its weights on the split's state features (the latest and mean
+            # arrival estimates, the lane share) learn; a lane's identity one-hots (0..34) stay 0, since a table's
+            # weight on them would be a route fixed whatever the live state (the net, w from the live tokens, is what
+            # may weigh them, every refresh)
+            gx[:, :STATE_F] = 0
             parts.append(gx.ravel() / max(len(D_), 1))
         J.append(np.concatenate(parts))
     J = np.array(J, np.float32)
