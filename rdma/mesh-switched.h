@@ -1025,7 +1025,12 @@ static inline struct mesh_node *mesh_switch_order(struct hdr *m,uint32_t node){
 enum { MESH_PIECE_DATA, MESH_PIECE_CREDIT };
 static inline uint64_t mesh_switch_ahead(const struct mesh_switch *sw,const struct mesh_declared *p){
   const uint64_t pieces=p->program.pieces[0]>p->program.pieces[1]?p->program.pieces[0]:p->program.pieces[1];
-  const uint64_t room=pieces?sw->slots/4/pieces:MESH_SWITCH_WINDOW;
+  /* an execution's slots as staging packs them, a quarter of the pool a program; never fewer than two executions where
+     two fit in half the pool, so the next execution streams while the last completes (one: stop and wait, a bubble of
+     the target's last landing and the credit's way back an execution) */
+  const uint64_t per=(pieces+MESH_SWITCH_UNITS-1)/MESH_SWITCH_UNITS;
+  uint64_t room=per?sw->slots/4/per:MESH_SWITCH_WINDOW;
+  if(room<2 && per && 2*per<=sw->slots/2)room=2;
   return room<1?1:room<MESH_SWITCH_WINDOW?room:MESH_SWITCH_WINDOW;
 }
 /* the executions wholly received of program p (every receive transfer's, the least); UINT64_MAX where it receives nothing */
