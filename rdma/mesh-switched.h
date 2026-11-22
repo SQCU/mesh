@@ -409,8 +409,12 @@ static inline void mesh_switch_sent(struct mesh_switch *sw,uint32_t lane,uint32_
   const uint64_t service=done>start?done-start:1,wait=start>posted?start-posted:0;
   atomic_fetch_add_explicit(&x->service,service,memory_order_relaxed);atomic_fetch_add_explicit(&x->wait,wait,memory_order_relaxed);
   float rate,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&rate,&waited);
-  const float r=(float)bytes/(float)service;
-  rate=rate>0?rate+(r-rate)/8:r;waited+=((float)wait-waited)/8;
+  /* the rate a capacity (the 3-vector's B, not its alpha): moved only by a SEND that waited behind the lane's previous
+     one (start after its post: the lane busy), whose service is its bytes' time on the wire alone; a SEND posted to an
+     idle lane serves its whole fixed cost too (alpha + bytes / B), which as a rate made a cable look a fraction of its
+     capacity and a multihop path dear (the bridges' own rule over such rates: a 12 MB all-gather 76 -> 44 GB/s) */
+  if(start>posted){const float r=(float)bytes/(float)service;rate=rate>0?rate+(r-rate)/8:r;}
+  waited+=((float)wait-waited)/8;
   atomic_store_explicit(&x->estimate,mesh_switch_pack(rate,waited),memory_order_relaxed);
   if(slot!=UINT32_MAX)mesh_switch_release(sw,slot);
 }
