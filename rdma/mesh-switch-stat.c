@@ -24,7 +24,7 @@ int main(void){
   if(m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"layout\":%u}\n",m->version);return 0;}
   const struct mesh_switch *sw=(const struct mesh_switch *)((const char *)m+m->switch_off);
   printf("{\"up\":true,\"node\":%u,\"clock\":%llu,\"slots\":%u,\"slot_bytes\":%llu,\"free\":%llu,\"counters\":[",m->node,
-         (unsigned long long)clock_gettime_nsec_np(CLOCK_MONOTONIC),sw->slots,(unsigned long long)sw->slot_bytes,U(sw->free_count));
+         (unsigned long long)clock_gettime_nsec_np(CLOCK_UPTIME_RAW),sw->slots,(unsigned long long)sw->slot_bytes,U(sw->free_count));
   for(uint32_t r=0;r<MESH_SWITCH_LOGS;r++){
     const struct mesh_switch_counters *c=sw->counters+r;
     printf("%s{\"ring\":%u,\"passes\":%llu,\"pass_ns\":%llu,\"part_ns\":[%llu,%llu,%llu,%llu,%llu],",r?",":"",r,U(c->passes),U(c->pass_ns),

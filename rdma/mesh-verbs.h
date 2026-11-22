@@ -133,7 +133,7 @@ static __attribute__((unused)) void say(const char *format,...){
   struct tm utc;gmtime_r(&t.tv_sec,&utc);
   char line[2048];
   size_t n=strftime(line,sizeof line,"%Y-%m-%dT%H:%M:%S",&utc);
-  n+=(size_t)snprintf(line+n,sizeof line-n,".%03ldZ %.3f ",t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
+  n+=(size_t)snprintf(line+n,sizeof line-n,".%03ldZ %.3f ",t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1e9);
   va_list arguments;va_start(arguments,format);vsnprintf(line+n,sizeof line-n,format,arguments);va_end(arguments);
   fputs(line,stderr);
 }
@@ -170,7 +170,7 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
   }
   if(!device->extent_mrs && !(device->extent_mrs=calloc(extents,sizeof *device->extent_mrs)))return ENOMEM;
   device->extents=extents;
-  const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  const uint64_t began=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for(size_t e=0,first=0;e<extents;e++,first+=MESH_EXTENT){
     const size_t bytes=wire->length-first<MESH_EXTENT?wire->length-first:MESH_EXTENT;
     if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
@@ -183,7 +183,7 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
     }
   }
   say("%s: region of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
-    (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
+    (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-began)/1e9);
   device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;

@@ -161,10 +161,10 @@ int mesh_diagnostic_retire(int n) {
     close(p[0]);
     close(p[1]);
     waitpid(pid, NULL, 0);
-    const uint64_t ended = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint64_t ended = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     const _Atomic uint64_t *owner = &((const struct mesh_client *)((const char *)m + m->client_off) + (client >> 32 & 63))->owner;
     uint64_t at = ended;
-    while (client && atomic_load(owner) == client && (at = clock_gettime_nsec_np(CLOCK_MONOTONIC)) - ended < UINT64_C(10000000000)) usleep(200);
+    while (client && atomic_load(owner) == client && (at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) - ended < UINT64_C(10000000000)) usleep(200);
     printf("{\"i\": %d, \"slot\": %llu, \"retired_ms\": %.3f}\n", i, (unsigned long long)(client >> 32 & 63), client ? (double)(at - ended) / 1e6 : -1.0);
     fflush(stdout);
     usleep(100000 + (useconds_t)(arc4random_uniform(3000)) * 1000);

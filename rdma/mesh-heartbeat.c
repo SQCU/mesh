@@ -51,7 +51,7 @@ static void say(const char *format,...){
   struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
   struct tm utc;gmtime_r(&t.tv_sec,&utc);
   fprintf(stderr,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %.3f heartbeat: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,utc.tm_hour,
-          utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
+          utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1e9);
   va_list arguments;va_start(arguments,format);vfprintf(stderr,format,arguments);va_end(arguments);
 }
 static uint64_t wall_us(void){return clock_gettime_nsec_np(CLOCK_REALTIME)/1000u;}

@@ -46,7 +46,7 @@ static char devices[MESH_PORTS][32];
 static uint32_t device_count;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 
-static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 uint64_t memory;
 static int64_t stop_reason;
 static void farewell_text(int64_t code,char *out,size_t room){
@@ -224,9 +224,9 @@ static void switch_sends(struct port *port,uint32_t j){
     }
     if(!n)return;
     struct ibv_send_wr *bad=NULL;
-    const uint64_t posting=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint64_t posting=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     const int error=queue->send(queue->pair,request,&bad);
-    const uint64_t posted=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     /* the requests before `bad` posted (all of them without an error) */
     const uint32_t made=error?(bad>=request && bad<request+n?(uint32_t)(bad-request):0):n;
     l->gate[lane].posted.n-=(uint64_t)(n-made)*each.n;
@@ -252,7 +252,7 @@ static void link_send(struct port *port,uint32_t served){
   struct ibv_wc done[16];
   const int count=l->provider.poll(l->provider.sent,16,done);
   if(count<0){link_failed(port,EIO,2);return;}
-  const uint64_t at=count?clock_gettime_nsec_np(CLOCK_MONOTONIC):0;
+  const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
@@ -279,7 +279,7 @@ static void link_receive(struct port *port,uint32_t served){
   const int count=l->provider.poll(l->provider.completion,16,done);
   if(count<0){link_failed(port,EIO,3);return;}
   if(count)atomic_thread_fence(memory_order_acquire);
-  const uint64_t at=count?clock_gettime_nsec_np(CLOCK_MONOTONIC):0;
+  const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
@@ -311,7 +311,7 @@ static void switch_stage(struct port *port){
   const int credits=delivered!=l->credit_delivered || ++l->credit_passes>=SWITCH_CREDIT_PASSES;
   if(credits){l->credit_delivered=delivered;l->credit_passes=0;}
   /* the clock read where a piece is made, not each pass */
-  uint64_t at=credits?clock_gettime_nsec_np(CLOCK_MONOTONIC):0;
+  uint64_t at=credits?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   /* the owned program slots, as last looked for (every SWITCH_OWNED_PASSES passes: a new declaration waits that many
      passes at most, a few tens of microseconds), each read owned again */
   if(!l->owned_passes--){
@@ -340,7 +340,7 @@ static void switch_stage(struct port *port){
           break;
         }
         staged++;
-        const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        const uint64_t t0=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         if(!at){
           /* the piece's stamps (mesh_switch_stage's `now`) at the clock read now */
           at=t0;sw->slot[s].staged=sw->slot[s].landed=at;
@@ -348,7 +348,7 @@ static void switch_stage(struct port *port){
         MESH_SWITCH_COUNT(sw,port->index,staged,1);
         MESH_SWITCH_COUNT(sw,port->index,staged_dests,((struct mesh_switch_name *)mesh_switch_slot_at(M,sw,s))->dests);
         if(!mesh_switch_forward(M,sw,s,at,port->index))switch_hold(port,s);
-        MESH_SWITCH_COUNT(sw,port->index,stage_ns,clock_gettime_nsec_np(CLOCK_MONOTONIC)-t0);
+        MESH_SWITCH_COUNT(sw,port->index,stage_ns,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-t0);
       }
     }
   }
@@ -360,7 +360,7 @@ static void switch_retry(struct port *port){
   struct mesh_switch *sw=switch_of();
   uint64_t at=0;
   if(l->holds){
-    at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     const uint32_t holds=l->holds;uint32_t kept=0;
     l->holds=0;   /* a slot that now waits on a word goes to its bucket (switch_hold); one that waits on none, back here */
     for(uint32_t i=0;i<holds;i++){
@@ -378,7 +378,7 @@ static void switch_retry(struct port *port){
     const int valid=!p || (mesh_switch_owned(p) && p->program.key==k->key);
     const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)M+k->word),memory_order_acquire);
     if(valid && v<k->least)continue;
-    if(!at)at=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if(!at)at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     uint32_t n=k->n,kept=0;uint64_t least=UINT64_MAX;
     k->n=0;   /* a slot kept waiting here goes back in place; one that waits elsewhere now, to its bucket */
     for(uint32_t i=0;i<n;i++){
@@ -1057,10 +1057,10 @@ static void *switch_watch(void *unused){
   const struct mesh_switch_policy policy={NULL,NULL,switch_policy_splits};
   while(!stop){
     switch_view();
-    const uint64_t t0=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    const uint64_t t0=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     mesh_switch_refresh(sw,NULL,SWITCH_DRAWS,SWITCH_ETA,seed=mesh_switch_mix(seed),(double)sw->slot_bytes,0);
     if(switch_policy_on)mesh_switch_policy_refresh(M,sw,&policy,clock_ns(),++point,0,&tokens);
-    MESH_SWITCH_COUNT(sw,MESH_PORTS,refreshes,1);MESH_SWITCH_COUNT(sw,MESH_PORTS,refresh_ns,clock_gettime_nsec_np(CLOCK_MONOTONIC)-t0);
+    MESH_SWITCH_COUNT(sw,MESH_PORTS,refreshes,1);MESH_SWITCH_COUNT(sw,MESH_PORTS,refresh_ns,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-t0);
     pthread_mutex_lock(&switch_lock);
     uint32_t kept=0;const uint64_t at=clock_ns();
     for(uint32_t i=0;i<switch_holds;i++)if(!mesh_switch_forward(M,sw,switch_held[i],at,MESH_PORTS))switch_held[kept++]=switch_held[i];

@@ -139,7 +139,9 @@ struct mesh_switch_splits {
    and wait (ns, summed), and the estimate its child keeps (rate in bytes a ns and wait, two floats in one word) */
 struct mesh_switch_lane {
   _Alignas(64) _Atomic uint32_t live,peer;
-  _Atomic uint64_t queued,head,tail;
+  _Atomic uint64_t queued,tail;     /* every pushing process's (mesh_switch_push) */
+  /* the lane's child's alone, on a line of its own: its outbox's head read every pass, never bounced by a push */
+  _Alignas(64) _Atomic uint64_t head;
   _Atomic uint64_t sends,bytes,service,wait,landed,estimate;
   _Atomic uint64_t frames;          /* every SEND's and receive's frames on the lane (TN3205: the two ends alike); 0 a whole slot */
 };

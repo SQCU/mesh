@@ -82,7 +82,7 @@ static void slot_vacate(struct hdr *m,struct mesh_declared *d){
   /* no bridge process inside its progress (mesh-switched.h mesh_switch_enter): an entry is a delivery's or a staging's
      few microseconds; one held past a second is a bridge process gone in it, its pages freed regardless */
   for(uint64_t t0=0,i=0;atomic_load_explicit(&d->users,memory_order_seq_cst);i++){
-    struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+    struct timespec now;clock_gettime(CLOCK_UPTIME_RAW,&now);
     const uint64_t at=(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec;
     if(!i)t0=at;else if(at-t0>1000000000u){atomic_store_explicit(&d->users,0,memory_order_relaxed);break;}
   }
