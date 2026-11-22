@@ -997,6 +997,19 @@ static inline int mesh_switch_owned(const struct mesh_declared *p){
   const uint64_t o=atomic_load_explicit(&p->owner,memory_order_acquire);
   return o && o!=UINT64_MAX;
 }
+/* a bridge process's use of program p's progress (its arena pages), entered only while p is the program of `key`: its
+   `users` raised before the owner is read again, so a client's slot_vacate (mesh-call.c), which marks the slot closing
+   and then waits for `users` to be 0 before it frees those pages, never frees them under a use (a delivery that read
+   `progress` as its program was vacated faulted on 0, sim-wire under ASan; a reused page would have been counted into
+   another program's cells) */
+static inline int mesh_switch_enter(struct mesh_declared *p,uint64_t key){
+  atomic_fetch_add_explicit(&p->users,1,memory_order_seq_cst);
+  const uint64_t o=atomic_load_explicit(&p->owner,memory_order_seq_cst);
+  if(o && o!=UINT64_MAX && p->program.key==key)return 1;
+  atomic_fetch_sub_explicit(&p->users,1,memory_order_release);
+  return 0;
+}
+static inline void mesh_switch_leave(struct mesh_declared *p){ atomic_fetch_sub_explicit(&p->users,1,memory_order_release); }
 /* whether a closed program is wholly done: every transfer of both directions complete through its closing execution */
 static inline int mesh_switch_done(const struct hdr *m,const struct mesh_declared *p){
   const uint64_t closed=atomic_load_explicit(&p->closed,memory_order_acquire);
@@ -1043,7 +1056,7 @@ static inline uint64_t mesh_switch_received(struct hdr *m,const struct mesh_decl
 }
 /* program p toward node x: a credit due (its executions wholly received past the last told by half the window) made in
    a free slot, one reference held, in *slot: 1, else 0 */
-static inline int mesh_switch_credit(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
+static inline int mesh_switch_credit_in(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
   const uint64_t received=mesh_switch_received(m,p);
   uint64_t told=atomic_load_explicit(&p->credited,memory_order_acquire);
   const uint64_t step=(mesh_switch_ahead(sw,p)+1)/2;
@@ -1062,6 +1075,12 @@ static inline int mesh_switch_credit(struct hdr *m,struct mesh_switch *sw,struct
   *slot=s;
   return 1;
 }
+static inline int mesh_switch_credit(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
+  if(!mesh_switch_enter(p,p->program.key))return 0;
+  const int r=mesh_switch_credit_in(m,sw,x,p,now,slot);
+  mesh_switch_leave(p);
+  return r;
+}
 /* a credit landed here: the sending program toward its source with its key told the executions received there */
 static inline void mesh_switch_credit_take(struct hdr *m,const struct mesh_switch_name *name){
   struct mesh_node *x=mesh_switch_order(m,name->source);
@@ -1078,7 +1097,7 @@ static inline void mesh_switch_credit_take(struct hdr *m,const struct mesh_switc
    cursor moved by one compare-exchange, so exactly one process stages it), copied into a free slot after its name,
    its send-side unit counted (its done word rising).  The slot, one reference held, in *slot.  1 staged; 0 none; -1 no
    free slot; -2 ready but past the credit window; -3 ready but past its transfer's window */
-static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
+static inline int mesh_switch_stage_in(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
   const struct mesh_crossing *table=mesh_switch_table(m,p,0);
   if(!table || !p->progress[0])return 0;
   const uint64_t n=atomic_load_explicit(&p->claimed,memory_order_acquire);
@@ -1140,10 +1159,11 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
     struct mesh_node *y=c->y[i];
     {
       struct mesh_declared *q=c->q[i];
-      if(!mesh_switch_owned(q) || q->program.key!=p->program.key || !q->progress[0])continue;
+      if(!mesh_switch_enter(q,p->program.key))continue;
+      if(!q->progress[0]){mesh_switch_leave(q);continue;}
       const struct mesh_crossing *qt=mesh_switch_table(m,q,0);
       uint64_t qn=atomic_load_explicit(&q->claimed,memory_order_acquire),qe,qs;uint32_t qtr;
-      if(!qt || !mesh_switch_locate(q,qt,0,qn,&qe,&qtr,&qs) || qe!=e)continue;
+      if(!qt || !mesh_switch_locate(q,qt,0,qn,&qe,&qtr,&qs) || qe!=e){mesh_switch_leave(q);continue;}
       int same=qs+units<=qt[qtr].units;
       for(uint32_t u=0;u<units && same;u++){
         const struct mesh_dma_span other=((const struct mesh_dma_span *)((const char *)m+qt[qtr].spans))[qs+u];
@@ -1153,10 +1173,11 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
       }
       if(!same ||
          qe>=atomic_load_explicit(&mesh_switch_progress(m,q,0)[qtr].complete,memory_order_acquire)+MESH_SWITCH_WINDOW ||
-         qe>=atomic_load_explicit(&q->credit,memory_order_acquire)+mesh_switch_ahead(sw,q))continue;
-      if(!atomic_compare_exchange_strong_explicit(&q->claimed,&qn,qn+units,memory_order_acq_rel,memory_order_acquire))continue;
+         qe>=atomic_load_explicit(&q->credit,memory_order_acquire)+mesh_switch_ahead(sw,q)){mesh_switch_leave(q);continue;}
+      if(!atomic_compare_exchange_strong_explicit(&q->claimed,&qn,qn+units,memory_order_acq_rel,memory_order_acquire)){mesh_switch_leave(q);continue;}
       name->dest[name->dests++]=(struct mesh_switch_dest){atomic_load_explicit(&y->node,memory_order_relaxed),qtr,(uint32_t)qs,units};
       for(uint32_t u=0;u<units;u++)mesh_switch_count(m,q,0,qt,qtr,qe,qs+u);
+      mesh_switch_leave(q);
     }
   }
   name->nwanted=name->dests;
@@ -1165,10 +1186,19 @@ static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct 
   return 1;
 }
 
+static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
+  if(!mesh_switch_enter(p,p->program.key))return 0;
+  const int r=mesh_switch_stage_in(m,sw,x,p,now,slot);
+  mesh_switch_leave(p);
+  return r;
+}
+
 /* ---- Delivery: a landed piece copied to the receiving program's span ---------------------------------------------
    dest (one of the name's entries, this node's): the program toward the source with the piece's key, its transfer and
    span; copied there once that program's client issued the step and its gate holds.  1 delivered (or already); 0 not
    yet (no such program yet, or not ready, or past its window: it waits in its slot) */
+static inline int mesh_switch_deliver_at(struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest,const unsigned char *data,
+                                         struct mesh_declared *p);
 static inline int mesh_switch_deliver(struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest,const unsigned char *data,
                                       struct mesh_declared **found){
   struct mesh_node *x=mesh_switch_order(m,name->source);
@@ -1178,6 +1208,13 @@ static inline int mesh_switch_deliver(struct hdr *m,const struct mesh_switch_nam
     if(mesh_switch_owned(x->program+k) && x->program[k].program.key==name->key && x->program[k].progress[1])p=x->program+k;
   if(!p)return 0;
   if(found)*found=p;
+  if(!mesh_switch_enter(p,name->key))return 0;
+  const int r=mesh_switch_deliver_at(m,name,dest,data,p);
+  mesh_switch_leave(p);
+  return r;
+}
+static inline int mesh_switch_deliver_at(struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest,const unsigned char *data,
+                                         struct mesh_declared *p){
   const struct mesh_crossing *table=mesh_switch_table(m,p,1);
   const uint32_t units=dest->units?dest->units:1;
   if(!table || dest->transfer>=p->program.transfers[1] || (uint64_t)dest->span+units>table[dest->transfer].units)return 0;
@@ -1262,22 +1299,28 @@ static inline uint32_t mesh_switch_unplaced(const struct hdr *m,const struct mes
 
 /* whether a destination here can never be placed: its program, at the piece's source's node slot, was declared and has
    gone (its slot vacated with the key still in it, or given to another program since: `prior`), or it closed before the
-   piece's execution.  A program not declared yet is not gone (a piece may land before its receiver declares): keys are
-   never reused (nccl-mesh.c: the communicator's name and the process's declaration count), so a key seen gone stays gone */
+   piece's execution.  A program not declared yet is not gone (a piece may land before its receiver declares), nor is a
+   key a program holds now.  nccl-mesh's keys are never reused (the communicator's name and the process's declaration
+   count); a client that reuses its keys (mesh-peer-client: the group) has a piece that lands before its program's
+   redeclaration taken as gone where the key's last program is vacated */
 static inline int mesh_switch_gone(const struct hdr *m,const struct mesh_switch_name *name){
   const struct mesh_node *x=mesh_switch_order((struct hdr *)m,name->source);
   if(!x)return 0;
+  /* a program of the key declared now (or being made) is the piece's: it is gone only past that program's close; a
+     key a client reuses (mesh-peer-client: its group) has a vacated program of the key beside a live one */
+  int was=0;
   for(uint32_t k=0;k<MESH_PROGRAMS;k++){
     const struct mesh_declared *p=x->program+k;
     const uint64_t owner=atomic_load_explicit(&p->owner,memory_order_acquire);
-    if(owner==UINT64_MAX)continue;
-    if(p->prior==name->key)return 1;
-    if(p->program.key!=name->key)continue;
-    if(!owner || !p->progress[1])return 1;
-    const uint64_t closed=atomic_load_explicit(&p->closed,memory_order_acquire);
-    if(closed!=UINT64_MAX && name->execution>=closed)return 1;
+    if(owner==UINT64_MAX)return 0;
+    if(owner && p->program.key==name->key){
+      if(!p->progress[1])continue;   /* a send program of the key: not the one a landing is for */
+      const uint64_t closed=atomic_load_explicit(&p->closed,memory_order_acquire);
+      return closed!=UINT64_MAX && name->execution>=closed;
+    }
+    was|=p->prior==name->key || (!owner && p->program.key==name->key);
   }
-  return 0;
+  return was;
 }
 
 /* ---- The forward: a held slot's destinations here delivered, the rest switched onto lanes --------------------------
@@ -1323,10 +1366,11 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
       MESH_SWITCH_COUNT(sw,ring,orphans,1);
     }else{
       kept[nkept++]=name->dest[i];
-      if(found)waits=mesh_switch_waits_on(m,found,name,name->dest+i,&wait_value);
+      if(found && mesh_switch_enter(found,name->key)){waits=mesh_switch_waits_on(m,found,name,name->dest+i,&wait_value);mesh_switch_leave(found);}
+      else if(found)waits=0;
       else{waits=(uint64_t)((const char *)&m->control-(const char *)m);wait_value=control+1;}
       wait_program=found?(uint64_t)((const char *)found-(const char *)m):0;
-      if(!waits)MESH_SWITCH_COUNT(sw,ring,unplaced[mesh_switch_unplaced(m,name,name->dest+i)],1);
+      if(!waits && found && mesh_switch_enter(found,name->key)){MESH_SWITCH_COUNT(sw,ring,unplaced[mesh_switch_unplaced(m,name,name->dest+i)],1);mesh_switch_leave(found);}
     }
   }
   const struct mesh_switch_name sending=*name;

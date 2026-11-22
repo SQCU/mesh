@@ -3,6 +3,7 @@
 #include "mesh-observe.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* design/algorithm-sources.md#programtensor */
@@ -77,7 +78,14 @@ static void slot_vacate(struct hdr *m,struct mesh_declared *d){
   uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
   if(!owner || owner==UINT64_MAX)return;
   if(client_live(m,owner) && !mesh_switch_done(m,d))return;
-  if(!atomic_compare_exchange_strong_explicit(&d->owner,&owner,UINT64_MAX,memory_order_acq_rel,memory_order_relaxed))return;
+  if(!atomic_compare_exchange_strong_explicit(&d->owner,&owner,UINT64_MAX,memory_order_seq_cst,memory_order_relaxed))return;
+  /* no bridge process inside its progress (mesh-switched.h mesh_switch_enter): an entry is a delivery's or a staging's
+     few microseconds; one held past a second is a bridge process gone in it, its pages freed regardless */
+  for(uint64_t t0=0,i=0;atomic_load_explicit(&d->users,memory_order_seq_cst);i++){
+    struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+    const uint64_t at=(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec;
+    if(!i)t0=at;else if(at-t0>1000000000u){atomic_store_explicit(&d->users,0,memory_order_relaxed);break;}
+  }
   if(d->pages)mesh_bits_clear(mesh_arena_bits(m),d->page,d->pages);
   d->progress[0]=d->progress[1]=0;d->pages=0;
   atomic_store_explicit(&d->owner,0,memory_order_release);
