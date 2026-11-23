@@ -189,13 +189,9 @@ struct child_message {
    any thread, before which no port job is dispatched on it and the bridge does not exit: B9), whether its device is to
    be opened (`opening`: at the start, at its link's coming on, at a hello heard while it is not open, B16, and as the
    call it was concluded around returns, B12; never on a clock), its link lanes, and its progress thread (`threads` 1
-   once started, in the child alone); the guard of its device's verbs objects (`guard`, odd while raised, the word the
-   progress thread waits on while it stands and while the link serves nothing, design/transport.md B13, and
-   `guarded`, the guard value the progress thread last stopped at: mesh-link.c guard_raise; the guard told wakes the
-   raiser parked on it, port_tell, port_wait), and the threads that
-   post on its queue pairs (`thread`: its progress thread, storing itself as it starts, and its link job's while one
-   runs, by which a provider's fault names its port, mesh-link.c fault_heard); the queue pairs its device has for a link as its child
-   told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); the registrations its device refused
+   once started, in the child alone), and the threads that post on its queue pairs (`thread`: its progress thread,
+   storing itself as it starts, and its link job's while one runs, by which a provider's fault names its port,
+   mesh-link.c fault_heard); the queue pairs its device has for a link as its child told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); the registrations its device refused
    in a row (`refusals`) and the time before which it is not opened again after one (`retry_at`: mesh-link.c port_opened);
    and its interface as the kernel's events name it (`family`, `unit`: an en<N>'s APPLE_IF_FAM_ETHERNET and N, read once
    from its name as the port is named; another port's family 0, which no event carries: mesh-link.c addresses_heard) */
@@ -216,7 +212,6 @@ struct port {
   dispatch_queue_t work;
   struct link link;
   _Atomic(pthread_t) thread[2];
-  _Atomic uint64_t guard,guarded;
   /* the parent's: the port's child (design/transport.md section 14, "A process a port"): its process (0 none; read
      on the terminations' queue too, mesh-link.c peer_terminated), its entry among the region's processes
      (`child_entry`, mesh-observe.h struct mesh_bridge_pages `child`) and socket, the pause a spawn that failed sets

@@ -309,11 +309,6 @@ static void switch_takes(struct port *port){
   l->take_from=(l->take_from+1)%MESH_CLIENTS;
 }
 
-/* the progress thread's tell of the guard value it stops at (`guarded`), its raiser woken (port_wait) */
-static void port_tell(_Atomic uint64_t *word,uint64_t value){
-  atomic_store_explicit(word,value,memory_order_release);
-  os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_NONE);
-}
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's progress thread over the lanes the link serves
    (`served` read once a pass: none posts on a lane its link no longer serves): the receive completions landed
    (link_receive), the receives topped up, the clients' writes taken (switch_takes), every lane's outbox posted,
@@ -347,8 +342,11 @@ static void port_pass(struct port *port){
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
 }
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
-   its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the port's
-   guard word while it serves none, looking again every MESH_PAUSE_NS (the stop's `closing`) */
+   its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the lanes
+   served while they are none, looking again every MESH_PAUSE_NS (the stop's `closing`).  It starts at the end of the
+   link's connect, once every verbs object of the child is made and connected, and none is made or changed after it:
+   the parent asks a child for its lanes once (a link lost after that ends the child, port_lost's `recycle`), and the
+   kernel releases the objects at the child's exit.  So no post crosses a make, a connect or a teardown */
 static void *port_progress(void *argument){
   struct port *port=argument;
   pthread_setname_np("mesh.rdma");
@@ -358,33 +356,24 @@ static void *port_progress(void *argument){
   atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
   mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_lanes_among) */
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
-    /* while the port's guard stands, or its link serves no lane, no pass (no post on any queue pair of its device) and
-       no lane read: the thread waits on the guard word (design/transport.md B13: a guarded call in the driver costs no
-       core), woken by its raising and lowering, by the link's coming up and by a halt or the child's end (guard_wake),
-       looking again every MESH_PAUSE_NS (the stop's `closing`), the guard told at each waking, the tell waking its
-       raiser (port_tell) */
-    const uint64_t guard=atomic_load_explicit(&port->guard,memory_order_acquire);
-    if(guard&1 || !atomic_load_explicit(&port->link.served,memory_order_acquire)){
+    /* while its link serves no lane, no pass (no post on any queue pair of its device) and no lane read: the thread
+       waits on the lanes served, so a change of that word between the read and the wait ends the wait at once, woken
+       by the link's coming up and by a halt or the child's end (progress_wake), looking again every MESH_PAUSE_NS (the
+       stop's `closing`) */
+    if(!atomic_load_explicit(&port->link.served,memory_order_acquire)){
       /* a fault absorbed on the port (fault_heard: the handler, which may make no call but mmap, munmap and sigaction,
          halted the port) wakes its child's loop, which tells its parent at once, not at its next tick */
       if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
-      if(guard&1)port_tell(&port->guarded,guard);
-      /* the wait on the word that parks the thread: the guard while it stands, else the lanes served while they are
-         none, so a change of that word between the read above and the wait ends the wait at once (a wait on the guard
-         for a link's coming up slept MESH_PAUSE_NS where the lanes were served between the two) */
-      if(guard&1)os_sync_wait_on_address_with_timeout(&port->guard,guard,sizeof port->guard,OS_SYNC_WAIT_ON_ADDRESS_NONE,
-                                                      OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
-      else os_sync_wait_on_address_with_timeout(&port->link.served,0,sizeof port->link.served,OS_SYNC_WAIT_ON_ADDRESS_NONE,
-                                                OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
+      os_sync_wait_on_address_with_timeout(&port->link.served,0,sizeof port->link.served,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
       continue;
     }
     port_pass(port);
   }
   return NULL;
 }
-/* design/transport.md B13: the progress thread parked on the port's guard looks again */
-static void guard_wake(struct port *port){
-  os_sync_wake_by_address_all(&port->guard,sizeof port->guard,OS_SYNC_WAKE_BY_ADDRESS_NONE);
+/* the progress thread, parked while its link serves no lane, looks again */
+static void progress_wake(struct port *port){
   os_sync_wake_by_address_all(&port->link.served,sizeof port->link.served,OS_SYNC_WAKE_BY_ADDRESS_NONE);
 }
 /* design/transport.md: the port's progress thread started, once; 0, or pthread_create's error */
@@ -398,32 +387,6 @@ static int port_threads(struct port *port){
   if(!error)port->threads=1;
   pthread_attr_destroy(&attributes);
   return error;
-}
-/* design/transport.md: the raiser of a guard parked, never spinning, until the port's progress thread, where started,
-   has told (`told`: `guarded`, the guard value it stops at) `value`, woken by the thread's tell (port_tell) alone, the
-   guard's waiters woken as it begins and at each waking; a call that does not return is the parent's to conclude
-   around (ports_stalled) */
-static void port_wait(struct port *port,_Atomic uint64_t *told,uint64_t value){
-  for(uint64_t seen;port->threads && (seen=atomic_load_explicit(told,memory_order_acquire))<value;){
-    guard_wake(port);
-    os_sync_wait_on_address(told,seen,sizeof *told,OS_SYNC_WAIT_ON_ADDRESS_NONE);
-  }
-}
-/* design/RDMA-KERNEL-RECOVERY.md: the guard of a port's device, on the port's queue, around a change of its verbs
-   objects (queue pairs and completion queues made, connected or destroyed): raised, it returns once each started
-   progress thread stops (it told the guard's value before its next pass, and passes no more while the guard stands),
-   so no queue pair of the device is posted on while another is made, changed or destroyed (Apple's provider: a post on
-   a long-lived queue pair across another's teardown stores to the device's shared doorbell mapping after it moved,
-   tbt_post_recv); lowered, the threads parked on it woken and going on (design/transport.md B13).  It stands for every
-   change once the port's threads run, the link lanes' long-lived queue pairs being posted on while the link is up.
-   Raised: 1; 0 where no progress thread runs (port_wait waits on the thread's tell alone) */
-static void guard_lower(struct port *port,int raised){
-  if(raised>0){atomic_fetch_add_explicit(&port->guard,1,memory_order_release);guard_wake(port);}
-}
-static int guard_raise(struct port *port){
-  if(!port->threads)return 0;
-  port_wait(port,&port->guarded,atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1);
-  return 1;
 }
 
 /* design/transport.md: a message to the port's peer, queued behind what the socket has not taken yet (a node's record
@@ -506,10 +469,11 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
   if(changed)record_changed();
 }
 
-/* design/transport.md section 14: a link job on the port's queue, guarded (no queue pair of the device is posted on
-   while one is made or connected: guard_raise), its verbs calls made on hearing the peer, from the peer's numbers as the
-   job was started (`numbers`, its LID and GID among them: the event loop takes the peer's LINK and hello meanwhile), and
-   none once its pairing is lost (B10: read as the guard stands and between its steps), each in the port's child and
+/* design/transport.md section 14: a link job on the port's queue (before the port's progress thread starts, so no
+   queue pair of the device is posted on while one is made or connected: port_progress), its verbs calls made on
+   hearing the peer, from the peer's numbers as the job was started (`numbers`, its LID and GID among them: the event
+   loop takes the peer's LINK and hello meanwhile), and none once its pairing is lost (B10: read as it begins and
+   between its steps), each in the port's child and
    once in its life
    (design/transport.md section 14, "A process a port"): the lanes made (LINK_JOB_MAKE: the port's own address read
    again, then a UC queue pair in INIT for each lane of the link's plan, d6dceac's verbs_up, each lane's share of the
@@ -608,11 +572,9 @@ static void link_job(struct port *port,int job){
   l->job=job;l->job_pairing=numbers.pairing;l->job_at=now;atomic_store_explicit(&l->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     atomic_store_explicit(&port->thread[1],pthread_self(),memory_order_release);
-    const int raised=guard_raise(port);
     int result=link_lapsed(l,&numbers);
     if(!result)result=job==LINK_JOB_MAKE?link_make(port,&numbers):link_connect(port,&numbers);
     if(!result && job==LINK_JOB_CONNECT)result=port_threads(port);
-    guard_lower(port,raised);
     l->result=result;
     atomic_store_explicit(&port->thread[1],NULL,memory_order_release);
     atomic_store_explicit(&l->done,1,memory_order_release);
@@ -1084,7 +1046,7 @@ static struct port *port_at(uint32_t interface){
   for(uint32_t p=0;interface && p<port_count;p++)if(ports[p].interface==interface)return ports+p;
   return NULL;
 }
-/* design/transport.md: a port's device opened, on its own queue (guarded), where it is to be (at the start,
+/* design/transport.md: a port's device opened, on its own queue, where it is to be (at the start,
    at its link's coming on or its interface's attaching, at a hello heard while it is not open, while it has no peer,
    and as the call its port was concluded around returns, ports_stalled), once its quiet window has ended and no job of
    its own is out (design/transport.md B9, B12): the hellos' group joined on its interface, so the port hears them open
@@ -1105,11 +1067,11 @@ static void port_open(struct port *port){
   port->job=1;port->job_at=now;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   child_send(port,(struct child_message){.kind=CHILD_OPEN});
 }
-/* the child's open of its port's device, on its port's queue, guarded; its end told the child's loop (child_main) */
+/* the child's open of its port's device, on its port's queue (before its progress thread starts: port_progress); its
+   end told the child's loop (child_main) */
 static void device_open(struct port *port){
   port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
-    const int raised=guard_raise(port);
     int refused=0,result=device_up(&port->device,&wire,&refused);
     if(!result)result=device_gid(&port->device,port->name);
     if(!result && !port->device.gid_matched){
@@ -1118,7 +1080,6 @@ static void device_open(struct port *port){
           "%02x%02x:%02x%02x:%02x%02x:%02x%02x used\n",port->index,port->name,port->device.name,port->name,port->device.gid_index,
           g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7],g[8],g[9],g[10],g[11],g[12],g[13],g[14],g[15]);
     }
-    guard_lower(port,raised);
     port->result=result;port->refused=refused;
     atomic_store_explicit(&port->done,1,memory_order_release);
     wake();
@@ -1774,7 +1735,7 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
   atomic_store_explicit(&port->closing,1,memory_order_release);
-  guard_wake(port);
+  progress_wake(port);
   const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   for(;;){
     const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
@@ -1789,7 +1750,7 @@ static void child_command(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
   if(heard->kind==CHILD_OPEN){if(!port->job)device_open(port);return;}
   if(heard->kind==CHILD_HALT){
-    atomic_fetch_add(&l->pairing,1);atomic_store(&l->served,0);guard_wake(port);
+    atomic_fetch_add(&l->pairing,1);atomic_store(&l->served,0);progress_wake(port);
     child_halted=0;
     return;
   }
@@ -1836,7 +1797,7 @@ static void child_jobs(struct port *port){
     lanes_open(port,port->peer,child_bandwidth);
     atomic_store(&l->served,l->plan);
     if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);said.result=ECANCELED;}
-    guard_wake(port);
+    progress_wake(port);
   }
   child_tell(said);
 }
