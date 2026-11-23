@@ -1371,6 +1371,12 @@ static void port_move(struct port *port,enum port_state state,uint64_t due,int64
 /* a loss's window: no open, make or connect on the port, and no exit, for MESH_PLATFORM_NS, the operator's bound on
    the termination a loss may follow (B9) */
 static void port_quiet(struct port *port){ quiet_until(&port->quiet_at,now+MESH_PLATFORM_NS); }
+/* the port's child halted, or its halt's window moved later (CHILD_HALT naming the port's quiet window's end as it
+   stands: the child exits no sooner than that, and once its own windows have ended, end_step), so a loss that left the
+   child alive and untold (its link gone off, a socket lost before the make) keeps its exit out of its window (B9) */
+static void port_halt(struct port *port){
+  child_send(port,(struct child_message){.kind=CHILD_HALT,.until=port->quiet_at});
+}
 /* a port's control socket closed and its pairing's numbers made new, its loss logged where it had dialed or paired */
 static void port_parted(struct port *port,int64_t code){
   if(port->state==PORT_DIALING || port_greeted(port)){
@@ -1396,16 +1402,16 @@ static void port_down(struct port *port,int64_t code){
 }
 /* design/transport.md section 14, #loss: a loss from the make on, or a child that halted itself, ends the child: its
    window from now, its line leaving (the clients' rings its port took are then the other serving ports' shares, and its
-   lanes no draw's, from the next pass on, even while its poller is stuck in a provider call), its child halted naming
-   the loss (CHILD_HALT: no pass of its poller begins after its line leaves, so no post on its lanes once the peer can
-   read the loss, and it exits MESH_PLATFORM_NS on and once its own windows have ended: end_step), its control socket
-   closed, what its lanes carried counted `lost` as its end is freed (switch_child_free), no verbs call made
+   lanes no draw's, from the next pass on, even while its poller is stuck in a provider call), its child halted
+   (port_halt: no pass of its poller begins after its line leaves, so no post on its lanes once the peer can read the
+   loss, and it exits once the window this loss moved MESH_PLATFORM_NS on, and its own windows, have ended), its control
+   socket closed, what its lanes carried counted `lost` as its end is freed (switch_child_free), no verbs call made
    (design/RDMA-KERNEL-RECOVERY.md "October 18"), and its exit awaited (EXITING): the kernel's release of the lanes, the
    port greeting no peer meanwhile, and paired again with the port's next child ("A process a port") */
 static void port_exiting(struct port *port,int64_t code){
   port_quiet(port);
   port_leaving(port);
-  child_send(port,(struct child_message){.kind=CHILD_HALT,.result=code>0?(int32_t)code:EIO});
+  port_halt(port);
   port_parted(port,code);
   port_move(port,PORT_EXITING,0,code);
 }
@@ -1613,8 +1619,8 @@ static void port_step(struct port *port,enum port_event event,int64_t code,const
     if(state>=PORT_DIALING && state<=PORT_PAIRED)port_unpaired(port,code);
     else if(event==PORT_TERMINATED && state==PORT_OPEN)port_unpaired(port,code);
     else if(lanes)port_exiting(port,code);
-    else if(event==PORT_TERMINATED && state==PORT_EXITING)
-      child_send(port,(struct child_message){.kind=CHILD_HALT,.result=(int32_t)code});
+    /* an ending child's halt moved to the window the termination moved (terminations_heard: quiet_all) */
+    else if(event==PORT_TERMINATED && state==PORT_EXITING)port_halt(port);
     else if(event==PORT_TERMINATED)port_move(port,state,port->due,code);
     return;
   case PORT_OFF:
@@ -1623,7 +1629,7 @@ static void port_step(struct port *port,enum port_event event,int64_t code,const
     else{
       /* no socket and no lanes: its window moved, which a want and its child's end wait out (B9) */
       port_quiet(port);
-      if(state==PORT_EXITING)child_send(port,(struct child_message){.kind=CHILD_HALT,.result=(int32_t)code});
+      if(state==PORT_EXITING)port_halt(port);
       else if((state==PORT_CLOSED || state==PORT_DOWN) && port->due)port_want(port);
       port_move(port,state,port->due,code);
     }
@@ -1707,11 +1713,12 @@ static void port_step(struct port *port,enum port_event event,int64_t code,const
       return;
     }
   case PORT_STOP:
-    /* design/transport.md: the bridge stops: its child halted (CHILD_HALT with no loss: it exits once its own windows
-       have ended: end_step), its line leaving, its control socket closed (the peer reads the stop as the socket's
-       end), and its exit awaited (EXITING); a port with no child CLOSED, opened no more */
+    /* design/transport.md: the bridge stops: its child halted (port_halt: it exits once the port's quiet window and its
+       own have ended, at once where none is open, so a link gone off or a socket lost before the make keeps its exit
+       out of the window it opened, B9), its line leaving, its control socket closed (the peer reads the stop as the
+       socket's end), and its exit awaited (EXITING); a port with no child CLOSED, opened no more */
     if(!port->child){port_parted(port,0);port_move(port,PORT_CLOSED,0,0);return;}
-    child_send(port,(struct child_message){.kind=CHILD_HALT});
+    port_halt(port);
     port_leaving(port);
     port_parted(port,0);
     port_move(port,PORT_EXITING,0,0);
@@ -1760,9 +1767,10 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    each told its parent once: CHILD_BROKEN; or a make or connect that failed, which its answer tells), or its parent
    lost (the socket's end, or a message to it the socket did not take whole: child_tell).  A command that does not fit
    the state is refused: ECANCELED once the line leaves, EBUSY otherwise.  The child owns its exit (its end, one state
-   machine: end_step): once its own windows have ended, and, where its end is a loss (a halt naming one, its own halt,
-   its parent lost), MESH_PLATFORM_NS after it; and in either case once its poller has returned from its last pass:
-   its exit, the kernel's release of its device's objects, no verbs call made */
+   machine: end_step): once its own windows have ended and the port's window its parent's halt names, or, where it
+   ended without one (its own halt, its parent lost), MESH_PLATFORM_NS after its end; and in either case once its
+   poller has returned from its last pass: its exit, the kernel's release of its device's objects, no verbs call
+   made */
 static unsigned char child_in[sizeof(struct child_message)];
 static uint32_t child_got;
 /* the child's end, one state machine on its main thread (end_step, its one transition function; the main thread its
@@ -1776,18 +1784,19 @@ static uint32_t child_got;
      the socket read and written no more.
    Each ending state's data: its exit due at `due` once its windows have ended (`exit_at`, B9b) and its poller has
    returned from its last pass (`polling` 0), and at `bound` whatever its poller does (a poller inside a provider call
-   may never return: what it holds then is lost, as at a crash, O4).  A stop's halt (CHILD_HALT with no loss) is due
-   as it comes, within MESH_PLATFORM_NS; a loss's (CHILD_HALT naming the loss, its own halt, a failed make or connect,
-   its parent lost) MESH_PLATFORM_NS on, within twice that, the floor a child whose link or parent was lost keeps
-   before its release (B9, B9b), as its parent's port window was.  Each end moves both later, never earlier, so a loss
+   may never return: what it holds then is lost, as at a crash, O4).  A halt (CHILD_HALT) is due at the end of its
+   port's quiet window as its parent names it (`until`: a loss's, MESH_PLATFORM_NS past the loss, or the window a loss
+   or termination before a stop left open, B9), as it comes where that has passed; its own halt, a failed make or
+   connect and its parent lost MESH_PLATFORM_NS on, the floor a child whose link or parent was lost keeps before its
+   release (B9, B9b).  Its bound is MESH_PLATFORM_NS past its due.  Each end moves both later, never earlier, so a loss
    heard after a stop takes the loss's time.
-   Its events: its parent's halt (END_HALT, `loss` whether it names one), its own halt or a failed command
+   Its events: its parent's halt (END_HALT, `until` the window's end it names), its own halt or a failed command
    (END_SELF), its parent lost (END_LOST), its poller's return (END_POLLED), and its exit's time come (END_DUE, at
    end_due: it exits) */
 enum end_state { END_NONE, END_ENDING, END_ALONE };
 enum end_event { END_HALT, END_SELF, END_LOST, END_POLLED, END_DUE };
 static struct { enum end_state state; uint64_t due,bound; } ending;
-static void end_step(struct link *l,enum end_event event,int loss){
+static void end_step(struct link *l,enum end_event event,uint64_t until){
   switch(event){
   case END_HALT:
   case END_SELF:
@@ -1801,7 +1810,7 @@ static void end_step(struct link *l,enum end_event event,int loss){
     }
     else if(ending.state==END_NONE)ending.state=END_ENDING;
     child_halt(l,0);
-    const uint64_t at=clock_ns(),due=event==END_HALT && !loss?at:at+MESH_PLATFORM_NS;
+    const uint64_t at=clock_ns(),due=event==END_HALT?MAX(at,until):at+MESH_PLATFORM_NS;
     ending.due=MAX(ending.due,due);
     ending.bound=MAX(ending.bound,due+MESH_PLATFORM_NS);
     return;
@@ -1893,7 +1902,7 @@ static void child_command(struct link *l,const struct child_message *heard){
   if(heard->kind==CHILD_OPEN)child_tell(l,device_open(l));
   else if(heard->kind==CHILD_MAKE)child_tell(l,lanes_make(l,heard));
   else if(heard->kind==CHILD_CONNECT)child_tell(l,lanes_connect(l,heard));
-  else if(heard->kind==CHILD_HALT)end_step(l,END_HALT,heard->result!=0);
+  else if(heard->kind==CHILD_HALT)end_step(l,END_HALT,heard->until);
 }
 static void child_read(struct link *l){
   while(ending.state!=END_ALONE){
@@ -2140,9 +2149,10 @@ static void adopting_read(int due){
       node.adopting,(double)(2*MESH_PLATFORM_NS)/1e9);
   exit(1);
 }
-/* design/transport.md: the stop (NODE_STOPPING), at stop signal `code`: every child halted (CHILD_HALT with no loss:
-   its line leaving, so no pass of its poller begins after it and no post is made once its peer can read the stop, and
-   its exit once its own windows have ended and its poller has returned, end_step), every control socket closed (the
+/* design/transport.md: the stop (NODE_STOPPING), at stop signal `code`: every child halted (CHILD_HALT naming its
+   port's quiet window, port_halt: its line leaving, so no pass of its poller begins after it and no post is made once
+   its peer can read the stop, and its exit once that window and its own have ended and its poller has returned,
+   end_step), every control socket closed (the
    kernel sends what it has after the close; the peer reads the stop as the socket's end), every lane no draw's (each
    port's PORT_STOP; what the lanes have the next bridge's adoption gives back: region_adopt), `bridge_pid` 0 (every stop
    keeps the region for the next bridge to adopt; a release is the heartbeat's, which expires the region once this

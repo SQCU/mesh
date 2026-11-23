@@ -125,9 +125,11 @@ struct link {
    written by one thread at each end (the parent's event loop, the child's main thread).  The parent's, a command at
    a time, each answered in its order: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE names the lanes
    of the plan in `lanes`), connect them to the peer's (CHILD_CONNECT: the peer's lanes, address, node and the link's
-   bandwidth); and end (CHILD_HALT, the child's one end, its reason in `result`: 0 the bridge stopping, so the child
-   exits once its own windows have ended; else the code its link was lost with, so it exits MESH_PLATFORM_NS on and
-   once its windows have ended: mesh-link.c end_step).  The child's: the device opened or not (CHILD_OPENED: its
+   bandwidth); and end (CHILD_HALT, the child's one end, sent at a loss from the make on, at a child's own halt and at
+   the bridge's stop, and again where a loss or termination heard while the child ends moves the port's window: in
+   `until` the end of its port's quiet window, the parent's struct port `quiet_at` in CLOCK_UPTIME_RAW nanoseconds,
+   the clock the child reads too, so the child exits no sooner than that end and once its own windows have ended:
+   mesh-link.c end_step).  The child's: the device opened or not (CHILD_OPENED: its
    address and bandwidth, and in `lanes` the queue pairs the device has for a link), the lanes made or not
    (CHILD_MADE: each lane's queue pair number, the first sequence number and each lane's share), connected or not
    (CHILD_CONNECTED); and its own halt (CHILD_BROKEN, once in its life, its reason in `result`: EIO a lane's or a
@@ -150,8 +152,14 @@ struct link {
    10: the child owns its exit.  CHILD_HALT is its one end and states why in `result` (0 the bridge stopping, else
    the loss's code), and the child exits by its own windows and that reason; CHILD_END goes.  CHILD_BROKEN, its reason
    in `result`, is its one report of its own halt, so CHILD_FAULTED and CHILD_TERMINATED go, and a child halted
-   by any of them ends.  No message names a pairing (`pairing` and `broken` go), and the kinds are numbered anew */
-#define MESH_CHILD_VERSION 10u
+   by any of them ends.  No message names a pairing (`pairing` and `broken` go), and the kinds are numbered anew.
+   11: CHILD_HALT names the end of its port's quiet window in `until`, a field appended to struct child_message, in
+   place of 10's reason in `result`, which a halt no longer carries.  The child exits no sooner than that end: a stop
+   that follows a loss the child was not told of (its link gone off, or its control socket lost before the make)
+   keeps its exit out of the window that loss opened (B9), as the parent's CHILD_END, held until the window had ended,
+   did before 10; 10's stop let it exit at once.  A halt at a loss names the window the loss has just moved
+   MESH_PLATFORM_NS on, 10's floor for a halt naming a loss */
+#define MESH_CHILD_VERSION 11u
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN };
 struct child_message {
   uint32_t kind;
@@ -159,7 +167,7 @@ struct child_message {
   uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,node,lanes;
   uint16_t lid,padding;
   uint8_t gid[16];
-  uint64_t bandwidth;
+  uint64_t bandwidth,until;
 };
 #define TAG_CHILD (UINT64_C(1)<<58)
 /* design/transport.md section 14: a port of the bridge's parent, one state machine on its event loop (mesh-link.c
@@ -180,7 +188,7 @@ struct child_message {
      window's end once the LINK is in);
    - CONNECTING: CHILD_CONNECT out.  `due` its bound (B12);
    - UP: its child serves the link;
-   - EXITING: its child halted (CHILD_HALT naming the loss, or the bridge's stop), its exit awaited (the loop's SIGCHLD,
+   - EXITING: its child halted (CHILD_HALT, at a loss or the bridge's stop), its exit awaited (the loop's SIGCHLD,
      mesh-link.c children_reaped); the port's next child is spawned only after it is reaped, so a device has one
      driving process.
    A port's fields: its index (its child's, the switch's), its device (`device`, the provider's rdma_<interface>, as
