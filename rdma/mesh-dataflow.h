@@ -30,7 +30,7 @@ void mesh_publications_clear(struct hdr *);
 void mesh_plan_retire(struct mesh_ctx *,uint64_t plan);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 /* design/torch-capture-change-request.md item 6 */
-struct mesh_view { void *address; size_t bytes; };
+#include "mesh-page-view.h"
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 /* P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser, Practical lock-freedom, 2004;
