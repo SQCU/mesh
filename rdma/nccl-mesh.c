@@ -23,18 +23,26 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <sys/sysctl.h>
+#include <os/os_sync_wait_on_address.h>
 
 enum { CALL_ALLREDUCE, CALL_BROADCAST, CALL_REDUCE, CALL_REDUCE_SCATTER, CALL_ALLGATHER, CALL_ALLTOALL, CALL_GATHER,
        CALL_SCATTER };
 static const char *const CALL_NAME[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter",
                                         "ncclAllGather", "ncclAlltoAll", "ncclGather", "ncclScatter"};
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
-/* A communicator's indices on each rank's node: RECEIVES receive indices for each source rank, of which each pair uses
-   the communicator's window W (at most RECEIVES: comm_window), the k-th page from rank s to rank d landing at base[d]
-   + s RECEIVES + k mod W, that index's (k / W + 1)-th landing; and SOURCES source pages of each class, which what the
-   rank sends is copied into */
-#define RECEIVES 4096u
-#define SOURCES 1024u
+/* A communicator's pages in SHARES shares, every rank cutting them alike: page j of a message, and a reduction's
+   position j, are share j % SHARES's.  Each share has indices of its own on each rank's node: RECEIVES receive
+   indices for each source rank, of which each pair uses the communicator's window W (at most RECEIVES:
+   comm_window), the share's k-th page from rank s to rank d landing at d's base of the share + s RECEIVES + k mod W,
+   that index's (k / W + 1)-th landing; and SOURCES source pages of each class, which what the share sends is copied
+   into.  A rank moves its shares on its threads (the process's attach's, at most SHARES), share s on thread s % its
+   threads: the layout is the same at every rank, whatever its threads */
+#define SHARES 8u
+#define RECEIVES 512u
+#define SOURCES 128u
+/* a thread with no call to move looks for one for WORKER_SPIN_NS, then sleeps until one comes */
+#define WORKER_SPIN_NS 2000000u
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
 /* a failure's message: its text, and `id`, where the message is a communicator's (comm_fail), the count of messages the
@@ -211,39 +219,63 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
 }
 
 /* -- the process's attach ---------------------------------------------------------------------------------------------
-   The process is one client of its node's bridge: one attach of the node's region (mesh-call.h mesh_attach), made at
-   its first communicator, whose slot owns every communicator's indices and pages.  A region a stop released, or a
-   bridge of another layout replaced, is expired (its layout no longer MESH_LAYOUT): while the process holds a
-   communicator of it, a new communicator fails naming the expiry, and once it holds none the attach is let go
-   (mesh_detach: its slot left, its indices freed and their pages dropped), so the next communicator attaches the
-   bridge's next region and no process holds two. */
-struct attach { struct mesh_ctx context; uint64_t comms; };
+   The process is a client of its node's bridge in one slot a thread: one attach of the node's region (mesh-call.h
+   mesh_attach), made at its first communicator, and as many more slots of the same mapping as it has threads
+   (`contexts`, threads_wanted: mesh.h mesh_slot_take, each a write ring of its own), whose slots own every
+   communicator's indices and pages.  A region a stop released, or a bridge of another layout replaced, is expired (its
+   layout no longer MESH_LAYOUT): while the process holds a communicator of it, a new communicator fails naming the
+   expiry, and once it holds none the attach is let go (mesh_detach of each slot: its indices freed and their pages
+   dropped), so the next communicator attaches the bridge's next region and no process holds two.  A write ring has
+   one producer (mesh-call.h mesh_write): each slot's writes, of all the process's communicators and threads, are made
+   one at a time (`writing`). */
+struct attach { struct mesh_ctx context[SHARES]; pthread_mutex_t writing[SHARES]; uint32_t contexts; uint64_t comms; };
 static struct attach *attached;
 static pthread_mutex_t attach_lock = PTHREAD_MUTEX_INITIALIZER;
-/* a client's write ring has one producer (mesh-call.h mesh_write): the process's writes, of all its communicators and
-   threads, made one at a time */
-static pthread_mutex_t write_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int attach_expired(const struct attach *a) {
-  return __atomic_load_n(&a->context.M->version, __ATOMIC_ACQUIRE) != MESH_LAYOUT;
+  return __atomic_load_n(&a->context[0].M->version, __ATOMIC_ACQUIRE) != MESH_LAYOUT;
 }
 /* the attach let go where its region is expired and it holds no communicator of it; under attach_lock */
 static void attach_settle(void) {
   struct attach *a = attached;
   if (!a || a->comms || !attach_expired(a)) return;
-  mesh_detach(&a->context);
+  for (uint32_t w = a->contexts; w-- > 0;) mesh_detach(&a->context[w]);
+  for (uint32_t w = 0; w < SHARES; w++) pthread_mutex_destroy(&a->writing[w]);
   free(a);
   attached = NULL;
 }
-/* the process's attach, made at its first use and again after an expired one is let go: 0, ESTALE where the process
-   holds communicators of an expired region, ENOMEM, or mesh_attach's error; under attach_lock */
+/* the threads a process moves a communicator's shares on: NCCL_MESH_THREADS where set (1 to SHARES), else half the
+   node's performance cores (its bridge's port children spin on others), at most SHARES */
+static uint32_t threads_wanted(void) {
+  const char *set = getenv("NCCL_MESH_THREADS");
+  long n = set && *set ? strtol(set, NULL, 10) : 0;
+  if (n <= 0) {
+    int cores = 0;
+    size_t size = sizeof cores;
+    if (sysctlbyname("hw.perflevel0.physicalcpu", &cores, &size, NULL, 0) || cores <= 0) cores = 2;
+    n = cores / 2;
+  }
+  return n < 1 ? 1 : n > (long)SHARES ? SHARES : (uint32_t)n;
+}
+/* the process's attach, made at its first use and again after an expired one is let go: its region attached, then a
+   slot of the same mapping for each further thread wanted while one is vacant (fewer threads where none is); 0, ESTALE
+   where the process holds communicators of an expired region, ENOMEM, or mesh_attach's error; under attach_lock */
 static int attach_current(struct attach **out) {
   attach_settle();
   if (attached) { *out = attached; return attach_expired(attached) ? ESTALE : 0; }
   struct attach *a = calloc(1, sizeof *a);
   if (!a) return ENOMEM;
-  const int status = mesh_attach(&a->context);
+  const int status = mesh_attach(&a->context[0]);
   if (status) { free(a); return status; }
+  a->contexts = 1;
+  for (const uint32_t wanted = threads_wanted(); a->contexts < wanted; a->contexts++) {
+    struct mesh_ctx *c = &a->context[a->contexts];
+    *c = (struct mesh_ctx){.fd = -1};
+    if (mesh_slot_take(c, a->context[0].M)) { *c = (struct mesh_ctx){0}; break; }
+    /* the expiry read again after the slot's compare-exchange, as mesh_attach reads it */
+    if (__atomic_load_n(&c->M->version, __ATOMIC_SEQ_CST) != MESH_LAYOUT) { mesh_detach(c); break; }
+  }
+  for (uint32_t w = 0; w < SHARES; w++) pthread_mutex_init(&a->writing[w], NULL);
   *out = attached = a;
   return 0;
 }
@@ -261,22 +293,34 @@ static ncclResult_t attach_fail(int status, const char *name) {
 
 /* -- communicators ------------------------------------------------------------------------------------------------- */
 
-/* A communicator: its ranks; each rank's node (`node`), the first of its receive indices (`base`) and its standing
-   listener's address (`address`, where a split's or a shrink's communicator whose first rank it is meets), gathered at
-   its init; the pages this rank has written to each rank (`sent`) and taken from each (`received`); this rank's
-   indices (`receives`, its RECEIVES for each rank; `source[c]` the first of its SOURCES source pages of class c, 0 short
-   and 1 long, and `next[c]` the one it looks at first); the indices each pair's pages use (`window`, comm_window); the
-   splits and shrinks made of it (`splits`, which name them);
+/* A share of a communicator at this rank: the slot its indices are of (`context`, the attach's, and its writes' lock
+   `writing`), its receive indices (`receives`, its RECEIVES for each rank) and its source pages (`source[c]` the
+   first of its SOURCES of class c, 0 short and 1 long, and `next[c]` the one it looks at first); a cache line each,
+   since each is its own thread's */
+struct share { _Alignas(128) struct mesh_ctx *context; pthread_mutex_t *writing; uint32_t receives, source[2], next[2]; };
+struct plan;
+/* a thread of a communicator's past its first (the calling thread): its number */
+struct self { struct ncclComm *comm; uint32_t t; };
+
+/* A communicator: its ranks; each rank's node (`node`), the first receive index of each of its shares (`base`, rank r
+   share s at r SHARES + s) and its standing listener's address (`address`, where a split's or a shrink's communicator
+   whose first rank it is meets), gathered at its init; the pages each share of this rank has written to each rank
+   (`sent`) and taken from each (`received`, share s rank r at s nranks + r); its shares here (`share`); the indices each
+   pair's pages of a share use (`window`, comm_window); the splits and shrinks made of it (`splits`, which name them);
    its bootstrap's sockets (`peers`: the root's to every rank, a rank's to the root) and its standing listener; the
    scratch a reduction's own contribution is made in; its first failure (`failed`, `failure`), its revoke, and the
-   calls and exchanges under way on it (`active`) */
+   calls and exchanges under way on it (`active`).  Its threads (`threads`, the first the calling thread's, the others
+   `thread`): a call's plan (`plan`) is told them by `job`, the count of calls told in its high bits and the threads
+   the call is moved on in its low 8, the threads asleep counted (`asleep`), and the told threads still moving it
+   counted (`running`); `stopping` ends them */
 struct ncclComm {
   int nranks, rank;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
   uint32_t *node, *base;
   char (*address)[NCCL_UNIQUE_ID_BYTES];
   uint64_t *sent, *received;
-  uint32_t receives, source[2], next[2], window, splits;
+  struct share share[SHARES];
+  uint32_t window, splits, threads;
   struct attach *attach;
   int *peers, standing;
   unsigned char *scratch;
@@ -286,17 +330,24 @@ struct ncclComm {
   pthread_mutex_t guard, exchanging;
   int revoked;
   _Atomic int active;
+  pthread_t thread[SHARES];
+  struct self self[SHARES];
+  struct plan *plan;
+  _Atomic uint64_t job;
+  _Atomic uint32_t asleep, running;
+  _Atomic int stopping;
 };
 
 /* a communicator of `nranks` ranks named `name`, this process rank `rank`, holding nothing yet; NULL where out of
    memory */
 static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
-  struct ncclComm *comm = calloc(1, sizeof *comm);
-  if (!comm) return NULL;
+  struct ncclComm *comm = NULL;
+  if (posix_memalign((void **)&comm, _Alignof(struct ncclComm), sizeof *comm)) return NULL;
+  memset(comm, 0, sizeof *comm);
   const size_t n = (size_t)nranks;
-  comm->node = calloc(n, sizeof *comm->node); comm->base = calloc(n, sizeof *comm->base);
+  comm->node = calloc(n, sizeof *comm->node); comm->base = calloc(n * SHARES, sizeof *comm->base);
   comm->address = calloc(n, sizeof *comm->address);
-  comm->sent = calloc(n, sizeof *comm->sent); comm->received = calloc(n, sizeof *comm->received);
+  comm->sent = calloc(n * SHARES, sizeof *comm->sent); comm->received = calloc(n * SHARES, sizeof *comm->received);
   comm->peers = malloc(n * sizeof *comm->peers);
   if (!comm->node || !comm->base || !comm->address || !comm->sent || !comm->received || !comm->peers) {
     free(comm->node); free(comm->base); free(comm->address); free(comm->sent); free(comm->received); free(comm->peers);
@@ -304,8 +355,9 @@ static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
     return NULL;
   }
   for (size_t r = 0; r < n; r++) comm->peers[r] = -1;
-  comm->nranks = nranks; comm->rank = rank; comm->standing = -1;
-  comm->receives = comm->source[0] = comm->source[1] = MESH_ABSENT;
+  comm->nranks = nranks; comm->rank = rank; comm->standing = -1; comm->threads = 1;
+  for (uint32_t s = 0; s < SHARES; s++)
+    comm->share[s] = (struct share){NULL, NULL, MESH_ABSENT, {MESH_ABSENT, MESH_ABSENT}, {0, 0}};
   pthread_mutex_init(&comm->guard, NULL);
   pthread_mutex_init(&comm->exchanging, NULL);
   snprintf(comm->name, sizeof comm->name, "%s", name);
@@ -322,17 +374,23 @@ static int comm_attach(struct ncclComm *comm) {
   return status;
 }
 
-/* comm's indices of this node's table (none for one rank, which sends nothing): RECEIVES receive indices for each rank,
-   naming no page and landed 0 until one lands, and SOURCES source pages of each class; 0, or mesh_pages' errno */
+/* comm's indices of this node's table (none for one rank, which sends nothing), each share's of the slot of the thread
+   that moves it (share s, the attach's context s % its contexts): RECEIVES receive indices for each rank, naming no
+   page and landed 0 until one lands, and SOURCES source pages of each class; 0, or mesh_pages' errno */
 static int comm_reserve(struct ncclComm *comm) {
   if (comm->nranks == 1) return 0;
-  struct mesh_ctx *context = &comm->attach->context;
+  struct attach *a = comm->attach;
   const uint64_t receives = (uint64_t)comm->nranks * RECEIVES;
   int status = 0;
   pthread_mutex_lock(&attach_lock);
-  if ((comm->receives = mesh_pages(context, (uint32_t)receives, 0)) == MESH_ABSENT) status = errno;
-  else if ((comm->source[0] = mesh_pages(context, SOURCES, MESH_SHORT_PAYLOAD)) == MESH_ABSENT) status = errno;
-  else if ((comm->source[1] = mesh_pages(context, SOURCES, MESH_LONG_PAYLOAD)) == MESH_ABSENT) status = errno;
+  for (uint32_t s = 0; !status && s < SHARES; s++) {
+    struct share *x = comm->share + s;
+    x->context = &a->context[s % a->contexts];
+    x->writing = &a->writing[s % a->contexts];
+    if ((x->receives = mesh_pages(x->context, (uint32_t)receives, 0)) == MESH_ABSENT) status = errno;
+    else if ((x->source[0] = mesh_pages(x->context, SOURCES, MESH_SHORT_PAYLOAD)) == MESH_ABSENT) status = errno;
+    else if ((x->source[1] = mesh_pages(x->context, SOURCES, MESH_LONG_PAYLOAD)) == MESH_ABSENT) status = errno;
+  }
   pthread_mutex_unlock(&attach_lock);
   return status;
 }
@@ -343,10 +401,13 @@ static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_lock(&attach_lock);
   struct attach *a = comm->attach;
   if (a) {
-    if (comm->receives != MESH_ABSENT) mesh_invalidate(&a->context, comm->receives, (uint32_t)comm->nranks * RECEIVES, 1);
-    for (int c = 0; c < 2; c++)
-      if (comm->source[c] != MESH_ABSENT) mesh_invalidate(&a->context, comm->source[c], SOURCES, 1);
-    comm->receives = comm->source[0] = comm->source[1] = MESH_ABSENT;
+    for (uint32_t s = 0; s < SHARES; s++) {
+      struct share *x = comm->share + s;
+      if (x->receives != MESH_ABSENT) mesh_invalidate(x->context, x->receives, (uint32_t)comm->nranks * RECEIVES, 1);
+      for (int c = 0; c < 2; c++)
+        if (x->source[c] != MESH_ABSENT) mesh_invalidate(x->context, x->source[c], SOURCES, 1);
+      x->receives = x->source[0] = x->source[1] = MESH_ABSENT;
+    }
     a->comms--;
     comm->attach = NULL;
     attach_settle();
@@ -364,7 +425,9 @@ static void bootstrap_close(struct ncclComm *comm) {
   pthread_mutex_unlock(&comm->guard);
 }
 
+static void comm_threads_stop(struct ncclComm *comm);
 static void comm_free(struct ncclComm *comm) {
+  comm_threads_stop(comm);
   bootstrap_close(comm);
   if (comm->standing >= 0) close(comm->standing);
   comm_leave(comm);
@@ -415,22 +478,23 @@ static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 #define BOOTSTRAP_SLICE_MS 100
 
 /* a rank's report at a communicator's init: its status (0, else why it cannot go on, so every rank fails alike), its
-   bridge's node, the first of its receive indices, its node's pool (`pages`: the fewer pages of its two classes, mesh.h
-   struct mesh_pool) and its standing listener's address */
-struct report { int32_t rank, status; uint32_t node, base, pages; char address[NCCL_UNIQUE_ID_BYTES]; };
+   bridge's node, its node's pool (`pages`: the fewer pages of its two classes, mesh.h struct mesh_pool), the first
+   receive index of each of its shares and its standing listener's address */
+struct report { int32_t rank, status; uint32_t node, pages, base[SHARES]; char address[NCCL_UNIQUE_ID_BYTES]; };
 
-/* the communicator's window, alike at every rank (each computes it from the same reports): the pages each pair
-   numbers before it comes back to an index, at most RECEIVES, and the most for which, at every node v of the
-   communicator, its c_v ranks' source pages and a page at each index of their windows, c_v (SOURCES + (nranks - 1)
-   W) pages of either class, fit in half the node's pool (the other half its bridge's lanes' receives, its relays'
-   pages and its other clients'); 0 where no window fits.  A communicator of one rank writes to no pair: RECEIVES */
+/* the communicator's window, alike at every rank (each computes it from the same reports): the pages each pair of a
+   share numbers before it comes back to an index, at most RECEIVES, and the most for which, at every node v of the
+   communicator, its c_v ranks' source pages and a page at each index of their shares' windows, c_v SHARES (SOURCES +
+   (nranks - 1) W) pages of either class, fit in half the node's pool (the other half its bridge's lanes' receives,
+   its relays' pages and its other clients'); 0 where no window fits.  A communicator of one rank writes to no pair:
+   RECEIVES */
 static uint32_t comm_window(const struct report *reports, int nranks) {
   uint32_t window = RECEIVES;
   for (int r = 0; nranks > 1 && r < nranks; r++) {
     uint64_t here = 0;
     for (int q = 0; q < nranks; q++) here += reports[q].node == reports[r].node;
-    const uint64_t room = reports[r].pages / 2, held = here * SOURCES;
-    const uint64_t most = room > held ? (room - held) / (here * (uint64_t)(nranks - 1)) : 0;
+    const uint64_t room = reports[r].pages / 2, held = here * SHARES * SOURCES;
+    const uint64_t most = room > held ? (room - held) / (here * SHARES * (uint64_t)(nranks - 1)) : 0;
     if (most < window) window = (uint32_t)most;
   }
   return window;
@@ -644,7 +708,9 @@ static ncclResult_t exchange(struct ncclComm *comm, const void *local, size_t by
    bootstrap's sockets opened (bootstrap_open, the root accepting on `standing` where it is a listener), then every
    rank's report gathered: each rank's node, base, pool and standing listener, the only exchange its calls need, from
    which every rank computes the same window (comm_window).  A rank that cannot go on, or a window of 0, fails every
-   rank alike, made holding nothing of its bridge's and its sockets closed; a revoke fails it as a value */
+   rank alike, made holding nothing of its bridge's and its sockets closed; a revoke fails it as a value.  A
+   communicator made starts its threads (comm_threads_start) */
+static void comm_threads_start(struct ncclComm *comm);
 static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   const int nranks = made->nranks, rank = made->rank;
   struct report *reports = calloc((size_t)nranks, sizeof *reports);
@@ -653,9 +719,10 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   const int attaching = comm_attach(made);
   int status = attaching ? attaching : comm_reserve(made);
   if (!status && nranks > 1 && (made->standing = listener_open(mine->address, sizeof mine->address)) < 0) status = errno;
-  mine->rank = rank; mine->status = status; mine->base = made->receives;
+  mine->rank = rank; mine->status = status;
+  for (uint32_t s = 0; s < SHARES; s++) mine->base[s] = made->share[s].receives;
   if (!attaching) {
-    struct hdr *m = made->attach->context.M;
+    struct hdr *m = made->attach->context[0].M;
     const struct mesh_pool *pool = mesh_pool(m);
     mine->node = m->node;
     mine->pages = pool->cls[0].pages < pool->cls[1].pages ? pool->cls[0].pages : pool->cls[1].pages;
@@ -666,7 +733,7 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   if (attaching) result = attach_fail(attaching, made->name);
   else if (status)
     result = fail(ncclSystemError, "communicator %s: its %u receive indices and %u source pages of each class of this node's bridge, "
-                  "or its listener: %s", made->name, (uint32_t)nranks * RECEIVES, SOURCES, strerror(status));
+                  "or its listener: %s", made->name, (uint32_t)nranks * RECEIVES * SHARES, SOURCES * SHARES, strerror(status));
   else if (met == ECANCELED || revoked(made)) result = revoked_fail(made);
   else if (met) result = fail(ncclRemoteError, "communicator %s: the bootstrap at %s: %s", made->name, made->id, strerror(met));
   for (int r = 0; !result && r < nranks; r++)
@@ -677,12 +744,14 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
     result = fail(ncclSystemError, "communicator %s: half the pool of a node of its ranks holds their source pages and no "
                   "receive page for each pair: %s", made->name, strerror(ENOSPC));
   for (int r = 0; !result && r < nranks; r++) {
-    made->node[r] = reports[r].node; made->base[r] = reports[r].base;
+    made->node[r] = reports[r].node;
+    for (uint32_t s = 0; s < SHARES; s++) made->base[(size_t)r * SHARES + s] = reports[r].base[s];
     memcpy(made->address[r], reports[r].address, sizeof made->address[r]);
     made->address[r][sizeof made->address[r] - 1] = 0;
   }
   free(reports);
   if (result) { bootstrap_close(made); comm_leave(made); }
+  else comm_threads_start(made);
   return result;
 }
 
@@ -819,18 +888,21 @@ static size_t page_at(size_t bytes, uint64_t j, size_t *offset) {
   return bytes - *offset < p ? bytes - *offset : p;
 }
 
-/* A phase's moves under way, toward and from each rank r: its pair's first page of the phase toward it
-   (`first_out[r]`) and from it (`first_in[r]`), the pages due from it (`due[r]`: those of its in-message, `from[r]`, or
-   the reduction's positions), the first of them not yet taken (`low[r]`) and each one's state (`taken`, from `at[r]`:
-   WAITING, TAKEN, or PARKED in the parked scratch until its turn); the page it sends next (out-message `o`, its page
-   `j`, its destinations from the g-th of them) and the source page that page's payload was copied into and not yet
-   written (`copied`, MESH_ABSENT none); each reduction position's next rank to combine (`next`) and the scratch a page
-   that lands before its rank's turn is copied into (`parked`, NULL until the first); the in-message pages still to
-   take and the reduction's contributions still to combine (`left`) */
+/* A share's moves of a phase under way, toward and from each rank r, every count in the share's own pages (its q-th
+   page of a message the message's page s + q SHARES, s the share): its pair's first page of the share in the phase
+   toward it (`first_out[r]`) and from it (`first_in[r]`), the share's pages due from it (`due[r]`: those of its
+   in-message, `from[r]`, or the reduction's positions), the first of them not yet taken (`low[r]`) and each one's state
+   (`taken`, from `at[r]`: WAITING, TAKEN, or PARKED in the parked scratch until its turn); the page it sends next
+   (out-message `o`, its page `j`, its destinations from the g-th of them) and the source page that page's payload was
+   copied into and not yet written (`copied`, MESH_ABSENT none); each of the share's reduction positions' next rank to
+   combine (`next`) and the scratch a page that lands before its rank's turn is copied into (`parked`, NULL until the
+   first); the in-message pages still to take and the reduction's contributions still to combine (`left`) */
 enum { WAITING, TAKEN, PARKED };
 struct moving {
   struct call *call;
   const struct phase *p;
+  struct share *share;
+  uint32_t s;
   uint64_t *first_out, *first_in, *due, *low, *at;
   const struct in **from;
   uint32_t o, g, copied;
@@ -841,19 +913,21 @@ struct moving {
   uint32_t *next;
 };
 
-/* a source page of class `cls` free to copy into: its uses 1, its word's alone (no write, SEND or landing of it under
-   way: the use-checker, design/PAGE-TABLE-SPEC-20261122.md section 6), looked for from the class's `next`; MESH_ABSENT
-   where none is */
-static uint32_t source_free(struct ncclComm *comm, int cls) {
-  struct mesh_ctx *context = &comm->attach->context;
+/* the pages of a message of `pages` pages that are share s's */
+static uint64_t share_pages(uint64_t pages, uint32_t s) { return pages > s ? (pages - s + SHARES - 1) / SHARES : 0; }
+
+/* a source page of share x of class `cls` free to copy into: its uses 1, its word's alone (no write, SEND or landing
+   of it under way: the use-checker, design/PAGE-TABLE-SPEC-20261122.md section 6), looked for from the class's `next`;
+   MESH_ABSENT where none is */
+static uint32_t source_free(struct share *x, int cls) {
   for (uint32_t i = 0; i < SOURCES; i++) {
-    const uint32_t at = (comm->next[cls] + i) % SOURCES;
+    const uint32_t at = (x->next[cls] + i) % SOURCES;
     struct mesh_view_entry entry;
-    if (mesh_entry(context, comm->source[cls] + at, &entry) || entry.uses != 1) continue;
-    comm->next[cls] = (at + 1) % SOURCES;
+    if (mesh_entry(x->context, x->source[cls] + at, &entry) || entry.uses != 1) continue;
+    x->next[cls] = (at + 1) % SOURCES;
     /* the bridge's last drop of a use (release) before this rank's stores into the page */
     atomic_thread_fence(memory_order_acquire);
-    return comm->source[cls] + at;
+    return x->source[cls] + at;
   }
   return MESH_ABSENT;
 }
@@ -861,28 +935,29 @@ static uint32_t source_free(struct ncclComm *comm, int cls) {
 /* the g-th of the ranks other than `me`, in rank order */
 static int other(int me, uint32_t g) { return (int)g + ((int)g >= me); }
 
-/* the phase's pages sent in order (each message's pages; each page to its destinations, one write to each MESH_DESTS
-   of them in rank order, every write from a source page of its own, each destination the index its own pair's page
-   number for the page names), while a source page is free and the write ring takes them: 0 (the rest wait for a later
-   pass), or -1 with the call's failure in *result */
+/* the share's pages of the phase sent in order (each message's pages of the share; each page to its destinations,
+   one write to each MESH_DESTS of them in rank order, every write from a source page of the share's own, each
+   destination the index its own pair's page number for the page names, in the share's indices there), while a source
+   page is free and the share's write ring takes them: 0 (the rest wait for a later pass), or -1 with the call's
+   failure in *result */
 static int send_some(struct moving *m, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
-  struct mesh_ctx *context = &comm->attach->context;
+  struct share *share = m->share;
   const struct phase *p = m->p;
   const int me = comm->rank;
-  for (; m->o < p->outs; m->o++, m->j = 0) {
+  for (; m->o < p->outs; m->o++, m->j = m->s) {
     const struct out *x = p->out + m->o;
     const uint64_t pages = pages_of(x->bytes);
     const uint32_t dests = x->to < 0 ? (uint32_t)comm->nranks - 1 : 1;
-    for (; m->j < pages; m->j++, m->g = 0)
+    for (; m->j < pages; m->j += SHARES, m->g = 0)
       while (m->g < dests) {
         if (m->copied == MESH_ABSENT) {
-          const uint32_t a = source_free(comm, x->bytes > MESH_SHORT_PAYLOAD);
+          const uint32_t a = source_free(share, x->bytes > MESH_SHORT_PAYLOAD);
           if (a == MESH_ABSENT) return 0;
           size_t offset;
           const size_t bytes = page_at(x->bytes, m->j, &offset);
-          unsigned char *data = mesh_page_data(context, a);
+          unsigned char *data = mesh_page_data(share->context, a);
           if (x->pre) premultiply(c->type, data, x->data + offset, c->pre, bytes / SIZE[c->type]);
           else memcpy(data, x->data + offset, bytes);
           m->copied = a; m->copied_bytes = bytes;
@@ -891,12 +966,13 @@ static int send_some(struct moving *m, ncclResult_t *result) {
         const uint32_t n = dests - m->g < MESH_DESTS ? dests - m->g : MESH_DESTS;
         for (uint32_t i = 0; i < n; i++) {
           const int d = x->to < 0 ? other(me, m->g + i) : x->to;
-          const uint64_t k = m->first_out[d] + m->j;
-          dest[i] = (struct mesh_dest){comm->node[d], comm->base[d] + (uint32_t)me * RECEIVES + (uint32_t)(k % comm->window)};
+          const uint64_t k = m->first_out[d] + m->j / SHARES;
+          dest[i] = (struct mesh_dest){comm->node[d], comm->base[(size_t)d * SHARES + m->s] + (uint32_t)me * RECEIVES +
+                                                      (uint32_t)(k % comm->window)};
         }
-        pthread_mutex_lock(&write_lock);
-        const int status = mesh_write(context, m->copied, (uint32_t)m->copied_bytes, dest, n);
-        pthread_mutex_unlock(&write_lock);
+        pthread_mutex_lock(share->writing);
+        const int status = mesh_write(share->context, m->copied, (uint32_t)m->copied_bytes, dest, n);
+        pthread_mutex_unlock(share->writing);
         if (status == EAGAIN) return 0;
         if (status) {
           *result = comm_fail(comm, ncclInternalError, "communicator %s: %s's write of its source page %u: %s", comm->name,
@@ -911,25 +987,25 @@ static int send_some(struct moving *m, ncclResult_t *result) {
 }
 
 /* the parked scratch's part for rank r's reduction pages: one p->bytes a rank, for each rank but rank 0 (whose page is
-   always in its turn) and this one */
+   always in its turn) and this one (a share touches only its own pages of it) */
 static unsigned char *parked_at(const struct moving *m, int r) {
   const int me = m->call->comm->rank;
   return m->parked + (size_t)(r - 1 - (me && me < r)) * m->p->bytes;
 }
 
-/* reduction position j combined on in rank order while the next rank's contribution is here: this rank's own, or a
-   page parked before its turn (rank 0's copied, each later one's combined); a page taken before its turn from an index
-   that named none adds nothing */
-static void advance(struct moving *m, uint64_t j) {
+/* the share's reduction position q combined on in rank order while the next rank's contribution is here: this rank's
+   own, or a page parked before its turn (rank 0's copied, each later one's combined); a page taken before its turn
+   from an index that named none adds nothing */
+static void advance(struct moving *m, uint64_t q) {
   struct call *c = m->call;
   const struct phase *p = m->p;
   const int n = c->comm->nranks, me = c->comm->rank;
   size_t offset;
-  const size_t bytes = page_at(p->bytes, j, &offset);
-  for (int r; (r = (int)m->next[j]) < n; m->next[j]++, m->left--) {
+  const size_t bytes = page_at(p->bytes, m->s + q * SHARES, &offset);
+  for (int r; (r = (int)m->next[q]) < n; m->next[q]++, m->left--) {
     const unsigned char *from = p->own + offset;
     if (r != me) {
-      const int state = m->taken[m->at[r] + j];
+      const int state = m->taken[m->at[r] + q];
       if (state == WAITING) return;
       if (state == TAKEN) continue;
       from = parked_at(m, r) + offset;
@@ -939,113 +1015,267 @@ static void advance(struct moving *m, uint64_t j) {
   }
 }
 
-/* page j of the phase's pages from rank s taken once its index has counted its landing (the pair's page k is the
-   (k / W + 1)-th to land at its index, W the communicator's window), whatever landed.  Where the index names a page,
-   the bytes due are copied from it as they are (a page of either class is followed by a long page's frames of the
-   region, mesh.h): an in-message's to its place in the buffer (design/DEFRAGMENT-pseudocode-20261122.md), a reduction
-   page's combined straight into the result where its rank's turn at its position has come (rank 0's copied; then the
-   position's later ranks already here after it, advance), else copied into the phase's parked scratch (allocated at
-   the first page parked, sized from the phase); then the index is invalidated.  Where it names none (its page was
-   taken under an earlier count), nothing is copied.  0 (taken, or not landed yet), or -1 with the call's failure in
-   *result */
-static int take(struct moving *m, int s, uint64_t j, ncclResult_t *result) {
+/* the share's page q of the phase's pages from rank r taken once its index has counted its landing (the pair's page k
+   of the share is the (k / W + 1)-th to land at its index, W the communicator's window), whatever landed.  Where the
+   index names a page, the bytes due are copied from it as they are (a page of either class is followed by a long
+   page's frames of the region, mesh.h): an in-message's to its place in the buffer
+   (design/DEFRAGMENT-pseudocode-20261122.md), a reduction page's combined straight into the result where its rank's
+   turn at its position has come (rank 0's copied; then the position's later ranks already here after it, advance),
+   else copied into the share's parked scratch (allocated at the first page parked, sized from the phase); then the
+   index is invalidated.  Where it names none (its page was taken under an earlier count), nothing is copied.  0
+   (taken, or not landed yet), or -1 with the call's failure in *result */
+static int take(struct moving *m, int r, uint64_t q, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
-  struct mesh_ctx *context = &comm->attach->context;
+  struct share *share = m->share;
   const struct phase *p = m->p;
-  const struct in *x = m->from[s];
-  const uint64_t k = m->first_in[s] + j;
-  const uint32_t index = comm->receives + (uint32_t)s * RECEIVES + (uint32_t)(k % comm->window);
+  const struct in *x = m->from[r];
+  const uint64_t k = m->first_in[r] + q;
+  const uint32_t index = share->receives + (uint32_t)r * RECEIVES + (uint32_t)(k % comm->window);
   struct mesh_view_entry entry;
-  if (mesh_entry(context, index, &entry)) {
+  if (mesh_entry(share->context, index, &entry)) {
     *result = comm_fail(comm, ncclInternalError, "communicator %s: its index %u could not be read", comm->name, index);
     return -1;
   }
   if (entry.landed < k / comm->window + 1) return 0;
   size_t offset;
-  const size_t bytes = page_at(x ? x->bytes : p->bytes, j, &offset);
-  const int turn = !x && m->next[j] == (uint32_t)s;
+  const size_t bytes = page_at(x ? x->bytes : p->bytes, m->s + q * SHARES, &offset);
+  const int turn = !x && m->next[q] == (uint32_t)r;
   unsigned char state = TAKEN;
   if (entry.data) {
     if (x) memcpy(x->to + offset, entry.data, bytes);
-    else if (turn && !s) memcpy(p->acc + offset, entry.data, bytes);
+    else if (turn && !r) memcpy(p->acc + offset, entry.data, bytes);
     else if (turn) combine_into(c->type, c->combine, p->acc + offset, entry.data, bytes / SIZE[c->type]);
     else {
       if (!m->parked && !(m->parked = malloc((size_t)(comm->nranks - 1 - (comm->rank != 0)) * p->bytes))) {
         *result = comm_fail(comm, ncclSystemError, "communicator %s: out of memory for the pages that land before their turn", comm->name);
         return -1;
       }
-      memcpy(parked_at(m, s) + offset, entry.data, bytes);
+      memcpy(parked_at(m, r) + offset, entry.data, bytes);
       state = PARKED;
     }
-    mesh_invalidate(context, index, 1, 0);
+    mesh_invalidate(share->context, index, 1, 0);
   }
-  m->taken[m->at[s] + j] = state;
+  m->taken[m->at[r] + q] = state;
   if (x || turn) m->left--;
-  if (turn) { m->next[j]++; advance(m, j); }
+  if (turn) { m->next[q]++; advance(m, q); }
   return 0;
 }
 
-/* the phase's landed pages taken (take), each in the pass that finds it, every page independent of the others: from
-   each rank, its pages from the first not yet taken through the communicator's window of them, each at an index of
-   its own (a page further on lands at the index of one of these, and is looked for once that one is taken, so no
-   index is read for a later page while an earlier page there is due): 0, or -1 with the call's failure in *result */
+/* the share's landed pages of the phase taken (take), each in the pass that finds it, every page independent of the
+   others: from each rank, its pages from the first not yet taken through the communicator's window of them, each at
+   an index of its own (a page further on lands at the index of one of these, and is looked for once that one is
+   taken, so no index is read for a later page while an earlier page there is due): 0, or -1 with the call's failure
+   in *result */
 static int take_some(struct moving *m, ncclResult_t *result) {
   const int n = m->call->comm->nranks;
   const uint32_t window = m->call->comm->window;
-  for (int s = 0; s < n; s++) {
-    const unsigned char *taken = m->taken + m->at[s];
-    while (m->low[s] < m->due[s] && taken[m->low[s]]) m->low[s]++;
-    const uint64_t end = m->due[s] - m->low[s] > window ? m->low[s] + window : m->due[s];
-    for (uint64_t j = m->low[s]; j < end; j++)
-      if (!taken[j] && take(m, s, j, result)) return -1;
+  for (int r = 0; r < n; r++) {
+    const unsigned char *taken = m->taken + m->at[r];
+    while (m->low[r] < m->due[r] && taken[m->low[r]]) m->low[r]++;
+    const uint64_t end = m->due[r] - m->low[r] > window ? m->low[r] + window : m->due[r];
+    for (uint64_t q = m->low[r]; q < end; q++)
+      if (!taken[q] && take(m, r, q, result)) return -1;
   }
   return 0;
 }
 
-/* A phase moved: each pair's pages numbered on from its count (comm's `sent` to each rank, `received` from each, the
-   same at both ends, since every rank makes the same calls in the same order and cuts each message alike), this rank's
-   own contribution combined where it is rank 0, then its pages sent and its landed pages taken, pass after pass, until
-   it has sent every page and taken every page due to it and combined every contribution.  The waits are this call's
-   own: they end once its pages have landed, or at the communicator's revoke, which each pass reads and which ends it
-   as a value */
-static ncclResult_t phase_move(struct call *c, const struct phase *p) {
+static void moving_close(struct moving *m) {
+  free(m->first_out); free(m->from); free(m->next); free(m->taken); free(m->parked);
+  m->first_out = NULL; m->from = NULL; m->next = NULL; m->taken = NULL; m->parked = NULL;
+}
+/* share s's moves of phase p begun: each pair's pages of the share numbered on from its count (comm's `sent` to each
+   rank, `received` from each, of the share, the same at both ends, since every rank makes the same calls in the same
+   order and cuts each message alike), and this rank's own contribution combined where it is rank 0; ncclSuccess, or
+   the failure (out of memory) */
+static ncclResult_t moving_open(struct moving *m, struct call *c, const struct phase *p, uint32_t s) {
   struct ncclComm *comm = c->comm;
   const int n = comm->nranks, me = comm->rank;
-  struct moving m = {.call = c, .p = p, .copied = MESH_ABSENT, .positions = p->acc ? pages_of(p->bytes) : 0};
-  m.first_out = calloc(5 * (size_t)n, sizeof *m.first_out);
-  m.from = calloc((size_t)n, sizeof *m.from);
-  m.next = calloc((size_t)m.positions + 1, sizeof *m.next);
+  *m = (struct moving){.call = c, .p = p, .share = comm->share + s, .s = s, .copied = MESH_ABSENT, .j = s,
+                       .positions = p->acc ? share_pages(pages_of(p->bytes), s) : 0};
+  m->first_out = calloc(5 * (size_t)n, sizeof *m->first_out);
+  m->from = calloc((size_t)n, sizeof *m->from);
+  m->next = calloc((size_t)m->positions + 1, sizeof *m->next);
   uint64_t pages = 0;
-  if (m.first_out && m.from) {
-    m.first_in = m.first_out + n; m.due = m.first_in + n; m.low = m.due + n; m.at = m.low + n;
-    for (uint32_t i = 0; i < p->ins; i++) { m.from[p->in[i].from] = p->in + i; m.due[p->in[i].from] = pages_of(p->in[i].bytes); }
-    for (int s = 0; p->acc && s < n; s++)
-      if (s != me) m.due[s] = m.positions;
-    for (int s = 0; s < n; s++) { m.at[s] = pages; pages += m.due[s]; }
+  if (m->first_out && m->from) {
+    m->first_in = m->first_out + n; m->due = m->first_in + n; m->low = m->due + n; m->at = m->low + n;
+    for (uint32_t i = 0; i < p->ins; i++) {
+      m->from[p->in[i].from] = p->in + i;
+      m->due[p->in[i].from] = share_pages(pages_of(p->in[i].bytes), s);
+    }
+    for (int r = 0; p->acc && r < n; r++)
+      if (r != me) m->due[r] = m->positions;
+    for (int r = 0; r < n; r++) { m->at[r] = pages; pages += m->due[r]; }
   }
-  m.taken = calloc((size_t)pages + 1, 1);
-  if (!m.first_out || !m.from || !m.next || !m.taken) {
-    free(m.first_out); free(m.from); free(m.next); free(m.taken);
+  m->taken = calloc((size_t)pages + 1, 1);
+  if (!m->first_out || !m->from || !m->next || !m->taken) {
+    moving_close(m);
     return fail(ncclSystemError, "communicator %s: out of memory", comm->name);
   }
-  m.left = pages + m.positions;
-  for (int r = 0; r < n; r++) {
-    m.first_out[r] = comm->sent[r]; m.first_in[r] = comm->received[r];
-    comm->received[r] += m.due[r];
-  }
+  m->left = pages + m->positions;
+  uint64_t *sent = comm->sent + (size_t)s * n, *received = comm->received + (size_t)s * n;
+  for (int r = 0; r < n; r++) { m->first_out[r] = sent[r]; m->first_in[r] = received[r]; received[r] += m->due[r]; }
   for (uint32_t o = 0; o < p->outs; o++)
     for (int d = 0; d < n; d++)
-      if (d != me && (p->out[o].to < 0 || p->out[o].to == d)) comm->sent[d] += pages_of(p->out[o].bytes);
-  for (uint64_t j = 0; j < m.positions; j++) advance(&m, j);
-  ncclResult_t result = ncclSuccess;
-  for (;;) {
-    if (send_some(&m, &result) || take_some(&m, &result)) break;
-    if (m.o == p->outs && !m.left) break;
-    if (revoked(comm)) { result = revoked_fail(comm); break; }
+      if (d != me && (p->out[o].to < 0 || p->out[o].to == d)) sent[d] += share_pages(pages_of(p->out[o].bytes), s);
+  for (uint64_t q = 0; q < m->positions; q++) advance(m, q);
+  return ncclSuccess;
+}
+
+/* A call's moves (call_move), told every thread that moves a share of it: its phases (a second for an all-reduce of
+   more than one page: the all-gather of the reduced segments); this rank's one copy of its own part where it lies
+   apart from where it goes (`local`), and the reduction's own contribution where comm's scratch makes it (`fill`, the
+   bytes it is copied, or premultiplied, from), each made by the shares, page by page; the shares with pages (`active`:
+   shares 0 to active - 1) and the threads that move them (`threads`, thread t shares t, t + threads, ...); each
+   thread's result and its message, and `stop`, which a thread's failure sets, so the others end too */
+struct local { const unsigned char *from; unsigned char *to; size_t bytes; };
+struct plan {
+  struct call *call;
+  struct phase phase[2];
+  uint32_t phases, active, threads;
+  struct local local;
+  const unsigned char *fill;
+  _Atomic int stop;
+  ncclResult_t result[SHARES];
+  struct said said[SHARES];
+};
+
+/* share s's pages of the reduction's own contribution made in comm's scratch from `fill`, before anything reads them */
+static void share_fill(struct plan *plan, uint32_t s) {
+  struct call *c = plan->call;
+  const struct phase *p = plan->phase;
+  if (!plan->fill) return;
+  for (uint64_t j = s, pages = pages_of(p->bytes); j < pages; j += SHARES) {
+    size_t offset;
+    const size_t bytes = page_at(p->bytes, j, &offset);
+    if (c->premultiplied) premultiply(c->type, c->comm->scratch + offset, plan->fill + offset, c->pre, bytes / SIZE[c->type]);
+    else memcpy(c->comm->scratch + offset, plan->fill + offset, bytes);
   }
-  free(m.first_out); free(m.from); free(m.next); free(m.taken); free(m.parked);
-  return result;
+}
+/* share s's pages of this rank's local copy */
+static void share_local(struct plan *plan, uint32_t s) {
+  const struct local *l = &plan->local;
+  for (uint64_t j = s, pages = pages_of(l->bytes); j < pages; j += SHARES) {
+    size_t offset;
+    const size_t bytes = page_at(l->bytes, j, &offset);
+    memcpy(l->to + offset, l->from + offset, bytes);
+  }
+}
+/* share s's positions of the reduction's result divided by nranks (an integer average) */
+static void share_divide(struct plan *plan, uint32_t s) {
+  struct call *c = plan->call;
+  const struct phase *p = plan->phase;
+  for (uint64_t j = s, pages = pages_of(p->bytes); j < pages; j += SHARES) {
+    size_t offset;
+    const size_t bytes = page_at(p->bytes, j, &offset);
+    truncdiv(c->type, p->acc + offset, p->acc + offset, bytes / SIZE[c->type], (uint64_t)c->comm->nranks);
+  }
+}
+
+/* Thread t's shares of a plan moved, each through the call's phases, each pass moving every one of them that is not
+   done: its pages sent and its landed pages taken (send_some, take_some); a share done with its first phase divides
+   its positions where the call averages integers, then begins the second where there is one; the thread's part of the
+   local copy made after its first pass's writes.  The waits are the call's own: they end once the shares' pages have
+   landed, at another thread's failure (`stop`), or at the communicator's revoke, which each pass reads and which ends
+   it as a value.  The thread's result and its message are put in the plan */
+static void shares_run(struct plan *plan, uint32_t t) {
+  struct call *c = plan->call;
+  struct ncclComm *comm = c->comm;
+  struct moving run[SHARES];
+  uint32_t stage[SHARES], shares[SHARES], runs = 0, done = 0;
+  ncclResult_t result = ncclSuccess;
+  for (uint32_t s = t; s < plan->active; s += plan->threads) {
+    share_fill(plan, s);
+    if ((result = moving_open(run + runs, c, plan->phase, s))) break;
+    stage[runs] = 0;
+    shares[runs++] = s;
+  }
+  int local = !plan->local.bytes;
+  while (!result && done < runs) {
+    for (uint32_t i = 0; i < runs; i++) {
+      if (stage[i] == plan->phases) continue;
+      struct moving *m = run + i;
+      if (send_some(m, &result) || take_some(m, &result)) break;
+      if (m->o < m->p->outs || m->left) continue;
+      moving_close(m);
+      if (!stage[i] && c->post && plan->phase[0].acc) share_divide(plan, shares[i]);
+      if (++stage[i] < plan->phases) { if ((result = moving_open(m, c, plan->phase + stage[i], shares[i]))) break; }
+      else done++;
+    }
+    if (result) break;
+    if (!local) { for (uint32_t i = 0; i < runs; i++) share_local(plan, shares[i]); local = 1; }
+    if (atomic_load_explicit(&plan->stop, memory_order_relaxed)) break;
+    if (done < runs && revoked(comm)) { result = revoked_fail(comm); break; }
+  }
+  for (uint32_t i = 0; i < runs; i++)
+    if (stage[i] < plan->phases) moving_close(run + i);
+  plan->result[t] = result;
+  if (result) { plan->said[t] = last; atomic_store_explicit(&plan->stop, 1, memory_order_relaxed); }
+}
+
+/* a thread of comm past its first: told each call (`job`), it moves its shares of the call where the call is moved on
+   it (shares_run), then counts itself done (`running`); between calls it looks for the next for WORKER_SPIN_NS, then
+   sleeps on `job` (counted `asleep`, so a call wakes it), until comm stops */
+static void *comm_thread(void *arg) {
+  const struct self *self = arg;
+  struct ncclComm *comm = self->comm;
+  uint64_t seen = atomic_load_explicit(&comm->job, memory_order_acquire), job;
+  for (;;) {
+    uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + WORKER_SPIN_NS;
+    for (uint32_t looks = 0; (job = atomic_load_explicit(&comm->job, memory_order_acquire)) == seen;) {
+      if (++looks & 255 || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until) continue;
+      atomic_fetch_add(&comm->asleep, 1);
+      if (atomic_load(&comm->job) == seen) os_sync_wait_on_address((void *)&comm->job, seen, sizeof comm->job, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+      atomic_fetch_sub(&comm->asleep, 1);
+      until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + WORKER_SPIN_NS;
+    }
+    seen = job;
+    if (atomic_load(&comm->stopping)) return NULL;
+    if (self->t < (job & 255)) {
+      shares_run(comm->plan, self->t);
+      atomic_fetch_sub_explicit(&comm->running, 1, memory_order_release);
+    }
+  }
+}
+
+/* comm's threads started, one for each slot of the process's attach past the first (fewer where one cannot be made) */
+static void comm_threads_start(struct ncclComm *comm) {
+  const uint32_t wanted = comm->attach->contexts;
+  pthread_attr_t attributes;
+  pthread_attr_init(&attributes);
+  pthread_attr_set_qos_class_np(&attributes, QOS_CLASS_USER_INTERACTIVE, 0);
+  for (comm->threads = 1; comm->threads < wanted; comm->threads++) {
+    comm->self[comm->threads] = (struct self){comm, comm->threads};
+    if (pthread_create(comm->thread + comm->threads, &attributes, comm_thread, comm->self + comm->threads)) break;
+  }
+  pthread_attr_destroy(&attributes);
+}
+/* comm's threads ended and joined (no call is under way: ncclCommDestroy, or an init that failed) */
+static void comm_threads_stop(struct ncclComm *comm) {
+  if (comm->threads < 2) return;
+  atomic_store(&comm->stopping, 1);
+  atomic_fetch_add(&comm->job, 256);
+  os_sync_wake_by_address_all((void *)&comm->job, sizeof comm->job, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+  for (uint32_t t = 1; t < comm->threads; t++) pthread_join(comm->thread[t], NULL);
+  comm->threads = 1;
+}
+
+/* a plan moved: told its threads past the first (the job's count raised and its threads put in its low bits, those
+   asleep woken), thread 0's shares moved here, then each told thread waited for (the call's own end): the first
+   thread's failure, in thread order, named again (ncclGetLastError), or ncclSuccess */
+static ncclResult_t plan_run(struct plan *plan) {
+  struct ncclComm *comm = plan->call->comm;
+  if (plan->threads > 1) {
+    comm->plan = plan;
+    atomic_store_explicit(&comm->running, plan->threads - 1, memory_order_relaxed);
+    atomic_store(&comm->job, (((atomic_load_explicit(&comm->job, memory_order_relaxed) >> 8) + 1) << 8) | plan->threads);
+    if (atomic_load(&comm->asleep)) os_sync_wake_by_address_all((void *)&comm->job, sizeof comm->job, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+  }
+  shares_run(plan, 0);
+  while (atomic_load_explicit(&comm->running, memory_order_acquire)) {}
+  for (uint32_t t = 0; t < plan->threads; t++)
+    if (plan->result[t]) { last = plan->said[t]; return plan->result[t]; }
+  return ncclSuccess;
 }
 
 /* rank q's segment of an all-reduce's elements, split as evenly as the ranks allow (the first count % nranks one
@@ -1057,9 +1287,10 @@ static size_t segment(size_t count, int n, int q, size_t *length) {
 }
 
 /* a reduction's own contribution, `bytes` at `from`: read in place where it needs no premultiply and lies apart from
-   the result `acc`, else made in comm's scratch (premultiplied, or copied, so the result's first stores do not reach
-   it); NULL where out of memory */
-static const unsigned char *own_of(struct call *c, const unsigned char *from, const unsigned char *acc, size_t bytes) {
+   the result `acc`, else made in comm's scratch (premultiplied, or copied, by the shares: share_fill, each position
+   before the result's first store there); NULL where out of memory */
+static const unsigned char *own_of(struct plan *plan, const unsigned char *from, const unsigned char *acc, size_t bytes) {
+  struct call *c = plan->call;
   const uintptr_t f = (uintptr_t)from, a = (uintptr_t)acc;
   if (!c->premultiplied && (f + bytes <= a || a + bytes <= f)) return from;
   struct ncclComm *comm = c->comm;
@@ -1068,9 +1299,23 @@ static const unsigned char *own_of(struct call *c, const unsigned char *from, co
     if (!grown) return NULL;
     comm->scratch = grown; comm->scratch_bytes = bytes;
   }
-  if (c->premultiplied) premultiply(c->type, comm->scratch, from, c->pre, bytes / SIZE[c->type]);
-  else memcpy(comm->scratch, from, bytes);
+  plan->fill = from;
   return comm->scratch;
+}
+/* this rank's own part, `bytes` at `from`, copied to `to`: by the shares where the two lie apart (`local`), else here
+   at once; nothing where they are one */
+static void local_of(struct plan *plan, const unsigned char *from, unsigned char *to, size_t bytes) {
+  const uintptr_t f = (uintptr_t)from, t = (uintptr_t)to;
+  if (from == to) return;
+  if (f + bytes <= t || t + bytes <= f) plan->local = (struct local){from, to, bytes};
+  else memmove(to, from, bytes);
+}
+/* the most pages any of a phase's messages, or its reduction, has */
+static uint64_t phase_pages(const struct phase *p) {
+  uint64_t most = p->acc ? pages_of(p->bytes) : 0;
+  for (uint32_t o = 0; o < p->outs; o++) if (pages_of(p->out[o].bytes) > most) most = pages_of(p->out[o].bytes);
+  for (uint32_t i = 0; i < p->ins; i++) if (pages_of(p->in[i].bytes) > most) most = pages_of(p->in[i].bytes);
+  return most;
 }
 
 /* A call moved on its communicator (design/PAGE-TABLE-SPEC-20261122.md section 6), B its count's bytes:
@@ -1086,7 +1331,8 @@ static const unsigned char *own_of(struct call *c, const unsigned char *from, co
      Scatter        the root's segment d to rank d
    This rank's own part is copied in place (none where it is there already); a reduction is in rank order, so every
    rank computes the same bits; a floating average premultiplies every contribution by 1 / nranks, and an integer one
-   divides the reduced sum by nranks */
+   divides the reduced sum by nranks.  Its pages are moved in shares, on as many of comm's threads as it has shares
+   with pages (plan_run): a call of one page on the calling thread alone */
 static ncclResult_t call_move(struct call *c) {
   struct ncclComm *comm = c->comm;
   const int n = comm->nranks, me = comm->rank, root = c->root;
@@ -1094,81 +1340,90 @@ static ncclResult_t call_move(struct call *c) {
   const unsigned char *send = c->send;
   unsigned char *recv = c->recv;
   if (!bytes) return ncclSuccess;
-  struct out *out = calloc((size_t)n, sizeof *out);
-  struct in *in = calloc((size_t)n, sizeof *in);
+  struct out *out = calloc(2 * (size_t)n, sizeof *out);
+  struct in *in = calloc(2 * (size_t)n, sizeof *in);
   if (!out || !in) { free(out); free(in); return fail(ncclSystemError, "communicator %s: out of memory", comm->name); }
-  struct phase p = {out, in, 0, 0, NULL, NULL, 0};
+  struct plan plan = {.call = c, .phases = 1};
+  struct phase *p = plan.phase;
+  *p = (struct phase){out, in, 0, 0, NULL, NULL, 0};
   ncclResult_t result = ncclSuccess;
   switch (c->what) {
   case CALL_ALLGATHER:
-    if (send != recv + (size_t)me * bytes) memmove(recv + (size_t)me * bytes, send, bytes);
-    out[p.outs++] = (struct out){send, bytes, -1, 0};
+    local_of(&plan, send, recv + (size_t)me * bytes, bytes);
+    out[p->outs++] = (struct out){send, bytes, -1, 0};
     for (int s = 0; s < n; s++)
-      if (s != me) in[p.ins++] = (struct in){s, bytes, recv + (size_t)s * bytes};
+      if (s != me) in[p->ins++] = (struct in){s, bytes, recv + (size_t)s * bytes};
     break;
   case CALL_BROADCAST:
-    if (me != root) { in[p.ins++] = (struct in){root, bytes, recv}; break; }
-    if (send != recv) memmove(recv, send, bytes);
-    out[p.outs++] = (struct out){send, bytes, -1, 0};
+    if (me != root) { in[p->ins++] = (struct in){root, bytes, recv}; break; }
+    local_of(&plan, send, recv, bytes);
+    out[p->outs++] = (struct out){send, bytes, -1, 0};
     break;
   case CALL_REDUCE:
-    if (me != root) { out[p.outs++] = (struct out){send, bytes, root, c->premultiplied}; break; }
-    p.acc = recv; p.bytes = bytes;
+    if (me != root) { out[p->outs++] = (struct out){send, bytes, root, c->premultiplied}; break; }
+    p->acc = recv; p->bytes = bytes;
     break;
   case CALL_REDUCE_SCATTER:
     for (int d = 0; d < n; d++)
-      if (d != me) out[p.outs++] = (struct out){send + (size_t)d * bytes, bytes, d, c->premultiplied};
-    p.acc = recv; p.bytes = bytes;
+      if (d != me) out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, c->premultiplied};
+    p->acc = recv; p->bytes = bytes;
     break;
   case CALL_ALLREDUCE:
-    if (bytes <= MESH_LONG_PAYLOAD) { p.acc = recv; p.bytes = bytes; break; }
+    if (bytes <= MESH_LONG_PAYLOAD) { p->acc = recv; p->bytes = bytes; break; }
     for (int d = 0; d < n; d++) {
       size_t length;
       const size_t first = segment(c->count, n, d, &length);
-      if (d != me) out[p.outs++] = (struct out){send + first * z, length * z, d, c->premultiplied};
-      else { p.acc = recv + first * z; p.bytes = length * z; }
+      if (d != me) out[p->outs++] = (struct out){send + first * z, length * z, d, c->premultiplied};
+      else { p->acc = recv + first * z; p->bytes = length * z; }
     }
     break;
   case CALL_ALLTOALL:
-    if (send != recv) memmove(recv + (size_t)me * bytes, send + (size_t)me * bytes, bytes);
+    local_of(&plan, send + (size_t)me * bytes, recv + (size_t)me * bytes, bytes);
     for (int d = 0; d < n; d++)
       if (d != me) {
-        out[p.outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0};
-        in[p.ins++] = (struct in){d, bytes, recv + (size_t)d * bytes};
+        out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0};
+        in[p->ins++] = (struct in){d, bytes, recv + (size_t)d * bytes};
       }
     break;
   case CALL_GATHER:
-    if (me != root) { out[p.outs++] = (struct out){send, bytes, root, 0}; break; }
-    if (send != recv + (size_t)root * bytes) memmove(recv + (size_t)root * bytes, send, bytes);
+    if (me != root) { out[p->outs++] = (struct out){send, bytes, root, 0}; break; }
+    local_of(&plan, send, recv + (size_t)root * bytes, bytes);
     for (int s = 0; s < n; s++)
-      if (s != root) in[p.ins++] = (struct in){s, bytes, recv + (size_t)s * bytes};
+      if (s != root) in[p->ins++] = (struct in){s, bytes, recv + (size_t)s * bytes};
     break;
   default: /* CALL_SCATTER */
-    if (me != root) { in[p.ins++] = (struct in){root, bytes, recv}; break; }
-    if (send + (size_t)root * bytes != recv) memmove(recv, send + (size_t)root * bytes, bytes);
+    if (me != root) { in[p->ins++] = (struct in){root, bytes, recv}; break; }
+    local_of(&plan, send + (size_t)root * bytes, recv, bytes);
     for (int d = 0; d < n; d++)
-      if (d != root) out[p.outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0};
+      if (d != root) out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0};
     break;
   }
-  if (p.acc) {
-    const size_t at = (size_t)(p.acc - recv);
+  if (p->acc) {
+    const size_t at = (size_t)(p->acc - recv);
     const unsigned char *own = c->what == CALL_REDUCE_SCATTER ? send + (size_t)me * bytes : send + at;
-    if (!(p.own = own_of(c, own, p.acc, p.bytes))) result = fail(ncclSystemError, "communicator %s: out of memory", comm->name);
+    if (!(p->own = own_of(&plan, own, p->acc, p->bytes))) result = fail(ncclSystemError, "communicator %s: out of memory", comm->name);
     /* the single-phase all-reduce sends what it reduces with, made once */
-    if (c->what == CALL_ALLREDUCE && bytes <= MESH_LONG_PAYLOAD) out[p.outs++] = (struct out){p.own, bytes, -1, 0};
+    if (c->what == CALL_ALLREDUCE && bytes <= MESH_LONG_PAYLOAD) out[p->outs++] = (struct out){p->own, bytes, -1, 0};
   }
-  if (!result) result = phase_move(c, &p);
-  if (!result && p.acc && c->post) truncdiv(c->type, p.acc, p.acc, p.bytes / z, (uint64_t)n);
   if (!result && c->what == CALL_ALLREDUCE && bytes > MESH_LONG_PAYLOAD) {
-    struct phase q = {out, in, 0, 0, NULL, NULL, 0};
-    out[q.outs++] = (struct out){p.acc, p.bytes, -1, 0};
+    struct phase *q = plan.phase + 1;
+    *q = (struct phase){out + n, in + n, 0, 0, NULL, NULL, 0};
+    q->out[q->outs++] = (struct out){p->acc, p->bytes, -1, 0};
     for (int s = 0; s < n; s++)
       if (s != me) {
         size_t length;
         const size_t first = segment(c->count, n, s, &length);
-        in[q.ins++] = (struct in){s, length * z, recv + first * z};
+        q->in[q->ins++] = (struct in){s, length * z, recv + first * z};
       }
-    result = phase_move(c, &q);
+    plan.phases = 2;
+  }
+  if (!result) {
+    uint64_t most = phase_pages(p), local = pages_of(plan.local.bytes);
+    if (plan.phases > 1 && phase_pages(plan.phase + 1) > most) most = phase_pages(plan.phase + 1);
+    if (local > most) most = local;
+    plan.active = most < SHARES ? (uint32_t)most : SHARES;
+    plan.threads = plan.active < comm->threads ? plan.active : comm->threads;
+    if (plan.active) result = plan_run(&plan);
   }
   free(out); free(in);
   return result;

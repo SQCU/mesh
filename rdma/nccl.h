@@ -45,16 +45,26 @@
    returned.  A communicator's calls are made by one thread at a time; calls on different communicators may be made
    by different threads at once.
 
-   Indices.  Each rank of a communicator holds, on its node, RECEIVES (4096) receive indices for every rank and
-   SOURCES (1024) source pages of each class.  Each pair uses W of its RECEIVES, the communicator's window, which
-   every rank computes alike from the init's reports: at most RECEIVES, and the most for which, at every node v of
-   the communicator, its c_v ranks' source pages and a page at each index of their windows, c_v (SOURCES + (nranks -
-   1) W) pages, fit in half the fewer pages of the node's two pool classes (the other half its bridge's lanes'
-   receives, its relays' pages and its other clients'); a W of 0 fails the init.  An index holds one page, so that is
-   the most of either class this communicator ever holds at v, whatever its peers write ahead; communicators and
-   clients that share a node share its pool.  The k-th page rank s sends rank d on the communicator is written to d's
-   index base[d] + s RECEIVES + k mod W (mesh-call.h mesh_write), so it is that index's (k / W + 1)-th landing: both
-   ends count each pair's pages alike, so no exchange beyond the init names any index.  A page to
+   Shares and threads.  Every rank cuts a call's pages into SHARES (8) shares alike: page j of a message, and a
+   reduction's position j, are share j % SHARES's.  A rank moves its shares on its threads, share s on thread s % its
+   threads, the first the calling thread's: the process takes a client slot of its node's bridge for each thread
+   (NCCL_MESH_THREADS where set, 1 to SHARES, else half the node's performance cores, at most SHARES; fewer where the
+   slots run out), and each communicator starts a thread for each slot past the first.  A call with pages in one share
+   only (a message of one page) moves on the calling thread alone.  A thread between calls looks for the next for 2
+   ms, then sleeps until one wakes it.  Each thread copies its shares' pages in and out, and makes its shares' part of
+   the call's own copy and of a reduction, so the copies of a large call are spread over the threads.
+
+   Indices.  Each share of a communicator holds, at each rank's node, RECEIVES (512) receive indices for every rank
+   and SOURCES (128) source pages of each class, of its thread's slot.  Each pair of a share uses W of its RECEIVES,
+   the communicator's window, which every rank computes alike from the init's reports: at most RECEIVES, and the most
+   for which, at every node v of the communicator, its c_v ranks' source pages and a page at each index of their
+   shares' windows, c_v SHARES (SOURCES + (nranks - 1) W) pages, fit in half the fewer pages of the node's two pool
+   classes (the other half its bridge's lanes' receives, its relays' pages and its other clients'); a W of 0 fails the
+   init.  An index holds one page, so that is the most of either class this communicator ever holds at v, whatever
+   its peers write ahead; communicators and clients that share a node share its pool.  The k-th page of share x rank s
+   sends rank d on the communicator is written to d's index base[d][x] + s RECEIVES + k mod W (mesh-call.h
+   mesh_write), so it is that index's (k / W + 1)-th landing: both ends count each pair's pages of each share alike,
+   so no exchange beyond the init names any index.  A page to
    several ranks is one write to each MESH_DESTS of them in rank order, each destination the index its own pair's
    count names and each write from a source page of its own, and a source page is copied into again only once its
    uses are back to 1 (no write, SEND or landing of it under way).  A receiving rank reads the indices of each rank's
@@ -69,7 +79,7 @@
    listener ncclGetUniqueId opens, on the node's fabric address where it holds one), the root listening on that host
    alone where it is an IPv6 address; the id is the communicator's name.  Making a communicator attaches the process's
    client of its node's bridge where it has none (every client slot held, or no region of a running bridge, fails the
-   init), takes its indices and pages, and gathers each rank's node, the first of its receive indices, its node's pool
+   init), takes its indices and pages, and gathers each rank's node, the first receive index of each of its shares, its node's pool
    and its standing listener's address over the bootstrap: the one exchange its calls need.  A rank that cannot go on
    fails every rank's init alike.  The bootstrap's waits are 100 ms slices that read the communicator's revoke; nothing else bounds them.
    ncclCommSplit gathers every rank's (color, key) over comm's bootstrap and makes each color's communicator, ordered

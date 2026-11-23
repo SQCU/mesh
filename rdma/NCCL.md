@@ -80,27 +80,38 @@ A page is one SEND: `MESH_HEAD` bytes of header, which the bridge writes, and th
 full but its last. Every rank cuts a message alike. Both payloads are multiples of 8 bytes, so a page always holds
 whole elements.
 
-At its init each rank of a communicator takes, on its node's page table (mesh-call.h `mesh_pages`):
+**Shares and threads.** Every rank cuts a call's pages into `SHARES` (8) shares alike: page j of a message, and a
+reduction's position j, belong to share j mod 8. A rank moves its shares on its threads, share s on thread s mod its
+thread count. The first thread is the calling thread's. The process takes one client slot of its node's bridge for
+each thread, so each thread has a write ring of its own. The thread count is `NCCL_MESH_THREADS` where set (1 to 8),
+else half the node's performance cores, at most 8, and fewer where the bridge's client slots run out. A call whose
+messages are one page each moves on the calling thread alone. Between calls a thread looks for the next one for
+2 ms, then sleeps until a call wakes it. Each thread copies its own shares' pages in and out, and makes its shares'
+part of the call's local copy and of a reduction. So a large call's copies run on all the threads at once, and the
+index layout is the same at every rank whatever its thread count.
 
-- **receive indices**: `RECEIVES` (4096) for every rank, naming no page until one lands;
-- **source pages**: `SOURCES` (1024) long pages and 1024 short pages.
+At its init each rank of a communicator takes, for each share, on its node's page table (mesh-call.h `mesh_pages`, in
+the slot of the share's thread):
 
-Each pair uses W of its `RECEIVES` indices, the communicator's **window**. Every rank computes the same W from the
-init's reports: at most `RECEIVES`, and the most for which, at every node v of the communicator, its c_v ranks'
-source pages and a page at each index of their windows fit in half of the node's pool:
+- **receive indices**: `RECEIVES` (512) for every rank, naming no page until one lands;
+- **source pages**: `SOURCES` (128) long pages and 128 short pages.
 
-    c_v (SOURCES + (nranks - 1) W) <= P_v / 2
+Each pair of a share uses W of its `RECEIVES` indices, the communicator's **window**. Every rank computes the same W
+from the init's reports: at most `RECEIVES`, and the most for which, at every node v of the communicator, its c_v
+ranks' source pages and a page at each index of their shares' windows fit in half of the node's pool:
+
+    c_v SHARES (SOURCES + (nranks - 1) W) <= P_v / 2
 
 where P_v is the fewer pages of the node's two classes. The other half is left for its bridge's lanes' receives, its
 relays' pages and its other clients'. A W of 0 fails the init. An index holds one page, so this is the most of either
 class the communicator ever holds at v, whatever its peers write ahead. The bound covers one communicator:
 communicators and clients that share a node share its pool.
 
-The k-th page rank s sends rank d on the communicator is written to d's index `base[d] + s RECEIVES + k mod W`.
-Rank s's pages k mod W, then that plus W, and so on, land there in turn, so page k is the index's (k / W + 1)-th
-landing (its `landed` count, which `mesh_entry` returns). Each rank keeps, for every peer, the pages it has sent it
-and the pages it has taken from it. Both ends count each pair's pages alike, because every rank makes the same calls
-in the same order and cuts each message alike. So each rank's `{node, base}` and its node's pool, gathered at the
+The k-th page of share x that rank s sends rank d on the communicator is written to d's index
+`base[d][x] + s RECEIVES + k mod W`. Rank s's pages of the share k mod W, then that plus W, and so on, land there in
+turn, so page k is the index's (k / W + 1)-th landing (its `landed` count, which `mesh_entry` returns). Each rank
+keeps, for every share and every peer, the pages it has sent it and the pages it has taken from it. Both ends count each pair's pages alike, because every rank makes the same calls
+in the same order and cuts each message alike. So each rank's node, each share's base and its node's pool, gathered at the
 init, are the only exchange that ever names an index.
 
 **Sending.** The rank copies a page's bytes into a source page and calls `mesh_write` with the page's destinations.
@@ -137,7 +148,7 @@ each pass reads; nothing else bounds it. Nothing in the transport waits.
 `ncclCommInitRank` is NCCL's bootstrap. The unique id is the root's `host:port`: `NCCL_COMM_ID`, or else the
 listener `ncclGetUniqueId` opens on the node's fabric address (its first address under `MESH_ULA_PREFIX`), or on its
 host name where it has none. The root listens on that host alone where it is an IPv6 address. Rank 0 takes every rank's
-report and sends each rank the whole table. A rank's report is its status, its node, the first of its receive indices,
+report and sends each rank the whole table. A rank's report is its status, its node, the first receive index of each of its shares,
 its node's pool (the window's P_v) and its standing listener's address. The communicator keeps the sockets, for a
 split's or a grow's exchange.
 
@@ -194,6 +205,7 @@ NCCL's own.
 | variable | read by | meaning |
 |---|---|---|
 | `NCCL_COMM_ID` | `ncclGetUniqueId` | the bootstrap root's `host:port` |
+| `NCCL_MESH_THREADS` | the process's first communicator | the threads a call's shares move on, 1 to 8 (default: half the performance cores, at most 8) |
 | `MESH_REGION` | libmesh | another region's name on the same machine (mesh.h `mesh_name`) |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against |
 
