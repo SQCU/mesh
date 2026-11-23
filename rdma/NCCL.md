@@ -222,7 +222,6 @@ NCCL's own.
 |---|---|---|
 | `NCCL_COMM_ID` | `ncclGetUniqueId` | the bootstrap root's `host:port` |
 | `NCCL_MESH_THREADS` | the process's first communicator | the threads of the process's pool, which move a call's channels, 1 to 8 (default 4, at most half the top-level cores) |
-| `MESH_REGION` | libmesh | another region's name on the same machine (mesh.h `mesh_name`) |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against |
 
 ## NumPy

@@ -740,16 +740,16 @@ uint64_t pool_bytes(void){
 }
 /* design/PAGE-TABLE-SPEC-20261122.md section 2: the pool carved from the arena once, in a region made new (one
    adopted keeps its carve, `pages` set): MESH_POOL_SHORT short and MESH_POOL_LONG long pages, fewer of both in
-   proportion where seven eighths of the arena fit fewer (the rest the bridge's other leases: the map's records), each
+   proportion where the arena fits fewer (the pool is the arena's one lease: the map is in the region's own bytes), each
    class in runs the arena leases (mesh_arena_alloc: a run within one MESH_DMA_EXTENT, so a SEND of any of its pages,
    which covers no more than the page's frames, lies in one registration), a run half as long where the arena has none
    so long; every page free, the short pages' ids first */
 static void pool_make(void){
   struct mesh_pool *pool=mesh_pool(M);
   if(pool->pages)return;
-  const uint64_t arena=(uint64_t)mesh_arena_pages(M)*M->pgsz,budget=arena-arena/8;
+  const uint64_t arena=(uint64_t)mesh_arena_pages(M)*M->pgsz;
   const uint64_t whole=(uint64_t)MESH_POOL_SHORT*MESH_CLASS_SHORT*MESH_FRAME+(uint64_t)MESH_POOL_LONG*MESH_CLASS_LONG*MESH_FRAME;
-  const double scale=budget>=whole?1:(double)budget/(double)whole;
+  const double scale=arena>=whole?1:(double)arena/(double)whole;
   const uint32_t want[MESH_CLASSES]={(uint32_t)(MESH_POOL_SHORT*scale),(uint32_t)(MESH_POOL_LONG*scale)};
   uint32_t pd=0;
   for(uint32_t c=0;c<MESH_CLASSES;c++){
@@ -798,12 +798,13 @@ static void switch_make(void){
    sender's measures of it are heard (mesh-switched.h struct mesh_switch_cable, struct mesh_switch_line); every node of
    it an entry of the node table (the key its links' lines are kept under: struct mesh_switch_view `slot`), live (the
    bandwidth of this node's own cables toward it), every other entry not.  Made by the event loop each time it
-   writes the map, after the write (mesh-records.c map_make): the map's one writer, so it reads the records and the
-   ports as they stand, with no serial to check and nothing read again, and a map's change is drawable at once */
+   publishes the map, after the publish (mesh-records.c map_make): the map's one writer, so it reads the published
+   copy and the ports as they stand, with nothing read again, and a map's change is drawable at once */
 #define SWITCH_LATENCY_NS 6000.0
 void switch_view(void){
-  const uint64_t count=atomic_load_explicit(&M->map_nodes,memory_order_relaxed);
-  const struct mesh_record *r=mesh_records(M);
+  const struct mesh_map_copy *map=mesh_map_published(M);
+  const uint64_t count=mesh_map_nodes(map);
+  const struct mesh_record *r=map->record;
   uint32_t nodes[MESH_SWITCH_N],slots[MESH_SWITCH_N],n=0;struct mesh_switch_fabric_link links[MESH_SWITCH_LINKS];uint32_t k=0;
   for(uint64_t i=0;i<count && n<MESH_SWITCH_N;i++){
     nodes[n]=r[i].node;
@@ -1937,7 +1938,8 @@ static int child_main(int argc,char **argv){
    slots, indices and pages standing, its pages registered again by the port children (the same
    pages: nothing is wired twice, nothing reloaded).  A region a live bridge serves is never read: a second bridge of
    the node ends at its port's bind, before region_open.  A region of another layout, or one a stop released (layout version 0), is made
-   expired (its layout version 0: no client's attach takes it) and left named, and this bridge ends with EX_TEMPFAIL:
+   expired (its layout version 0: no client's attach takes it; its map's waiters woken to read that: mesh.h
+   mesh_expire) and left named, and this bridge ends with EX_TEMPFAIL:
    its heartbeat unlinks it once no process maps it and opens a bridge again, so no second region is ever made beside
    a live client of the first (the 2026-10-20 watchdog panic, design/rubrics.md "Failure across interfaces"); a bridge
    unlinks only a shared memory object that never became a region (no magic: a bridge ended while making it).  A
@@ -1945,7 +1947,7 @@ static int child_main(int argc,char **argv){
 static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->entries==b->entries && a->streams==b->streams && a->clients==b->clients &&
          a->table_off==b->table_off && a->arena_off==b->arena_off && a->ring_off==b->ring_off && a->pool_off==b->pool_off &&
-         a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->node_off==b->node_off &&
+         a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->node_off==b->node_off && a->map_off==b->map_off &&
          a->switch_off==b->switch_off && a->client_off==b->client_off && a->data_off==b->data_off && a->length==b->length;
 }
 static int region_open(const struct hdr *geometry,int *out){
@@ -1959,7 +1961,7 @@ static int region_open(const struct hdr *geometry,int *out){
     if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
     if(old && old->magic==MESH_MAGIC){
       if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
-      __atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);
+      mesh_expire(old);
       say("bridge: region %s is expired (another layout, or released): this bridge ends, and its heartbeat unlinks it once no "
           "process of it lives and opens a bridge again\n",MESH_NAME);
       exit(EX_TEMPFAIL);
@@ -1974,8 +1976,6 @@ static int region_open(const struct hdr *geometry,int *out){
   M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   if(M==MAP_FAILED)die("mmap");
   *M=*geometry;M->version=MESH_LAYOUT;
-  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
-  own->map=MESH_ABSENT;own->map_pages=0;
   *out=fd;
   return 0;
 }
@@ -1997,10 +1997,10 @@ static int region_open(const struct hdr *geometry,int *out){
    what the bridge before had, each use by the ring or receive that had it, never a recount of each page's
    uses from the table: the clients attached across the restart change words, ring cells and uses as it runs (a
    write's use counted as it pushes its cell, an invalidation's dropped as it clears a word), so a count made from one
-   reading of the table and the rings would miss or double each change made between its reads.  A map or health
-   serial a bridge that died mid-write left odd made even (its readers wait while it is odd), and the map's records
-   this bridge's to write again (map_adopt).  The pool's carve and the page table stand; the switch is made new after
-   (switch_make), so what was given back is said here */
+   reading of the table and the rings would miss or double each change made between its reads.  The map's published
+   copy stands, the bridge before's, until this bridge's first publish (node_start's record_changed): a bridge that
+   died mid-write wrote only the copy not published.  The pool's carve and the page table stand; the switch is made
+   new after (switch_make), so what was given back is said here */
 static void region_adopt(void){
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_lanes *x=mesh_lanes_at(M,s);
@@ -2025,9 +2025,6 @@ static void region_adopt(void){
   const uint32_t receives=mesh_switch_receives_drop(M,0,MESH_SWITCH_LANES);
   say("bridge: what the bridge before had given back: %llu pages of its rings (lost) and %u of its "
       "receives\n",(unsigned long long)lost,receives);
-  if(atomic_load(&M->map)&1)atomic_fetch_add(&M->map,1);
-  if(atomic_load(&M->health)&1)atomic_fetch_add(&M->health,1);
-  map_adopt();
   atomic_store(&M->busy,0);
 }
 
@@ -2084,7 +2081,6 @@ static void node_start(int adopted){
   sysctl_text("hw.model",model,sizeof model);
   health_init();
   record_changed();
-  if(!atomic_load(&M->map_nodes))die("the map's lease");
   switch_policy_load();
   struct kevent64_s event;
   int watched[4]={listener,hello,network,addresses};

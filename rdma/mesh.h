@@ -13,9 +13,9 @@
 #include "mesh-call.h"
 /* design/PAGE-TABLE-SPEC-20261122.md: the node's region, which the bridge makes and every process of the node maps */
 #define MESH_MAGIC 0x4d455348u
+/* the region's name, the one every process of the node opens: its bridge, the bridge's children, its heartbeat, its
+   clients and its observers */
 #define MESH_NAME "/mesh0"
-/* the region's name: MESH_NAME, or $MESH_REGION where set (another region on the same machine) */
-static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"); return name && *name?name:MESH_NAME; }
 #define MESH_PORT "18519"
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
@@ -33,13 +33,16 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    166's FAREWELL `code` are unused */
 #define MESH_VERSION 167u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  194: the page table and its owner bytes (`table_off`), the clients'
-   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), the lane records (`stream_off`), and the
-   switch's inbound and in-flight rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`),
-   each inbound ring of MESH_POOL_PAGES entries; against 193, the lane records (struct mesh_lanes) have no unused
-   fields: the word c5 renamed `unused`, `spare`, `padding` and each way's `unused` pair are gone and `child` lies
-   beside `peer`, 192 bytes a record, not 256 */
-#define MESH_LAYOUT 194u
+   before it left where its layout is this one.  195: the page table and its owner bytes (`table_off`), the clients'
+   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), the map's two copies (`map_off`,
+   struct mesh_map_copy, published by `map_version`), the lane records (`stream_off`, 192 bytes a record), and the
+   switch's inbound and in-flight rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane
+   `flight`), each inbound ring of MESH_POOL_PAGES entries; against 194, the map's records are two copies of
+   MESH_RECORDS records each in the region's own bytes (194's: one copy in arena pages the bridge leased, under a
+   seqlock), `map` is the map's serial alone (never odd), the word at 152 is `map_version` (194's `map_nodes`: each
+   copy has its count), the word at 160 is unused (194's `health` serial: a health sample is a publish), and the
+   bridge's pages record no map lease (mesh-observe.h struct mesh_bridge_pages: 194's `map` and `map_pages` unused) */
+#define MESH_LAYOUT 195u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -159,12 +162,17 @@ struct mesh_client {
    pages a block), `ring_off` the clients' write rings, `pool_off` the pool, `bridge_off` the bridge's own pages,
    `stream_off` the lane records, `client_off` the client slots, `data_off` the arena, `node_off` the node table and
    `switch_off` the switch; `attached` the client slots whose rings the bridge's port children look at, a bit a slot
-   (mesh_ring_flag); `busy` the frames the bridge's lanes have queued (0 while none) and `idle_since` the wall clock in
-   ns at which they last had none (0 while they have any); `spare` is unused */
+   (mesh_ring_flag); `map` the map's serial, `map_off` the map's two copies and `map_version` their publishes
+   (mesh_map_published); `busy` the frames the bridge's lanes have queued (0 while none) and `idle_since` the wall clock
+   in ns at which they last had none (0 while they have any); `unused` and `spare` are unused */
 struct hdr {
   uint32_t magic,version,pgsz,block,entries,node,streams,clients;
   uint64_t table_off,arena_off,ring_off,pool_off,bridge_off,stream_off,client_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,attached,map,map_off,map_nodes,health,busy,idle_since;
+  _Atomic uint64_t bridge_pid,serial,attached,map;
+  uint64_t map_off;
+  _Atomic uint64_t map_version;
+  uint64_t unused;
+  _Atomic uint64_t busy,idle_since;
   uint64_t spare;
   uint64_t node_off,switch_off;
 };
@@ -173,24 +181,41 @@ _Static_assert(offsetof(struct hdr,version)==4 && offsetof(struct hdr,pgsz)==8 &
                offsetof(struct hdr,table_off)==32 && offsetof(struct hdr,arena_off)==40 && offsetof(struct hdr,ring_off)==48 &&
                offsetof(struct hdr,pool_off)==56 && offsetof(struct hdr,bridge_off)==64 && offsetof(struct hdr,stream_off)==72 &&
                offsetof(struct hdr,client_off)==80 && offsetof(struct hdr,data_off)==88 && offsetof(struct hdr,length)==96 &&
-               offsetof(struct hdr,bridge_pid)==112 && offsetof(struct hdr,attached)==128 && offsetof(struct hdr,spare)==184 &&
+               offsetof(struct hdr,bridge_pid)==112 && offsetof(struct hdr,attached)==128 && offsetof(struct hdr,map)==136 &&
+               offsetof(struct hdr,map_off)==144 && offsetof(struct hdr,map_version)==152 && offsetof(struct hdr,busy)==168 &&
+               offsetof(struct hdr,spare)==184 &&
                offsetof(struct hdr,node_off)==192 && offsetof(struct hdr,switch_off)==200 && sizeof(struct hdr)==208,
                "struct hdr: every field at its offset");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
-/* a shared word (`map`, `health`) bumped and its waiters woken, the writes after it ordered behind it */
-static inline void mesh_notify(_Atomic uint64_t *word){
-  atomic_fetch_add_explicit(word,1,memory_order_release);
-  atomic_thread_fence(memory_order_release);
-  os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+/* design/transport.md: the map, the records of the nodes a paired path from this node reaches (struct mesh_record),
+   in two copies at `map_off` (mesh_layout), each with its count, written by the bridge's event loop alone
+   (mesh-records.c map_publish): it writes the copy not published whole, then publishes it by a release store of
+   `map_version` (its publishes so far; the published copy is [map_version & 1]).  A reader loads `map_version` with
+   acquire and copies the published copy, and never waits: a bridge that dies mid-write leaves the copy before it
+   published, and its successor's first publish replaces it.  A copy stands until the second publish after it, when the
+   bridge writes it again.  A health sample is a publish of its own; a publish that changes the mesh also moves the
+   map's serial (`map`) and wakes its waiters (mesh_map_moved).  The bridge's first record is published before the
+   region opens (`magic` set last), so a reader never reads an empty map, and the serial is never 0 */
+#define MESH_RECORDS 256u
+struct mesh_map_copy { uint64_t nodes; struct mesh_record record[MESH_RECORDS]; };
+static inline struct mesh_map_copy *mesh_map_copies(struct hdr *m){ return (struct mesh_map_copy *)((char *)m+m->map_off); }
+static inline const struct mesh_map_copy *mesh_map_published(struct hdr *m){
+  return mesh_map_copies(m)+(atomic_load_explicit(&m->map_version,memory_order_acquire)&1);
 }
-/* design/transport.md: the map, `map_nodes` records at `map_off` in arena pages the bridge leases for itself, and
-   leases again larger as the mesh grows; the bridge notifies `map`, its serial, before and after each change (odd
-   while it writes; its own record is in before the region opens, so a reader never reads 0), and a reader's copy is
-   whole where `map` read (acquired) before it was even and is unchanged after it */
-static inline struct mesh_record *mesh_records(struct hdr *m){ return (struct mesh_record *)((char *)m+atomic_load_explicit(&m->map_off,memory_order_relaxed)); }
-static inline int mesh_map_whole(struct hdr *m,uint64_t before){
-  atomic_thread_fence(memory_order_acquire);
-  return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
+/* a copy's records, at most its room */
+static inline uint32_t mesh_map_nodes(const struct mesh_map_copy *copy){ return copy->nodes<MESH_RECORDS?(uint32_t)copy->nodes:MESH_RECORDS; }
+/* the map's serial moved and its waiters woken (mesh-dataflow.c mesh_map_wait): by the bridge at each publish that
+   changes the mesh, and at the region's expiry (mesh_expire) */
+static inline void mesh_map_moved(struct hdr *m){
+  atomic_fetch_add_explicit(&m->map,1,memory_order_release);
+  os_sync_wake_by_address_all(&m->map,sizeof m->map,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
+/* region m expired: its layout version 0, so no attach or read of it takes it again, then its map's waiters woken
+   (mesh_map_moved), each of which reads the expiry.  By the heartbeat's release (mesh-heartbeat.c region_expire) and by
+   a bridge that finds a region it cannot adopt (mesh-link.c region_open) */
+static inline void mesh_expire(struct hdr *m){
+  __atomic_store_n(&m->version,0,__ATOMIC_SEQ_CST);
+  mesh_map_moved(m);
 }
 /* an owner word is its generation, slot and process: (generation << 38) | (slot << 32) | pid */
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
@@ -201,8 +226,6 @@ static inline struct mesh_node *mesh_node_at(struct hdr *m,uint32_t n){return (s
 /* the arena's pages of pgsz bytes, and its bitmap (a bit a page, set while a lease of the bridge has it) */
 static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
-/* arena page `page`'s address */
-static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 
 /* ---- The page table (`table_off`) ------------------------------------------------------------------------------
    A word an index, (landed << 32) | (pd + 1), where pd + 1 == 0 names no page and `landed` counts the landings at the
@@ -380,19 +403,18 @@ void mesh_leave(struct hdr *,uint64_t client);
 /* the one join of two nodes' records: the cables each one's bridge reaches the other over, the fewer of the two ends'
    counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
-/* `pages` arena pages leased (the bridge's own: map records, the pool's carve), the first a multiple of `align`, all
-   within one MESH_DMA_EXTENT, taken first fit by compare-exchange from the context's rover (`arena_rover`): the
-   first, or MESH_ABSENT with errno EINVAL or ENOMEM */
+/* `pages` arena pages leased (the bridge's own: the pool's carve), the first a multiple of `align`, all within one
+   MESH_DMA_EXTENT, taken first fit by compare-exchange from the context's rover (`arena_rover`): the first, or
+   MESH_ABSENT with errno EINVAL or ENOMEM */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
-/* `pages` arena pages from `page` given back */
-void mesh_arena_give(struct hdr *,uint32_t page,uint32_t pages);
 /* the arena pages no lease has */
 uint32_t mesh_arena_free(struct hdr *);
 
 /* The node's region as the bridge makes it: `pages` arena pages of `pgsz` bytes, `block` pages a block (the bridge's
    registered memory), after the header and, each at a multiple of pgsz, the page table's words and owner bytes, the
    arena's bitmap, the clients' write rings, the pool's header and descriptors, the bridge's own pages, the lane
-   records, the node table, the switch and the client slots; the arena at a multiple of a block.  Its length */
+   records, the node table, the map's two copies, the switch and the client slots; the arena at a multiple of a block.
+   Its length */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   const uint32_t arena=pages/block*block;
   const uint64_t page=pgsz,bytes=(uint64_t)block*pgsz;
@@ -405,6 +427,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->bridge_off=at; at+=MESH_BRIDGE_BYTES; at=(at+page-1)/page*page;
   h->stream_off=at; at+=(uint64_t)MESH_STREAMS*sizeof(struct mesh_lanes); at=(at+page-1)/page*page;
   h->node_off=at; at+=(uint64_t)MESH_NODES*sizeof(struct mesh_node); at=(at+page-1)/page*page;
+  h->map_off=at; at+=2*sizeof(struct mesh_map_copy); at=(at+page-1)/page*page;
   h->switch_off=at; at+=MESH_SWITCH_BYTES; at=(at+page-1)/page*page;
   h->client_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client);
   at=(at+bytes-1)/bytes*bytes;

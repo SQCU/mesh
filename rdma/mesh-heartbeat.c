@@ -121,14 +121,14 @@ static pid_t region_bridge(uint64_t *start){
   if(m)munmap(m,size);
   return was;
 }
-/* the end of a release: the named region, where no bridge serves it, made expired (layout version 0), as its bridge's
-   release stop makes it (mesh-link.c), for a bridge that ended keeping it (a restart's close the release overtook, a
-   bridge launchd ran itself, or an end before its stop) */
+/* the end of a release: the named region, where no bridge serves it, made expired (mesh.h mesh_expire: its layout
+   version 0, and its map's waiters woken to read that), the bridge having kept it at its stop (a release's, a
+   restart's close the release overtook, a bridge launchd ran itself, or an end before its stop) */
 static void region_expire(void){
   size_t size=0;
   struct hdr *m=region_map(&size,1);
   uint64_t start;
-  if(m && m->magic==MESH_MAGIC && !bridge_of(m,size,&start))__atomic_store_n(&m->version,0,__ATOMIC_SEQ_CST);
+  if(m && m->magic==MESH_MAGIC && !bridge_of(m,size,&start))mesh_expire(m);
   if(m)munmap(m,size);
 }
 static void reopen_later(void){

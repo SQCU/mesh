@@ -8,7 +8,6 @@ static void busy_tell(void){
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);
 }
-static uint32_t map_page,map_pages,map_room;
 /* design/transport.md: the bytes the kernel can give without pressure (kern.memorystatus_level percent of
    the node's memory), read now */
 static uint64_t available_now(void){
@@ -37,19 +36,24 @@ void health_init(void){
    peer lacks it; a full table gives the longest unheard of the nodes the map lacks its place */
 struct known { uint64_t heard,lost_at; uint32_t told; struct mesh_record record; };
 _Static_assert(MESH_PORTS<=32,"a port a bit of `told`");
-#define MESH_KNOWN 256
-static struct known known[MESH_KNOWN];
+static struct known known[MESH_RECORDS];
 static uint32_t known_count;
 static uint32_t port_bit(const struct port *port){ return UINT32_C(1)<<(uint32_t)(port-ports); }
-/* the map's record of `node`, NULL where the map has none */
-static struct mesh_record *record_of(uint32_t node){
-  for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
+/* the map's published copy (step 0) and the one not published (step 1, the next publish's: map_publish), this thread
+   the one writer of both and of `map_version` */
+static struct mesh_map_copy *map_copy(uint64_t step){
+  return mesh_map_copies(M)+((atomic_load_explicit(&M->map_version,memory_order_relaxed)+step)&1);
+}
+/* the published map's record of `node`, NULL where the map has none */
+static const struct mesh_record *record_of(uint32_t node){
+  const struct mesh_map_copy *map=map_copy(0);
+  for(uint32_t i=0;i<mesh_map_nodes(map);i++)if(map->record[i].node==node)return map->record+i;
   return NULL;
 }
 static struct known *known_at(uint32_t node){
   for(uint32_t i=0;i<known_count;i++)if(known[i].record.node==node)return known+i;
   struct known *at=NULL;
-  if(known_count<MESH_KNOWN)at=known+known_count++;
+  if(known_count<MESH_RECORDS)at=known+known_count++;
   else for(uint32_t i=0;i<known_count;i++)if(!record_of(known[i].record.node) && (!at || known[i].heard<at->heard))at=known+i;
   if(at)*at=(struct known){.record.node=node};
   return at;
@@ -72,27 +76,13 @@ void records_forget(const struct port *port){
 }
 /* design/transport.md, #region: the map, a record a node a paired path from this node reaches, each its node's record
    in the table above (this node's own rebuilt from its port table when that changes, its sequence one more; every
-   other node's the newest heard); each change written between two notifications of the map serial (odd while it
-   writes), the records in arena pages the bridge leases and leases again larger as the mesh grows */
-static int map_grow(uint64_t records){
-  if(records<=map_room)return 0;
-  uint32_t pages=(uint32_t)((records*2*sizeof(struct mesh_record)+M->pgsz-1)/M->pgsz),page=mesh_arena_alloc(&bridge,pages,1);
-  if(page==MESH_ABSENT)return ENOMEM;
-  memcpy(mesh_at(M,page),mesh_records(M),(size_t)atomic_load(&M->map_nodes)*sizeof(struct mesh_record));
-  atomic_store(&M->map_off,(uint64_t)(mesh_at(M,page)-(unsigned char *)M));
-  mesh_bridge_pages(M)->map=page;mesh_bridge_pages(M)->map_pages=pages;
-  if(map_pages)mesh_arena_give(M,map_page,map_pages);
-  map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
-  return 0;
-}
-/* design/transport.md section 2: an adopted region's map pages, recorded by the bridge before (mesh-observe.h struct
-   mesh_bridge_pages), taken again as this bridge's, its records none until this bridge writes its own */
-void map_adopt(void){
-  const struct mesh_bridge_pages *own=mesh_bridge_pages(M);
-  if(own->map==MESH_ABSENT)return;
-  map_page=own->map;map_pages=own->map_pages;map_room=(uint32_t)((uint64_t)map_pages*M->pgsz/sizeof(struct mesh_record));
-  atomic_store(&M->map_nodes,0);
-  atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
+   other node's the newest heard), written in the copy not published and then published (mesh.h struct
+   mesh_map_copy): the copy published by one release store of `map_version`, and where the mesh changed (`mesh`), the
+   map's serial moved and its waiters woken (mesh.h mesh_map_moved).  An adopted region's published copy is the bridge
+   before's until this bridge's first publish, its own record (node_start), replaces it */
+static void map_publish(int mesh){
+  atomic_store_explicit(&M->map_version,atomic_load_explicit(&M->map_version,memory_order_relaxed)+1,memory_order_release);
+  if(mesh)mesh_map_moved(M);
 }
 /* design/transport.md: whether two records' reached nodes (each with its stream's bandwidth), boot and facts are the same */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
@@ -103,39 +93,43 @@ static int record_links_same(const struct mesh_record *a,const struct mesh_recor
          a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
 }
-static void health_put(struct mesh_record *stored,const struct mesh_record *record){
-  mesh_notify(&M->health);
-  stored->sequence=record->sequence;stored->health=record->health;
-  mesh_notify(&M->health);
+/* a record whose links the published map has as they are: the map copied into the copy not published with that
+   record's sequence and health, and published, the map's serial unmoved (a health sample is no change of the mesh) */
+static void health_put(const struct mesh_record *record){
+  const struct mesh_map_copy *was=map_copy(0);
+  struct mesh_map_copy *next=map_copy(1);
+  const uint32_t n=mesh_map_nodes(was);
+  memcpy(next->record,was->record,(size_t)n*sizeof *next->record);
+  next->nodes=n;
+  for(uint32_t i=0;i<n;i++)if(next->record[i].node==record->node){next->record[i].sequence=record->sequence;next->record[i].health=record->health;}
+  map_publish(0);
 }
 /* RFC 2328 s16.1 over the table: the map made again, every record known that a paired path from this node reaches (two
-   nodes paired where each one's record names the other: mesh_joined), in the table's order, written only where it
-   differs from the map as it stands (so a change no path reaches moves no serial).  A node the map loses or gains is
-   logged, and each record it gains is sent where a peer lacks it (record_tell): a port paired while the map lacked
-   the record was never sent it (map_tell sends the map alone), and every other port's peer was told it or sent it.
-   A map written has the switch's view and the node table made from it at once (mesh-link.c switch_view) */
+   nodes paired where each one's record names the other: mesh_joined), in the table's order, in the copy not
+   published, and published only where it differs from the published one (so a change no path reaches moves no
+   serial).  A node the map loses or gains is logged, and each record it gains is sent where a peer lacks it
+   (record_tell): a port paired while the map lacked the record was never sent it (map_tell sends the map alone), and
+   every other port's peer was told it or sent it.  A map published has the switch's view and the node table made from
+   it at once (mesh-link.c switch_view) */
 static void map_make(void){
-  const uint64_t n=atomic_load(&M->map_nodes);
-  const struct mesh_record *r=mesh_records(M);
-  struct mesh_record *next=malloc(MESH_KNOWN*sizeof *next);
-  unsigned char *reached=calloc(MESH_KNOWN,1);
-  uint32_t *order=malloc(MESH_KNOWN*sizeof *order),*gained=malloc(MESH_KNOWN*sizeof *gained),head=0,tail=0,gains=0;
-  if(!next || !reached || !order || !gained){
-    free(next);free(reached);free(order);free(gained);say("map: no memory to make it again\n");return;
-  }
+  const struct mesh_map_copy *was=map_copy(0);
+  struct mesh_map_copy *next=map_copy(1);
+  const uint32_t n=mesh_map_nodes(was);
+  unsigned char reached[MESH_RECORDS]={0};
+  uint32_t order[MESH_RECORDS],gained[MESH_RECORDS],head=0,tail=0,gains=0;
   for(uint32_t k=0;k<known_count;k++)if(known[k].record.node==M->node){reached[k]=1;order[tail++]=k;}
   while(head<tail){
     const uint32_t a=order[head++];double beta;
     for(uint32_t b=0;b<known_count;b++)if(!reached[b] && mesh_joined(&known[a].record,&known[b].record,&beta)){reached[b]=1;order[tail++]=b;}
   }
-  uint64_t count=0;
+  uint32_t count=0;
   for(uint32_t k=0;k<known_count;k++){
     struct known *node=known+k;
-    int was=0;
-    for(uint64_t i=0;i<n && !was;i++)was=r[i].node==node->record.node;
-    if(reached[k])next[count++]=node->record;
-    if(node->record.node==M->node || was==reached[k])continue;
-    if(was){
+    int mapped=0;
+    for(uint32_t i=0;i<n && !mapped;i++)mapped=was->record[i].node==node->record.node;
+    if(reached[k])next->record[count++]=node->record;
+    if(node->record.node==M->node || mapped==reached[k])continue;
+    if(mapped){
       say("node %u unreachable, heard %.1f s before\n",node->record.node,node->heard?(double)(now-node->heard)/1e9:-1.0);
       node->lost_at=now;
       continue;
@@ -145,29 +139,23 @@ static void map_make(void){
     node->lost_at=0;
     gained[gains++]=k;
   }
-  if(count!=n || memcmp(next,r,(size_t)n*sizeof *r)){
-    mesh_notify(&M->map);
-    if(map_grow(count))say("map: no lease for %llu records; %llu remaining\n",(unsigned long long)count,(unsigned long long)map_room);
-    if(count>map_room)count=map_room;
-    memcpy(mesh_records(M),next,(size_t)count*sizeof *next);
-    atomic_store(&M->map_nodes,count);
-    mesh_notify(&M->map);
+  if(count!=n || memcmp(next->record,was->record,(size_t)n*sizeof *next->record)){
+    next->nodes=count;
+    map_publish(1);
     switch_view();
   }
-  free(next);free(reached);free(order);
   /* each from its table entry (record_tell copies it): a port lost meanwhile makes the map again, and moves no entry */
   for(uint32_t g=0;g<gains;g++)record_tell(known+gained[g]);
-  free(gained);
 }
 /* design/transport.md: `record` stored as its node's newest (`k` its place in the table), heard on port `from` (NULL:
    this node's own), whose peer is then the one that has it.  One whose node the map has, and whose reached nodes,
-   boot and facts are the map's record's, changes only its health and sequence there, written under the region's
-   health serial and never the map's: the map serial moves only where the mesh changes, and a health sample is no
-   change of the mesh.  Any other makes the map again (map_make) */
+   boot and facts are the map's record's, changes only its health and sequence there (health_put), published with the
+   map's serial unmoved: the serial moves only where the mesh changes, and a health sample is no change of the mesh.
+   Any other makes the map again (map_make) */
 static void map_put(struct known *k,const struct mesh_record *record,const struct port *from){
-  struct mesh_record *mapped=record_of(record->node);
+  const struct mesh_record *mapped=record_of(record->node);
   k->record=*record;k->told=from?port_bit(from):0;
-  if(mapped && record_links_same(mapped,record))health_put(mapped,record);
+  if(mapped && record_links_same(mapped,record))health_put(record);
   else map_make();
 }
 /* design/transport.md: the map sent on `port` as its link comes up: each record of it whose peer lacks it

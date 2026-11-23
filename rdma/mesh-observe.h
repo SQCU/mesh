@@ -18,16 +18,17 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; };
 _Static_assert(sizeof(struct mesh_link_info)==32 && MESH_PORTS*sizeof(struct mesh_link_info)<=MESH_BRIDGE_BYTES,"mesh_link_info");
 static inline struct mesh_link_info *mesh_links(struct hdr *m){ return (struct mesh_link_info *)((char *)m+m->bridge_off); }
-/* design/transport.md section 2: the bridge's own pages of the region, recorded beside the links so the next bridge
-   adopts them with the region instead of leasing them again: the map's pages (MESH_ABSENT where none); and the
-   processes of the bridge that map the region, each by its pid and start (mesh_started): the bridge's own start
-   (beside the header's `bridge_pid`) and each child, which registers the region and maps it until its exit, in an
-   entry no live child has (twice the ports: an earlier launch's child that has not ended keeps its entry), so the
-   heartbeat unlinks an expired region only once none of them lives.  Fields are only ever appended, so a heartbeat of
-   any build finds `bridge_start` and `child` at their offsets; `unused` is written by no build */
+/* design/transport.md section 2: the processes of the bridge that map the region, recorded beside the links, each by
+   its pid and start (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which
+   registers the region and maps it until its exit, in an entry no live child has (twice the ports: an earlier
+   launch's child that has not ended keeps its entry), so the heartbeat unlinks an expired region only once none of
+   them lives.  Fields are only ever appended, so a heartbeat of any build finds `bridge_start` and `child` at their
+   offsets; `unused` is written by no bridge of this layout (its last three words MESH_LAYOUT 194's `map`, `map_pages`
+   and `padding`) */
 struct mesh_process { uint32_t pid,padding; uint64_t start; };
-struct mesh_bridge_pages { uint32_t unused[2*MESH_PORTS+1],map,map_pages,padding; uint64_t bridge_start;
+struct mesh_bridge_pages { uint32_t unused[2*MESH_PORTS+4]; uint64_t bridge_start;
   struct mesh_process child[2*MESH_PORTS]; };
+_Static_assert(offsetof(struct mesh_bridge_pages,bridge_start)==80,"mesh_bridge_pages: bridge_start at its offset");
 _Static_assert(MESH_PORTS*sizeof(struct mesh_link_info)+sizeof(struct mesh_bridge_pages)<=MESH_BRIDGE_BYTES,"mesh_bridge_pages");
 static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){
   return (struct mesh_bridge_pages *)((char *)m+m->bridge_off+MESH_PORTS*sizeof(struct mesh_link_info));

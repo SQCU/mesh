@@ -489,8 +489,6 @@ class Curriculum:
         players = max(sum(cfg["players_per_team"]), sum(cfg["controllers"].values()))
         maxplayers = int(cfg.get("maxplayers") or engine_player_capacity(players))
         initial_bots = cfg["controllers"]["bot"]
-        server_region = str(cfg.get("server_mesh_region", self.args.server_mesh_region))
-        responder_region = str(cfg.get("responder_mesh_region", self.args.responder_mesh_region))
         perturbation, cvars = self.perturbation(cfg, entity)
         strategy_node = cfg.get("strategy_node", self.args.strategy_node)
         strategy_node = 1 if strategy_node is None else int(strategy_node)
@@ -508,7 +506,7 @@ class Curriculum:
         )
         stage = []
         server_prefix = [
-            "env", f"MESH_REGION={server_region}",
+            "env",
             f"MESH_EXPERT_SOCKET={self.placement['socket']}",
             f"MESH_EXPERT_FRAMEBYTES={self.placement['framebytes']}",
         ] + self.server_prefix
@@ -535,7 +533,7 @@ class Curriculum:
         checkpoint_out = os.path.join(directory, "checkpoint.npz")
         checkpoint_initial = os.path.join(directory, "checkpoint.initial.npz")
         learning_rate = 0.0 if cfg["split"] == "heldout" else float(cfg.get("learning_rate", self.args.learning_rate))
-        responder = ["env", f"MESH_REGION={responder_region}"] + self.responder_prefix + [
+        responder = self.responder_prefix + [
             "--placement", os.path.abspath(os.path.expanduser(self.args.placement)),
             "--off-policy-players", str(cfg["off_policy_players"]),
             "--learning-rate", str(learning_rate), "--save-every", str(self.args.save_every),
@@ -1130,8 +1128,6 @@ def parser():
     ap.add_argument("--responder-command")
     ap.add_argument("--server-cwd")
     ap.add_argument("--responder-cwd")
-    ap.add_argument("--server-mesh-region", default=os.environ.get("MESH_SERVER_REGION", os.environ.get("MESH_REGION", "/mesh0")))
-    ap.add_argument("--responder-mesh-region", default=os.environ.get("MESH_RESPONDER_REGION", os.environ.get("MESH_REGION", "/mesh0")))
     ap.add_argument("--python", default=os.environ.get("MESH_PYTHON_LAUNCHER", os.path.join(os.path.dirname(ROOT), "bin", "mesh-python")))
     ap.add_argument("--entity-tool", default=os.path.join(ROOT, "payload", "tools", "mkentfile.py"))
     ap.add_argument("--build-command", default=os.path.join(ROOT, "payload", "build.sh"))

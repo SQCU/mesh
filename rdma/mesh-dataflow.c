@@ -10,7 +10,7 @@
    now (it outlives a restart of its bridge): 0, EINVAL where it is no region of this layout, or one expired, else the
    errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
-  int file=shm_open(mesh_name(),writable?O_RDWR:O_RDONLY,0);
+  int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
   if(file<0)return errno;
   struct stat info;
   if(fstat(file,&info)){int error=errno;close(file);return error;}
@@ -58,34 +58,15 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
   munmap(m,length);return 0;
 }
 
-/* A seqlock's serial read odd (its writer in its write): waited on for at most MESH_PAUSE_NS; 0 to read it again, or
-   ESRCH where it did not move and the bridge has exited */
-static int mesh_serial_wait(struct hdr *m,_Atomic uint64_t *serial,uint64_t odd){
-  if(os_sync_wait_on_address_with_timeout(serial,odd,sizeof *serial,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-       MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_exited((pid_t)atomic_load(&m->bridge_pid)))return ESRCH;
-  return 0;
-}
-
-/* The map's records as one serial left them, the seqlock's reader (mesh.h mesh_map_whole), read again until a copy is
-   whole: a copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open) */
-static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out,uint64_t *serial){
-  for(;;){
-    const uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
-    if(before&1){
-      if(mesh_serial_wait(m,&m->map,before))return -ESRCH;
-      continue;
-    }
-    const uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
-    const int fits=at<=length && count<=(length-at)/sizeof(struct mesh_record);
-    struct mesh_record *copy=fits?malloc((count?count:1)*sizeof *copy):NULL;
-    if(copy)memcpy(copy,(char *)m+at,count*sizeof *copy);
-    if(mesh_map_whole(m,before)){
-      if(!copy)return fits?-ENOMEM:-EINVAL;
-      if(serial)*serial=before;
-      *out=copy;return (int)count;
-    }
-    free(copy);
-  }
+/* The map's records as its published copy has them (mesh.h mesh_map_published), never waited for: a copy in *out the
+   caller frees and its count, or -ENOMEM */
+static int mesh_records_read(struct hdr *m,struct mesh_record **out){
+  const struct mesh_map_copy *map=mesh_map_published(m);
+  const uint32_t count=mesh_map_nodes(map);
+  struct mesh_record *copy=malloc((count?count:1)*sizeof *copy);
+  if(!copy)return -ENOMEM;
+  memcpy(copy,map->record,count*sizeof *copy);
+  *out=copy;return (int)count;
 }
 
 /* The one join of two nodes' records: the cables each one's bridge reaches the other over (its record names the other
@@ -151,7 +132,7 @@ int mesh_map(uint32_t *node,struct mesh_link_map *map){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
-  const int count=mesh_records_read(m,length,&r,NULL);
+  const int count=mesh_records_read(m,&r);
   munmap(m,length);
   if(count<0)return count;
   const int result=mesh_records_map(r,(uint32_t)count,node,map);
@@ -159,24 +140,13 @@ int mesh_map(uint32_t *node,struct mesh_link_map *map){
   return result;
 }
 
-/* The records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
-   (mesh-records.c health_put); a read that a health write overlapped is read again, and an odd serial (a write open)
-   waited on as mesh_records_read waits on the map's */
+/* The records with their health, as the map's published copy has them (a health sample is a publish of its own:
+   mesh-records.c health_put) */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
-  int count;
-  for(;;){
-    const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
-    if(before&1){
-      if(mesh_serial_wait(m,&m->health,before)){count=-ESRCH;break;}
-      continue;
-    }
-    count=mesh_records_read(m,length,&r,NULL);
-    if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
-    free(r);r=NULL;
-  }
+  const int count=mesh_records_read(m,&r);
   munmap(m,length);
   if(count<0)return count;
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
@@ -189,21 +159,19 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   return count;
 }
 
-/* The map's serial waited on until it differs from *serial, or the bridge's exit (ESRCH: its pid in the region another,
-   or its process exited, read at every wake and every MESH_PAUSE_NS re-look) */
+/* The map's serial waited on, with no clock, until it differs from *serial: each wake (the bridge's publish that
+   changes the mesh, its successor's first, or the region's expiry, each of which moves the serial: mesh.h
+   mesh_map_moved) reads the serial and the region's layout again; ESRCH where the region expired (the heartbeat's
+   release, or a bridge that could not adopt it: no bridge serves it again) */
 int mesh_map_wait(uint64_t *serial){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return error;
-  const uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_acquire);
-  uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
-  while(!error && seen==*serial){
-    os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-                                         MESH_PAUSE_NS);
-    seen=atomic_load_explicit(&m->map,memory_order_acquire);
-    if(seen==*serial && (atomic_load_explicit(&m->bridge_pid,memory_order_acquire)!=bridge || mesh_exited((pid_t)bridge)))error=ESRCH;
-  }
-  if(!error)*serial=seen;
+  uint64_t seen;
+  while((seen=atomic_load_explicit(&m->map,memory_order_acquire))==*serial && __atomic_load_n(&m->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT)
+    os_sync_wait_on_address(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+  if(__atomic_load_n(&m->version,__ATOMIC_ACQUIRE)!=MESH_LAYOUT)error=ESRCH;
+  else *serial=seen;
   munmap(m,length);
   return error;
 }
@@ -307,12 +275,6 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(first==MESH_ABSENT){errno=ENOMEM;return MESH_ABSENT;}
   c->arena_rover=first+pages;
   return first;
-}
-
-void mesh_arena_give(struct hdr *m,uint32_t page,uint32_t pages){
-  _Atomic uint64_t *bits=mesh_arena_bits(m);
-  for(uint32_t w=page/64;pages && w<=(page+pages-1)/64;w++)
-    atomic_fetch_and_explicit(&bits[w],~mesh_word_mask(page,pages,w),memory_order_acq_rel);
 }
 
 uint32_t mesh_arena_free(struct hdr *m){

@@ -70,8 +70,9 @@ def _map():
 
 def wait(serial=0):
     """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), waited
-    for on the serial's word, which the bridge wakes as it moves the map; the wait is the caller's own.  OSError naming
-    the bridge where it is unreachable, ESRCH where it exits while waited on."""
+    for on the serial's word with no clock, which the bridge wakes as it changes the map (a health sample is no change);
+    the wait is the caller's own.  OSError naming the bridge where it is unreachable, ESRCH where its region expires
+    while waited on."""
     made = ffi.new('uint64_t *', serial)
     status = lib.mesh_map_wait(made)
     if status:

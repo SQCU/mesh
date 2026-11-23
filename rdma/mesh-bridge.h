@@ -249,7 +249,6 @@ void record_changed(void);
 void switch_view(void);
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room);
 void record_retell(void);
-void map_adopt(void);
 void map_tell(struct port *port);
 void records_forget(const struct port *port);
 uint64_t health_due(void);

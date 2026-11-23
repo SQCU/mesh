@@ -5,7 +5,7 @@
    in-flight positions and feedback, and its published view, one JSON line to stdout.  It reads the region and writes nothing: two lines around
    a workload are its counts (their difference).
 
-   usage: mesh-switch-stat   (MESH_REGION names another region, as the clients' attach) */
+   usage: mesh-switch-stat */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -17,7 +17,7 @@
 
 #define U(x) ((unsigned long long)atomic_load_explicit(&(x),memory_order_relaxed))
 int main(void){
-  const int fd=shm_open(mesh_name(),O_RDONLY,0);
+  const int fd=shm_open(MESH_NAME,O_RDONLY,0);
   if(fd<0){printf("{\"up\":false,\"errno\":%d}\n",errno);return 0;}
   struct stat st;
   if(fstat(fd,&st) || st.st_size<(off_t)sizeof(struct hdr)){printf("{\"up\":false,\"errno\":%d}\n",EINVAL);return 0;}

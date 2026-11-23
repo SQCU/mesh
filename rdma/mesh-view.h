@@ -41,12 +41,13 @@ int mesh_link_map_check(const struct mesh_link_map *);
    a link a cable where two nodes' records each name the other (the fewer of the two ends' counts), each at the least
    bandwidth either end reports, the kind MESH_LINKS_MESH where a link joins every pair, else MESH_LINKS_GRAPH.  On
    entry map->nodes and map->links are the room of node and of link and bandwidth; returns the map's nodes, or -errno
-   (ENOSPC: the room is short, map->nodes and map->links then the room needed; ESRCH: the bridge went while its write of
-   the records was open; ENOMEM). */
+   (ENOSPC: the room is short, map->nodes and map->links then the room needed; ENOMEM).  It never waits on the
+   bridge. */
 int mesh_map(uint32_t *node,struct mesh_link_map *map);
-/* The bridge's map serial (never 0; it changes with the records): waits on it until it differs from *serial and writes
-   it there (*serial 0: at once); 0, or ESRCH where the bridge exits while it is waited on, else the errno of an
-   unreachable bridge.  The wait is the caller's own. */
+/* The bridge's map serial (never 0; it changes where the mesh does, not at a health sample): waits on it until it
+   differs from *serial and writes it there (*serial 0: at once); 0, or ESRCH where the region expires while it is
+   waited on (no bridge serves it again), else the errno of an unreachable bridge.  The wait is the caller's own and has
+   no clock: a bridge that ends without a successor or a release leaves it waiting until the next bridge's first map. */
 int mesh_map_wait(uint64_t *serial);
 
 /* What a node's record carries of its health: `booted`, the wall clock of the node's boot (ns since the epoch), and its
@@ -57,8 +58,8 @@ struct mesh_health { uint64_t booted,available; };
 #define MESH_MODEL_BYTES 32
 struct mesh_node_health { uint32_t node; uint64_t region,memory; char model[MESH_MODEL_BYTES];
                           struct mesh_health health; };
-/* Every node's record the bridge has (mesh_map's nodes, this node's own among them): their count (at most `capacity`
-   written), or -errno where the bridge is unreachable. */
+/* Every node's record the bridge has (mesh_map's nodes, this node's own among them), never waiting on the bridge:
+   their count (at most `capacity` written), or -errno where the bridge is unreachable. */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
 
 #ifdef __cplusplus
