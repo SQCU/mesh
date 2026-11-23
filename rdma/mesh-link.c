@@ -497,7 +497,8 @@ static void *port_progress(void *argument){
    on its control socket (PORT_MESSAGE: `data` the message) and the socket's loss (PORT_GONE: `code` why); its peer
    interface terminating (PORT_TERMINATED); its child's answer to the command out (PORT_ANSWERED: `data` the child's
    CHILD_OPENED, CHILD_MADE or CHILD_CONNECTED, each taken only in the state that waits for it), its child's own halt
-   (PORT_BROKEN: `code` its reason) and its exit (PORT_EXITED); its deadline passed (PORT_DUE); the bridge's stop
+   (PORT_BROKEN: `code` its reason) and its exit, reaped (PORT_EXITED: `code` its wait status); its deadline passed
+   (PORT_DUE); the bridge's stop
    (PORT_STOP) */
 enum port_event { PORT_ON, PORT_ADDRESSED, PORT_OFF, PORT_HEARD, PORT_ACCEPTED, PORT_DIALED, PORT_MESSAGE, PORT_GONE,
                   PORT_TERMINATED, PORT_ANSWERED, PORT_BROKEN, PORT_EXITED, PORT_DUE, PORT_STOP };
@@ -1279,13 +1280,14 @@ static int child_send(struct port *port,struct child_message said){
   close(port->child_fd);port->child_fd=-1;
   return error;
 }
-/* the port's child spawned, then recorded, then run: spawned suspended (POSIX_SPAWN_START_SUSPENDED: it runs no
-   instruction yet), its pid and start recorded in an entry of the region's processes no live child has (mesh-observe.h
-   struct mesh_bridge_pages `child`), its socket's messages and its exit watched on the loop's queue (tagged by the
-   port), and only then resumed (SIGCONT).  So every child that runs is recorded first: a bridge that ends at any point
-   of a spawn leaves no child its next launch's ADOPTING does not wait for, and a device's queue pairs are one process's
-   at a time (no scan of the node's processes for one).  A child whose watch cannot be armed is killed while it has run
-   nothing, and reaped (at once: it was never resumed).  0, or the error */
+/* the port's child spawned, then recorded, then run: its socket's messages watched on the loop's queue (tagged by the
+   port) before the spawn, then the child spawned suspended (POSIX_SPAWN_START_SUSPENDED: it runs no instruction yet),
+   its pid and start recorded in an entry of the region's processes no live child has (mesh-observe.h struct
+   mesh_bridge_pages `child`), and only then resumed (SIGCONT).  So every child that runs is recorded first: a bridge
+   that ends at any point of a spawn leaves no child its next launch's ADOPTING does not wait for, and a device's queue
+   pairs are one process's at a time (no scan of the node's processes for one).  Nothing after the spawn can fail, so
+   no child is spawned that is not run.  Its exit is heard as every child's is, on the loop's SIGCHLD (children_reaped).
+   0, or the error */
 static int child_spawn(struct port *port){
   int pair[2],on=1;
   struct mesh_process *children=mesh_bridge_pages(M)->child;
@@ -1298,6 +1300,14 @@ static int child_spawn(struct port *port){
     return error;
   }
   setsockopt(pair[0],SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on);
+  struct kevent64_s watch;
+  EV_SET64(&watch,(uint64_t)pair[0],EVFILT_READ,EV_ADD,0,0,TAG_CHILD|port->index,0,0);
+  if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){
+    const int error=errno?errno:EIO;
+    close(pair[0]);close(pair[1]);
+    say("link %u (%s): its child not spawned: its socket not watched (%s)\n",port->index,port->name,strerror(error));
+    return error;
+  }
   char index[16];
   snprintf(index,sizeof index,"%u",port->index);
   char version[16];
@@ -1323,19 +1333,6 @@ static int child_spawn(struct port *port){
     return error;
   }
   children[entry]=(struct mesh_process){(uint32_t)pid,0,mesh_started(pid)};
-  struct kevent64_s watch[2];
-  EV_SET64(&watch[0],(uint64_t)pair[0],EVFILT_READ,EV_ADD,0,0,TAG_CHILD|port->index,0,0);
-  EV_SET64(&watch[1],(uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_CHILD|port->index,0,0);
-  if(kevent64(events,watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL) || kevent64(events,watch+1,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){
-    error=errno?errno:EIO;
-    kill(pid,SIGKILL);
-    int status=0;
-    while(waitpid(pid,&status,0)<0 && errno==EINTR){}
-    children[entry]=(struct mesh_process){0};
-    close(pair[0]);
-    say("link %u (%s): its child %d not watched (%s): killed before it ran\n",port->index,port->name,(int)pid,strerror(error));
-    return error;
-  }
   port->child=pid;port->child_entry=entry;port->child_fd=pair[0];port->child_in_length=0;
   kill(pid,SIGCONT);
   say("link %u (%s): its child %d spawned\n",port->index,port->name,(int)pid);
@@ -1533,18 +1530,16 @@ static void port_up(struct port *port){
   map_tell(port);
   if(port->state==PORT_UP)record_changed();
 }
-/* design/transport.md section 14: the port's child exited (its last messages taken first: the event loop): its exit
-   reaped, seen through to its end after NOTE_EXIT (the kernel's release of its device's objects), its entry among the
-   region's processes cleared; one that ended unbidden (in any state but EXITING, while the bridge runs) is the link's
-   loss (ECHILD) and is spawned again once the port's quiet window has passed, however often its children ended (the
-   operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and anything like it").  What it had given back
-   and its line made new (switch_child_free: its queue pairs went with it, so nothing lands in or is read from its
-   pages again), and the port CLOSED, to be opened by its next child */
-static void port_reaped(struct port *port){
+/* design/transport.md section 14: the port's child reaped, `status` its wait status (children_reaped: its exit seen
+   through to its end, the kernel's release of its device's objects; its last messages taken first), its socket
+   closed and its entry among the region's processes cleared; one that ended unbidden (in any state but EXITING, while
+   the bridge runs) is the link's loss (ECHILD) and is spawned again once the port's quiet window has passed, however
+   often its children ended (the operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and anything like
+   it").  What it had given back and its line made new (switch_child_free: its queue pairs went with it, so nothing
+   lands in or is read from its pages again), and the port CLOSED, to be opened by its next child */
+static void port_reaped(struct port *port,int status){
   const pid_t pid=port->child;
-  int status=0;
   if(port->child_fd>=0){close(port->child_fd);port->child_fd=-1;}
-  while(waitpid(pid,&status,0)<0 && errno==EINTR){}
   port->child=0;
   if(port->child_entry<2*MESH_PORTS && mesh_bridge_pages(M)->child[port->child_entry].pid==(uint32_t)pid)
     mesh_bridge_pages(M)->child[port->child_entry]=(struct mesh_process){0};
@@ -1657,7 +1652,7 @@ static void port_step(struct port *port,enum port_event event,int64_t code,const
     if(state!=PORT_CLOSED && state!=PORT_EXITING)port_exiting(port,code>0?code:EIO);
     return;
   case PORT_EXITED:
-    port_reaped(port);
+    port_reaped(port,(int)code);
     return;
   case PORT_DUE:
     switch(state){
@@ -2156,7 +2151,7 @@ static void node_ended(int due){
 }
 /* design/transport.md section 14, "A process a port": the end (NODE_ENDING), once the stop's windows have ended: the
    bridge ended once every child, each halted at the stop and ending by its own windows (child_end), is reaped
-   (PORT_EXITED, on the loop: its NOTE_EXIT, then its exit seen through to its end), at most MESH_PLATFORM_NS on, so
+   (PORT_EXITED, on the loop: its exit seen through to its end, children_reaped), at most MESH_PLATFORM_NS on, so
    no child of this launch has its device's queue pairs as the next launch's children make theirs.  This end stays
    beside the next bridge's ADOPTING because it alone sees an exit through to its end: a process in its exit is no
    longer found by its pid, before the kernel releases its device's objects (design/transport.md section 2), so ADOPTING
@@ -2189,6 +2184,24 @@ static void node_step(enum node_event event,int64_t code){
     return;
   }
 }
+/* design/transport.md section 14, "A process a port": the loop's SIGCHLD, the kernel's word that a child's exit is
+   complete (the kernel has released its device's objects, and the child can be reaped): each port's child that has
+   exited reaped (waitpid with WNOHANG: no wait), its last messages taken first (child_heard), then its port's
+   PORT_EXITED, which spawns the port's next child only now, and the node's NODE_EXIT (ENDING waits for the reaps).
+   A child's exit is heard as it completes, not as it begins (NOTE_EXIT), so the loop never waits on one whose kernel
+   release stalls.  One SIGCHLD may tell several exits, or a child's stop or continuation, which reaps none */
+static void children_reaped(void){
+  for(uint32_t p=0;p<port_count;p++){
+    struct port *port=ports+p;
+    int status=0;
+    pid_t got=0;
+    while(port->child && (got=waitpid(port->child,&status,WNOHANG))<0 && errno==EINTR){}
+    if(!port->child || got!=port->child)continue;
+    child_heard(port);
+    port_step(port,PORT_EXITED,status,NULL);
+    node_step(NODE_EXIT,0);
+  }
+}
 
 /* design/transport.md: the node's resident bridge; its one operand the path of its configuration (no default); a port's
    child as its parent spawns it (child_main) */
@@ -2213,6 +2226,10 @@ int main(int argc,char **argv){
     if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
     signal(stopping_signals[i],SIG_IGN);
   }
+  /* design/transport.md section 14: the children's exits (children_reaped), before any child is spawned; SIGCHLD's
+     disposition left the default, since one set to SIG_IGN has the kernel reap the children itself */
+  EV_SET64(&event,SIGCHLD,EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
+  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
   signal(SIGPIPE,SIG_IGN);
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
@@ -2284,19 +2301,16 @@ int main(int argc,char **argv){
     now=clock_ns();
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
-      if(e->filter==EVFILT_SIGNAL)node_step(NODE_STOP,(int64_t)e->ident);
+      /* design/transport.md section 14, "A process a port": a port's child's exit complete (SIGCHLD) */
+      if(e->filter==EVFILT_SIGNAL && e->ident==SIGCHLD)children_reaped();
+      else if(e->filter==EVFILT_SIGNAL)node_step(NODE_STOP,(int64_t)e->ident);
       else if(e->filter==EVFILT_PROC && e->udata==TAG_ADOPT)node_step(NODE_EXIT,0);
       /* design/transport.md: the parent's IOKit, its callbacks run here */
       else if(e->filter==EVFILT_MACHPORT && e->udata==TAG_IOKIT)iokit_heard();
-      /* design/transport.md section 14, "A process a port": a port's child's message or exit */
+      /* design/transport.md section 14, "A process a port": a port's child's messages */
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_CHILD)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
-        if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child){
-          child_heard(port);
-          port_step(port,PORT_EXITED,0,NULL);
-          node_step(NODE_EXIT,0);
-        }
-        else if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
+        if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
       }
       else if(e->filter==EVFILT_PROC){
         for(uint32_t s=0;s<MESH_CLIENTS;s++){

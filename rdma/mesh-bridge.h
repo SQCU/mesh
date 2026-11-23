@@ -180,8 +180,9 @@ struct child_message {
      window's end once the LINK is in);
    - CONNECTING: CHILD_CONNECT out.  `due` its bound (B12);
    - UP: its child serves the link;
-   - EXITING: its child halted (CHILD_HALT naming the loss, or the bridge's stop), its exit awaited (NOTE_EXIT); the
-     port's next child is spawned only after it is reaped, so a device has one driving process.
+   - EXITING: its child halted (CHILD_HALT naming the loss, or the bridge's stop), its exit awaited (the loop's SIGCHLD,
+     mesh-link.c children_reaped); the port's next child is spawned only after it is reaped, so a device has one
+     driving process.
    A port's fields: its index (its child's, the switch's), its device (`device`, the provider's rdma_<interface>, as
    IOKit's first match named it) and interface (`name`, `interface` its index once it is first opened; `family`,
    `unit`: an en<N>'s APPLE_IF_FAM_ETHERNET and N, read once from its name; another port's family 0, which no event
