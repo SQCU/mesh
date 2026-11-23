@@ -316,22 +316,34 @@ static uint64_t switch_mine(const struct port *port){
   }
   return mine;
 }
-/* the writes this node's clients put on the rings this child takes (switch_mine), taken and carried, at most
-   SWITCH_BURST a pass, each of those rings with writes on it looked at from the slot after the one where this child
-   began its last pass, whichever client the slot is now (a write is carried on its own ring use, its writer there or
-   exited).  As the serving ports change, the child whose share a ring was may take from it a moment longer, and the
-   ring's compare-exchange gives each write to one child */
+/* slot `slot`'s ring, flagged and found empty by the child that takes it: its flag cleared where the slot is vacant,
+   then its owner and its put read again and the ring flagged again where either moved (mesh.h mesh_ring_flag: each
+   of these sequentially consistent), so a client that takes the slot and writes meanwhile is never missed */
+static void ring_vacant(uint32_t slot,struct mesh_ring *r){
+  _Atomic uint64_t *owner=&((struct mesh_client *)((char *)M+M->client_off)+slot)->owner;
+  if(atomic_load(owner))return;
+  const uint64_t bit=UINT64_C(1)<<slot;
+  atomic_fetch_and(&M->attached,~bit);
+  if(atomic_load(owner) || atomic_load(&r->put)>atomic_load(&r->take))atomic_fetch_or(&M->attached,bit);
+}
+/* the writes this node's clients put on the rings this child takes (its share, switch_mine, of the rings flagged
+   attached: mesh.h mesh_ring_flag), taken and carried, at most SWITCH_BURST a pass, each of those rings looked at from
+   the slot after the one where this child began its last pass, whichever client the slot is now (a write is carried
+   on its own ring use, its writer there or exited); a flagged ring found empty whose slot is vacant has its flag
+   cleared (ring_vacant), so the scan reads only the rings of clients that write.  As the serving ports change, the
+   child whose share a ring was may take from it a moment longer, and the ring's compare-exchange gives each write to
+   one child */
 #define SWITCH_BURST 16u
-_Static_assert(MESH_CLIENTS==64,"a client slot a bit of a mask");
 static void switch_takes(struct port *port){
   struct mesh_switch *sw=switch_of();
   struct link *l=&port->link;
-  const uint64_t mine=switch_mine(port);
+  const uint64_t mine=switch_mine(port)&atomic_load_explicit(&M->attached,memory_order_relaxed);
   const uint32_t from=l->take_from%MESH_CLIENTS;
   uint32_t taken=0;uint64_t at=0;
   for(uint64_t k=from?mine>>from|mine<<(MESH_CLIENTS-from):mine;k && taken<SWITCH_BURST;k&=k-1){
     const uint32_t slot=((uint32_t)__builtin_ctzll(k)+from)%MESH_CLIENTS;
-    if(!mesh_ring_pending(mesh_ring_at(M,slot)))continue;
+    struct mesh_ring *r=mesh_ring_at(M,slot);
+    if(!mesh_ring_pending(r)){ring_vacant(slot,r);continue;}
     if(!at)at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     taken+=mesh_switch_ring_dequeue(M,sw,slot,SWITCH_BURST-taken,at,port->index,hand_of(port));
   }
@@ -1671,17 +1683,6 @@ static void child_reaped(struct port *port){
   port->opening=1;
 }
 
-/* design/transport.md: the clients' control word, watched for the event loop */
-static void *control_watch(void *unused){
-  (void)unused;
-  while(!stop){
-    uint64_t seen=atomic_load_explicit(&M->control,memory_order_acquire);
-    wake();
-    os_sync_wait_on_address(&M->control,seen,sizeof M->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
-  }
-  return NULL;
-}
-
 /* design/transport.md: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
    the consumer's document (rdma/bridge_configuration.py): its name and its region in bytes (`region_bytes`); NULL, or
    why it is refused */
@@ -1988,9 +1989,9 @@ static void region_adopt(void){
    waits for that are still ahead (the next liveness turn, `liveness`; the next health sample;
    where the devices are to be read, the windows' end; the exit's window; each port's quiet window, spawn pause, open's
    retry, next hello, and the bound of its open's or link's job out), and no later than MESH_PAUSE_NS on (design/rubrics.md M3: the wait ends in finite
-   time).  Every other change a turn takes wakes the loop where it happens (wake, `control`, a socket, a signal and an
-   exit on the queue), so a turn comes at the change or at the time it waits for, where a fixed tick (250 ms) took each
-   such time up to a tick late */
+   time).  Every other change a turn takes wakes the loop where it happens (wake, a socket, a signal and an exit on the
+   queue), so a turn comes at the change or at the time it waits for, where a fixed tick (250 ms) took each such time
+   up to a tick late; a client slot taken or left is read at the next turn, whatever woke it (clients_turn) */
 static inline void due_at(uint64_t *due,uint64_t at){ if(at>now && at<*due)*due=at; }
 static uint64_t turn_due(uint64_t liveness){
   uint64_t due=MIN(liveness,now+MESH_PAUSE_NS);
@@ -2093,8 +2094,6 @@ int main(int argc,char **argv){
   mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize();M->magic=MESH_MAGIC;
-  pthread_t watcher;
-  if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   /* the refresh at the progress threads' class: its SWITCH_REFRESH_NS pause near its length (at the default class
      the system's timer slack made 50 us about 460 us) */
   pthread_t refresher;
@@ -2134,7 +2133,7 @@ int main(int argc,char **argv){
       liveness=now+MESH_PAUSE_NS;
       record_retell();
     }
-    clients_turn(alive);
+    clients_turn();
     if(lefts)switch_settle();
     struct kevent64_s ready[16];
     const uint64_t due=turn_due(liveness),at=clock_ns(),rest=due>at?due-at:0;
@@ -2202,7 +2201,6 @@ int main(int argc,char **argv){
   /* design/transport.md section 2: every stop keeps the region for the next bridge to adopt; a release is the
      heartbeat's, which expires the region once this bridge has ended (mesh-heartbeat.c region_expire) */
   atomic_store(&M->bridge_pid,0);
-  mesh_notify(&M->control);
   const uint64_t exit_by=clock_ns()+MESH_PLATFORM_NS;
   for(int told=0;;){
     now=clock_ns();

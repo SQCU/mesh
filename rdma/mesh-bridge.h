@@ -267,6 +267,6 @@ uint64_t health_due(void);
 void health_turn(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);
 void port_lost(struct port *port,int64_t code);
-void clients_turn(int liveness);
+void clients_turn(void);
 
 #endif

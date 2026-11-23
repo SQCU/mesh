@@ -43,7 +43,8 @@ uint32_t mesh_pages(struct mesh_ctx *context,uint32_t count,uint32_t bytes){
 }
 
 /* One ring cell: the page's use for the write counted by a compare-exchange from 1 (the word's use alone), so a page
-   with a SEND or a write out is refused, and dropped again where the ring is full */
+   with a SEND or a write out is refused, and dropped again where the ring is full; the ring flagged for the bridge's
+   port children (mesh.h mesh_ring_flag) */
 int mesh_write(struct mesh_ctx *context,uint32_t index,uint32_t bytes,const struct mesh_dest *dests,uint32_t n){
   struct hdr *m=attached(context);
   if(!m || index>=m->entries || !dests || !n || n>MESH_DESTS)return EINVAL;
@@ -57,7 +58,9 @@ int mesh_write(struct mesh_ctx *context,uint32_t index,uint32_t bytes,const stru
   if(!atomic_compare_exchange_strong_explicit(&p->uses,&alone,2,memory_order_acq_rel,memory_order_relaxed))return EBUSY;
   struct mesh_write w={.pd=pd,.bytes=bytes,.dests=n};
   for(uint32_t i=0;i<n;i++)w.dest[i]=dests[i];
-  if(!mesh_ring_push(mesh_ring_at(m,mesh_owner_byte(context->client)-1u),&w)){mesh_pd_drop(m,pd);return EAGAIN;}
+  const uint32_t slot=mesh_owner_byte(context->client)-1u;
+  if(!mesh_ring_push(mesh_ring_at(m,slot),&w)){mesh_pd_drop(m,pd);return EAGAIN;}
+  mesh_ring_flag(m,slot);
   return 0;
 }
 
@@ -109,5 +112,4 @@ void mesh_leave(struct hdr *m,uint64_t client){
     }
   uint64_t leaving=owner|MESH_LEAVING;
   atomic_compare_exchange_strong(&slot->owner,&leaving,0);
-  mesh_notify(&m->control);
 }

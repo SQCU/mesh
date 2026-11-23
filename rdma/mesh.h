@@ -30,12 +30,12 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    names MESH_LINK_LANES lanes in `pair` (162's 10) */
 #define MESH_VERSION 163u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  185: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  186: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   184, the switch has a line a port (mesh-switched.h struct mesh_switch `port`: its child's state, its link's peer and
-   plan, all in one cache line) and a queue a cable (`cable`), and no `taker`, no lane's live, peer, frames or queued,
-   and no neighbours or lanes in the refresh's weights; the lane records' `live` is `unused` */
-#define MESH_LAYOUT 185u
+   185, the header's `control`, a counter clients bumped for the bridge's watcher thread, is `attached` in place, a bit
+   a client slot whose ring the port children look at (mesh_ring_flag), and a ring's `put` is stored sequentially
+   consistent */
+#define MESH_LAYOUT 186u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -151,12 +151,13 @@ struct mesh_client {
    the page table's words and owner bytes, `arena_off` the arena's bitmap (a bit an arena page of `pgsz` bytes, `block`
    pages a block), `ring_off` the clients' write rings, `pool_off` the pool, `bridge_off` the bridge's own pages,
    `stream_off` the lane records, `client_off` the client slots, `data_off` the arena, `node_off` the node table and
-   `switch_off` the switch; `busy` the frames the bridge's lanes have queued (0 while none) and `idle_since` the wall
-   clock in ns at which they last had none (0 while they have any); `spare` is unused */
+   `switch_off` the switch; `attached` the client slots whose rings the bridge's port children look at, a bit a slot
+   (mesh_ring_flag); `busy` the frames the bridge's lanes have queued (0 while none) and `idle_since` the wall clock in
+   ns at which they last had none (0 while they have any); `spare` is unused */
 struct hdr {
   uint32_t magic,version,pgsz,block,entries,node,streams,clients;
   uint64_t table_off,arena_off,ring_off,pool_off,bridge_off,stream_off,client_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since;
+  _Atomic uint64_t bridge_pid,serial,attached,map,map_off,map_nodes,health,busy,idle_since;
   uint64_t spare;
   uint64_t node_off,switch_off;
 };
@@ -165,11 +166,11 @@ _Static_assert(offsetof(struct hdr,version)==4 && offsetof(struct hdr,pgsz)==8 &
                offsetof(struct hdr,table_off)==32 && offsetof(struct hdr,arena_off)==40 && offsetof(struct hdr,ring_off)==48 &&
                offsetof(struct hdr,pool_off)==56 && offsetof(struct hdr,bridge_off)==64 && offsetof(struct hdr,stream_off)==72 &&
                offsetof(struct hdr,client_off)==80 && offsetof(struct hdr,data_off)==88 && offsetof(struct hdr,length)==96 &&
-               offsetof(struct hdr,bridge_pid)==112 && offsetof(struct hdr,control)==128 && offsetof(struct hdr,spare)==184 &&
+               offsetof(struct hdr,bridge_pid)==112 && offsetof(struct hdr,attached)==128 && offsetof(struct hdr,spare)==184 &&
                offsetof(struct hdr,node_off)==192 && offsetof(struct hdr,switch_off)==200 && sizeof(struct hdr)==208,
                "struct hdr: every field at its offset");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
-/* a shared word (`control`, `map`) bumped and its waiters woken, the writes after it ordered behind it */
+/* a shared word (`map`, `health`) bumped and its waiters woken, the writes after it ordered behind it */
 static inline void mesh_notify(_Atomic uint64_t *word){
   atomic_fetch_add_explicit(word,1,memory_order_release);
   atomic_thread_fence(memory_order_release);
@@ -279,16 +280,29 @@ static inline void mesh_pd_drop(struct hdr *m,uint32_t pd){
 
 /* ---- The write rings (`ring_off`) --------------------------------------------------------------------------------- */
 static inline struct mesh_ring *mesh_ring_at(struct hdr *m,uint32_t slot){ return (struct mesh_ring *)((char *)m+m->ring_off)+slot; }
-/* write w put on the ring by its one producer: 1, or 0 where the ring is full */
+/* write w put on the ring by its one producer: 1, or 0 where the ring is full.  The put's store is sequentially
+   consistent, ordered before the writer's read of its flag (mesh_ring_flag) */
 static inline int mesh_ring_push(struct mesh_ring *r,const struct mesh_write *w){
   const uint64_t at=atomic_load_explicit(&r->put,memory_order_relaxed),lap=at/MESH_RING;
   struct mesh_cell *cell=&r->cell[at%MESH_RING];
   if(atomic_load_explicit(&cell->sequence,memory_order_acquire)!=2*lap)return 0;
   cell->w=*w;
   atomic_store_explicit(&cell->sequence,2*lap+1,memory_order_release);
-  atomic_store_explicit(&r->put,at+1,memory_order_release);
+  atomic_store(&r->put,at+1);
   return 1;
 }
+/* client slot `slot`'s ring flagged for the bridge's port children (struct hdr `attached`, a bit a slot), which look
+   at the flagged rings alone: by its writer after each write, where the flag is not set yet (one load a write, and an
+   or at its first), and by a slot's take that finds a write left at put (mesh-dataflow.c mesh_slot_take).  The port
+   child that takes the ring clears the flag where it finds the slot vacant and the ring empty, then reads the owner
+   and the put again and flags the ring again where either moved (mesh-link.c switch_takes).  Each of the four is
+   sequentially consistent, so a write is never left on a ring not flagged: a writer that reads its flag set before the
+   clear stored its put before the clear, and the child's read after the clear sees that put */
+static inline void mesh_ring_flag(struct hdr *m,uint32_t slot){
+  const uint64_t bit=UINT64_C(1)<<(slot&(MESH_CLIENTS-1));
+  if(!(atomic_load(&m->attached)&bit))atomic_fetch_or(&m->attached,bit);
+}
+_Static_assert(MESH_CLIENTS==64,"a client slot a bit of `attached`");
 /* the writes on the ring as its counters read now (0: none to take) */
 static inline uint64_t mesh_ring_pending(struct mesh_ring *r){
   const uint64_t put=atomic_load_explicit(&r->put,memory_order_acquire),take=atomic_load_explicit(&r->take,memory_order_relaxed);
@@ -347,12 +361,13 @@ static inline int mesh_alive(pid_t pid,uint64_t start){ return start?mesh_starte
 
 /* ---- libmesh (mesh-dataflow.c, mesh-call.c) ----------------------------------------------------------------------- */
 /* a vacant client slot of region m taken for this process by one compare-exchange (its generation from the header's
-   `serial`), stamped with its start, and the bridge woken to watch its exit; 0, or EBUSY where none is vacant */
+   `serial`), stamped with its start; the bridge watches its exit from its event loop's next turn.  0, or EBUSY where
+   none is vacant */
 int mesh_slot_take(struct mesh_ctx *,struct hdr *);
 /* client `client`'s slot left, by its detach or by the bridge where its process has exited: the owner word marked
    MESH_LEAVING (an owner word already marked: its leaving finished), each index it owns left naming no page and
-   freed, then the slot vacant and the bridge woken; the writes on its ring stay there, each on its own use, for the
-   port children to carry (mesh-switched.h mesh_switch_ring_dequeue) */
+   freed, then the slot vacant; the writes on its ring stay there, each on its own use, for the port children to carry
+   (mesh-switched.h mesh_switch_ring_dequeue), its flag kept until they have (mesh_ring_flag) */
 void mesh_leave(struct hdr *,uint64_t client);
 /* the one join of two nodes' records: the cables each one's bridge reaches the other over, the fewer of the two ends'
    counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */

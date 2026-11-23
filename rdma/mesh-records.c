@@ -230,22 +230,22 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   map_put(k,&heard,from);
   record_tell(k);
 }
-/* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first seen (its exit,
-   the event loop's EVFILT_PROC, makes every slot it has leave: a client's death is that event, not a poll), one
-   already exited made to leave at once (mesh.h mesh_leave: its indices freed and their pages dropped, the writes on
-   its ring left for the port children to carry); on a liveness turn, a slot whose leaving its process left half done as it died finished; and the frames
-   queued told (busy_tell) */
-void clients_turn(int liveness){
+/* design/transport.md: every client slot read, on every turn of the event loop: a slot's process watched from the turn
+   its slot is first seen as it stands, owned or leaving (its exit, the event loop's EVFILT_PROC, makes every slot it
+   has leave: a client's death is that event, not a poll), one already exited made to leave at once (mesh.h
+   mesh_leave, which also finishes a leaving its process left half done as it died: its indices freed and their pages
+   dropped, the writes on its ring left for the port children to carry); and the frames queued told (busy_tell).  A
+   slot taken is seen at the turn after, whatever wakes the loop (at most MESH_PAUSE_NS on) */
+void clients_turn(void){
   const pid_t self=getpid();
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *client=(struct mesh_client *)((char *)M+M->client_off)+s;
     uint64_t owner=atomic_load(&client->owner);
     if(owner && (pid_t)(uint32_t)owner==self)continue;
-    if(owner && owner!=owners[s] && !(owner&MESH_LEAVING)){
+    if(owner && owner!=owners[s]){
       struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
       if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
     }
-    if(liveness && owner&MESH_LEAVING && !mesh_alive((pid_t)(uint32_t)owner,client->start)){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
     owners[s]=owner;
   }
   busy_tell();
