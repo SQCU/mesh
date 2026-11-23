@@ -44,6 +44,26 @@ class Observation:
     sample_seconds: float
 
 
+def observations(lib, program):
+    error = C.create_string_buffer(ROOM)
+    count, slices, members, identities = (mesh.U(), C.POINTER(metal.UnitSlice)(), C.POINTER(mesh.U)(),
+                                          C.POINTER(mesh.Q)())
+    unit = lib.MetalProgramUnits(program, C.byref(count), C.byref(slices), C.byref(members), C.byref(identities))
+    total = sum(unit[u].copies for u in range(count.value))
+    observed = (metal.Observed * max(total, 1))()
+    checked(lib.MetalProgramObserved(program, observed, total, error, ROOM), error, "observation")
+    made_ = []
+    for u in range(count.value):
+        for s in range(unit[u].slice, unit[u].slice + unit[u].copies):
+            got, part = observed[s], slices[s]
+            if got.executions:
+                made_.append(Observation(unit[u].kind, unit[u].call, unit[u].site, got.residue,
+                                         tuple(members[part.member:part.member + part.count]),
+                                         tuple(identities[part.identity:part.identity + part.identities]),
+                                         got.executions, got.seconds))
+    return made_
+
+
 # compiler/mesh_compiler/metal.py: the live native owner and its three bound libraries (libmetal_ir, the recorder and
 # its device, the transport)
 def libraries():
@@ -1491,25 +1511,9 @@ class Bound:
         if self.work is None:
             self.work = tuple(None if program is None else borrowed(self.libs[1], program, self.owned)
                               for program in self.programs)
-        lib, error = self.libs[2][0], C.create_string_buffer(ROOM)
-        run, units, read = lib.MetalProgramRunObserved, lib.MetalProgramUnits, lib.MetalProgramObserved
-        outputs = self.invoked(run, given)
-        count, slices, members, identities = (mesh.U(), C.POINTER(metal.UnitSlice)(), C.POINTER(mesh.U)(),
-                                              C.POINTER(mesh.Q)())
-        unit = units(self.program, C.byref(count), C.byref(slices), C.byref(members), C.byref(identities))
-        total = sum(unit[u].copies for u in range(count.value))
-        observed = (metal.Observed * max(total, 1))()
-        checked(read(self.program, observed, total, error, ROOM), error, "observation")
-        made_ = []
-        for u in range(count.value):
-            for s in range(unit[u].slice, unit[u].slice + unit[u].copies):
-                got, part = observed[s], slices[s]
-                if got.executions:
-                    made_.append(Observation(unit[u].kind, unit[u].call, unit[u].site, got.residue,
-                                             tuple(members[part.member:part.member + part.count]),
-                                             tuple(identities[part.identity:part.identity + part.identities]),
-                                             got.executions, got.seconds))
-        return outputs, made_
+        lib = self.libs[2][0]
+        outputs = self.invoked(lib.MetalProgramRunObserved, given)
+        return outputs, observations(lib, self.program)
 
 
 # The saved artifact, its joint owner and its typed recipe, as the frontend's Root and Output records; no construction
