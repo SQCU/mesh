@@ -32,12 +32,13 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    the sender's time as it was and judged a line's age by its stamp against the receiver's clock */
 #define MESH_VERSION 166u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  193: the page table and its owner bytes (`table_off`), the clients'
-   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and the switch's inbound and in-flight
-   rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`), each inbound ring of
-   MESH_POOL_PAGES entries; against 192, each remote line this node keeps (mesh-switched.h struct mesh_switch_heard)
-   has the time this node took it (`taken`), from which its backlog drains */
-#define MESH_LAYOUT 193u
+   before it left where its layout is this one.  194: the page table and its owner bytes (`table_off`), the clients'
+   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), the lane records (`stream_off`), and the
+   switch's inbound and in-flight rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`),
+   each inbound ring of MESH_POOL_PAGES entries; against 193, the lane records (struct mesh_lanes) have no unused
+   fields: the word c5 renamed `unused`, `spare`, `padding` and each way's `unused` pair are gone and `child` lies
+   beside `peer`, 192 bytes a record, not 256 */
+#define MESH_LAYOUT 194u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -115,27 +116,27 @@ struct mesh_ring { _Alignas(64) _Atomic uint64_t put; _Alignas(64) _Atomic uint6
 struct mesh_node { _Alignas(64) _Atomic uint32_t node; _Atomic uint32_t live; _Atomic uint64_t generation,bandwidth; };
 _Static_assert(sizeof(struct mesh_node)==64,"mesh_node");
 
-/* The bridge's lane records (never a client's): a port's lane pair s, its peer and identity as its lanes last opened
-   (whether they serve is its port's line: mesh-switched.h struct mesh_switch `port`), each lane's requests posted and
-   completed each way, its passes and SEND times, and the port child that posts them (`child`, `child_start`); `unused`
-   and `spare` are unused (every field keeps its offset: the heartbeat and observers read them) */
-struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2],unused[2]; };
+/* The bridge's lane records (never a client's): a port's lane pair s, its peer and the port child that posts its lanes
+   (`child`, `child_start`) and its bandwidth and identity as its lanes last opened (whether they serve is its port's
+   line: mesh-switched.h struct mesh_switch `port`), its passes and SEND times, and each lane's requests posted and
+   completed each way, each way's on a cache line of its own.  The bridge and its children write them and the bridge's
+   own observation tools read them; the heartbeat reads none (only the header's), so a field whose role ends goes, with
+   a MESH_LAYOUT of its own */
+struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 _Static_assert(sizeof(struct mesh_posts)==64 && offsetof(struct mesh_posts,done)==16,"mesh_posts ABI");
 struct mesh_lanes {
   _Alignas(64) _Atomic uint32_t peer;
-  uint32_t unused;
-  uint64_t spare;
+  _Atomic uint32_t child;
   _Atomic uint64_t bandwidth,wire;
   /* the passes its port's progress thread made (mesh-link.c port_pass) */
   _Atomic uint64_t passes;
   /* its SENDs' post -> completion (the NIC's, the wire's and the peer NIC's acknowledgement, no pass of either bridge):
      the nanoseconds summed and the SENDs timed, both lanes of the record, by its port's progress thread */
   _Atomic uint64_t send_ns,sends;
-  _Atomic uint32_t child,padding;
   uint64_t child_start;
   struct mesh_posts posts[2];
 };
-_Static_assert(sizeof(struct mesh_lanes)==256,"mesh_lanes");
+_Static_assert(sizeof(struct mesh_lanes)==192 && offsetof(struct mesh_lanes,posts)==64,"mesh_lanes");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes its clients' pages may fill (`region`: the payload bytes of its bridge's
    pool, every class's pages), the node's memory in bytes and hardware model (hw.model, mesh-view.h MESH_MODEL_BYTES with its
