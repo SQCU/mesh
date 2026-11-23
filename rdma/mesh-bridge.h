@@ -7,7 +7,6 @@
 #include "mesh-verbs.h"
 #include "mesh-observe.h"
 #include "mesh-switched.h"
-#include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
 #include <sys/ioctl.h>
@@ -29,8 +28,6 @@
 #include <IOKit/IOMessage.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
-
-_Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
    (link_plan, design/HETEROGENEOUS-LINKS.md), MESH_LINK_LANES at most, two a stream: stream s's lanes 2 s and 2 s + 1
@@ -99,16 +96,11 @@ _Static_assert(offsetof(struct message,port)==36 && offsetof(struct message,vers
    in its child's life ("A process a port": `lanes` once the child was asked for them, the parent's; a link lost after it
    pairs again with the port's next child), on the two completion queues its device's context has, each lane's share of them (`share`
    frames, a request one frame at least: no lane overruns its queues), and each lane's queue pair number (`qpn`, by which
-   a completion names its lane).  Its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its job on the port's
-   queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled), the pairing it belongs to (`pairing`, moved at
-   its loss and at a halt, mesh-link.c port_halt, so a job of a pairing since lost makes no call and is dropped as it
-   ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes
-   the progress thread serves while its port's line is CHILD_SERVING (`served`, a bit a lane, the event loop's to set
-   and to clear, a thread's to clear, every lane, where it found a lane or a completion failed, mesh-link.c lane_lost
-   and link_failed, and the termination's queue's, B9b), the child's end (`closing`, its main thread's to set:
-   mesh-link.c child_leave; its progress thread returns at the end of its pass), the two one 8-byte word the parked
-   progress thread waits on, so a change of either wakes it, and the lanes a progress thread found failed (`broken`:
-   the event loop loses the link on reading it).  The
+   a completion names its lane).  The parent's: its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its
+   command out to the child (`job`, sent at `job_at`: mesh-link.c ports_stalled), the pairing it belongs to (`pairing`,
+   moved at its loss, so an answer of a pairing since lost is dropped as it comes: mesh-link.c child_heard), the
+   peer's lanes (`peer`, heard in its LINK: `heard`), and the lanes its child found failed (`broken`, as its report
+   told them: the event loop loses the link on reading it).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends have, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
@@ -123,8 +115,7 @@ struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,lanes;
   _Atomic int done;
-  _Alignas(8) _Atomic uint32_t served;
-  _Atomic uint32_t closing,broken,pairing;
+  _Atomic uint32_t broken,pairing;
   uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],job_pairing,psn;
   struct frames share;
   struct lane_state lane[MESH_LINK_LANES];
@@ -132,8 +123,6 @@ struct link {
   uint64_t wire[MESH_LINK_STREAMS];
   uint32_t take_from,send_from;
 };
-_Static_assert(offsetof(struct link,served)%8==0 && offsetof(struct link,closing)==offsetof(struct link,served)+4,
-               "a link's lanes served and its closing one 8-byte word");
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
    parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE), connect them to the peer's
@@ -141,11 +130,12 @@ _Static_assert(offsetof(struct link,served)%8==0 && offsetof(struct link,closing
    (CHILD_END).  The child's, each naming the pairing it was asked for: the device opened or not (CHILD_OPENED: its
    address and bandwidth, and in `lanes` the queue pairs the device has for a link), the lanes made or not
    (CHILD_MAKE names the lanes of the plan in `lanes`; CHILD_MADE: each lane's queue pair number, the first sequence
-   number and each lane's share), connected or not (CHILD_CONNECTED), the lanes a progress thread found failed
+   number and each lane's share), connected or not (CHILD_CONNECTED), the lanes its poller found failed
    (CHILD_BROKEN, naming its connect's pairing), a fault absorbed on the provider's doorbell (CHILD_FAULTED), its
    port's peer interface terminating (CHILD_TERMINATED, as the child heard it: B9b; the parent hears the same
-   termination on its own listener and loses the link there first, mesh-link.c terminations_heard, and answers the
-   report with its halt); kind 11 is no message */
+   termination on its own listener and loses the link there first, mesh-link.c terminations_heard).  A child that tells
+   one of the last three has halted itself and takes no command again (mesh-link.c child_halt); kind 11 is no
+   message */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX` (its first three words the same for every
    version, so a bridge finds a child of any version that has a device open: child_elsewhere), and struct child_message.
@@ -170,18 +160,14 @@ struct child_message {
   uint64_t bandwidth;
 };
 #define TAG_CHILD (UINT64_C(1)<<58)
-/* design/transport.md: a port, its link, its control socket's queues each way, its verbs work's queue (its
-   open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS and the port
-   was concluded around it, until the call returns: design/transport.md B12, mesh-link.c ports_stalled), the end of
-   its quiet window
-   (`quiet_at`, MESH_PLATFORM_NS past its last loss or a peer interface's termination heard, B9b, moved only later and by
-   any thread, before which no port job is dispatched on it and the bridge does not exit: B9), whether its device is to
-   be opened (`opening`: as it is made, at its link's coming on, at a hello heard while it is not open, B16, and as the
-   call it was concluded around returns, B12; never on a clock), its link lanes, and its progress thread (`threads` 1
-   once started, and `passing` 1 from its start to its return, in the child alone: mesh-link.c child_leave waits for its
-   return), and the threads that post on its queue pairs (`thread`: its progress thread,
-   storing itself as it starts, and its link job's while one runs, by which a provider's fault names its port,
-   mesh-link.c fault_heard); the queue pairs its device has for a link as its child told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); the registrations its device refused
+/* design/transport.md: a port, its link, its control socket's queues each way, its open asked of its child (`job`,
+   sent at `job_at`; `stuck` once a command of the port outlived MESH_PLATFORM_NS and the port was concluded around
+   it, until its answer comes: design/transport.md B12, mesh-link.c ports_stalled), the end of its quiet window
+   (`quiet_at`, MESH_PLATFORM_NS past its last loss or a peer interface's termination heard, B9b, moved only later and
+   only by its process's main thread, before which no command is sent for it and neither the bridge nor its child
+   exits: B9), whether its device is to be opened (`opening`: as it is made, at its link's coming on, at a hello heard
+   while it is not open, B16, and as the call it was concluded around returns, B12; never on a clock), its link lanes;
+   the queue pairs its device has for a link as its child told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); the registrations its device refused
    in a row (`refusals`) and the time before which it is not opened again after one (`retry_at`: mesh-link.c port_opened);
    and its interface as the kernel's events name it (`family`, `unit`: an en<N>'s APPLE_IF_FAM_ETHERNET and N, read once
    from its name as the port is named; another port's family 0, which no event carries: mesh-link.c addresses_heard) */
@@ -189,18 +175,15 @@ struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,peer_port,greeted,connecting,writing,open,opening,stuck,budget,refusals,family,unit;
   char name[IFNAMSIZ];
-  int control,job,result,refused,threads;
-  _Atomic int done,passing;
-  uint64_t next,bandwidth,job_at,retry_at;
-  _Atomic uint64_t quiet_at;
+  int control,job,result,refused;
+  _Atomic int done;
+  uint64_t next,bandwidth,job_at,retry_at,quiet_at;
   struct message heard;
   uint16_t lid;
   uint8_t gid[16];
   unsigned char *in,*out;
   size_t in_length,in_room,out_length,out_sent,out_room;
-  dispatch_queue_t work;
   struct link link;
-  _Atomic(pthread_t) thread[2];
   /* the parent's: the port's child (design/transport.md section 14, "A process a port"): its process (0 none), its entry among the region's processes
      (`child_entry`, mesh-observe.h struct mesh_bridge_pages `child`) and socket, the pause a spawn that failed sets
      before the next (`spawn_at`), whether the port's link, lost once its lanes were asked for, waits to end its child
@@ -237,7 +220,6 @@ static inline int owned(uint64_t owner){ return owner && atomic_load(&mesh_clien
 /* the functions each translation unit calls of the other's */
 void sysctl_text(const char *name,char *out,size_t room);
 void health_init(void);
-void wake(void);
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes);
 void lanes_cancel(const struct port *port);
 uint64_t lanes_busy(void);

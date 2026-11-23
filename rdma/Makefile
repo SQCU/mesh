@@ -15,7 +15,7 @@ LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdm
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
 .build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh-observe.h mesh-switched.h $(MESH_H) $(ROUTE_H) \
   .build/libmesh.dylib .build/route-forward.o Makefile
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c .build/route-forward.o $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit -framework Accelerate
+	cc $(CPPFLAGS) -O2 $(WARN) -o $@ mesh-link.c mesh-records.c .build/route-forward.o $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit -framework Accelerate
 # the routing policy's forward on the CPU (route/forward.c: no contraction, act.h's bits), which the bridge's refresh
 # runs where a theta is given (mesh-link.c switch_policy)
 .build/route-forward.o: route/forward.c route/scan.h route/int8mm.h route/act.h $(ROUTE_H) Makefile

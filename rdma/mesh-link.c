@@ -14,29 +14,24 @@ uint32_t port_count;
 int events=-1,listener=-1,hello=-1,network=-1,addresses=-1;
 uint64_t now,sequence;
 struct mesh_ctx bridge={.fd=-1};
-/* a child's: its port's bit where a provider's doorbell fault was absorbed on it (fault_heard) */
-static _Atomic uint32_t faulted;
 /* design/transport.md B9b: the window of a peer interface's termination (`exit_at`), as every port's quiet
-   window stands, before which the bridge does not exit, and which a port made meanwhile takes as its own */
-static _Atomic uint64_t exit_at;
-/* a window's end moved to `until` where it is earlier, by any thread (the event loop's conclusions, a termination's
-   queue, B9b), never earlier */
-static void quiet_until(_Atomic uint64_t *at,uint64_t until){
-  uint64_t was=atomic_load(at);
-  while(was<until && !atomic_compare_exchange_weak(at,&was,until)){}
-}
-/* the latest of the exit's window and every port's (B9, B9b): the stop's wait */
+   window stands, before which the bridge does not exit, and which a port made meanwhile takes as its own; in each
+   process its main thread's alone (the parent's event loop, a child's main thread: their IOKit callbacks run there) */
+static uint64_t exit_at;
+/* a window's end moved to `until` where it is earlier, never earlier */
+static void quiet_until(uint64_t *at,uint64_t until){ if(*at<until)*at=until; }
+/* the latest of the exit's window and every port's (B9, B9b): the stop's wait, and a child's end's */
 static uint64_t windows_end(void){
-  uint64_t latest=atomic_load(&exit_at);
-  for(uint32_t p=0;p<port_count;p++){const uint64_t quiet=atomic_load(&ports[p].quiet_at);latest=MAX(latest,quiet);}
+  uint64_t latest=exit_at;
+  for(uint32_t p=0;p<port_count;p++)latest=MAX(latest,ports[p].quiet_at);
   return latest;
 }
 /* design/transport.md section 2: the node's start and stop, one state machine on the event loop (node_step, its one
    transition function; the loop its one owner), each state's deadline `due`:
    - ADOPTING: the region a bridge before this one left adopted once every child that bridge recorded has exited (their
-     exits on the loop's queue, TAG_ADOPT: until a child's exit has begun its progress thread may still post, take
-     and land on what the adoption gives back), at most 2 MESH_PLATFORM_NS on, child_leave's bound on a child whose
-     parent ended; one that lives past it ends this bridge, which its heartbeat opens again;
+     exits on the loop's queue, TAG_ADOPT: until a child's exit has begun its poller may still post, take and land
+     on what the adoption gives back), at most 2 MESH_PLATFORM_NS on, a child's end's bound where its parent ended
+     (child_main); one that lives past it ends this bridge, which its heartbeat opens again;
    - SETTLING: the node started (node_start), its IOKit notifications armed on the loop's queue (iokit_watch: its
      ports made from IOKit's first match of its interfaces) and no port opened until IOKit's registry is quiet (its
      busy state 0, kIOBusyInterest: no termination in its course, B9), at most MESH_PLATFORM_NS on;
@@ -65,12 +60,6 @@ static void stop_text(int64_t code,char *out,size_t room){
   else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
   else snprintf(out,room,"no reason given");
 }
-/* a child's loop woken (its EVFILT_USER, child_main): by its progress thread, its port's jobs and its IOKit queue; the
-   parent's loop is woken by its own queue's events alone */
-void wake(void){
-  struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
-  kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-}
 /* the port's line (mesh-switched.h struct mesh_switch `port`) leaving where its child has made its lanes or serves
    them: from the next pass on no draw pushes onto its lanes and no child takes for it (a child whose lanes are not
    made keeps its device for a later pairing) */
@@ -78,30 +67,28 @@ static inline struct mesh_switch *switch_of(void){ return mesh_switch_of(M); }
 static void port_leaving(const struct port *port){
   mesh_port_move(switch_of(),port->index,1u<<CHILD_LANES_MADE|1u<<CHILD_SERVING,CHILD_LEAVING,0,0);
 }
-/* design/transport.md: a child's port halted from any of its threads (its peer interface's termination heard, a
-   provider's fault absorbed; atomics alone): its pairing lost, so no job of it makes a further call (B10), then no
-   lane of its link served and its line leaving, each sequentially consistent (child_jobs' connect moves the line to
-   serving, stores served and reads the pairing again), and its bit set in `which` for the child's loop to report to
-   its parent (child_reports) */
-_Static_assert(MESH_PORTS<=32,"a bit a port");
-static void port_halt(struct port *port,_Atomic uint32_t *which){
-  atomic_fetch_add(&port->link.pairing,1);
-  atomic_store(&port->link.served,0);
-  port_leaving(port);
-  atomic_fetch_or(which,UINT32_C(1)<<port->index);
+/* design/transport.md section 14: a child's own halt, its port's line leaving from whatever state it is in (one
+   compare-exchange, mesh_port_move: its poller posts nothing from its next pass and returns, and the child takes no
+   command again; it ends at its parent's word), and, where this call moved it, `reason` stored for its main thread to
+   tell its parent (child_report: CHILD_BROKEN, CHILD_FAULTED or CHILD_TERMINATED; 0, a make or connect that failed or
+   the child's end, tells nothing).  A line leaves once in a child's life, so one reason at most is ever stored.  From
+   any context of the child: its poller (a lane's failure), its main thread (its IOKit callbacks, its commands, its
+   end) and the fault handler (atomics alone).  1 where this call moved the line */
+static _Atomic uint32_t child_reason;
+static int child_halt(const struct port *port,uint32_t reason){
+  if(!mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN|1u<<CHILD_LANES_MADE|1u<<CHILD_SERVING,
+                     CHILD_LEAVING,0,0))return 0;
+  if(reason)atomic_store(&child_reason,reason);
+  return 1;
 }
 
-/* a lane's failure, found by a progress thread: no lane of its link served from here (as at a failed completion,
-   link_failed: nothing more is posted on any of them), its port's line leaving (no draw takes any lane of the link from
-   the next pass on), and the link lost by the event loop on reading `broken` (link_turn) */
+/* a lane's failure, found by the poller: its child halted (child_halt, CHILD_BROKEN: nothing more is posted on any lane
+   of the link, as at a failed completion, link_failed, and no draw takes any of them from the next pass on), and the
+   link lost by its parent on the report */
 static void lane_lost(struct port *port,uint32_t lane,int64_t code){
-  struct link *l=&port->link;
-  if(atomic_exchange_explicit(&l->served,0,memory_order_acq_rel)>>lane&1)
+  if(child_halt(port,CHILD_BROKEN))
     say("link %u (%s): lane %u failed: %s; the link toward node %u lost\n",port->index,port->name,lane,
         strerror((int)(code>0?code:EIO)),port->peer);
-  port_leaving(port);
-  atomic_fetch_or_explicit(&l->broken,UINT32_C(1)<<lane,memory_order_release);
-  wake();
 }
 
 /* the lane records of port p's lane pair s (mesh.h struct mesh_lanes, the bridge's own) */
@@ -121,17 +108,12 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
   while(k<MESH_LINK_LANES && l->qpn[k]!=qp_num)k++;
   return k;
 }
-/* design/transport.md: the link's first failed completion, on any lane, or a failed poll: no lane of the
-   link served from here, so nothing is posted on it again, its port's line leaving, and the link lost by the event
-   loop on reading `broken` (link_turn) */
+/* design/transport.md: the link's first failed completion, on any lane, or a failed poll: its child halted
+   (child_halt, CHILD_BROKEN), so nothing is posted on it again, and the link lost by its parent on the report */
 static void link_failed(struct port *port,int64_t code,uint32_t domain){
-  struct link *l=&port->link;
-  const uint32_t served=atomic_exchange_explicit(&l->served,0,memory_order_acq_rel);
-  port_leaving(port);
-  if(served)say("link %u (%s): a completion failed (code %lld, domain %u): no lane served, the link toward node %u lost\n",
-                port->index,port->name,(long long)code,domain,port->peer);
-  atomic_fetch_or_explicit(&l->broken,served,memory_order_release);
-  wake();
+  if(child_halt(port,CHILD_BROKEN))
+    say("link %u (%s): a completion failed (code %lld, domain %u): no lane served, the link toward node %u lost\n",
+        port->index,port->name,(long long)code,domain,port->peer);
 }
 
 /* ---- design/PAGE-TABLE-SPEC-20261122.md section 5: the switch's data path, a port child's part (mesh-switched.h) ----
@@ -308,7 +290,7 @@ static void switch_sends(struct port *port,uint32_t served){
 /* the cost-to-go this child's poller keeps and its draws read (mesh-switched.h struct mesh_switch_togo), in its own
    memory: a step each idle pass (port_pass) */
 static struct mesh_switch_togo togo;
-/* design/transport.md: the link's SEND completions (a lane no longer served drops its own; a failed one fails the
+/* design/transport.md: the link's SEND completions (one naming no lane of the plan dropped; a failed one fails the
    link, link_failed): each one's in-flight entry (at the position its wr_id names: a queue pair completes its SENDs in
    their order) given back, the lane's completed count one more, and its page's use dropped, through the switch's
    estimators (its post, as its entry stored it, its service from the later of its post and the lane's previous
@@ -442,36 +424,35 @@ static uint32_t switch_takes(struct port *port,const uint64_t *line){
   return taken;
 }
 
-/* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's progress thread over the lanes the link serves
-   (`served` and every port's line read once a pass: none posts on a lane its link no longer serves, and none at all
-   while its port's line is not CHILD_SERVING, so a line its parent or a lane's failure moved to leaving stops every
-   post from the next pass on, before the halt reaches the child): the receive completions landed (link_receive), the
-   receives topped up, the clients' writes taken (switch_takes, the port's share of the rings from the same lines), the
-   port's inbound rings posted (switch_sends), the SEND completions (link_send), the pass counted (`passes`); a pass
-   that polled no completion and took no write takes one step of its poller's cost-to-go (mesh-switched.h
-   mesh_switch_togo_step), so a busy pass gains nothing */
-static void port_pass(struct port *port){
+/* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's poller over the lanes of its link's plan (`served`),
+   made only while its port's line is CHILD_SERVING (every port's line read once a pass: a line its parent, a halt, a
+   lane's failure, a termination or a fault moved to leaving stops every post from the next pass on): the receive
+   completions landed (link_receive), the receives topped up, the clients' writes taken (switch_takes, the port's share
+   of the rings from the same lines), the port's inbound rings posted (switch_sends), the SEND completions (link_send),
+   the pass counted (`passes`); a pass that polled no completion and took no write takes one step of its poller's
+   cost-to-go (mesh-switched.h mesh_switch_togo_step), so a busy pass gains nothing.  1 after a pass, 0 where the line
+   no longer serves (no pass made: the poller returns) */
+static int port_pass(struct port *port){
   /* one pass in 1024 timed (counters pass_ns: its time summed and the passes timed; part_ns: each part's time) */
   static __thread uint32_t timing;
-  const int timed=!(++timing&1023);
-  uint64_t t[6]={0};
-  if(timed)t[0]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   uint64_t line[MESH_PORTS];
   mesh_switch_ports_read(sw,line);
-  const uint32_t served=mesh_port_state(line[port->index])==CHILD_SERVING?atomic_load_explicit(&l->served,memory_order_acquire):0;
-  const uint32_t lanes=plan_lanes(l->plan);
-  uint32_t worked=0;
-  if(served)worked|=(uint32_t)link_receive(port,served);
+  if(mesh_port_state(line[port->index])!=CHILD_SERVING)return 0;
+  const int timed=!(++timing&1023);
+  uint64_t t[6]={0};
+  if(timed)t[0]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  const uint32_t served=l->plan,lanes=plan_lanes(served);
+  uint32_t worked=(uint32_t)link_receive(port,served);
   if(timed)t[1]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for(uint32_t j=0;j<lanes;j++)if(served>>j&1)switch_receives(port,j);
   if(timed)t[2]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served)worked|=switch_takes(port,line);
+  worked|=switch_takes(port,line);
   if(timed)t[3]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served)switch_sends(port,served);
+  switch_sends(port,served);
   if(timed)t[4]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served)worked|=(uint32_t)link_send(port,served);
+  worked|=(uint32_t)link_send(port,served);
   if(!worked)mesh_switch_togo_step(sw,&togo);
   MESH_SWITCH_COUNT(sw,port->index,passes,1);   /* the pass time is the wall time over these (the thread spins) */
   if(timed){
@@ -481,62 +462,34 @@ static void port_pass(struct port *port){
   }
   struct mesh_lanes *counted=lanes_of(port,0);
   atomic_store_explicit(&counted->passes,atomic_load_explicit(&counted->passes,memory_order_relaxed)+1,memory_order_relaxed);
+  return 1;
 }
-/* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
-   its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the lanes
-   served while they are none, looking again every MESH_PAUSE_NS (a fault absorbed meanwhile).  It starts at the end of
-   the link's connect, once every verbs object of the child is made and connected, and none is made or changed after
-   it: the parent asks a child for its lanes once (a link lost after that ends the child, port_lost's `recycle`), and
-   the kernel releases the objects at the child's exit.  So no post crosses a make, a connect or a teardown.  It
-   returns at the end of the pass in which its child closes (`closing`: child_leave), and says so (`passing` 0, its
-   child's loop woken), so a child that ends leaves no page in the thread's hands: a pass's carries, landings and
-   posts are each whole by its end.  `passing` is stored before `closing` is first read, and child_leave stores
-   `closing` before it reads `passing` (each sequentially consistent), so a child that reads it 0 is ended before the
-   thread's first pass, or after its return */
+/* a child's queue's user events (EVFILT_USER, child_main): its poller's return, triggered once in the child's life
+   (port_progress), and a provider's doorbell fault absorbed (fault_heard) */
+enum { POLLER_RETURNED, FAULT_ABSORBED };
+static void child_trigger(uint64_t which){
+  struct kevent64_s event;EV_SET64(&event,which,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
+  kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+}
+/* design/transport.md section 14: a port's poller, the one thread that posts on its device's queue pairs and polls
+   their completion queues: it passes without pause while its port's line serves (rubric M8: the queues read as fast
+   as a hardware thread allows) and never parks.  Its child's main thread makes it at the end of the link's connect,
+   once every verbs object of the child is made and connected and its line raised to serving (link_serve), and makes
+   no verbs object after: the parent asks a child for its lanes once (a link lost after that ends the child), and the
+   kernel releases the objects at the child's exit.  So no post crosses a make or a connect.  It returns at the first
+   pass that finds its line leaving (port_pass) and says so to its child's main thread (POLLER_RETURNED), once, so a
+   child that ends leaves no page in its hands: a pass's carries, landings and posts are each whole by its end, and
+   the child exits only after that word (child_main) */
 static void *port_progress(void *argument){
   struct port *port=argument;
-  struct link *l=&port->link;
   pthread_setname_np("mesh.rdma");
-  /* fault_heard: this thread its port's, and its handler on a stack of its own */
+  /* fault_heard's handler on a stack of its own */
   stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
-  atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
   mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_cables_toward) */
-  atomic_store(&port->passing,1);
-  while(!atomic_load(&l->closing)){
-    /* while its link serves no lane, no pass (no post on any queue pair of its device) and no lane read: the thread
-       waits on the lanes served and `closing` as one 8-byte word (struct link), so a change of either between the
-       reads and the wait ends the wait at once, woken by the link's coming up, by a halt and by the child's end
-       (progress_wake), looking again every MESH_PAUSE_NS */
-    if(!atomic_load_explicit(&l->served,memory_order_acquire)){
-      /* a fault absorbed on the port (fault_heard: the handler, which may make no call but mmap, munmap and sigaction,
-         halted the port) wakes its child's loop, which tells its parent at once, not at its next tick */
-      if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
-      os_sync_wait_on_address_with_timeout(&l->served,0,sizeof l->served+sizeof l->closing,OS_SYNC_WAIT_ON_ADDRESS_NONE,
-                                           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
-      continue;
-    }
-    port_pass(port);
-  }
-  atomic_store_explicit(&port->passing,0,memory_order_release);
-  wake();
+  while(port_pass(port)){}
+  child_trigger(POLLER_RETURNED);
   return NULL;
-}
-/* the progress thread, parked while its link serves no lane, looks again (its lanes served or its closing moved) */
-static void progress_wake(struct port *port){
-  os_sync_wake_by_address_all(&port->link.served,sizeof port->link.served+sizeof port->link.closing,OS_SYNC_WAKE_BY_ADDRESS_NONE);
-}
-/* design/transport.md: the port's progress thread started, once; 0, or pthread_create's error */
-static int port_threads(struct port *port){
-  if(port->threads)return 0;
-  pthread_attr_t attributes;
-  pthread_attr_init(&attributes);
-  pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
-  pthread_t created;
-  const int error=pthread_create(&created,&attributes,port_progress,port);
-  if(!error)port->threads=1;
-  pthread_attr_destroy(&attributes);
-  return error;
 }
 
 /* design/transport.md: a message to the port's peer, queued behind what the socket has not taken yet (a node's record
@@ -622,76 +575,73 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
   if(changed)record_changed();
 }
 
-/* design/transport.md section 14: a link job on the port's queue (before the port's progress thread starts, so no
-   queue pair of the device is posted on while one is made or connected: port_progress), its verbs calls made on
-   hearing the peer, from the peer's numbers as the job was started (`numbers`, its LID and GID among them: the event
-   loop takes the peer's LINK and hello meanwhile), and none once its pairing is lost (B10: read as it begins and
-   between its steps), each in the port's child and
-   once in its life
-   (design/transport.md section 14, "A process a port"): the lanes made (LINK_JOB_MAKE: the port's own address read
-   again, then a UC queue pair in INIT for each lane of the link's plan, d6dceac's verbs_up, each lane's share of the
-   completion queues the plan's lanes dividing them: design/HETEROGENEOUS-LINKS.md; EALREADY for a make asked
-   again); or connected to the peer's (LINK_JOB_CONNECT, the plan's lanes alone: RTR, then RTS, each lane's number set,
-   every lane's progress and depth made new, and the port's progress thread started).  No queue pair is moved to
-   another state, destroyed or forgotten after it: the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its
-   first run (2026-10-19, design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the child's exit, its
-   one end */
-struct link_numbers { uint32_t peer[MESH_LINK_LANES][2],pairing; uint16_t lid; uint8_t gid[16]; };
-static int link_lapsed(const struct link *l,const struct link_numbers *numbers){
-  return atomic_load_explicit(&l->pairing,memory_order_relaxed)!=numbers->pairing?ECANCELED:0;
+/* design/transport.md section 14: a link's verbs calls, made on its child's main thread on its parent's command, once
+   in the child's life ("A process a port") and before its poller exists, so no queue pair of the device is posted on
+   while one is made or connected (port_progress): the lanes made (link_make: the port's own address read again, then a
+   UC queue pair in INIT for each lane of the link's plan, d6dceac's verbs_up, each lane's share of the completion
+   queues the plan's lanes dividing them: design/HETEROGENEOUS-LINKS.md); or connected to the peer's (link_connect,
+   the plan's lanes alone: RTR, then RTS, each lane's number set, every lane's progress and depth made new), from the
+   peer's numbers as the command gave them.  No queue pair is moved to another state, destroyed or forgotten after it:
+   the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its first run (2026-10-19,
+   design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the child's exit, its one end.  Between
+   its steps the child's IOKit notifications are taken (link_lapsed: a termination heard halts the child, B10, B9b),
+   and a step whose child has halted is not made (ECANCELED) */
+static void iokit_heard(void);
+static int link_lapsed(const struct port *port){
+  iokit_heard();
+  return mesh_port_state(atomic_load(&switch_of()->port[port->index]))==CHILD_LEAVING?ECANCELED:0;
 }
-static int link_make(struct port *port,const struct link_numbers *numbers){
+static int link_make(struct port *port){
   struct link *l=&port->link;
   struct mesh_verbs *p=&l->provider;
   struct ibv_port_attr attributes;
   int error=0;
-  if(p->queues)return EALREADY;
   /* design/transport.md: the port's own address (its attributes and GID) read again at the make, as its opening read
      it: a peer's restart can move the port's GID table, and LINKs naming the address of the port's opening failed every
      lane's connection at the peer with EIO (2026-10-19, after the Mini's power loss) */
   if(ibv_query_port(port->device.context,1,&attributes))return errno?errno:EIO;
   port->device.port=attributes;
-  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(l,numbers)) || (error=pair_up(p,plan_lanes(l->plan))))return error;
+  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(port)) || (error=pair_up(p,plan_lanes(l->plan))))return error;
   l->share=(struct frames){(uint64_t)MIN(p->completion->cqe,p->sent->cqe)/MAX(plan_lanes(l->plan),1u)};
   return 0;
 }
 static void lane_reset(struct port *port,uint32_t k);
 /* design/transport.md section 14: stream s's identity, alike at both ends: FNV-1a over its first lane's two ends, each
    its port's GID and its queue pair's number, the lesser end first; never 0 */
-static uint64_t stream_wire(const struct port *port,const struct link_numbers *numbers,uint32_t s){
+static uint64_t stream_wire(const struct port *port,const struct child_message *heard,uint32_t s){
   const uint32_t k=2*s;
   uint8_t end[2][20];
   memcpy(end[0],port->gid,16);memcpy(end[0]+16,&port->link.qpn[k],4);
-  memcpy(end[1],numbers->gid,16);memcpy(end[1]+16,&numbers->peer[k][0],4);
+  memcpy(end[1],heard->gid,16);memcpy(end[1]+16,&heard->peer[k][0],4);
   const int first=memcmp(end[0],end[1],20)>0;
   uint64_t h=UINT64_C(14695981039346656037);
   for(int e=0;e<2;e++)
     for(int i=0;i<20;i++){h^=end[e^first][i];h*=UINT64_C(1099511628211);}
   return h?h:1;
 }
-static int link_connect(struct port *port,const struct link_numbers *numbers){
+static int link_connect(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
   struct mesh_verbs *p=&l->provider;
   const uint32_t plan=l->plan;
   int error=0;
-  for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_receive(p,(int)k,numbers->peer[k],numbers->lid,numbers->gid);
-  if(!error)error=link_lapsed(l,numbers);
+  for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_receive(p,(int)k,heard->peer[k],heard->lid,heard->gid);
+  if(!error)error=link_lapsed(port);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_send(p,(int)k);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)l->qpn[k]=plan>>k&1?p->queues[k].pair->qp_num:UINT32_MAX;
-  if(!error)error=link_lapsed(l,numbers);
+  if(!error)error=link_lapsed(port);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)lane_reset(port,k);
-  for(uint32_t s=0;s<plan_streams(plan) && !error;s++)l->wire[s]=stream_wire(port,numbers,s);
+  for(uint32_t s=0;s<plan_streams(plan) && !error;s++)l->wire[s]=stream_wire(port,heard,s);
   return error;
 }
 /* design/transport.md section 14, "A process a port": the link's lane records opened as its lanes connect, by the
-   child before any lane is served: each lane's requests posted and completed each way 0 (its queue pairs are new),
+   child before its poller exists: each lane's requests posted and completed each way 0 (its queue pairs are new),
    this child their poster (`child`, `child_start`), the peer node, the link's bandwidth and identity told; each lane's
    in-flight ring's positions 0 (its last child's end gave back what was in it: switch_child_free); then the port's
    inbound rings emptied of what was pushed onto them after its last child's end (mesh-switched.h
-   mesh_switch_inbound_drop: pages for the port's last link, each counted `lost` in the port's counters: its progress
-   thread passes no lane yet), and the port's line moved from its lanes made to serving toward the peer with the
-   link's plan (one release of them all: a draw that reads it serving reads them emptied).  1 where the line moved, 0
-   where it was not at its lanes made (a halt came first: it is leaving) */
+   mesh_switch_inbound_drop: pages for the port's last link, each counted `lost` in the port's counters), and the
+   port's line moved from its lanes made to serving toward the peer with the link's plan (one release of them all: a
+   draw that reads it serving reads them emptied).  1 where the line moved, 0 where it was not at its lanes made (a
+   halt came first: it is leaving) */
 static int lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
@@ -713,21 +663,25 @@ static int lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   mesh_switch_inbound_drop(M,sw,port->index,port->index);
   return mesh_port_move(sw,port->index,1u<<CHILD_LANES_MADE,CHILD_SERVING,node,l->plan);
 }
-static void link_job(struct port *port,int job){
-  struct link *l=&port->link;
-  struct link_numbers numbers={.pairing=atomic_load_explicit(&l->pairing,memory_order_relaxed),.lid=port->heard.lid};
-  memcpy(numbers.peer,l->peer,sizeof numbers.peer);memcpy(numbers.gid,port->heard.gid,sizeof numbers.gid);
-  l->job=job;l->job_pairing=numbers.pairing;l->job_at=now;atomic_store_explicit(&l->done,0,memory_order_relaxed);
-  dispatch_async(port->work,^{
-    atomic_store_explicit(&port->thread[1],pthread_self(),memory_order_release);
-    int result=link_lapsed(l,&numbers);
-    if(!result)result=job==LINK_JOB_MAKE?link_make(port,&numbers):link_connect(port,&numbers);
-    if(!result && job==LINK_JOB_CONNECT)result=port_threads(port);
-    l->result=result;
-    atomic_store_explicit(&port->thread[1],NULL,memory_order_release);
-    atomic_store_explicit(&l->done,1,memory_order_release);
-    wake();
-  });
+/* design/transport.md section 14: a connected link served: its lane records opened and its line raised to serving
+   (lanes_open), then its poller made (port_progress, at the progress threads' class), the one thread that posts on the
+   device's queue pairs from here on: pthread_create orders every make, connect and lane state before its first post.
+   The line is raised here, before the poller exists and before the child answers its connect, so the parent's record
+   of the link (record_reach) and its node table (switch_view), each made as it takes the answer, read it serving.  A
+   plan of no lane has nothing to poll: its line serves and no poller is made.  `polling` 1 from the poller's making to
+   its return's event (child_main), the main thread's.  0, or why the link does not serve (ECANCELED: a halt came first) */
+static int polling;
+static int link_serve(struct port *port,uint32_t node,uint64_t bandwidth){
+  if(!lanes_open(port,node,bandwidth))return ECANCELED;
+  if(!port->link.plan)return 0;
+  pthread_attr_t attributes;
+  pthread_attr_init(&attributes);
+  pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
+  pthread_t created;
+  const int error=pthread_create(&created,&attributes,port_progress,port);
+  pthread_attr_destroy(&attributes);
+  if(!error)polling=1;
+  return error;
 }
 /* a LINK telling the peer every lane of this end's pairing, the lanes of its plan (`count` theirs): each one's queue pair
    number and first sequence number, as its child told them (CHILD_MADE), 0 for a lane the plan leaves out */
@@ -737,13 +691,13 @@ static void link_tell(struct port *port){
   for(uint32_t k=0;k<MESH_LINK_LANES;k++)if(l->plan>>k&1){said.pair[k][0]=l->qpn[k];said.pair[k][1]=(l->psn+k)&0xffffff;}
   port_say(port,said,NULL,0);
 }
-/* the link of a port lost (its peer's loss, a failure, the bridge stopping): its lanes served no more and left as they
+/* the link of a port lost (its peer's loss, a failure, the bridge stopping), in the parent: its pairing moved, so an
+   answer of its child to a command of the pairing lost is dropped as it comes (child_heard), its lanes left as they
    are, no verbs call made, and, once connected, never paired again in this bridge's life (design/transport.md section
-   14); a job of this pairing still on the port's queue makes no call and is dropped as it ends (B10) */
+   14) */
 static void link_lost(struct port *port){
   struct link *l=&port->link;
   atomic_fetch_add_explicit(&l->pairing,1,memory_order_relaxed);l->state=LINK_DOWN;l->heard=0;
-  atomic_store_explicit(&l->served,0,memory_order_release);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
 }
 /* a lane's progress made new at its connect: nothing posted, its receives its queues' share, and its depth (the
@@ -754,11 +708,10 @@ static void lane_reset(struct port *port,uint32_t k){
   const struct frames room=frames_min(l->share,(struct frames){l->provider.queues[k].receive_capacity}),
                       sends=frames_min((struct frames){l->provider.queues[k].send_capacity},(struct frames){MAX(l->share.n,1)});
   l->lane[k]=(struct lane_state){.frame_capacity=room.n,.depth=MIN(sends.n/mesh_switch_lane_frames(k),(uint64_t)MESH_SWITCH_FLIGHT)};
-  atomic_thread_fence(memory_order_release);
 }
 /* the line of a port (`port` NULL: of every port) leaving, as its link is lost or the bridge stops, where its child
    has made its lanes (port_leaving): no draw takes its lanes and no child takes for it from the next pass on, even
-   while its progress thread is stuck in a provider call, and what its rings have is dropped as its child ends
+   while its poller is stuck in a provider call, and what its rings have is dropped as its child ends
    (switch_child_free) */
 void lanes_cancel(const struct port *port){
   for(uint32_t p=0;p<port_count;p++)if(!port || ports+p==port)port_leaving(ports+p);
@@ -1003,8 +956,8 @@ void switch_view(void){
    emptied, each page's use dropped, counted `lost`, and the pages posted as its lanes' receives given back, then its
    port's line made new (STARTED, no peer, no plan) for its next child: no process but this one writes it now.  Its
    lanes are no draw's already (lanes_cancel).  A child that ended between passes (every end it was asked for or chose:
-   child_leave waits for its progress thread's return) held no page outside these; one that ended inside a pass (a
-   crash, or its progress thread still inside a provider call at its leave's bound) may have held one mid-carry,
+   its exit waits for its poller's return, child_main) held no page outside these; one that ended inside a pass (a
+   crash, or its poller still inside a provider call at its end's bound) may have held one mid-carry,
    mid-landing or between an inbound ring and an in-flight ring, which is not found and stays in use (the operator's
    O4: accepted, no record) */
 static void switch_child_free(struct port *port){
@@ -1177,24 +1130,6 @@ static void port_open(struct port *port){
   const int error=child_send(port,(struct child_message){.kind=CHILD_OPEN});
   if(error){port->result=error;port->refused=0;port_opened(port);}
 }
-/* the child's open of its port's device, on its port's queue (before its progress thread starts: port_progress); its
-   end told the child's loop (child_main) */
-static void device_open(struct port *port){
-  port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
-  dispatch_async(port->work,^{
-    int refused=0,result=device_up(&port->device,&wire,&refused);
-    if(!result)result=device_gid(&port->device,port->name);
-    if(!result && !port->device.gid_matched){
-      const uint8_t *g=port->device.gid.raw;
-      say("link %u (%s): no GID of %s is a link-local address %s has; GID[%u] %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
-          "%02x%02x:%02x%02x:%02x%02x:%02x%02x used\n",port->index,port->name,port->device.name,port->name,port->device.gid_index,
-          g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7],g[8],g[9],g[10],g[11],g[12],g[13],g[14],g[15]);
-    }
-    port->result=result;port->refused=refused;
-    atomic_store_explicit(&port->done,1,memory_order_release);
-    wake();
-  });
-}
 /* design/transport.md: a port's opening taken (its address and bandwidth as its child told them, CHILD_OPENED): a
    device that failed to open opens again at the next hello heard on it (hello_heard) or its link's next coming on; one
    whose registration of the region it refused (it keeps the extents it took: device_up logged the extent and why) does
@@ -1295,7 +1230,7 @@ static void port_found(const char *device){
   /* the interface as the kernel's events name it, its name read once here into typed values (addresses_heard) */
   if(!strncmp(port->name,"en",2)){port->family=APPLE_IF_FAM_ETHERNET;port->unit=(uint32_t)strtoul(port->name+2,NULL,10);}
   port_count++;
-  quiet_until(&port->quiet_at,atomic_load(&exit_at));
+  quiet_until(&port->quiet_at,exit_at);
   link_set(port,0,MESH_STOPPED,0);
 }
 /* design/transport.md: a port's link off or its interface detached (the link lost, its lanes left as they
@@ -1337,16 +1272,27 @@ static void addresses_heard(void){
   }
 }
 
-/* design/transport.md B9b (EXIT-RECLAIM.md P2, and P3 as a window in place of IOServiceWaitQuiet): a
-   Thunderbolt RDMA peer interface's termination, which IOKit tells in its first phase (kIOTerminatedNotification).  A
-   child's port halted by one (port_halt) has its bit set in `terminated`, which the child's loop reports to its parent
-   (CHILD_TERMINATED, child_reports) */
-static _Atomic uint32_t terminated;
-/* the exit's window and every port's moved to `until` at least (a port made meanwhile takes `exit_at`'s: port_found) */
+/* ---- design/transport.md: IOKit, on each process's own queue ---------------------------------------------------
+   Each process's notifications (the parent's and a child's) are on one IONotificationPort (`iokit`) whose Mach port is
+   a filter of the process's queue (EVFILT_MACHPORT, TAG_IOKIT): each message it holds is taken without waiting and
+   handed to IOKit (IODispatchCalloutFromMessage), which calls its callback on the thread that takes it, the process's
+   main thread (the parent's event loop, a child's main thread), so no thread hears IOKit for another and nothing is
+   handed on (iokit_heard).  Armed at the parent's SETTLING (iokit_watch) and as a child starts (child_iokit) */
+#define TAG_IOKIT (UINT64_C(1)<<56)
+static IONotificationPortRef iokit;
+/* every message the notification port holds, each taken without waiting and dispatched, until none is left */
+static void iokit_heard(void){
+  const mach_port_t port=IONotificationPortGetMachPort(iokit);
+  union { mach_msg_header_t header; uint8_t bytes[8192]; } message;
+  while(mach_msg(&message.header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof message,port,0,MACH_PORT_NULL)==MACH_MSG_SUCCESS)
+    IODispatchCalloutFromMessage(NULL,&message.header,iokit);
+}
+/* design/transport.md B9b (EXIT-RECLAIM.md P2, and P3 as a window in place of IOServiceWaitQuiet): a Thunderbolt RDMA
+   peer interface's termination, which IOKit tells in its first phase (kIOTerminatedNotification): the exit's window
+   and every port's moved to `until` at least (a port made meanwhile takes `exit_at`'s: port_found) */
 static void quiet_all(uint64_t until){
   quiet_until(&exit_at,until);
-  const uint32_t count=__atomic_load_n(&port_count,__ATOMIC_SEQ_CST);
-  for(uint32_t p=0;p<count;p++)quiet_until(&ports[p].quiet_at,until);
+  for(uint32_t p=0;p<port_count;p++)quiet_until(&ports[p].quiet_at,until);
 }
 /* the port whose interface is the terminating peer interface's, by mesh-fabric-init.sh's rule (an
    AppleThunderboltRDMAInterface rdma_<port> and its peer interface carry the same "RID"); NULL where none is found
@@ -1359,10 +1305,8 @@ static struct port *peer_port(io_service_t peer){
     for(io_service_t interface;(interface=IOIteratorNext(interfaces));IOObjectRelease(interface)){
       CFTypeRef its=found?NULL:IORegistryEntryCreateCFProperty(interface,CFSTR("RID"),kCFAllocatorDefault,0);
       io_name_t name;
-      if(its && CFEqual(its,rid) && IORegistryEntryGetName(interface,name)==KERN_SUCCESS){
-        const uint32_t count=__atomic_load_n(&port_count,__ATOMIC_SEQ_CST);
-        for(uint32_t p=0;p<count;p++)if(!strcmp(ports[p].device.name,name))found=ports+p;
-      }
+      if(its && CFEqual(its,rid) && IORegistryEntryGetName(interface,name)==KERN_SUCCESS)
+        for(uint32_t p=0;p<port_count;p++)if(!strcmp(ports[p].device.name,name))found=ports+p;
       if(its)CFRelease(its);
     }
     IOObjectRelease(interfaces);
@@ -1370,74 +1314,67 @@ static struct port *peer_port(io_service_t peer){
   if(rid)CFRelease(rid);
   return found;
 }
-/* a child's: its peer interface's terminations, on a queue of its own (the iterator drained first, which arms it
-   again): for each terminated service the exit's window and its port's moved to MESH_PLATFORM_NS from now (no port job
-   and no exit inside the termination) and the child's loop woken, before any property is read; then its port, where
-   the service maps to it, halted (port_halt: its pairing lost, served no more, its bit set for the child's loop to
-   report to its parent); each released.  A child whose listener is not yet armed as the termination comes (it has made
-   no queue pair yet) misses it */
+/* a child's: its peer interfaces' terminations (the iterator drained first, which arms it again), on its main thread:
+   for each terminated service the exit's window and its port's moved to MESH_PLATFORM_NS from now (no make, connect or
+   exit inside the termination, and the child's end waits for it: child_main) before any property is read; then its
+   port, where the service maps to it, halted (child_halt, CHILD_TERMINATED: its poller posts nothing from its next
+   pass, the child takes no command again, and its main thread tells its parent); each released.  Heard as the child's
+   loop wakes and between the steps of its commands (link_lapsed), so a termination during a verbs call is heard as
+   the call returns.  A child whose listener is not yet armed as the termination comes (it has made no queue pair
+   yet) misses it */
 static void peer_terminated(void *unused,io_iterator_t iterator){
   (void)unused;
   io_service_t services[MESH_PORTS];
   uint32_t count=0;
   for(io_service_t service;(service=IOIteratorNext(iterator));){
     quiet_all(clock_ns()+MESH_PLATFORM_NS);
-    wake();
     if(count<MESH_PORTS)services[count++]=service;
     else IOObjectRelease(service);
   }
   for(uint32_t k=0;k<count;k++){
     struct port *port=peer_port(services[k]);
     IOObjectRelease(services[k]);
-    if(!port)continue;
-    port_halt(port,&terminated);
-    wake();
+    if(port)child_halt(port,CHILD_TERMINATED);
   }
 }
-/* a child's listener, armed before it opens its device: the notification on a serial queue of its own, its iterator
+/* a child's listener, armed before it opens its device: its notification port a filter of its queue, its iterator
    drained once (which arms it).  A child whose notification is not armed ends: its port's poller would hear a
    termination only from its parent's line (terminations_heard), and it has made no queue pair yet, so its parent loses
    the link as it reaps it (child_reaped) and the port's next child arms its own */
-static void terminations_watch(void){
-  IONotificationPortRef notifications=IONotificationPortCreate(kIOMainPortDefault);
+static void child_iokit(void){
   io_iterator_t iterator=IO_OBJECT_NULL;
   kern_return_t error=KERN_FAILURE;
-  if(notifications){
-    IONotificationPortSetDispatchQueue(notifications,dispatch_queue_create("mesh.terminations",DISPATCH_QUEUE_SERIAL));
-    error=IOServiceAddMatchingNotification(notifications,kIOTerminatedNotification,IOServiceMatching("AppleThunderboltRDMAPeerInterface"),
-                                           peer_terminated,NULL,&iterator);
+  if((iokit=IONotificationPortCreate(kIOMainPortDefault))){
+    struct kevent64_s event;
+    EV_SET64(&event,IONotificationPortGetMachPort(iokit),EVFILT_MACHPORT,EV_ADD,0,0,TAG_IOKIT,0,0);
+    error=kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?KERN_FAILURE:
+      IOServiceAddMatchingNotification(iokit,kIOTerminatedNotification,IOServiceMatching("AppleThunderboltRDMAPeerInterface"),
+                                       peer_terminated,NULL,&iterator);
   }
   if(error)die("child: its port's peer-interface terminations not heard: this child ends");
   peer_terminated(NULL,iterator);
 }
-/* design/transport.md (EXIT-RECLAIM.md P4): the provider's doorbell fault absorbed.  A SIGSEGV or SIGBUS
-   whose pc lies in the provider's text (`provider`, read at the start) on a thread that posts on a port's queue
-   pairs (struct port `thread`) has one anonymous page mapped at the faulting page by hint, never MAP_FIXED, so nothing
-   mapped is replaced: where it got that page (no mapping was there: the doorbell the driver unmapped in a termination),
-   or the port's bit in `faulted` is set (its other thread got the page first; else the store faults again until the
-   child's loop takes the bit), the store lands in that page, no doorbell rings, and the port is halted for the child's
-   loop to report (port_halt, child_reports: CHILD_FAULTED, which its parent loses the link on, ENETDOWN, no verbs
-   call).  Where the page could not be mapped and the bit is clear, the store is made once more (`retried`, the port's
-   last such page: its other thread may have mapped it, its bit not yet set or already taken by the child's loop), and
-   only a second fault at that page is any other fault.  The bridge does not exit.  Any other fault: the default action
-   restored, the store made again, the process ended.  On the thread's alternate stack where it has one (port_progress); mmap, munmap and sigaction alone */
+/* design/transport.md (EXIT-RECLAIM.md P4): the provider's doorbell fault absorbed, once.  A SIGSEGV or SIGBUS whose pc
+   lies in the provider's text (`provider`, read at the start) has one anonymous page mapped at the faulting page by
+   hint, never MAP_FIXED, so nothing mapped is replaced.  Where it got that page (no mapping was there: the doorbell the
+   driver unmapped in a termination), the store lands in that page, no doorbell rings, the child is halted (child_halt,
+   CHILD_FAULTED: after an absorbed doorbell store its queue pair's state is unknown, so nothing is posted on any of
+   them again, and the child ends; its parent loses the link on the report, ENETDOWN, and the peer at the control
+   socket's end), and its main thread is woken to tell it (FAULT_ABSORBED: its poller may be inside a provider call
+   that never returns).  The thread that faults is the poller or, before the poller exists, the main thread in a
+   setup call: the two never run provider code at once, so no other thread maps the page first.  Any other fault ends
+   the child at once (_exit, its status 128 and the signal's number, so no crash report is written to storage).  On
+   the poller's alternate stack (port_progress); mmap, munmap, kevent64, _exit and atomics alone */
 static uintptr_t provider[2];
-static _Atomic uintptr_t retried[MESH_PORTS];
 static void fault_heard(int number,siginfo_t *info,void *context){
   const uintptr_t pc=__darwin_arm_thread_state64_get_pc(((ucontext_t *)context)->uc_mcontext->__ss);
   const uintptr_t page=trunc_page((uintptr_t)info->si_addr);
-  const pthread_t self=pthread_self();
-  struct port *port=NULL;
-  for(uint32_t p=0,count=__atomic_load_n(&port_count,__ATOMIC_SEQ_CST);p<count;p++)
-    for(int t=0;t<2;t++)if(atomic_load_explicit(&ports[p].thread[t],memory_order_acquire)==self)port=ports+p;
-  if(port && pc>=provider[0] && pc<provider[1]){
+  if(pc>=provider[0] && pc<provider[1]){
     void *got=mmap((void *)page,vm_page_size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
-    if(got!=MAP_FAILED && got!=(void *)page)munmap(got,vm_page_size);
-    if(got==(void *)page || atomic_load(&faulted)>>port->index&1){port_halt(port,&faulted);return;}
-    if(atomic_exchange(&retried[port->index],page)!=page)return;
+    if(got==(void *)page){child_halt(ports,CHILD_FAULTED);child_trigger(FAULT_ABSORBED);return;}
+    if(got!=MAP_FAILED)munmap(got,vm_page_size);
   }
-  struct sigaction fallback={.sa_handler=SIG_DFL};
-  sigaction(number,&fallback,NULL);
+  _exit(128+number);
 }
 /* the provider's text read and the faults' handler installed, by a child before it opens its device */
 static void faults_install(void){
@@ -1454,21 +1391,10 @@ static void faults_install(void){
 }
 
 /* ---- design/transport.md: the parent's IOKit, on the event loop ----------------------------------------------------
-   The parent's notifications are on one IONotificationPort (`iokit`) whose Mach port is a filter of the loop's queue
-   (EVFILT_MACHPORT, TAG_IOKIT): each message it holds is taken without waiting and handed to IOKit
-   (IODispatchCalloutFromMessage), which calls its callback on the loop itself, so no thread of the parent hears IOKit
-   and nothing is handed on (iokit_heard).  Armed at SETTLING's entry (iokit_watch) */
-#define TAG_IOKIT (UINT64_C(1)<<56)
-static IONotificationPortRef iokit;
+   Armed at SETTLING's entry (iokit_watch): the peer interfaces' terminations, the interfaces (the ports) and the peer
+   interfaces' arrivals, each callback on the loop itself */
 /* SETTLING's: the service plane root's busy state's changes (kIOBusyInterest), released as the node runs */
 static io_object_t busy_notification;
-/* every message the notification port holds, each taken without waiting and dispatched, until none is left */
-static void iokit_heard(void){
-  const mach_port_t port=IONotificationPortGetMachPort(iokit);
-  union { mach_msg_header_t header; uint8_t bytes[8192]; } message;
-  while(mach_msg(&message.header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof message,port,0,MACH_PORT_NULL)==MACH_MSG_SUCCESS)
-    IODispatchCalloutFromMessage(NULL,&message.header,iokit);
-}
 /* design/transport.md B9b: Thunderbolt RDMA peer interfaces terminating (the iterator drained, which arms it again):
    the exit's window and every port's moved to MESH_PLATFORM_NS from now (no port job and no exit inside the
    termination, whichever port's it is) before any property is read, and logged; then each port one maps to lost
@@ -1486,7 +1412,7 @@ static void terminations_heard(void *unused,io_iterator_t iterator){
     else IOObjectRelease(service);
   }
   if(heard){
-    const uint64_t at=clock_ns(),until=atomic_load(&exit_at);
+    const uint64_t at=clock_ns(),until=exit_at;
     say("bridge node %u: %u Thunderbolt RDMA peer interface%s terminating: no port job and no exit for %.1f s "
         "(design/transport.md)\n",node.id,heard,heard==1?"":"s",(double)(until>at?until-at:0)/1e9);
   }
@@ -1595,7 +1521,7 @@ static int child_send(struct port *port,struct child_message said){
 static void child_reaped(struct port *port);
 /* a process, not this bridge nor one of its children, that is a child of the port's device of any version (its argv
    `--child VERSION DEVICE ...`, the three words every version keeps): a child of a launch whose parent ended
-   unbidden, which has the device's queue pairs until its exit (child_leave, at most 2 MESH_PLATFORM_NS); its pid and
+   unbidden, which has the device's queue pairs until its exit (child_main, at most 2 MESH_PLATFORM_NS); its pid and
    start (pid 0: none; one exited or in its exit is none).  A device's queue pairs are one child's at a time: a link
    takes as many as its device has for it, up to MESH_LINK_LANES (eight of a macOS 26 device's ten,
    design/HETEROGENEOUS-LINKS.md).  The list has room for one process past the system's most (kern.maxproc, read
@@ -1718,13 +1644,13 @@ static void child_job(struct port *port,int job){
 }
 /* the child's messages, each whole one taken: an open's, a make's or a connect's end for the job out (a connect of a
    pairing since lost has its lanes cancelled again: the child may have opened them after the loss's cancel); the
-   lanes a progress thread found failed, for the link's pairing (heard while its connect's end is not yet taken, read
+   lanes its poller found failed, for the link's pairing (heard while its connect's end is not yet taken, read
    by link_turn in the turn that takes it); a fault absorbed on its provider's doorbell, which loses the link as at its
    link's going off (open 0, ENETDOWN: network_heard), and its peer interface's termination as the child heard it
-   (ETIMEDOUT), no verbs call either way.  The parent's own listener has lost the link on that termination already
-   (terminations_heard), so the second loss changes nothing but its CHILD_HALT, which answers the child's halt (it
-   takes no command until its halt is answered); where the parent's listener could not map it to the port, this is the
-   loss.  The socket's end closes it; the child's exit is reaped (child_reaped) */
+   (ETIMEDOUT), no verbs call either way.  A child that tells either has halted itself and takes no command again
+   (child_halt), whether or not its lanes were made, so it ends (`recycle`) and the port's next child opens the device.
+   The parent's own listener has lost the link on a termination already (terminations_heard); where it could not map
+   it to the port, this is the loss.  The socket's end closes it; the child's exit is reaped (child_reaped) */
 static void child_heard(struct port *port){
   struct link *l=&port->link;
   for(;;){
@@ -1752,18 +1678,20 @@ static void child_heard(struct port *port){
       atomic_store_explicit(&l->done,1,memory_order_release);
     }
     else if(heard.kind==CHILD_BROKEN && current)atomic_fetch_or(&l->broken,heard.broken);
-    else if(heard.kind==CHILD_FAULTED){
-      say("link %u (%s): a fault of its provider's doorbell absorbed: its link lost (design/transport.md)\n",port->index,port->name);
-      port->open=0;port_lost(port,ENETDOWN);
+    else if(heard.kind==CHILD_FAULTED || heard.kind==CHILD_TERMINATED){
+      if(heard.kind==CHILD_FAULTED)
+        say("link %u (%s): a fault of its provider's doorbell absorbed: its link lost (design/transport.md)\n",port->index,port->name);
+      port->open=0;
+      if(!stopping())port->recycle=1;
+      port_lost(port,heard.kind==CHILD_FAULTED?ENETDOWN:ETIMEDOUT);
     }
-    else if(heard.kind==CHILD_TERMINATED)port_lost(port,ETIMEDOUT);
   }
 }
 /* a port whose link was lost once its lanes were asked for (`recycle`) asks its child to end once its quiet window and
    the exit's have ended (B9, B9b: no release inside a termination) and no job of its own is out (B12) */
 static void child_turn(struct port *port){
-  if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
-     now<atomic_load(&exit_at))return;
+  if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<port->quiet_at ||
+     now<exit_at)return;
   child_send(port,(struct child_message){.kind=CHILD_END});
   port->ending=1;
   say("link %u (%s): its child %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",
@@ -1835,124 +1763,114 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    parent spawned it (child_spawn), VERSION the contract's (mesh-bridge.h MESH_CHILD_VERSION): the parent's region
    mapped (its magic, version and bridge the parent's), its port the parent's port INDEX on DEVICE (its lane records,
    lanes and rings the region's), the provider's faults absorbed (fault_heard) and its peer interface's terminations
-   heard (B9b: its lanes served no more at once, port_halt, and each told its parent, CHILD_TERMINATED; a child whose
-   listener cannot be armed ends there, terminations_watch).  It takes the parent's messages on descriptor 3 one after
-   another: an open, a make or a connect of its link as a job on its port's queue (link_job, device_open; one asked
-   while a job is out, or while a halt of its own is not yet answered by the parent's, is refused), a halt (no lane
-   served, a job out lapsed, its line leaving where its lanes were made), an end, and a message of any other kind let
-   be; and tells each job's end, naming the pairing it was asked for.  Its state is its port's line (mesh-switched.h
-   enum child_state), which it moves as its device opens, as its lanes are made and as they serve: a connect that ends
-   while its pairing stands opens the link's lanes (lanes_open, its line serving) and then serves every lane, its
-   pairing read again (port_halt's sequence).  The child ends at its parent's word, once its own windows have ended (at
-   most MESH_PLATFORM_NS on), or at its parent's loss (the socket's end, or a message to it the socket did not take
-   whole: child_tell), its lanes served no more and its line leaving, MESH_PLATFORM_NS and its windows on (at most
-   twice that), and in either case once its progress thread has returned from its last pass (within the same bound):
-   its exit, the kernel's release of its device's objects, no verbs call made */
+   heard (child_iokit; a child whose listener cannot be armed ends there).  Two threads: its main thread, which takes
+   the parent's messages on descriptor 3 one after another, its IOKit notifications and its queue's user events on its
+   queue (child_main), makes every verbs call of its open, make and connect itself and answers each at once; and, from
+   its connect on, its poller (port_progress), the one thread that posts.  Its state is its port's line (mesh-switched.h
+   enum child_state, one compare-exchange a move: mesh_port_move), which its main thread moves as its device opens, as
+   its lanes are made and as they connect and serve, and which leaves at a halt: its parent's (CHILD_HALT, where its
+   lanes were made: port_leaving), its own (child_halt: a lane's or a completion's failure on its poller, a
+   termination heard, a doorbell fault absorbed, a make or connect that failed), or its end.  A command that does not
+   fit the state is refused: ECANCELED once the line leaves, EBUSY otherwise.  The child ends at its parent's word
+   (CHILD_END), once its own windows have ended (at most MESH_PLATFORM_NS on), or at its parent's loss (the socket's
+   end, or a message to it the socket did not take whole: child_tell), MESH_PLATFORM_NS and its windows on (at most
+   twice that), and in either case once its poller has returned from its last pass (within the same bound): its exit,
+   the kernel's release of its device's objects, no verbs call made */
+/* the pairing its connect was asked for, which a report of its lanes' failure names (CHILD_BROKEN) */
 static uint32_t child_asked;
-static uint64_t child_bandwidth;
-static int child_halted;
 static unsigned char child_in[sizeof(struct child_message)];
 static uint32_t child_got;
-static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
-  atomic_fetch_add(&port->link.pairing,1);
-  atomic_store(&port->link.served,0);
-  mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN|1u<<CHILD_LANES_MADE|1u<<CHILD_SERVING,CHILD_LEAVING,0,0);
-  atomic_store(&port->link.closing,1);
-  progress_wake(port);
-  /* the parent's socket read no more: its end, or a message after the last, would end each wait below at once */
+/* the child's end, its main thread's: none while `start` is 0; else asked (`asked`, CHILD_END) or its parent lost, from
+   `start` on */
+static struct { int asked; uint64_t start; } ending;
+static void child_end(struct port *port,int asked){
+  if(ending.start)return;
+  child_halt(port,0);
+  ending.asked=asked;ending.start=clock_ns();
+  /* the parent's socket read no more: its end, or a message after the last, would end each wait at once */
   struct kevent64_s parent;EV_SET64(&parent,3,EVFILT_READ,EV_DELETE,0,0,0,0,0);
   kevent64(events,&parent,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-  const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
-  for(;;){
-    const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
-    const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows));
-    /* its progress thread inside a pass, or yet to see `closing` (port_progress): what that pass carries, lands or
-       posts is in its hands alone, so the exit waits for its return, which wakes this wait; and for the bound at
-       most, since a thread inside a provider call may never return (what it holds then is lost, as at a crash) */
-    const int passing=atomic_load(&port->passing);
-    if(at>=bound || (at>=until && !passing))break;
-    const uint64_t rest=(passing?bound:until)-at;
-    /* the wait on the child's queue, so a wake (the progress thread's return, a termination heard) ends it at once and
-       the windows are read again */
-    struct timespec wait={(time_t)(rest/1000000000u),(long)(rest%1000000000u)};
-    struct kevent64_s woken;
-    kevent64(events,NULL,0,&woken,1,0,&wait);
-  }
-  exit(0);
 }
 /* a message to the parent, whole, in one send that never waits (child_send's rule, the other way: a child tells at
-   most an answer to each command and a few reports); one not taken whole is its parent's loss, and the child leaves */
+   most an answer to each command and one report); one not taken whole is its parent's loss, and the child ends */
 static void child_tell(struct port *port,struct child_message said){
-  if(send(3,&said,sizeof said,MSG_DONTWAIT)!=(ssize_t)sizeof said)child_leave(port,0);
+  if(send(3,&said,sizeof said,MSG_DONTWAIT)!=(ssize_t)sizeof said)child_end(port,0);
+}
+/* the child's own halt told its parent, once (child_halt's reason, taken) */
+static void child_report(struct port *port){
+  const uint32_t reason=atomic_exchange(&child_reason,0);
+  if(reason)child_tell(port,(struct child_message){.kind=reason,.pairing=child_asked,.broken=reason==CHILD_BROKEN?port->link.plan:0});
+}
+/* why a command does not fit the line's state, 0 where it does (its state one of `fits`, bits over enum child_state) */
+static int32_t child_refused(const struct port *port,uint32_t fits){
+  const uint32_t state=mesh_port_state(atomic_load(&switch_of()->port[port->index]));
+  return fits>>state&1?0:state==CHILD_LEAVING?ECANCELED:EBUSY;
+}
+/* the device opened (CHILD_OPEN; again where it is open: its port and address read again): device_up, then its GID
+   (device_gid), the line moved to DEVICE_OPEN; the answer its address, bandwidth and the queue pairs it has for a link */
+static struct child_message device_open(struct port *port){
+  struct child_message said={.kind=CHILD_OPENED,.result=child_refused(port,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN)};
+  int refused=0;
+  if(!said.result)said.result=device_up(&port->device,&wire,&refused);
+  if(!said.result)said.result=link_lapsed(port);
+  if(!said.result)said.result=device_gid(&port->device,port->name);
+  if(!said.result && !port->device.gid_matched){
+    const uint8_t *g=port->device.gid.raw;
+    say("link %u (%s): no GID of %s is a link-local address %s has; GID[%u] %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+        "%02x%02x:%02x%02x:%02x%02x:%02x%02x used\n",port->index,port->name,port->device.name,port->name,port->device.gid_index,
+        g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7],g[8],g[9],g[10],g[11],g[12],g[13],g[14],g[15]);
+  }
+  if(!said.result && !mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN,CHILD_DEVICE_OPEN,0,0))
+    said.result=ECANCELED;
+  said.refused=refused;
+  if(!said.result){
+    port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
+    said.lid=port->lid;memcpy(said.gid,port->gid,16);said.bandwidth=port_bandwidth(&port->device.port);
+    said.lanes=port->device.max_pairs;
+  }
+  return said;
+}
+/* the lanes of the plan the command names made (CHILD_MAKE, from DEVICE_OPEN: link_make), the line moved to
+   LANES_MADE; the answer each lane's queue pair number, the first sequence number, each lane's share and the port's
+   address.  A make that fails halts the child (child_halt): a queue pair it made is released at its exit, never made
+   again or reused */
+static struct child_message lanes_make(struct port *port,const struct child_message *heard){
+  struct link *l=&port->link;
+  struct child_message said={.kind=CHILD_MADE,.pairing=heard->pairing,.result=child_refused(port,1u<<CHILD_DEVICE_OPEN)};
+  if(said.result)return said;
+  l->plan=heard->lanes;
+  said.result=link_make(port);
+  if(!said.result && !mesh_port_move(switch_of(),port->index,1u<<CHILD_DEVICE_OPEN,CHILD_LANES_MADE,0,0))said.result=ECANCELED;
+  if(said.result){child_halt(port,0);return said;}
+  for(uint32_t k=0;k<MESH_LINK_LANES;k++)said.qpn[k]=l->plan>>k&1?l->provider.queues[k].pair->qp_num:UINT32_MAX;
+  said.psn=l->provider.psn;said.share=(uint32_t)l->share.n;
+  port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
+  said.lid=port->lid;memcpy(said.gid,port->gid,16);
+  return said;
+}
+/* the lanes connected to the peer's the command names (CHILD_CONNECT, from LANES_MADE: link_connect) and served
+   (link_serve: the line serving toward the command's node, the poller made); a connect that fails halts the child */
+static struct child_message lanes_connect(struct port *port,const struct child_message *heard){
+  struct child_message said={.kind=CHILD_CONNECTED,.pairing=heard->pairing,.result=child_refused(port,1u<<CHILD_LANES_MADE)};
+  if(said.result)return said;
+  port->peer=heard->node;child_asked=heard->pairing;
+  said.result=link_connect(port,heard);
+  if(!said.result)said.result=link_serve(port,heard->node,heard->bandwidth);
+  if(said.result)child_halt(port,0);
+  return said;
 }
 static void child_command(struct port *port,const struct child_message *heard){
-  struct link *l=&port->link;
-  if(heard->kind==CHILD_OPEN){if(!port->job)device_open(port);return;}
-  if(heard->kind==CHILD_HALT){
-    atomic_fetch_add(&l->pairing,1);atomic_store(&l->served,0);port_leaving(port);progress_wake(port);
-    child_halted=0;
-    return;
-  }
-  if(heard->kind==CHILD_END)child_leave(port,1);
-  if(heard->kind!=CHILD_MAKE && heard->kind!=CHILD_CONNECT)return;
-  const int job=heard->kind==CHILD_MAKE?LINK_JOB_MAKE:LINK_JOB_CONNECT;
-  int refused=l->job?EBUSY:child_halted || atomic_load(&faulted) || atomic_load(&terminated)?ECANCELED:0;
-  if(!refused && job==LINK_JOB_CONNECT){
-    memcpy(l->peer,heard->peer,sizeof l->peer);port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
-    port->peer=heard->node;child_bandwidth=heard->bandwidth;
-  }
-  if(refused){
-    child_tell(port,(struct child_message){.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=heard->pairing,.result=refused});
-    return;
-  }
-  child_asked=heard->pairing;
-  if(job==LINK_JOB_MAKE)l->plan=heard->lanes;
-  link_job(port,job);
-}
-static void child_jobs(struct port *port){
-  struct link *l=&port->link;
-  if(port->job && atomic_load_explicit(&port->done,memory_order_acquire)){
-    port->job=0;
-    struct child_message said={.kind=CHILD_OPENED,.result=port->result,.refused=port->refused};
-    if(!port->result){
-      mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN,CHILD_DEVICE_OPEN,0,0);
-      port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
-      said.lid=port->lid;memcpy(said.gid,port->gid,16);said.bandwidth=port_bandwidth(&port->device.port);
-      said.lanes=port->device.max_pairs;
-    }
-    child_tell(port,said);
-  }
-  if(!l->job || !atomic_load_explicit(&l->done,memory_order_acquire))return;
-  const int job=l->job;
-  l->job=0;
-  struct child_message said={.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=child_asked,.result=l->result};
-  if(!said.result && l->job_pairing!=atomic_load(&l->pairing))said.result=ECANCELED;
-  if(!said.result && job==LINK_JOB_MAKE && !mesh_port_move(switch_of(),port->index,1u<<CHILD_DEVICE_OPEN,CHILD_LANES_MADE,0,0))said.result=ECANCELED;
-  if(!said.result && job==LINK_JOB_MAKE){
-    for(uint32_t k=0;k<MESH_LINK_LANES;k++)said.qpn[k]=l->plan>>k&1?l->provider.queues[k].pair->qp_num:UINT32_MAX;
-    said.psn=l->provider.psn;said.share=(uint32_t)l->share.n;
-    port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
-    said.lid=port->lid;memcpy(said.gid,port->gid,16);
-  }
-  else if(!said.result && !lanes_open(port,port->peer,child_bandwidth))said.result=ECANCELED;
-  else if(!said.result){
-    atomic_store(&l->served,l->plan);
-    if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);port_leaving(port);said.result=ECANCELED;}
-    progress_wake(port);
-  }
-  child_tell(port,said);
-}
-static void child_reports(struct port *port){
-  const uint32_t broken=atomic_exchange_explicit(&port->link.broken,0,memory_order_acq_rel);
-  if(broken)child_tell(port,(struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken});
-  if(atomic_exchange(&faulted,0)){child_halted=1;child_tell(port,(struct child_message){.kind=CHILD_FAULTED});}
-  if(atomic_exchange(&terminated,0)){child_halted=1;child_tell(port,(struct child_message){.kind=CHILD_TERMINATED});}
+  if(heard->kind==CHILD_OPEN)child_tell(port,device_open(port));
+  else if(heard->kind==CHILD_MAKE)child_tell(port,lanes_make(port,heard));
+  else if(heard->kind==CHILD_CONNECT)child_tell(port,lanes_connect(port,heard));
+  else if(heard->kind==CHILD_HALT)port_leaving(port);
+  else if(heard->kind==CHILD_END)child_end(port,1);
 }
 static void child_read(struct port *port){
-  for(;;){
+  while(!ending.start){
     const ssize_t got=recv(3,child_in+child_got,sizeof child_in-child_got,MSG_DONTWAIT);
     if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-    if(got<=0)child_leave(port,0);
+    if(got<=0){child_end(port,0);return;}
     if((child_got+=(uint32_t)got)<sizeof child_in)continue;
     child_got=0;
     struct child_message heard;
@@ -1960,6 +1878,11 @@ static void child_read(struct port *port){
     child_command(port,&heard);
   }
 }
+/* the child's loop: its main thread waits on its queue (the parent's socket, its IOKit notifications, its poller's
+   return and a fault absorbed), with no timeout until it ends; ending, until its exit is due: the windows read again at
+   each wake (a termination heard moves them), and the exit made once they have ended and its poller has returned
+   from its last pass, or at the end's bound whatever its poller does (a poller inside a provider call may never
+   return: what it holds then is lost, as at a crash, O4) */
 static int child_main(int argc,char **argv){
   signal(SIGPIPE,SIG_IGN);
   const unsigned long index=argc>=5?strtoul(argv[4],NULL,10):MESH_PORTS;
@@ -1974,26 +1897,38 @@ static int child_main(int argc,char **argv){
   if(wire_map(&wire,M,fd))die("child: transport page aliases");
   close(fd);
   struct port *port=ports;
-  *port=(struct port){.index=(uint32_t)index,.control=-1,.child_fd=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
+  *port=(struct port){.index=(uint32_t)index,.control=-1,.child_fd=-1};
   port->link.provider.device=&port->device;
   snprintf(port->device.name,sizeof port->device.name,"%s",argv[3]);snprintf(port->name,sizeof port->name,"%s",argv[3]+5);
-  __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);
+  port_count=1;
   struct kevent64_s event;
   if((events=kqueue())<0)die("child events");
-  EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
-  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+  const uint64_t users[]={POLLER_RETURNED,FAULT_ABSORBED};
+  for(size_t i=0;i<sizeof users/sizeof *users;i++){
+    EV_SET64(&event,users[i],EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
+    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+  }
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
-  terminations_watch();
+  child_iokit();
   for(;;){
-    now=clock_ns();
-    child_jobs(port);
-    child_reports(port);
+    struct timespec rest,*wait=NULL;
+    if(ending.start){
+      const uint64_t at=clock_ns(),bound=ending.start+(ending.asked?1:2)*MESH_PLATFORM_NS;
+      const uint64_t until=MIN(bound,MAX(ending.asked?ending.start:ending.start+MESH_PLATFORM_NS,windows_end()));
+      if(at>=bound || (at>=until && !polling))exit(0);
+      const uint64_t left=(polling?bound:until)-at;
+      rest=(struct timespec){(time_t)(left/1000000000u),(long)(left%1000000000u)};wait=&rest;
+    }
     struct kevent64_s ready[4];
-    struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
-    const int count=kevent64(events,NULL,0,ready,4,0,&tick);
+    const int count=kevent64(events,NULL,0,ready,4,0,wait);
     now=clock_ns();
-    for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    for(int i=0;i<count;i++){
+      if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+      else if(ready[i].filter==EVFILT_USER && ready[i].ident==POLLER_RETURNED)polling=0;
+      else if(ready[i].filter==EVFILT_MACHPORT)iokit_heard();
+    }
+    child_report(port);
   }
 }
 
@@ -2119,10 +2054,10 @@ static uint64_t turn_due(uint64_t liveness){
   due=MIN(due,liveness);
   due_at(&due,health_due());
   if(node.state!=NODE_RUNNING)return due;
-  due_at(&due,atomic_load(&exit_at));
+  due_at(&due,exit_at);
   for(uint32_t p=0;p<port_count;p++){
     const struct port *port=ports+p;
-    due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->spawn_at);
+    due_at(&due,port->quiet_at);due_at(&due,port->spawn_at);
     if(port->opening)due_at(&due,port->retry_at);
     if(port->open && port->control<0)due_at(&due,port->next);
     if(port->job)due_at(&due,port->job_at+MESH_PLATFORM_NS);
@@ -2200,7 +2135,7 @@ static void adopting_read(int due){
    (design/RDMA-KERNEL-RECOVERY.md "October 18"), the first of them asked no sooner than every port's quiet window ends
    (B9: its reclaim never inside the termination a conclusion may follow) and a peer interface's termination's
    (`exit_at`, B9b), the loop serving the children's sockets, the clients' exits and the kernel's link events meanwhile
-   (a link going off extends its port's window, network_heard, as a termination extends them all, peer_terminated),
+   (a link going off extends its port's window, network_heard, as a termination extends them all, terminations_heard),
    each no later than MESH_PLATFORM_NS past the stop's start (`due`: every window set before the stop ends by then, so
    the wait is the one 5 s budget, well inside its heartbeat's bound of 3 MESH_PLATFORM_NS) */
 static void node_stop(int64_t code){
@@ -2234,7 +2169,7 @@ static void node_ended(int due){
   exit(0);
 }
 /* design/transport.md section 14, "A process a port": the end (NODE_ENDING), once the stop's windows have ended: each
-   child asked to end (its own windows its own: child_leave), and the bridge ended once every one is reaped
+   child asked to end (its own windows its own: child_main), and the bridge ended once every one is reaped
    (child_reaped, on the loop: its NOTE_EXIT, then its exit seen through to its end), at most MESH_PLATFORM_NS on, so
    no child of this launch has its device's queue pairs as the next launch's children make theirs.  This end stays
    beside the next bridge's ADOPTING and child_elsewhere because it alone sees an exit through to its end: a process in
