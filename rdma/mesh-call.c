@@ -14,6 +14,36 @@ uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room
   return count;
 }
 
+static uint32_t new_page(struct hdr *m,uint32_t frames){
+  const uint32_t pd=mesh_pool_pop(m,frames);
+  if(pd!=MESH_ABSENT){
+    struct mesh_pd *p=mesh_pd_at(m,pd);
+    atomic_store_explicit(&p->bytes,0,memory_order_relaxed);
+    atomic_store_explicit(&p->state,MESH_PD_LIVE,memory_order_relaxed);
+    atomic_store_explicit(&p->uses,1,memory_order_relaxed);
+  }
+  return pd;
+}
+
+/* The writer alone assigns this source index. A queued write holds the old backing page through its completion. */
+void *mesh_page_writable(struct mesh_ctx *context,uint32_t index,uint32_t bytes){
+  struct hdr *m=attached(context);
+  const uint32_t frames=mesh_class_frames(bytes);
+  if(!m || index>=m->entries || !frames ||
+     atomic_load_explicit(&mesh_owners(m)[index],memory_order_acquire)!=mesh_owner_byte(context->client)){
+    errno=EINVAL;return NULL;
+  }
+  uint32_t pd=mesh_word_pd(mesh_entry_load(m,index));
+  if(mesh_pd_valid(m,pd)){
+    struct mesh_pd *p=mesh_pd_at(m,pd);
+    if(p->cls==frames && atomic_load_explicit(&p->uses,memory_order_acquire)==1)return mesh_pd_data(m,pd);
+  }
+  pd=new_page(m,frames);
+  if(pd==MESH_ABSENT){errno=EAGAIN;return NULL;}
+  mesh_pd_drop(m,mesh_entry_reset(m,index,pd));
+  return mesh_pd_data(m,pd);
+}
+
 /* The indices taken (mesh.h mesh_index_take), then each one's word made anew: naming a page popped from the pool
    (its uses 1, the word's) or none, landed 0.  A page a stale landing left at a freed index is dropped as the word is
    made anew.  Where the pool has too few pages, those taken go back and the indices are freed */
@@ -26,16 +56,13 @@ uint32_t mesh_pages(struct mesh_ctx *context,uint32_t count,uint32_t bytes){
   for(uint32_t i=0;i<count;i++){
     uint32_t pd=MESH_ABSENT;
     if(bytes){
-      pd=mesh_pool_pop(m,frames);
+      pd=new_page(m,frames);
       if(pd==MESH_ABSENT){
         for(uint32_t k=0;k<i;k++)mesh_pd_drop(m,mesh_entry_reset(m,first+k,MESH_ABSENT));
         mesh_index_release(m,first,count);
         errno=ENOMEM;return MESH_ABSENT;
       }
-      struct mesh_pd *p=mesh_pd_at(m,pd);
-      atomic_store_explicit(&p->bytes,0,memory_order_relaxed);
-      atomic_store_explicit(&p->state,MESH_PD_LIVE,memory_order_relaxed);
-      atomic_store_explicit(&p->uses,1,memory_order_relaxed);
+
     }
     mesh_pd_drop(m,mesh_entry_reset(m,first+i,pd));
   }

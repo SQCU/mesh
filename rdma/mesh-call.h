@@ -51,6 +51,9 @@ struct mesh_dest { uint32_t node,index; };
    EINVAL (not attached, count 0 or past the table, bytes past MESH_LONG_PAYLOAD), ENOSPC (no `count` consecutive free
    indices), ENOMEM (the pool has fewer free pages of the class). */
 uint32_t mesh_pages(struct mesh_ctx *,uint32_t count,uint32_t bytes);
+/* Writable payload at a leased source index, renewed from the pool while earlier writes still hold its page.
+   The calling writer owns the index exclusively. NULL with EAGAIN when the pool has no page of this class. */
+void *mesh_page_writable(struct mesh_ctx *,uint32_t index,uint32_t bytes);
 /* The page at `index` (`bytes` of payload) written to each of dests[0 .. n): each destination on this node set by the
    call itself (the index names the page, its landed one more), and the others one cell of this client's write ring,
    the page's uses raised by one until the bridge takes it.  0; EBUSY where the page has a SEND or a write out (its uses

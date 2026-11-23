@@ -28,16 +28,9 @@ enum { CALL_ALLREDUCE, CALL_BROADCAST, CALL_REDUCE, CALL_REDUCE_SCATTER, CALL_AL
 static const char *const CALL_NAME[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter",
                                         "ncclAllGather", "ncclAlltoAll", "ncclGather", "ncclScatter"};
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
-/* A communicator's pages in CHANNELS channels, every rank cutting them alike: page j of a message, and a reduction's
-   position j, are channel j % CHANNELS's.  Each channel has indices of its own on each rank's node: a receive ring of
-   the communicator's `depth` indices for each source rank (at most RECEIVES: comm_depth), the channel's k-th page from
-   rank s to rank d landing at d's base of the channel + s depth + k mod depth, that index's (k / depth + 1)-th
-   landing; and SOURCES source pages of each class, which what the channel sends is copied into.  A rank moves its
-   channels on the threads of its process's pool (T of them, at most CHANNELS), channel c on thread c % T with the
-   indices of slot c % T: the layout is the same at every rank, whatever its threads */
+/* Page j of each message runs on channel j % CHANNELS. Each writer addresses the receiver's allocated extent. */
 #define CHANNELS 8u
-#define RECEIVES 512u
-#define SOURCES 128u
+#define EXTENT_PAGES 512u
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
 /* a failure's message: its text, and `id`, where the message is a communicator's (comm_fail), the count of messages the
@@ -354,29 +347,25 @@ static ncclResult_t attach_fail(int status, const char *name) {
 
 /* -- communicators ------------------------------------------------------------------------------------------------- */
 
-/* A channel of a communicator at this rank: the slot its indices are of (`context`, the attach's), its receive indices
-   (`receives`, a ring of the communicator's depth for each rank) and its source pages (`source[c]` the first of its
-   SOURCES of class c, 0 short and 1 long, and `next[c]` the one it looks at first); a cache line each, since each is
-   its own thread's */
-struct channel { _Alignas(128) struct mesh_ctx *context; uint32_t receives, source[2], next[2]; };
+struct extent { uint32_t first, used; };
+struct peer_pages {
+  struct extent send, receive;
+  uint32_t next_receive;
+  int advertised;
+};
+struct channel {
+  _Alignas(128) struct mesh_ctx *context;
+  struct peer_pages *peer;
+  uint32_t source, mailbox, first_receive;
+};
 
-/* A communicator: its ranks; each rank's node (`node`), the first receive index of each of its channels (`base`, rank
-   r channel c at r CHANNELS + c) and its standing listener's address (`address`, where a split's or a shrink's
-   communicator whose first rank it is meets), gathered at its init; the pages each channel of this rank has written to
-   each rank (`sent`) and taken from each (`received`, channel c rank r at c nranks + r); its channels here
-   (`channel`); the depth of each pair's receive ring (`depth`, comm_depth; 0 for one rank, which has no ring); the
-   splits and shrinks made of it (`splits`, which name them); its bootstrap's sockets (`peers`: the root's to every
-   rank, a rank's to the root) and its standing listener; the scratch a reduction's own contribution is made in; its
-   life (`state`, enum comm_state: its failure, `failed` and `failure`, recorded with it, and `guard`, its moves') and
-   its `references` (comm_release) */
 struct ncclComm {
   int nranks, rank;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
-  uint32_t *node, *base;
+  uint32_t *node, *mailbox;
   char (*address)[NCCL_UNIQUE_ID_BYTES];
-  uint64_t *sent, *received;
   struct channel channel[CHANNELS];
-  uint32_t depth, splits;
+  uint32_t extent_pages, splits;
   struct attach *attach;
   int *peers, standing;
   unsigned char *scratch;
@@ -401,19 +390,22 @@ static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
   if (posix_memalign((void **)&comm, _Alignof(struct ncclComm), sizeof *comm)) return NULL;
   memset(comm, 0, sizeof *comm);
   const size_t n = (size_t)nranks;
-  comm->node = calloc(n, sizeof *comm->node); comm->base = calloc(n * CHANNELS, sizeof *comm->base);
+  comm->node = calloc(n, sizeof *comm->node); comm->mailbox = calloc(n * CHANNELS, sizeof *comm->mailbox);
   comm->address = calloc(n, sizeof *comm->address);
-  comm->sent = calloc(n * CHANNELS, sizeof *comm->sent); comm->received = calloc(n * CHANNELS, sizeof *comm->received);
+  struct peer_pages *peers = calloc(n * CHANNELS, sizeof *peers);
   comm->peers = malloc(n * sizeof *comm->peers);
-  if (!comm->node || !comm->base || !comm->address || !comm->sent || !comm->received || !comm->peers) {
-    free(comm->node); free(comm->base); free(comm->address); free(comm->sent); free(comm->received); free(comm->peers);
+  if (!comm->node || !comm->mailbox || !comm->address || !peers || !comm->peers) {
+    free(comm->node); free(comm->mailbox); free(comm->address); free(peers); free(comm->peers);
     free(comm);
     return NULL;
   }
   for (size_t r = 0; r < n; r++) comm->peers[r] = -1;
   comm->nranks = nranks; comm->rank = rank; comm->standing = -1;
-  for (uint32_t c = 0; c < CHANNELS; c++)
-    comm->channel[c] = (struct channel){NULL, MESH_ABSENT, {MESH_ABSENT, MESH_ABSENT}, {0, 0}};
+  for (uint32_t c = 0; c < CHANNELS; c++) {
+    comm->channel[c] = (struct channel){NULL, peers + c * n, MESH_ABSENT, MESH_ABSENT, MESH_ABSENT};
+    for (size_t r = 0; r < n; r++)
+      comm->channel[c].peer[r] = (struct peer_pages){{MESH_ABSENT, 0}, {MESH_ABSENT, 0}, MESH_ABSENT, 0};
+  }
   pthread_mutex_init(&comm->guard, NULL);
   atomic_init(&comm->state, COMM_LIVE);
   atomic_init(&comm->references, 1);
@@ -431,36 +423,22 @@ static int comm_attach(struct ncclComm *comm) {
   return status;
 }
 
-/* comm's source pages of this node's table (none for one rank, which sends nothing), each channel's of the slot of
-   the thread that moves it (channel c, the attach's context c % its contexts): SOURCES of each class; 0, or
-   mesh_pages' errno */
-static int comm_sources(struct ncclComm *comm) {
-  if (comm->nranks == 1) return 0;
-  struct attach *a = comm->attach;
-  int status = 0;
-  pthread_mutex_lock(&attach_lock);
-  for (uint32_t c = 0; !status && c < CHANNELS; c++) {
-    struct channel *x = comm->channel + c;
-    x->context = &a->context[c % a->contexts];
-    if ((x->source[0] = mesh_pages(x->context, SOURCES, MESH_SHORT_PAYLOAD)) == MESH_ABSENT) status = errno;
-    else if ((x->source[1] = mesh_pages(x->context, SOURCES, MESH_LONG_PAYLOAD)) == MESH_ABSENT) status = errno;
-  }
-  pthread_mutex_unlock(&attach_lock);
-  return status;
-}
-
-/* comm's receive indices of this node's table, each channel's of its source pages' slot: a ring of comm's depth for
-   each rank, nranks depth indices, naming no page and landed 0 until one lands; 0, or mesh_pages' errno */
+/* One data and one address-publication source per channel. The receiver publishes the first address of
+   each following extent in its own slot in the sending rank's mailbox. */
 static int comm_receives(struct ncclComm *comm) {
-  const uint32_t receives = (uint32_t)comm->nranks * comm->depth;
-  int status = 0;
-  pthread_mutex_lock(&attach_lock);
-  for (uint32_t c = 0; !status && c < CHANNELS; c++) {
-    struct channel *x = comm->channel + c;
-    if ((x->receives = mesh_pages(x->context, receives, 0)) == MESH_ABSENT) status = errno;
+  const uint32_t n = (uint32_t)comm->nranks, count = comm->extent_pages;
+  for (uint32_t c = 0; c < CHANNELS; c++) {
+    struct channel *ch = comm->channel + c;
+    ch->context = &comm->attach->context[c % comm->attach->contexts];
+    ch->source = mesh_pages(ch->context, 2, 0);
+    if (ch->source == MESH_ABSENT) return errno;
+    ch->mailbox = mesh_pages(ch->context, n, 0);
+    if (ch->mailbox == MESH_ABSENT) return errno;
+    ch->first_receive = mesh_pages(ch->context, n * count, 0);
+    if (ch->first_receive == MESH_ABSENT) return errno;
+    for (uint32_t r = 0; r < n; r++) ch->peer[r].receive.first = ch->first_receive + r * count;
   }
-  pthread_mutex_unlock(&attach_lock);
-  return status;
+  return 0;
 }
 
 /* comm's indices freed (their pages dropped: a page a SEND still reads goes back to the pool at its completion) and its
@@ -471,10 +449,15 @@ static void comm_leave(struct ncclComm *comm) {
   if (a) {
     for (uint32_t c = 0; c < CHANNELS; c++) {
       struct channel *x = comm->channel + c;
-      if (x->receives != MESH_ABSENT) mesh_invalidate(x->context, x->receives, (uint32_t)comm->nranks * comm->depth, 1);
-      for (int k = 0; k < 2; k++)
-        if (x->source[k] != MESH_ABSENT) mesh_invalidate(x->context, x->source[k], SOURCES, 1);
-      x->receives = x->source[0] = x->source[1] = MESH_ABSENT;
+      for (int r = 0; r < comm->nranks; r++) {
+        struct peer_pages *pages = x->peer + r;
+        if (pages->receive.first != MESH_ABSENT) mesh_invalidate(x->context, pages->receive.first, comm->extent_pages, 1);
+        if (pages->next_receive != MESH_ABSENT) mesh_invalidate(x->context, pages->next_receive, comm->extent_pages, 1);
+        pages->receive.first = pages->next_receive = MESH_ABSENT;
+      }
+      if (x->source != MESH_ABSENT) mesh_invalidate(x->context, x->source, 2, 1);
+      if (x->mailbox != MESH_ABSENT) mesh_invalidate(x->context, x->mailbox, (uint32_t)comm->nranks, 1);
+      x->source = x->mailbox = MESH_ABSENT;
     }
     a->comms--;
     comm->attach = NULL;
@@ -497,7 +480,7 @@ static void comm_free(struct ncclComm *comm) {
   if (comm->standing >= 0) close(comm->standing);
   comm_leave(comm);
   pthread_mutex_destroy(&comm->guard);
-  free(comm->node); free(comm->base); free(comm->address); free(comm->sent); free(comm->received); free(comm->scratch);
+  free(comm->node); free(comm->mailbox); free(comm->address); free(comm->channel[0].peer); free(comm->scratch);
   free(comm);
 }
 
@@ -576,23 +559,19 @@ static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 struct report { int32_t rank, status; uint32_t node, pages; char address[NCCL_UNIQUE_ID_BYTES]; };
 /* its report in the second round: its status (its receive indices taken, else why not) and the first receive index of
    each of its channels */
-struct base_report { int32_t status; uint32_t base[CHANNELS]; };
+struct base_report { int32_t status; uint32_t first[CHANNELS], mailbox[CHANNELS]; };
 
-/* the depth of each pair's receive ring, alike at every rank (each computes it from the same first-round reports;
-   nranks > 1): the pages each pair of a channel numbers before it comes back to an index, at most RECEIVES, and the
-   most for which, at every node v of the communicator, its c_v ranks' source pages and a page at each index of their
-   channels' rings, c_v CHANNELS (SOURCES + (nranks - 1) depth) pages of either class, fit in half the node's pool (the
-   other half its bridge's lanes' receives, its relays' pages and its other clients'); 0 where no depth fits */
-static uint32_t comm_depth(const struct report *reports, int nranks) {
-  uint32_t depth = RECEIVES;
+/* Up to two receive extents may hold landings from each other rank per channel. Leave half
+   the pool to bridge receives, forwarding, outgoing pages, and other clients. */
+static uint32_t extent_pages(const struct report *reports, int nranks) {
+  uint32_t count = EXTENT_PAGES;
   for (int r = 0; r < nranks; r++) {
     uint64_t here = 0;
     for (int q = 0; q < nranks; q++) here += reports[q].node == reports[r].node;
-    const uint64_t room = reports[r].pages / 2, sources = here * CHANNELS * SOURCES;
-    const uint64_t most = room > sources ? (room - sources) / (here * CHANNELS * (uint64_t)(nranks - 1)) : 0;
-    if (most < depth) depth = (uint32_t)most;
+    uint64_t room = reports[r].pages / (4 * here * CHANNELS * (uint64_t)(nranks - 1));
+    if (count > room) count = (uint32_t)room;
   }
-  return depth;
+  return count;
 }
 
 /* a listener on `host` alone where it is an IPv6 address, else on every address, at *port (0: any, *port then the
@@ -767,14 +746,8 @@ static ncclResult_t exchange(struct ncclComm *comm, const void *local, size_t by
   return error ? fail(ncclRemoteError, "communicator %s: an exchange over its bootstrap: %s", comm->name, strerror(error)) : ncclSuccess;
 }
 
-/* A communicator's init at its id, the one path of every init (ncclCommInitRank, a split's, a shrink's, a grow's), in
-   two rounds of its bootstrap's gather.  First the process attached (comm_attach), the communicator's source pages
-   taken (comm_sources) and its standing listener opened, its bootstrap's sockets opened (bootstrap_open, the root
-   accepting on `standing` where it is a listener), and every rank's report gathered: its status, node, pool and
-   standing listener, from which every rank computes the same depth (comm_depth).  Then each rank takes its receive
-   rings, nranks depth indices a channel (comm_receives), and the second round gathers each rank's status and the
-   first receive index of each of its channels: with the first, the only exchange its calls need.  A rank that cannot
-   go on, or a depth of 0, fails every rank alike, made with nothing of its bridge's and its sockets released */
+/* Bootstrap discovers nodes, then exchanges the first destination extents and the indices for
+   publishing subsequent allocation addresses. */
 static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   const int nranks = made->nranks, rank = made->rank;
   struct report *reports = calloc((size_t)nranks, sizeof *reports);
@@ -782,7 +755,7 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   if (!reports || !bases) { free(reports); free(bases); return fail(ncclSystemError, "communicator %s: out of memory", made->name); }
   struct report *mine = reports + rank;
   const int attaching = comm_attach(made);
-  int status = attaching ? attaching : comm_sources(made);
+  int status = attaching;
   if (!status && nranks > 1 && (made->standing = listener_open(mine->address, sizeof mine->address)) < 0) status = errno;
   mine->rank = rank; mine->status = status;
   if (!attaching) {
@@ -795,24 +768,25 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   if (!met && nranks > 1) met = gather(made, reports, sizeof *reports, !rank);
   ncclResult_t result = ncclSuccess;
   if (attaching) result = attach_fail(attaching, made->name);
-  else if (status)
-    result = fail(ncclSystemError, "communicator %s: its %u source pages of each class of this node's bridge, or its listener: %s",
-                  made->name, SOURCES * CHANNELS, strerror(status));
+  else if (status) result = fail(ncclSystemError, "communicator %s: listener: %s", made->name, strerror(status));
   else if (met) result = fail(ncclRemoteError, "communicator %s: the bootstrap at %s: %s", made->name, made->id, strerror(met));
   for (int r = 0; !result && r < nranks; r++)
     if (reports[r].status)
       result = fail(ncclRemoteError, "communicator %s: rank %d could not join it: %s", made->name, r, strerror(reports[r].status));
-  if (!result && nranks > 1 && !(made->depth = comm_depth(reports, nranks)))
-    result = fail(ncclSystemError, "communicator %s: half the pool of a node of its ranks has room for their source pages and no "
+  if (!result && nranks > 1 && !(made->extent_pages = extent_pages(reports, nranks)))
+    result = fail(ncclSystemError, "communicator %s: the node pool has no space for a "
                   "receive page for each pair: %s", made->name, strerror(ENOSPC));
   if (!result && nranks > 1) {
     struct base_report *own = bases + rank;
     own->status = comm_receives(made);
-    for (uint32_t c = 0; c < CHANNELS; c++) own->base[c] = made->channel[c].receives;
+    for (uint32_t c = 0; c < CHANNELS; c++) {
+      own->first[c] = made->channel[c].first_receive;
+      own->mailbox[c] = made->channel[c].mailbox;
+    }
     met = gather(made, bases, sizeof *bases, 0);
     if (own->status)
       result = fail(ncclSystemError, "communicator %s: its %u receive indices of this node's bridge: %s", made->name,
-                    (uint32_t)nranks * made->depth * CHANNELS, strerror(own->status));
+                    (uint32_t)nranks * made->extent_pages * CHANNELS, strerror(own->status));
     else if (met) result = fail(ncclRemoteError, "communicator %s: the bootstrap at %s: %s", made->name, made->id, strerror(met));
     for (int r = 0; !result && r < nranks; r++)
       if (bases[r].status)
@@ -821,7 +795,10 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   }
   for (int r = 0; !result && r < nranks; r++) {
     made->node[r] = reports[r].node;
-    for (uint32_t c = 0; c < CHANNELS; c++) made->base[(size_t)r * CHANNELS + c] = bases[r].base[c];
+    for (uint32_t c = 0; c < CHANNELS; c++) {
+      made->channel[c].peer[r].send.first = bases[r].first[c] + (uint32_t)rank * made->extent_pages;
+      made->mailbox[(size_t)r * CHANNELS + c] = bases[r].mailbox[c] + (uint32_t)rank;
+    }
     memcpy(made->address[r], reports[r].address, sizeof made->address[r]);
     made->address[r][sizeof made->address[r] - 1] = 0;
   }
@@ -955,28 +932,19 @@ static size_t page_at(size_t bytes, uint64_t j, size_t *offset) {
   return bytes - *offset < p ? bytes - *offset : p;
 }
 
-/* A channel's progress through a phase under way, toward and from each rank r, every count in the channel's own pages
-   (its q-th page of a message the message's page id + q CHANNELS, id the channel's number): its pair's first page of
-   the channel in the phase toward it (`first_out[r]`) and from it (`first_in[r]`), the channel's pages due from it
-   (`due[r]`: those of its in-message, `from[r]`, or the reduction's positions), the first of them not yet taken
-   (`low[r]`) and each one's state (`taken`, from `at[r]`: WAITING, TAKEN, or PARKED in the parked scratch until its
-   turn); the page it sends next (out-message `o`, its page `j`, its destinations from the g-th of them) and the source
-   page that page's payload was copied into and not yet written (`copied`, MESH_ABSENT none); each of the channel's
-   reduction positions' next rank to combine (`next`) and the scratch a page that lands before its rank's turn is
-   copied into (`parked`, NULL until the first); the in-message pages still to take and the reduction's contributions
-   still to combine (`left`) */
-enum { WAITING, TAKEN, PARKED };
+/* Page q of channel id is logical message page id + q CHANNELS. low[r] is the first
+   unconsumed logical page from r. The current destination extent starts at that page. */
 struct channel_phase {
   struct call *call;
   const struct phase *p;
   struct channel *channel;
   uint32_t id;
-  uint64_t *first_out, *first_in, *due, *low, *at;
+  uint64_t *due, *low, *at;
   const struct in **from;
   uint32_t o, g, copied;
   uint64_t j;
   size_t copied_bytes;
-  unsigned char *taken, *parked;
+  unsigned char *taken;
   uint64_t positions, left;
   uint32_t *next;
 };
@@ -984,30 +952,60 @@ struct channel_phase {
 /* the pages of a message of `pages` pages that are channel id's */
 static uint64_t channel_pages(uint64_t pages, uint32_t id) { return pages > id ? (pages - id + CHANNELS - 1) / CHANNELS : 0; }
 
-/* a source page of channel x of class `cls` free to copy into: its uses 1, its word's alone (no write, SEND or landing
-   of it under way: the use-checker, design/PAGE-TABLE-SPEC-20261122.md section 6), looked for from the class's `next`;
-   MESH_ABSENT where none is */
-static uint32_t source_free(struct channel *x, int cls) {
-  for (uint32_t i = 0; i < SOURCES; i++) {
-    const uint32_t at = (x->next[cls] + i) % SOURCES;
-    struct mesh_view_entry entry;
-    if (mesh_entry(x->context, x->source[cls] + at, &entry) || entry.uses != 1) continue;
-    x->next[cls] = (at + 1) % SOURCES;
-    /* the bridge's last drop of a use (release) before this rank's stores into the page */
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return x->source[cls] + at;
+/* Load the next advertised extent once all writes to the previous one have been submitted.
+   A receiver can publish another address only after receiving data in the advertised extent. */
+static int destination(struct channel_phase *m, int rank, struct mesh_dest *out) {
+  struct ncclComm *comm = m->call->comm;
+  struct extent *send = &m->channel->peer[rank].send;
+  if (send->used == comm->extent_pages) {
+    uint32_t mailbox = m->channel->mailbox + (uint32_t)rank;
+    struct mesh_view_entry e;
+    int rc = mesh_entry(m->channel->context, mailbox, &e);
+    if (rc) return rc;
+    if (!e.data) return EAGAIN;
+    if (e.bytes != sizeof send->first) return EIO;
+    memcpy(&send->first, e.data, sizeof send->first);
+    send->used = 0;
+    mesh_invalidate(m->channel->context, mailbox, 1, 0);
   }
-  return MESH_ABSENT;
+  *out = (struct mesh_dest){comm->node[rank], send->first + send->used};
+  return 0;
+}
+
+/* Allocate and advertise the next distinct extent as the reader advances. The current
+   extent stays owned until the reader has consumed every page in it. */
+static int extend_receive(struct channel_phase *m, int r) {
+  struct ncclComm *comm = m->call->comm;
+  struct channel *ch = m->channel;
+  struct peer_pages *peer = ch->peer + r;
+  uint32_t count = comm->extent_pages;
+  if (peer->receive.used < (count + 1) / 2) return 0;
+  if (peer->next_receive == MESH_ABSENT) {
+    peer->next_receive = mesh_pages(ch->context, count, 0);
+    if (peer->next_receive == MESH_ABSENT) return errno;
+  }
+  if (!peer->advertised) {
+    uint32_t *offer = mesh_page_writable(ch->context, ch->source + 1, sizeof *offer);
+    if (!offer) return errno;
+    *offer = peer->next_receive;
+    struct mesh_dest target = {comm->node[r], comm->mailbox[(size_t)r * CHANNELS + m->id]};
+    int rc = mesh_write(ch->context, ch->source + 1, sizeof *offer, &target, 1);
+    if (rc) return rc;
+    peer->advertised = 1;
+  }
+  if (peer->receive.used == count) {
+    mesh_invalidate(ch->context, peer->receive.first, count, 1);
+    peer->receive = (struct extent){peer->next_receive, 0};
+    peer->next_receive = MESH_ABSENT;
+    peer->advertised = 0;
+  }
+  return 0;
 }
 
 /* the g-th of the ranks other than `me`, counting up from rank 0 */
 static int other(int me, uint32_t g) { return (int)g + ((int)g >= me); }
 
-/* the channel's pages of the phase sent one after another (each message's pages of the channel; each page to its
-   destinations, one write to each MESH_DESTS of them by rank, every write from a source page of the channel's own,
-   each destination the index its own pair's page number for the page names in its receive ring, of the channel's
-   indices there), while a source page is free and the channel's write ring takes them: 0 (the rest wait for a later
-   pass), or -1 with the call's failure in *result */
+/* Issue one page write to each group of destinations, advancing only the addressed extents. */
 static int send_some(struct channel_phase *m, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
@@ -1020,23 +1018,23 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
     const uint32_t dests = x->to < 0 ? (uint32_t)comm->nranks - 1 : 1;
     for (; m->j < pages; m->j += CHANNELS, m->g = 0)
       while (m->g < dests) {
-        if (m->copied == MESH_ABSENT) {
-          const uint32_t a = source_free(channel, x->bytes > MESH_SHORT_PAYLOAD);
-          if (a == MESH_ABSENT) return 0;
-          size_t offset;
-          const size_t bytes = page_at(x->bytes, m->j, &offset);
-          unsigned char *data = mesh_page_data(channel->context, a);
-          if (x->pre) premultiply(c->type, data, x->data + offset, c->pre, bytes / SIZE[c->type]);
-          else memcpy(data, x->data + offset, bytes);
-          m->copied = a; m->copied_bytes = bytes;
-        }
         struct mesh_dest dest[MESH_DESTS];
         const uint32_t n = dests - m->g < MESH_DESTS ? dests - m->g : MESH_DESTS;
         for (uint32_t i = 0; i < n; i++) {
           const int d = x->to < 0 ? other(me, m->g + i) : x->to;
-          const uint64_t k = m->first_out[d] + m->j / CHANNELS;
-          dest[i] = (struct mesh_dest){comm->node[d], comm->base[(size_t)d * CHANNELS + m->id] + (uint32_t)me * comm->depth +
-                                                      (uint32_t)(k % comm->depth)};
+          int rc = destination(m, d, dest + i);
+          if (rc == EAGAIN) return 0;
+          if (rc) { *result = comm_fail(comm, ncclInternalError, "receive extent from rank %d: %s", d, strerror(rc)); return -1; }
+        }
+        if (m->copied == MESH_ABSENT) {
+          size_t offset;
+          const size_t bytes = page_at(x->bytes, m->j, &offset);
+          unsigned char *data = mesh_page_writable(channel->context, channel->source, (uint32_t)bytes);
+          if (!data && errno == EAGAIN) return 0;
+          if (!data) { *result = comm_fail(comm, ncclInternalError, "source page: %s", strerror(errno)); return -1; }
+          if (x->pre) premultiply(c->type, data, x->data + offset, c->pre, bytes / SIZE[c->type]);
+          else memcpy(data, x->data + offset, bytes);
+          m->copied = channel->source; m->copied_bytes = bytes;
         }
         const int status = mesh_write(channel->context, m->copied, (uint32_t)m->copied_bytes, dest, n);
         if (status == EAGAIN) return 0;
@@ -1046,125 +1044,94 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
           return -1;
         }
         m->copied = MESH_ABSENT;
+        for (uint32_t i = 0; i < n; i++) {
+          const int d = x->to < 0 ? other(me, m->g + i) : x->to;
+          channel->peer[d].send.used++;
+        }
         m->g += n;
       }
   }
   return 0;
 }
 
-/* the parked scratch's part for rank r's reduction pages: one p->bytes a rank, for each rank but rank 0 (whose page is
-   always in its turn) and this one (a channel touches only its own pages of it) */
-static unsigned char *parked_at(const struct channel_phase *m, int r) {
-  const int me = m->call->comm->rank;
-  return m->parked + (size_t)(r - 1 - (me && me < r)) * m->p->bytes;
-}
-
-/* the channel's reduction position q combined on, rank by rank, while the next rank's contribution is here: this
-   rank's own, or a page parked before its turn (rank 0's copied, each later one's combined); a page taken before its
-   turn from an index that named none adds nothing */
-static void advance(struct channel_phase *m, uint64_t q) {
-  struct call *c = m->call;
-  const struct phase *p = m->p;
-  const int n = c->comm->nranks, me = c->comm->rank;
+/* The local contribution has no landing. Combine it at its position in rank order. */
+static void own_contribution(struct channel_phase *m, uint64_t q) {
+  if (m->next[q] != (uint32_t)m->call->comm->rank) return;
   size_t offset;
-  const size_t bytes = page_at(p->bytes, m->id + q * CHANNELS, &offset);
-  for (int r; (r = (int)m->next[q]) < n; m->next[q]++, m->left--) {
-    const unsigned char *from = p->own + offset;
-    if (r != me) {
-      const int state = m->taken[m->at[r] + q];
-      if (state == WAITING) return;
-      if (state == TAKEN) continue;
-      from = parked_at(m, r) + offset;
-    }
-    if (!r) memcpy(p->acc + offset, from, bytes);
-    else combine_into(c->type, c->combine, p->acc + offset, from, bytes / SIZE[c->type]);
-  }
+  size_t bytes = page_at(m->p->bytes, m->id + q * CHANNELS, &offset);
+  if (!m->next[q]) memcpy(m->p->acc + offset, m->p->own + offset, bytes);
+  else combine_into(m->call->type, m->call->combine, m->p->acc + offset, m->p->own + offset, bytes / SIZE[m->call->type]);
+  m->next[q]++;
 }
 
-/* the channel's page q of the phase's pages from rank r taken once its index has counted its landing (the pair's page
-   k of the channel is the (k / depth + 1)-th to land at its index, depth that of the pair's receive ring), whatever
-   landed.  Where the index names a page, the bytes due are copied from it as they are (a page of either class is
-   followed by a long page's frames of the region, mesh.h): an in-message's to its place in recvbuff
-   (design/DEFRAGMENT-pseudocode-20261122.md), a reduction page's combined straight into the result where its rank's
-   turn at its position has come (rank 0's copied; then the position's later ranks already here after it, advance),
-   else copied into the channel's parked scratch (allocated at the first page parked, sized from the phase); then the
-   index is invalidated.  Where it names none (its page was taken under an earlier count), nothing is copied.  0
-   (taken, or not landed yet), or -1 with the call's failure in *result */
-static int take(struct channel_phase *m, int r, uint64_t q, ncclResult_t *result) {
+/* Consume exactly the allocated index for q. A sender writes this index once. */
+static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
   struct channel *channel = m->channel;
   const struct phase *p = m->p;
   const struct in *x = m->from[r];
-  const uint64_t k = m->first_in[r] + q;
-  const uint32_t index = channel->receives + (uint32_t)r * comm->depth + (uint32_t)(k % comm->depth);
+  if (!x && m->next[q] != (uint32_t)r) return 0;
   struct mesh_view_entry entry;
   if (mesh_entry(channel->context, index, &entry)) {
     *result = comm_fail(comm, ncclInternalError, "communicator %s: its index %u could not be read", comm->name, index);
     return -1;
   }
-  if (entry.landed < k / comm->depth + 1) return 0;
+  if (!entry.data) return 0;
   size_t offset;
   const size_t bytes = page_at(x ? x->bytes : p->bytes, m->id + q * CHANNELS, &offset);
-  const int turn = !x && m->next[q] == (uint32_t)r;
-  unsigned char state = TAKEN;
-  if (entry.data) {
-    if (x) memcpy(x->to + offset, entry.data, bytes);
-    else if (turn && !r) memcpy(p->acc + offset, entry.data, bytes);
-    else if (turn) combine_into(c->type, c->combine, p->acc + offset, entry.data, bytes / SIZE[c->type]);
-    else {
-      if (!m->parked && !(m->parked = malloc((size_t)(comm->nranks - 1 - (comm->rank != 0)) * p->bytes))) {
-        *result = comm_fail(comm, ncclSystemError, "communicator %s: out of memory for the pages that land before their turn", comm->name);
-        return -1;
-      }
-      memcpy(parked_at(m, r) + offset, entry.data, bytes);
-      state = PARKED;
-    }
-    mesh_invalidate(channel->context, index, 1, 0);
+  if (entry.bytes != bytes) {
+    *result = comm_fail(comm, ncclInternalError, "page %u contains %u bytes; expected %zu", index, entry.bytes, bytes);
+    return -1;
   }
-  m->taken[m->at[r] + q] = state;
-  if (x || turn) m->left--;
-  if (turn) { m->next[q]++; advance(m, q); }
+  if (x) memcpy(x->to + offset, entry.data, bytes);
+  else {
+    if (!r) memcpy(p->acc + offset, entry.data, bytes);
+    else combine_into(c->type, c->combine, p->acc + offset, entry.data, bytes / SIZE[c->type]);
+    m->next[q]++;
+    own_contribution(m, q);
+  }
+  mesh_invalidate(channel->context, index, 1, 0);
+  m->taken[m->at[r] + q] = 1;
+  m->left--;
   return 0;
 }
 
-/* the channel's landed pages of the phase taken (take), each in the pass that finds it, every page independent of the
-   others: from each rank, its pages from the first not yet taken through the depth of its receive ring, each at an
-   index of its own (a page further on lands at the index of one of these, and is looked for once that one is taken,
-   so no index is read for a later page while an earlier page there is due): 0, or -1 with the call's failure in
-   *result */
 static int take_some(struct channel_phase *m, ncclResult_t *result) {
-  const int n = m->call->comm->nranks;
-  const uint32_t depth = m->call->comm->depth;
-  for (int r = 0; r < n; r++) {
+  struct ncclComm *comm = m->call->comm;
+  for (int r = 0; r < comm->nranks; r++) {
+    if (m->low[r] == m->due[r]) continue;
+    struct extent *recv = &m->channel->peer[r].receive;
+    uint32_t room = comm->extent_pages - recv->used;
+    uint64_t low = m->low[r], end = m->due[r] - low > room ? low + room : m->due[r];
     const unsigned char *taken = m->taken + m->at[r];
-    while (m->low[r] < m->due[r] && taken[m->low[r]]) m->low[r]++;
-    const uint64_t end = m->due[r] - m->low[r] > depth ? m->low[r] + depth : m->due[r];
-    for (uint64_t q = m->low[r]; q < end; q++)
-      if (!taken[q] && take(m, r, q, result)) return -1;
+    for (uint64_t q = low; q < end; q++)
+      if (!taken[q] && take(m, r, q, recv->first + recv->used + (uint32_t)(q - low), result)) return -1;
+    while (m->low[r] < end && taken[m->low[r]]) { m->low[r]++; recv->used++; }
+    int rc = extend_receive(m, r);
+    if (rc && rc != EAGAIN) {
+      *result = comm_fail(comm, ncclSystemError, "receive extent for rank %d: %s", r, strerror(rc));
+      return -1;
+    }
   }
   return 0;
 }
 
 static void channel_phase_end(struct channel_phase *m) {
-  free(m->first_out); free(m->from); free(m->next); free(m->taken); free(m->parked);
-  m->first_out = NULL; m->from = NULL; m->next = NULL; m->taken = NULL; m->parked = NULL;
+  free(m->due); free(m->from); free(m->next); free(m->taken);
+  m->due = NULL; m->from = NULL; m->next = NULL; m->taken = NULL;
 }
-/* channel id's progress through phase p begun: each pair's pages of the channel numbered on from its count (comm's
-   `sent` to each rank, `received` from each, of the channel, the same at both ends, since every rank makes the same
-   calls in the same sequence and cuts each message alike), and this rank's own contribution combined where it is rank
-   0; ncclSuccess, or the failure (out of memory) */
 static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c, const struct phase *p, uint32_t id) {
   struct ncclComm *comm = c->comm;
   const int n = comm->nranks, me = comm->rank;
   *m = (struct channel_phase){.call = c, .p = p, .channel = comm->channel + id, .id = id, .copied = MESH_ABSENT, .j = id,
                               .positions = p->acc ? channel_pages(pages_of(p->bytes), id) : 0};
-  m->first_out = calloc(5 * (size_t)n, sizeof *m->first_out);
+  m->due = calloc(3 * (size_t)n, sizeof *m->due);
   m->from = calloc((size_t)n, sizeof *m->from);
   m->next = calloc((size_t)m->positions + 1, sizeof *m->next);
   uint64_t pages = 0;
-  if (m->first_out && m->from) {
-    m->first_in = m->first_out + n; m->due = m->first_in + n; m->low = m->due + n; m->at = m->low + n;
+  if (m->due && m->from) {
+    m->low = m->due + n; m->at = m->low + n;
     for (uint32_t i = 0; i < p->ins; i++) {
       m->from[p->in[i].from] = p->in + i;
       m->due[p->in[i].from] = channel_pages(pages_of(p->in[i].bytes), id);
@@ -1174,17 +1141,12 @@ static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c,
     for (int r = 0; r < n; r++) { m->at[r] = pages; pages += m->due[r]; }
   }
   m->taken = calloc((size_t)pages + 1, 1);
-  if (!m->first_out || !m->from || !m->next || !m->taken) {
+  if (!m->due || !m->from || !m->next || !m->taken) {
     channel_phase_end(m);
     return fail(ncclSystemError, "communicator %s: out of memory", comm->name);
   }
-  m->left = pages + m->positions;
-  uint64_t *sent = comm->sent + (size_t)id * n, *received = comm->received + (size_t)id * n;
-  for (int r = 0; r < n; r++) { m->first_out[r] = sent[r]; m->first_in[r] = received[r]; received[r] += m->due[r]; }
-  for (uint32_t o = 0; o < p->outs; o++)
-    for (int d = 0; d < n; d++)
-      if (d != me && (p->out[o].to < 0 || p->out[o].to == d)) sent[d] += channel_pages(pages_of(p->out[o].bytes), id);
-  for (uint64_t q = 0; q < m->positions; q++) advance(m, q);
+  m->left = pages;
+  for (uint64_t q = 0; q < m->positions; q++) own_contribution(m, q);
   return ncclSuccess;
 }
 
