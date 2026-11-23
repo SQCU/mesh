@@ -10,6 +10,6 @@
    this file, the services' shell scripts with awk. */
 #define MESH_DISK_FLOOR_GIB 20
 /* A log a long-lived process writes on its stderr (a bridge's): past MESH_LOG_CAP_MIB it moves to
-   <path>.1, the one before it dropped, and starts again, so it holds at most twice this. */
+   <path>.1, the one before it dropped, and starts again, so it takes at most twice this. */
 #define MESH_LOG_CAP_MIB 16
 #endif

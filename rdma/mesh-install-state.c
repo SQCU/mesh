@@ -1,4 +1,4 @@
-/* Read-only install preflight, using the same holder identity as mesh-heartbeat.
+/* Read-only install preflight, using the same process identity as mesh-heartbeat.
    This is an observer, never a client and never an owner of region memory. */
 #include "mesh.h"
 #include <errno.h>
@@ -23,7 +23,7 @@ static uint32_t install_state_clients(const struct hdr *m,pid_t *out){
   for(uint32_t c=0;c<m->clients;c++){
     const struct mesh_client *slot=(const struct mesh_client *)((const char *)m+m->client_off)+c;
     pid_t pid=(pid_t)(uint32_t)atomic_load_explicit(&slot->owner,memory_order_acquire);
-    if(pid && mesh_holds(pid,slot->start))out[count++]=pid;
+    if(pid && mesh_alive(pid,slot->start))out[count++]=pid;
   }
   return count;
 }

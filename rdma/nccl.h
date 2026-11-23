@@ -8,24 +8,25 @@
 /* libnccl-mesh: NCCL's API over the mesh's page tables (design/PAGE-TABLE-SPEC-20261122.md section 6).
 
    This is NVIDIA/nccl master 12df1a1 src/nccl.h.in (NCCL 2.32.3) with its CUDA includes removed, its version filled in,
-   and only the functions libnccl-mesh.dylib exports declared (each also as its pnccl profiling name).  Every type,
-   enum, config struct and initializer kept is NCCL's, member for member, so code written against nccl.h for these
-   calls compiles against this one.  Installing, linking and running it: rdma/NCCL.md.
+   and only the functions libnccl-mesh.dylib exports in it (each also as its pnccl profiling name).  Every type, enum,
+   config struct and initializer it has is NCCL's, member for member, so code written against nccl.h for these calls
+   builds against this one.  Installing and linking it: rdma/NCCL.md.
 
    A rank is a process on a node, a client of its node's resident bridge (mesh-flow).  Its calls move bytes between
    ranks as pages of the node's pool, named by indices of each node's page table (mesh-call.h): a rank copies what it
-   sends into source pages of its own and writes each to the indices its peers hold for it; the bridges carry the page
+   sends into source pages of its own and writes each to the indices its peers took for it; the bridges carry the page
    to every destination node and make each destination index name it; the receiving rank copies (or combines) what
-   landed at its indices into its buffers, as it landed, and invalidates them.  The bridge owns cables, lanes, frames
-   and the path of every page; this library owns nothing but its indices, its pages and the copies, and checks nothing
+   landed at its indices into recvbuff, as it landed, and invalidates them.  The bridge owns cables, lanes, frames and
+   the path of every page; this library owns nothing but its indices, its pages and the copies, and checks nothing
    that lands.
 
    Calls.  Every call is blocking, on host memory: it returns once this rank's part is done (its pages written, every
-   page due to it landed and taken into its buffers), and its stream argument is NULL (any other is refused,
-   ncclInvalidArgument).  Buffers are ordinary memory; ncclMemAlloc allocates it page-aligned and ncclMemFree frees it.
-   Every rank makes the same calls on a communicator, in the same order, with the same count, type, operator and root,
-   as NCCL requires; nothing is compared at run time, so calls that do not pair are the caller's error (each rank
-   takes the bytes due to it as they landed).  The calls move pages so (B a rank's count of bytes):
+   page due to it landed and taken into recvbuff), and its stream argument is NULL (any other is refused,
+   ncclInvalidArgument).  sendbuff and recvbuff are ordinary memory; ncclMemAlloc allocates it page-aligned and
+   ncclMemFree frees it.  Every rank makes the same calls on a communicator, in the same sequence, with the same
+   count, type, operator and root, as NCCL requires; nothing is compared at call time, so calls that do not pair are
+   the caller's error (each rank takes the bytes due to it as they landed).  The calls move pages so (B a rank's count
+   of bytes):
      ncclAllGather      each rank's B to every other rank, one write a page to them all, landing at recvbuff + rank B
      ncclBroadcast      the root's B to every other rank
      ncclReduce         every other rank's B to the root, which reduces them with its own
@@ -37,62 +38,71 @@
      ncclGather         every other rank's B to the root, landing at its recvbuff + rank B
      ncclScatter        the root's segment d to rank d
    A message of at most MESH_SHORT_PAYLOAD bytes is one short page, a longer one long pages, every rank cutting it
-   alike.  A reduction combines in rank order (rank 0's, then rank 1's, ...), so every rank computes the same bits, on
+   alike.  A reduction combines rank by rank (rank 0's, then rank 1's, ...), so every rank computes the same bits, on
    the host, for all twelve types and ncclSum, ncclProd, ncclMax, ncclMin and ncclAvg (a floating average premultiplies
    every contribution by 1 / nranks, an integer one divides the sum by nranks); the in-place forms are NCCL's.  A group
-   (ncclGroupStart/End; a call outside one is a group of one) runs its calls in the order they were made, each to its
-   end, on whatever communicators they name; every one runs whatever another's result, and the first failure is
-   returned.  A communicator's calls are made by one thread at a time; calls on different communicators may be made
-   by different threads at once.
+   (ncclGroupStart/End; a call outside one is a group of one) makes its calls one after another, as they were made,
+   each to its end, on whatever communicators they name; every one is made whatever another's result, and the first
+   failure is returned.  A communicator's calls are made by one thread at a time.  Calls on different communicators
+   may come from different threads, and are moved one after the other: the process moves one call at a time, on its
+   one pool of threads, and a call that waits for the one before it to end ends at its own communicator's revoke as
+   any wait of a call does.  So, as NCCL asks of communicators used at once, the ranks that several communicators share
+   make their calls on them in the same sequence; where one process calls on two communicators from two threads, their
+   sequence is whichever call takes the pool first, so such an application sequences those calls itself, or makes them
+   from one thread.  A process is one rank of a communicator (two ranks of one communicator in one process would each
+   wait for the other's pages).
 
-   Shares and threads.  Every rank cuts a call's pages into SHARES (8) shares alike: page j of a message, and a
-   reduction's position j, are share j % SHARES's.  A rank moves its shares on its threads, share s on thread s % its
-   threads, the first the calling thread's: the process takes a client slot of its node's bridge for each thread
-   (NCCL_MESH_THREADS where set, 1 to SHARES, else 4, at most half the node's top-level cores; fewer where the
-   slots run out), and each communicator starts a thread for each slot past the first.  A call with pages in one share
-   only (a message of one page) moves on the calling thread alone.  A thread between calls looks for the next for 2
-   ms, then sleeps until one wakes it.  Each thread copies its shares' pages in and out, and makes its shares' part of
-   the call's own copy and of a reduction, so the copies of a large call are spread over the threads.
+   Channels and threads.  Every rank cuts a call's pages into CHANNELS (8) channels alike: page j of a message, and a
+   reduction's position j, are channel j % CHANNELS's.  A rank moves its channels on its process's pool of T threads,
+   channel c on thread c % T, the first thread the calling thread: at its first communicator the process takes a
+   client slot of its node's bridge for each thread (NCCL_MESH_THREADS where set, 1 to CHANNELS, else 4, at most half
+   the node's top-level cores; fewer where no more slots are vacant) and starts a worker for each slot past the
+   first.  The workers spin between calls and never sleep, from then until the process lets its attach go (once its
+   bridge's region has expired and it has destroyed every communicator of it) or exits.  A call with pages in one
+   channel only (a message of one page) moves on the calling thread alone.  Each thread copies its channels' pages in
+   and out, and makes its channels' part of the call's own copy and of a reduction, so the copies of a large call are
+   spread over the threads.
 
-   Indices.  Each share of a communicator holds, at each rank's node, RECEIVES (512) receive indices for every rank
-   and SOURCES (128) source pages of each class, of its thread's slot.  Each pair of a share uses W of its RECEIVES,
-   the communicator's window, which every rank computes alike from the init's reports: at most RECEIVES, and the most
-   for which, at every node v of the communicator, its c_v ranks' source pages and a page at each index of their
-   shares' windows, c_v SHARES (SOURCES + (nranks - 1) W) pages, fit in half the fewer pages of the node's two pool
-   classes (the other half its bridge's lanes' receives, its relays' pages and its other clients'); a W of 0 fails the
-   init.  An index holds one page, so that is the most of either class this communicator ever holds at v, whatever
-   its peers write ahead; communicators and clients that share a node share its pool.  The k-th page of share x rank s
-   sends rank d on the communicator is written to d's index base[d][x] + s RECEIVES + k mod W (mesh-call.h
-   mesh_write), so it is that index's (k / W + 1)-th landing: both ends count each pair's pages of each share alike,
-   so no exchange beyond the init names any index.  A page to
-   several ranks is one write to each MESH_DESTS of them in rank order, each destination the index its own pair's
-   count names and each write from a source page of its own, and a source page is copied into again only once its
-   uses are back to 1 (no write, SEND or landing of it under way).  A receiving rank reads the indices of each rank's
-   next W pages due and takes page k once its index's landed count reaches k / W + 1: where the index names a page,
-   the bytes due are copied from it to their place, whatever it holds (a reduction page that lands before its rank's
-   turn into the call's scratch, and combined from there in rank order), and the index is invalidated, so the rank
-   holds no page of the phase it is in while it waits for another; where it names none (its page was taken under an
-   earlier count), nothing is copied.  A page written W pages or more ahead of the page its receiver takes there
-   replaces that page at the index, and is taken as it.
+   Indices.  Each channel of a communicator has, at each rank's node, a receive ring of `depth` indices for every rank
+   and SOURCES (128) source pages of each class, of its thread's slot.  Every rank computes the same depth from the
+   first round of the init's reports: at most RECEIVES (512), and the most for which, at every node v of the
+   communicator, its c_v ranks' source pages and a page at each index of their channels' rings, c_v CHANNELS (SOURCES +
+   (nranks - 1) depth) pages, fit in half the fewer pages of the node's two pool classes (the other half its bridge's
+   lanes' receives, its relays' pages and its other clients'); a depth of 0 fails the init.  An index names one page
+   at a time, so that is the most of either class this communicator ever has at v, whatever its peers write ahead;
+   communicators and clients that share a node share its pool.  The k-th page of channel c that rank s sends rank d on
+   the communicator is written to d's index base[d][c] + s depth + k mod depth (mesh-call.h mesh_write), so it is that
+   index's (k / depth + 1)-th landing: both ends count each pair's pages of each channel alike, so no exchange beyond
+   the init names any index.  A page to several ranks is one write to each MESH_DESTS of them by rank, each
+   destination the index its own pair's count names and each write from a source page of its own, and a source page
+   is copied into again only once its uses are back to 1 (no write, SEND or landing of it under way).  A receiving
+   rank reads the indices of each rank's next depth pages due and takes page k once its index's landed count reaches
+   k / depth + 1: where the index names a page, the bytes due are copied from it to their place, whatever its bytes
+   (a reduction page that lands before its rank's turn into the call's scratch, and combined from there rank by rank),
+   and the index is invalidated, so the rank has no page of the phase it is in while it waits for another; where it
+   names none (its page was taken under an earlier count), nothing is copied.  A page written depth pages or more
+   ahead of the page its receiver takes there replaces that page at the index, and is taken as it.
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
-   listener ncclGetUniqueId opens, on the node's fabric address where it holds one), the root listening on that host
+   listener ncclGetUniqueId opens, on the node's fabric address where it has one), the root listening on that host
    alone where it is an IPv6 address; the id is the communicator's name.  Making a communicator attaches the process's
-   client of its node's bridge where it has none (every client slot held, or no region of a running bridge, fails the
-   init), takes its indices and pages, and gathers each rank's node, the first receive index of each of its shares, its node's pool
-   and its standing listener's address over the bootstrap: the one exchange its calls need.  A rank that cannot go on
-   fails every rank's init alike.  The bootstrap's waits are 100 ms slices that read the communicator's revoke; nothing else bounds them.
-   ncclCommSplit gathers every rank's (color, key) over comm's bootstrap and makes each color's communicator, ordered
-   by key then rank, at its first rank's standing listener; ncclCommShrink makes the kept ranks' communicator at the
-   first kept rank's standing listener, exchanging nothing over comm (with NCCL_SHRINK_ABORT, comm is revoked first);
-   a rank of no color, or excluded, gets NULL.  ncclCommGrow meets at the id that ncclCommGetUniqueId gives comm's root,
-   which the root gives comm's ranks over comm's bootstrap; a joining process passes NULL and the root's id.  Two ranks
-   of a communicator may share a node.  ncclCommRevoke is NCCL's: comm's calls under way end as a value at their next
-   look, every later call on it is refused (ncclInvalidUsage), and ncclCommGetAsyncError reads ncclSuccess after it;
-   its revokeFlags is not read.  ncclCommDestroy (and ncclCommAbort) revokes comm, waits for its calls under way to
-   return, frees its indices (their pages drop as their last uses end) and frees it.  A region its bridge's stop
-   released, or a bridge of another layout replaced, is expired: while the process holds a communicator of it, a new
-   one fails (ncclRemoteError), and once it has destroyed them all its next one attaches the bridge's next region.
+   client of its node's bridge where it has none (every client slot taken, or no region of a bridge that is up, fails
+   the init), takes its source pages, and gathers each rank's status, node, pool and standing listener's address over
+   the bootstrap; every rank then computes the depth and takes its receive rings, and a second round gathers each
+   rank's status and the first receive index of each of its channels: the only exchanges its calls need.  A rank that
+   cannot go on fails every rank's init alike.  The bootstrap's waits are 100 ms slices that read the communicator's
+   revoke; nothing else bounds them.  ncclCommSplit gathers every rank's (color, key) over comm's bootstrap and makes
+   each color's communicator, sorted by key then rank, at its first rank's standing listener; ncclCommShrink makes the
+   remaining ranks' communicator at the first remaining rank's standing listener, exchanging nothing over comm (with
+   NCCL_SHRINK_ABORT, comm is revoked first); a rank of no color, or excluded, gets NULL.  ncclCommGrow meets at the id
+   that ncclCommGetUniqueId gives comm's root, which the root gives comm's ranks over comm's bootstrap; a joining
+   process passes NULL and the root's id.  Two ranks of a communicator may share a node.  ncclCommRevoke is NCCL's:
+   comm's calls under way end as a value at their next look, every later call on it is refused (ncclInvalidUsage),
+   and ncclCommGetAsyncError reads ncclSuccess after it; its revokeFlags is not read.  ncclCommDestroy (and
+   ncclCommAbort) revokes comm, waits for its calls under way to return, frees its indices (their pages drop as their
+   last uses end) and frees it.  A region its bridge's stop released, or a bridge of another layout replaced, is
+   expired: while the process has a communicator of it, a new one fails (ncclRemoteError), and once it has destroyed
+   them all its next one attaches the bridge's next region.
 
    Failures are ncclResult_t values, ncclGetLastError naming what failed.  A call records three failures on its
    communicator: a write its node's table refuses, an index it cannot read, and no memory for the pages that land
@@ -102,7 +112,7 @@
    ncclInvalidUsage while ncclCommGetAsyncError reads ncclSuccess.  A call never fails on what lands: the library
    checks nothing that lands, and each page's bytes are taken as they landed (a write may land wrong, or not at all:
    mesh-call.h).  A call's wait ends once its pages have landed, or at ncclCommRevoke or ncclCommAbort: no timer
-   declares a peer lost, and a page that never lands leaves its call waiting until the application revokes or aborts
+   judges a peer lost, and a page that never lands leaves its call waiting until the application revokes or aborts
    that communicator, as with NCCL's own.
 
    Not implemented (not exported): ncclCommInitRankConfig and the non-blocking init, ncclCommInitAll,
@@ -252,7 +262,7 @@ typedef struct ncclConfig_v23100 {
   NCCL_CONFIG_UNDEF_INT,                    /* nvlsHostMode */          \
 }
 
-/* NCCL's malloc and free: here ordinary host memory, aligned to the system's page (a buffer of the calls is any
+/* NCCL's malloc and free: here ordinary host memory, aligned to the system's page (sendbuff and recvbuff may be any
    memory). */
 ncclResult_t  ncclMemAlloc(void** ptr, size_t size);
 ncclResult_t pncclMemAlloc(void** ptr, size_t size);
@@ -306,7 +316,7 @@ ncclResult_t pncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *new
 ncclResult_t  ncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
 ncclResult_t pncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
 
-/* Revoke: comm's operations in flight end with an error and none is issued after it (NCCL 2.29). */
+/* Revoke: comm's operations in flight end with an error and none starts after it (NCCL 2.29). */
 ncclResult_t  ncclCommRevoke(ncclComm_t comm, int revokeFlags);
 ncclResult_t pncclCommRevoke(ncclComm_t comm, int revokeFlags);
 
@@ -506,8 +516,8 @@ ncclResult_t pncclScatter(const void* sendbuff, void* recvbuff, size_t count,
 /*
  * Group semantics
  *
- * ncclGroupStart and ncclGroupEnd bracket calls that run as one group: here
- * ncclGroupEnd runs them in the order they were made, each to its end.
+ * ncclGroupStart and ncclGroupEnd bracket calls that are made as one group: here
+ * ncclGroupEnd makes them one after another, as they were made, each to its end.
  */
 
 /*
@@ -522,7 +532,7 @@ ncclResult_t pncclGroupStart(void);
 /*
  * Group End
  *
- * End a group call: run the calls made since ncclGroupStart.
+ * End a group call: make the calls queued since ncclGroupStart.
  */
 ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);

@@ -1,17 +1,18 @@
 /* design/transport.md section 2, "The heartbeat": the node's bridge supervised by one small process, the job launchd
-   keeps alive (bin/mesh-user.sh).  It holds no device, no region and no socket of the mesh: it opens the bridge (spawned
+   keeps alive (bin/mesh-user.sh).  It has no device, no region and no socket of the mesh: it opens the bridge (spawned
    in a process group of its own, so a heartbeat that ends leaves it serving), closes it when asked (a signal, its exit
    then heard as a kernel event, never inferred from time passing), and is the one process that unlinks an expired
-   region, once none of the region's holders lives (the bridge, its children and its clients, each recorded in the region
-   by its pid and start: mesh_holds), before it opens a bridge again: a bridge is never opened while another is ending,
-   and no second region is ever made beside a live holder of the first (a process in its exit is none: mesh_started).
+   region, once none of the region's processes lives (the bridge, its children and its clients, each recorded in the
+   region by its pid and start: mesh_alive), before it opens a bridge again: a bridge is never opened while another is
+   ending, and no second region is ever made beside a live process of the first (a process in its exit is none:
+   mesh_started).
 
    Its operator's signals (`launchctl kill SIG user/$(id -u)/io.mesh.bridge`):
-   - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
+   - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region left for the next to adopt), this heartbeat's own
      image run again (a deploy's new binaries both), and the bridge opened again (once an expired region is unlinked);
    - SIGUSR1: release: the bridge closed by SIGTERM (its children end, so the kernel frees their devices' objects; its
      region expired, so every client's next attach or communicator returns the expiry), the region unlinked once no
-     holder lives (its memory then the system's), and no bridge opened until SIGHUP;
+     process of it lives (its memory then the system's), and no bridge opened until SIGHUP;
    - SIGTERM, SIGINT (launchd's stop of the job, the system's shutdown): release, then this heartbeat ends (0, which
      launchd's KeepAlive {SuccessfulExit: false} does not restart).
    The bridge keeps its region at every stop of its own; a release is the heartbeat's: once the bridge it closed has
@@ -43,7 +44,7 @@ extern char **environ;
 #define REOPEN_S 60u
 #define REPLACE_TICK_MS 1000
 enum { TIMER_OPEN=1, TIMER_END=2 };
-enum { TAG_BRIDGE=1, TAG_HOLDER=2 };
+enum { TAG_BRIDGE=1, TAG_PROCESS=2 };
 
 /* a line of the log: its time and the message, one write (stderr is line-buffered from main) */
 static void say(const char *format,...){
@@ -66,10 +67,10 @@ static pid_t bridge;
 static int child;
 static enum { ASKED_NONE, ASKED_RESTART, ASKED_RELEASE, ASKED_END } asked;
 static uint64_t opened_at;
-/* whether a bridge is wanted (SIGHUP; a release none), whether an expired region waits to be unlinked (its holders
-   watched), whether a reopen waits REOPEN_S, and the holders last told */
+/* whether a bridge is wanted (SIGHUP; a release none), whether an expired region waits to be unlinked (its processes
+   watched), whether a reopen waits REOPEN_S, and the processes last told */
 static int wanted=1,replacing,timer_open;
-static pid_t told[3*MESH_PORTS+MESH_CLIENTS];
+static pid_t told[1+2*MESH_PORTS+MESH_CLIENTS];
 static uint32_t told_count;
 
 /* the node's region by name, mapped (read-only, or read-write where `writable`) and its descriptor closed at once:
@@ -94,7 +95,7 @@ static pid_t bridge_of(struct hdr *m,size_t size,uint64_t *start){
   const struct mesh_bridge_pages *own=region_own(m,size);
   const pid_t was=own?(pid_t)atomic_load(&m->bridge_pid):0;
   *start=own?own->bridge_start:0;
-  return was && mesh_holds(was,*start)?was:0;
+  return was && mesh_alive(was,*start)?was:0;
 }
 static pid_t region_bridge(uint64_t *start){
   size_t size=0;
@@ -121,11 +122,12 @@ static void reopen_later(void){
   kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
 }
 
-/* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its holders lives:
-   its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process (its
-   owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
-   they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
-   and named as they change.  A region that is live, or none, ends the replacement */
+/* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its processes
+   lives: its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process
+   (its owner's pid, `start`), each identified by its pid and start (mesh_alive, so a reused pid is none of them).
+   Until then their exits are watched on this heartbeat's queue (mesh-observe.h mesh_exits_wait, each exit a turn),
+   the slots read again every REPLACE_TICK_MS for a client that lets go and lives on, and they are named as they
+   change.  A region that is live, or none, ends the replacement */
 static void replace_turn(void){
   size_t size=0;
   struct hdr *m=region_map(&size,0);
@@ -135,22 +137,19 @@ static void replace_turn(void){
     replacing=0;told_count=0;
     return;
   }
-  pid_t holders[3*MESH_PORTS+MESH_CLIENTS];
+  struct mesh_process processes[1+2*MESH_PORTS+MESH_CLIENTS];
   uint32_t count=0;
-  uint64_t start;
-  const pid_t serving=bridge_of(m,size,&start);
-  if(serving)holders[count++]=serving;
-  for(uint32_t a=0;a<2*MESH_PORTS;a++)
-    if(own->child[a].pid && mesh_holds((pid_t)own->child[a].pid,own->child[a].start))holders[count++]=(pid_t)own->child[a].pid;
+  processes[count++]=(struct mesh_process){.pid=(uint32_t)atomic_load(&m->bridge_pid),.start=own->bridge_start};
+  for(uint32_t a=0;a<2*MESH_PORTS;a++)processes[count++]=own->child[a];
   for(uint32_t c=0;c<m->clients && c<MESH_CLIENTS && m->client_off+(uint64_t)(c+1)*sizeof(struct mesh_client)<=size;c++){
     const struct mesh_client *slot=(const struct mesh_client *)((const char *)m+m->client_off)+c;
-    const pid_t pid=(pid_t)(uint32_t)atomic_load(&slot->owner);
-    if(pid && mesh_holds(pid,slot->start))holders[count++]=pid;
+    processes[count++]=(struct mesh_process){.pid=(uint32_t)atomic_load(&slot->owner),.start=slot->start};
   }
   munmap(m,size);
+  count=mesh_exits_wait(events,processes,count,TAG_PROCESS,0);
   if(!count){
     replacing=0;told_count=0;
-    if(!shm_unlink(MESH_NAME) || errno==ENOENT)say("region %s unlinked: none of its holders lives, and its memory is the system's\n",MESH_NAME);
+    if(!shm_unlink(MESH_NAME) || errno==ENOENT)say("region %s unlinked: none of its processes lives, and its memory is the system's\n",MESH_NAME);
     else {
       say("region %s not unlinked: %s\n",MESH_NAME,strerror(errno));
       if(!timer_open)reopen_later();
@@ -159,17 +158,12 @@ static void replace_turn(void){
   }
   replacing=1;
   int same=count==told_count;
-  for(uint32_t k=0;k<count && same;k++)same=holders[k]==told[k];
+  for(uint32_t k=0;k<count && same;k++)same=(pid_t)processes[k].pid==told[k];
   if(!same){
-    say("region %s is expired; it is unlinked, and a bridge opened, once each of its %u holders ends or lets it go:",MESH_NAME,count);
-    for(uint32_t k=0;k<count;k++)fprintf(stderr," %d",(int)holders[k]);
+    say("region %s is expired; it is unlinked, and a bridge opened, once each of its %u processes ends or lets it go:",MESH_NAME,count);
+    for(uint32_t k=0;k<count;k++){fprintf(stderr," %u",processes[k].pid);told[k]=(pid_t)processes[k].pid;}
     fputc('\n',stderr);
-    memcpy(told,holders,count*sizeof *holders);told_count=count;
-  }
-  for(uint32_t k=0;k<count;k++){
-    struct kevent64_s watch;
-    EV_SET64(&watch,(uint64_t)holders[k],EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_HOLDER,0,0);
-    kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+    told_count=count;
   }
 }
 
@@ -186,12 +180,12 @@ static int bridge_watch(pid_t pid,int mine){
   return kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
 }
 
-/* this heartbeat's image run again (a deploy's new one), its operator's signals held pending across the exec (blocked:
+/* this heartbeat's image run again (a deploy's new one), its operator's signals left pending across the exec (blocked:
    the new image reads them, main) */
 static void run_again(void){
-  sigset_t held;sigemptyset(&held);
-  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&held,heard[i]);
-  sigprocmask(SIG_BLOCK,&held,NULL);
+  sigset_t blocked;sigemptyset(&blocked);
+  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&blocked,heard[i]);
+  sigprocmask(SIG_BLOCK,&blocked,NULL);
   /* a signal the kqueue heard since its last read raised again once the kqueue is drained (the kqueue records a
      blocked signal's delivery too), now blocked, so it is pending across the exec */
   struct kevent64_s left[8];
@@ -203,11 +197,11 @@ static void run_again(void){
   say("the heartbeat runs its image again (%s)\n",self);
   execv(self,arguments);
   say("the heartbeat's image %s not run again: %s\n",self,strerror(errno));
-  sigprocmask(SIG_UNBLOCK,&held,NULL);
+  sigprocmask(SIG_UNBLOCK,&blocked,NULL);
 }
 
 static void bridge_ended(void);
-/* the bridge opened where one is wanted, none runs, no region waits for its holders and no reopen waits: spawned in a
+/* the bridge opened where one is wanted, none runs, no region waits for its processes and no reopen waits: spawned in a
    process group of its own, its signals' dispositions the defaults and none blocked, its input /dev/null, its log
    this heartbeat's */
 static void open_bridge(void){
@@ -243,7 +237,7 @@ static void open_bridge(void){
 }
 
 /* the heartbeat's state carried forward after any event: a bridge opened where one is wanted, else an expired region's
-   holders read again */
+   processes read again */
 static void turn(void){
   if(wanted && !bridge && !timer_open)open_bridge();
   else if(!bridge)replace_turn();
@@ -288,7 +282,7 @@ static void close_bridge(int how,int signal_number){
   if(!bridge)return;
   if(asked==ASKED_END || (asked==ASKED_RELEASE && how!=ASKED_END))return;
   asked=how;
-  say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its region kept":"SIGTERM: released");
+  say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its region left for the next bridge":"SIGTERM: released");
   kill(bridge,signal_number);
 }
 
@@ -309,9 +303,9 @@ int main(int argc,char **argv){
   /* the operator's signals: blocked while their filters are added (a run_again leaves them blocked and pending across
      the exec), each then given a handler that does nothing (an ignored signal is discarded, a pending one too), and
      each one pending since before its filter raised again once unblocked, so its filter hears it */
-  sigset_t held,pending;sigemptyset(&held);
-  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&held,heard[i]);
-  sigprocmask(SIG_BLOCK,&held,NULL);
+  sigset_t blocked,pending;sigemptyset(&blocked);
+  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&blocked,heard[i]);
+  sigprocmask(SIG_BLOCK,&blocked,NULL);
   if((events=kqueue())<0 || fcntl(events,F_SETFD,FD_CLOEXEC)){say("events: %s\n",strerror(errno));return 1;}
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++){
     struct kevent64_s e;
@@ -322,7 +316,7 @@ int main(int argc,char **argv){
   }
   signal(SIGPIPE,SIG_IGN);
   sigpending(&pending);
-  sigprocmask(SIG_UNBLOCK,&held,NULL);
+  sigprocmask(SIG_UNBLOCK,&blocked,NULL);
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++)if(sigismember(&pending,heard[i]))kill(getpid(),heard[i]);
   uint64_t start=0;
   const pid_t serving=region_bridge(&start);
@@ -374,7 +368,7 @@ int main(int argc,char **argv){
         return 0;
       }
       else if(e->filter==EVFILT_PROC && e->udata==TAG_BRIDGE && (pid_t)e->ident==bridge)bridge_ended();
-      else if(e->filter==EVFILT_PROC && e->udata==TAG_HOLDER)turn();
+      else if(e->filter==EVFILT_PROC && e->udata==TAG_PROCESS)turn();
     }
   }
 }

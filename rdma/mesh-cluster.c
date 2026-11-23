@@ -1,4 +1,4 @@
-/* mesh-cluster: the whole cluster's fabric as this node's region holds it, one JSON object, read-only.
+/* mesh-cluster: the whole cluster's fabric as this node's region has it, one JSON object, read-only.
    The cluster part is the flooded link-state of every node with a bridge (mesh.h struct mesh_record: each bridge
    floods its own record, the newest of which every bridge keeps; a record's reach is an entry a cable, the peer node
    and the bandwidth that end reports), so it names nodes that are no communicator's member (a relay-only node) and is

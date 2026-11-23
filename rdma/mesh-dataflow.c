@@ -6,8 +6,8 @@
 #include <sys/stat.h>
 
 /* The node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no client and changes
-   nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge runs on it now
-   (it outlives a restart of its bridge): 0, EINVAL where it is no region of this layout, or one expired, else the
+   nothing of the bridge's), its descriptor left open in *fd where one is asked for, whether or not a bridge runs on it
+   now (it outlives a restart of its bridge): 0, EINVAL where it is no region of this layout, or one expired, else the
    errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   int file=shm_open(mesh_name(),writable?O_RDWR:O_RDONLY,0);
@@ -38,7 +38,7 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
   munmap(m,length);return (int)count;
 }
 
-/* The bridge stores idle_since before busy (mesh-records.c busy_tell), and idle_since is never 0 while its lanes hold
+/* The bridge stores idle_since before busy (mesh-records.c busy_tell), and idle_since is never 0 while its lanes have
    nothing (the region's boot from its start), so a read that meets it as it becomes busy (busy 0 and idle_since 0: the
    old count, the new time) is a busy one and is told as one */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since){
@@ -59,10 +59,10 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
 }
 
 /* A seqlock's serial read odd (its writer in its write): waited on for at most MESH_PAUSE_NS; 0 to read it again, or
-   ESRCH where it did not move and the bridge is gone */
+   ESRCH where it did not move and the bridge has exited */
 static int mesh_serial_wait(struct hdr *m,_Atomic uint64_t *serial,uint64_t odd){
   if(os_sync_wait_on_address_with_timeout(serial,odd,sizeof *serial,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-       MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return ESRCH;
+       MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_exited((pid_t)atomic_load(&m->bridge_pid)))return ESRCH;
   return 0;
 }
 
@@ -190,7 +190,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
 }
 
 /* The map's serial waited on until it differs from *serial, or the bridge's exit (ESRCH: its pid in the region another,
-   or its process gone, read at every wake and every MESH_PAUSE_NS re-look) */
+   or its process exited, read at every wake and every MESH_PAUSE_NS re-look) */
 int mesh_map_wait(uint64_t *serial){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -201,7 +201,7 @@ int mesh_map_wait(uint64_t *serial){
     os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
                                          MESH_PAUSE_NS);
     seen=atomic_load_explicit(&m->map,memory_order_acquire);
-    if(seen==*serial && (atomic_load_explicit(&m->bridge_pid,memory_order_acquire)!=bridge || mesh_gone((pid_t)bridge)))error=ESRCH;
+    if(seen==*serial && (atomic_load_explicit(&m->bridge_pid,memory_order_acquire)!=bridge || mesh_exited((pid_t)bridge)))error=ESRCH;
   }
   if(!error)*serial=seen;
   munmap(m,length);
@@ -218,8 +218,8 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
     slot->start=mesh_started(getpid());
     /* the slot's write ring, whose one producer this process is now: its put moved past every position the slot's
        last client wrote, to its take where the take is past it, then past the cell at put where that cell was filled
-       (its sequence past its lap's free value: a client gone between its cell's store and put's, the cell taken since
-       or not), so this process's first write finds its cell free */
+       (its sequence past its lap's free value: a client that exited between its cell's store and put's, the cell
+       taken since or not), so this process's first write finds its cell free */
     struct mesh_ring *ring=mesh_ring_at(m,s);
     uint64_t put=atomic_load_explicit(&ring->put,memory_order_relaxed);
     const uint64_t take=atomic_load_explicit(&ring->take,memory_order_acquire);
@@ -244,7 +244,7 @@ int mesh_attach(struct mesh_ctx *c){
   error=mesh_slot_take(c,m);
   if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};return error;}
   /* the expiry (a store, seq_cst) read again after the slot's compare-exchange (seq_cst): a slot the heartbeat's read
-     of the holders missed reads it expired here, and is let go */
+     of the region's processes missed reads it expired here, and is let go */
   if(__atomic_load_n(&m->version,__ATOMIC_SEQ_CST)!=MESH_LAYOUT){mesh_detach(c);return EINVAL;}
   return 0;
 }
@@ -266,9 +266,9 @@ static uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint64_t bits=b-a==64?~UINT64_C(0):((UINT64_C(1)<<(b-a))-1);
   return bits<<(a-lo);
 }
-/* [first, first + count) claimed word by word, each by a compare-exchange that expects its bits clear; where another
-   claimed one first, the words taken are given back: 1 where claimed, else 0 */
-static int mesh_claim(_Atomic uint64_t *bits,uint32_t first,uint32_t count){
+/* [first, first + count) taken word by word, each by a compare-exchange that expects its bits clear; where another
+   took one first, the words taken are given back: 1 where taken, else 0 */
+static int arena_mark(_Atomic uint64_t *bits,uint32_t first,uint32_t count){
   const uint32_t last=(first+count-1)/64;
   uint32_t w=first/64;
   for(;w<=last;w++){
@@ -281,8 +281,8 @@ static int mesh_claim(_Atomic uint64_t *bits,uint32_t first,uint32_t count){
   for(uint32_t v=first/64;v<w;v++)atomic_fetch_and_explicit(&bits[v],~mesh_word_mask(first,count,v),memory_order_acq_rel);
   return 0;
 }
-/* the first clear run of `count` pages in [begin, end), its first a multiple of `align` and the run within one extent
-   of `extent` pages, claimed (mesh_claim); MESH_ABSENT where none is */
+/* the first `count` consecutive clear pages in [begin, end), its first a multiple of `align` and all within one extent
+   of `extent` pages, taken (arena_mark); MESH_ABSENT where none is */
 static uint32_t mesh_scan(_Atomic uint64_t *bits,uint32_t count,uint32_t align,uint32_t extent,uint32_t begin,uint32_t end){
   for(uint64_t first=((uint64_t)begin+align-1)/align*align;first<end && count<=end-first;){
     if(first/extent!=(first+count-1)/extent){first=((first/extent+1)*extent+align-1)/align*align;continue;}
@@ -291,22 +291,22 @@ static uint32_t mesh_scan(_Atomic uint64_t *bits,uint32_t count,uint32_t align,u
       const uint64_t occupied=atomic_load_explicit(&bits[w],memory_order_acquire)&mesh_word_mask((uint32_t)first,count,w);
       if(occupied)next=(uint64_t)w*64+64-(uint64_t)__builtin_clzll(occupied);
     }
-    if(next==first && mesh_claim(bits,(uint32_t)first,count))return (uint32_t)first;
+    if(next==first && arena_mark(bits,(uint32_t)first,count))return (uint32_t)first;
     if(next>first)first=(next+align-1)/align*align;
   }
   return MESH_ABSENT;
 }
 
-/* The scan resumes at the context's cursor, where its last lease ended, then from page 0 */
+/* The scan resumes at the context's rover, where its last lease ended, then from page 0 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   struct hdr *m=c?c->M:NULL;
   if(!m || !pages || !align){errno=EINVAL;return MESH_ABSENT;}
-  const uint32_t arena=mesh_arena_pages(m),extent=(uint32_t)(MESH_DMA_EXTENT/m->pgsz),resume=c->arena_cursor<arena?c->arena_cursor:0;
+  const uint32_t arena=mesh_arena_pages(m),extent=(uint32_t)(MESH_DMA_EXTENT/m->pgsz),resume=c->arena_rover<arena?c->arena_rover:0;
   _Atomic uint64_t *bits=mesh_arena_bits(m);
   uint32_t first=mesh_scan(bits,pages,align,extent,resume,arena);
   if(first==MESH_ABSENT && resume)first=mesh_scan(bits,pages,align,extent,0,arena);
   if(first==MESH_ABSENT){errno=ENOMEM;return MESH_ABSENT;}
-  c->arena_cursor=first+pages;
+  c->arena_rover=first+pages;
   return first;
 }
 
@@ -318,8 +318,8 @@ void mesh_arena_give(struct hdr *m,uint32_t page,uint32_t pages){
 
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
-  uint32_t held=0;
+  uint32_t used=0;
   for(uint32_t w=0;w<words;w++)
-    held+=(uint32_t)__builtin_popcountll(atomic_load_explicit(&mesh_arena_bits(m)[w],memory_order_relaxed)&mesh_word_mask(0,pages,w));
-  return pages-held;
+    used+=(uint32_t)__builtin_popcountll(atomic_load_explicit(&mesh_arena_bits(m)[w],memory_order_relaxed)&mesh_word_mask(0,pages,w));
+  return pages-used;
 }

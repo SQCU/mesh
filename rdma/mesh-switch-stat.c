@@ -1,7 +1,7 @@
 /* mesh-switch-stat: the switch as the bridge keeps it in its region (mesh-switched.h): its pool's pages and their free
    counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), its live
-   lanes' outboxes and feedback and its weights, one JSON line to stdout.  It reads the region and writes nothing: two
-   lines around a run are the run's counts (their difference).
+   lanes' outboxes and feedback and its published view and weights, one JSON line to stdout.  It reads the region and
+   writes nothing: two lines around a workload are its counts (their difference).
 
    usage: mesh-switch-stat   (MESH_REGION names another region, as the clients' attach) */
 #include <errno.h>
@@ -40,8 +40,7 @@ int main(void){
     printf("\"posts\":%llu,\"post_wait_ns\":%llu,\"post_call_ns\":%llu,\"sent\":%llu,\"send_ns\":%llu,",U(c->posts),U(c->post_wait_ns),
            U(c->post_call_ns),U(c->sent),U(c->send_ns));
     printf("\"starved\":%llu,\"refreshes\":%llu,",U(c->starved),U(c->refreshes));
-    printf("\"unreachable\":%llu,\"lost\":%llu,\"malformed\":%llu,\"unowned\":%llu}",U(c->unreachable),U(c->lost),U(c->malformed),
-           U(c->unowned));
+    printf("\"unreachable\":%llu,\"lost\":%llu,\"malformed\":%llu}",U(c->unreachable),U(c->lost),U(c->malformed));
   }
   printf("],\"lanes\":[");
   int first=1;
@@ -55,9 +54,11 @@ int main(void){
            U(x->service),U(x->wait),U(x->landed),rate,wait);
     first=0;
   }
-  const struct mesh_switch_weights *w=&sw->weights;
+  /* the view and the weights as published (each its copy as its version names it) */
+  const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
+  const struct mesh_switch_weights *w=sw->weights+mesh_switch_published(&sw->weights_version);
   printf("],\"view\":[");
-  for(uint32_t i=0;i<sw->view.nodes && i<MESH_SWITCH_N;i++)printf("%s%u",i?",":"",sw->view.node[i]);
+  for(uint32_t i=0;i<v->nodes && i<MESH_SWITCH_N;i++)printf("%s%u",i?",":"",v->node[i]);
   printf("],\"refreshes\":%llu,\"neighbour\":[",(unsigned long long)w->refreshes);
   for(uint32_t k=0;k<w->deg && k<MESH_SWITCH_N;k++)printf("%s%u",k?",":"",w->neighbour[k]);
   printf("],\"w\":[");

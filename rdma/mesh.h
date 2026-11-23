@@ -25,15 +25,15 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    destination as a node and an index of that node's page table (mesh-switched.h) */
 #define MESH_VERSION 162u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  181: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  182: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   180, each cell of a lane's outbox holds its SEND's post time beside its push time (mesh-switched.h struct
-   mesh_switch_cell `posted`), and a write ring's cell holds the write's page, bytes and destinations, no tag (struct
-   mesh_write) */
-#define MESH_LAYOUT 181u
+   181, the switch names each client ring's one taker (mesh-switched.h struct mesh_switch `taker`), has its view, its
+   weights and its split tables in two copies each, the published one named by a version word in place of each one's
+   seqlock serial (`view_version`, `weights_version`, `splits_version`), and its counters have no `unowned` */
+#define MESH_LAYOUT 182u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
-   node table holds (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
+   node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
    for its own observation tools and no client reads (`bridge_off`, mesh-observe.h) */
 #define MESH_STREAMS 32
 #define MESH_LINK_STREAMS 4u
@@ -51,7 +51,7 @@ _Static_assert(38+25<=63,"an owner word");
 /* the operator's bound (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
    without something happening on it or its scope concluding */
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
-/* The pool: the pages of each class the bridge carves at its start (fewer, in proportion, where the arena holds
+/* The pool: the pages of each class the bridge carves at its start (fewer, in proportion, where the arena has
    fewer), MESH_CLASSES classes (mesh-call.h MESH_CLASS_SHORT, MESH_CLASS_LONG); and a client slot's write ring's
    cells */
 #define MESH_POOL_SHORT 16384u
@@ -81,19 +81,20 @@ struct mesh_pd { _Atomic uint64_t next; uint64_t offset; _Atomic uint32_t uses,b
   _Atomic uint32_t lane; };
 _Static_assert(sizeof(struct mesh_pd)==32 && offsetof(struct mesh_pd,uses)==16 && offsetof(struct mesh_pd,lane)==28,"mesh_pd");
 /* The pool's header: a class's free stack (`head`: the top page's id + 1 in its low 32 bits, 0 empty, and a tag in its
-   high 32 that every change moves), its free pages (never fewer than the stack holds), its frames and its pages; and
+   high 32 that every change moves), its free pages (never fewer than the stack has), its frames and its pages; and
    the pages the bridge carved (`pages`, the descriptors that name pages).  The descriptors follow it */
 struct mesh_pool_class { _Alignas(64) _Atomic uint64_t head; _Atomic uint32_t free; uint32_t frames,pages; };
 struct mesh_pool { struct mesh_pool_class cls[MESH_CLASSES]; _Alignas(64) uint32_t pages; };
 
-/* A write as a client's ring cell holds it: the page the index named when it was written (`pd`: the write's use is on
+/* A write as a client's ring cell has it: the page the index named when it was written (`pd`: the write's use is on
    it until the bridge takes it; the take reads the page, never the index), its payload bytes and its destinations */
 struct mesh_write { uint32_t pd,bytes,dests,unused; struct mesh_dest dest[MESH_DESTS]; };
 _Static_assert(sizeof(struct mesh_write)==16+8*MESH_DESTS,"mesh_write");
-/* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and any number of takers (the
-   port children).  Cell c holds the write of position p (c = p mod MESH_RING) while its sequence is 2 (p / MESH_RING)
-   + 1 and is free for it while its sequence is 2 (p / MESH_RING), so a zeroed ring is empty; `put` is the next position
-   written and `take` the next taken */
+/* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and one taker, the port child
+   the bridge names for it (mesh-switched.h struct mesh_switch `taker`; as the bridge names another, both may take a
+   moment, each position one compare-exchange's).  Cell c has the write of position p (c = p mod MESH_RING) while
+   its sequence is 2 (p / MESH_RING) + 1 and is free for it while its sequence is 2 (p / MESH_RING), so a zeroed ring
+   is empty; `put` is the next position written and `take` the next taken */
 struct mesh_cell { _Atomic uint64_t sequence; struct mesh_write w; };
 struct mesh_ring { _Alignas(64) _Atomic uint64_t put; _Alignas(64) _Atomic uint64_t take; _Alignas(64) struct mesh_cell cell[MESH_RING]; };
 
@@ -124,7 +125,7 @@ struct mesh_lanes {
 };
 _Static_assert(sizeof(struct mesh_lanes)==256,"mesh_lanes");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
-   record's sequence in that boot, the bytes its clients' pages may hold (`region`: the payload bytes of its bridge's
+   record's sequence in that boot, the bytes its clients' pages may fill (`region`: the payload bytes of its bridge's
    pool, every class's pages), the node's memory in bytes and hardware model (hw.model, mesh-view.h MESH_MODEL_BYTES with its
    NUL), and the `reached` nodes its bridge reaches (mesh-view.h struct mesh_reach).  No host name: a name a person reads
    is a label the readers take from the name table by node number (etc/mesh-nodes.json, rdma/peers.py label) */
@@ -132,8 +133,8 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
    that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The
-   slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a region's holders
-   at these offsets */
+   slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a region's
+   processes at these offsets */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   uint64_t start,padding[6];
@@ -143,8 +144,8 @@ struct mesh_client {
    the page table's words and owner bytes, `arena_off` the arena's bitmap (a bit an arena page of `pgsz` bytes, `block`
    pages a block), `ring_off` the clients' write rings, `pool_off` the pool, `bridge_off` the bridge's own pages,
    `stream_off` the lane records, `client_off` the client slots, `data_off` the arena, `node_off` the node table and
-   `switch_off` the switch; `busy` the frames the bridge's lanes hold queued (0 while none) and `idle_since` the wall
-   clock in ns at which they last held none (0 while they hold any); `spare` is unused */
+   `switch_off` the switch; `busy` the frames the bridge's lanes have queued (0 while none) and `idle_since` the wall
+   clock in ns at which they last had none (0 while they have any); `spare` is unused */
 struct hdr {
   uint32_t magic,version,pgsz,block,entries,node,streams,clients;
   uint64_t table_off,arena_off,ring_off,pool_off,bridge_off,stream_off,client_off,data_off,length,boot;
@@ -182,7 +183,7 @@ static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){r
 static inline struct mesh_lanes *mesh_lanes_at(struct hdr *m,uint32_t p){return (struct mesh_lanes *)((char *)m+m->stream_off)+p;}
 /* the node table's entry n */
 static inline struct mesh_node *mesh_node_at(struct hdr *m,uint32_t n){return (struct mesh_node *)((char *)m+m->node_off)+n;}
-/* the arena's pages of pgsz bytes, and its bitmap (a bit a page, set while a lease of the bridge holds it) */
+/* the arena's pages of pgsz bytes, and its bitmap (a bit a page, set while a lease of the bridge has it) */
 static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
 /* arena page `page`'s address */
@@ -222,7 +223,7 @@ static inline int mesh_pd_valid(struct hdr *m,uint32_t pd){ return pd<mesh_pool(
 static inline struct mesh_pool_class *mesh_pool_class(struct hdr *m,uint32_t frames){
   return frames==MESH_CLASS_SHORT?&mesh_pool(m)->cls[0]:frames==MESH_CLASS_LONG?&mesh_pool(m)->cls[1]:NULL;
 }
-/* the frames of the least class whose payload holds `bytes`; 0 where none does */
+/* the frames of the least class whose payload fits `bytes`; 0 where none does */
 static inline uint32_t mesh_class_frames(uint32_t bytes){ return bytes<=MESH_SHORT_PAYLOAD?MESH_CLASS_SHORT:bytes<=MESH_LONG_PAYLOAD?MESH_CLASS_LONG:0; }
 /* page pd's header (its first byte, where a SEND of it starts) and its payload */
 static inline unsigned char *mesh_pd_head(struct hdr *m,uint32_t pd){ return (unsigned char *)m+mesh_pd_at(m,pd)->offset; }
@@ -264,9 +265,9 @@ static inline void mesh_pd_use(struct hdr *m,uint32_t pd){ atomic_fetch_add_expl
 static inline void mesh_pd_drop(struct hdr *m,uint32_t pd){
   if(!mesh_pd_valid(m,pd))return;
   _Atomic uint32_t *uses=&mesh_pd_at(m,pd)->uses;
-  uint32_t held=atomic_load_explicit(uses,memory_order_relaxed);
-  while(held && !atomic_compare_exchange_weak_explicit(uses,&held,held-1,memory_order_acq_rel,memory_order_relaxed));
-  if(held==1)mesh_pool_push(m,pd);
+  uint32_t count=atomic_load_explicit(uses,memory_order_relaxed);
+  while(count && !atomic_compare_exchange_weak_explicit(uses,&count,count-1,memory_order_acq_rel,memory_order_relaxed));
+  if(count==1)mesh_pool_push(m,pd);
 }
 
 /* ---- The write rings (`ring_off`) --------------------------------------------------------------------------------- */
@@ -281,8 +282,8 @@ static inline int mesh_ring_push(struct mesh_ring *r,const struct mesh_write *w)
   atomic_store_explicit(&r->put,at+1,memory_order_release);
   return 1;
 }
-/* the writes the ring holds as its counters read now (0: none to take) */
-static inline uint64_t mesh_ring_held(struct mesh_ring *r){
+/* the writes on the ring as its counters read now (0: none to take) */
+static inline uint64_t mesh_ring_pending(struct mesh_ring *r){
   const uint64_t put=atomic_load_explicit(&r->put,memory_order_acquire),take=atomic_load_explicit(&r->take,memory_order_relaxed);
   return put>take?put-take:0;
 }
@@ -290,9 +291,9 @@ static inline uint64_t mesh_ring_held(struct mesh_ring *r){
 /* ---- Index allocation (the owner bytes) ------------------------------------------------------------------------ */
 /* client `client`'s owner byte: its slot + 1 */
 static inline uint8_t mesh_owner_byte(uint64_t client){ return (uint8_t)(((client>>32)&(MESH_CLIENTS-1))+1); }
-/* the first run of `count` free indices in [begin, end) claimed for `owner`, first fit: each byte taken by a
-   compare-exchange that expects it free, and a run that meets one another took first given back and the scan gone on
-   past it; the run's first index, or MESH_ABSENT */
+/* the first `count` consecutive free indices in [begin, end) taken for `owner`, first fit: each byte taken by a
+   compare-exchange that expects it free, and a stretch that meets one another took first given back and the scan
+   continued past it; the first index, or MESH_ABSENT */
 static inline uint32_t mesh_index_scan(_Atomic uint8_t *owners,uint8_t owner,uint32_t count,uint32_t begin,uint32_t end){
   for(uint32_t first=begin;first<end && count<=end-first;){
     uint32_t i=0;
@@ -309,55 +310,53 @@ static inline uint32_t mesh_index_scan(_Atomic uint8_t *owners,uint8_t owner,uin
   }
   return MESH_ABSENT;
 }
-/* `count` consecutive free indices claimed for `owner`, the scan resumed at *cursor (the run's end, after it), then from
-   index 0: the first, or MESH_ABSENT */
-static inline uint32_t mesh_index_take(struct hdr *m,uint8_t owner,uint32_t count,uint32_t *cursor){
-  const uint32_t entries=m->entries,begin=*cursor<entries?*cursor:0;
-  if(!count || count>entries)return MESH_ABSENT;
-  uint32_t first=mesh_index_scan(mesh_owners(m),owner,count,begin,entries);
-  if(first==MESH_ABSENT && begin)first=mesh_index_scan(mesh_owners(m),owner,count,0,entries);
-  if(first!=MESH_ABSENT)*cursor=first+count;
-  return first;
+/* `count` consecutive free indices taken for `owner`, the lowest such (first fit from index 0), so indices just freed
+   are the next ones given and their words are made new (mesh-call.c mesh_pages drops a page a landing left there): the
+   first, or MESH_ABSENT */
+static inline uint32_t mesh_index_take(struct hdr *m,uint8_t owner,uint32_t count){
+  if(!count || count>m->entries)return MESH_ABSENT;
+  return mesh_index_scan(mesh_owners(m),owner,count,0,m->entries);
 }
 /* indices [first, first + count) freed */
 static inline void mesh_index_release(struct hdr *m,uint32_t first,uint32_t count){
   for(uint32_t i=0;i<count;i++)atomic_store_explicit(&mesh_owners(m)[first+i],0,memory_order_release);
 }
 
-/* ---- Holders of the region ---------------------------------------------------------------------------------------- */
-/* a process gone (its slot's or the bridge's pid; 0: none) */
-static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
-/* a process's start in microseconds of the wall clock (libproc PROC_PIDTBSDINFO), 0 where it is gone or in its exit
-   (XNU takes a process from every lookup by pid as its exit begins, before the kernel releases its device objects);
-   with its pid, the identity of a holder of the region, which a later process given the same pid does not share */
+/* ---- Processes of the region -------------------------------------------------------------------------------------- */
+/* a process exited (its slot's or the bridge's pid; 0: none) */
+static inline int mesh_exited(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
+/* a process's start in microseconds of the wall clock (libproc PROC_PIDTBSDINFO), 0 where it has exited or is in its
+   exit (XNU takes a process from every lookup by pid as its exit begins, before the kernel releases its device
+   objects); with its pid, the identity of a process of the region, which a later process given the same pid does not
+   share */
 static inline uint64_t mesh_started(pid_t process){
   struct proc_bsdinfo info;
   return process && proc_pidinfo(process,PROC_PIDTBSDINFO,0,&info,(int)sizeof info)==(int)sizeof info?
          (uint64_t)info.pbi_start_tvsec*UINT64_C(1000000)+info.pbi_start_tvusec:0;
 }
-/* the process `pid` of start `start` alive (a start of 0, which a region an earlier bridge or library wrote holds: the
+/* the process `pid` of start `start` alive (a start of 0, which a region an earlier bridge or library wrote has: the
    pid alone) */
-static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_gone(pid); }
+static inline int mesh_alive(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_exited(pid); }
 
 /* ---- libmesh (mesh-dataflow.c, mesh-call.c) ----------------------------------------------------------------------- */
 /* a vacant client slot of region m taken for this process by one compare-exchange (its generation from the header's
    `serial`), stamped with its start, and the bridge woken to watch its exit; 0, or EBUSY where none is vacant */
 int mesh_slot_take(struct mesh_ctx *,struct hdr *);
-/* client `client`'s slot left, by its detach or by the bridge where its process is gone: the owner word marked
+/* client `client`'s slot left, by its detach or by the bridge where its process has exited: the owner word marked
    MESH_LEAVING (an owner word already marked: its leaving finished), each index it owns left naming no page and
    freed, then the slot vacant and the bridge woken; the writes on its ring stay there, each on its own use, for the
-   port children to carry (mesh-switched.h mesh_switch_take_ring) */
+   port children to carry (mesh-switched.h mesh_switch_ring_dequeue) */
 void mesh_leave(struct hdr *,uint64_t client);
 /* the one join of two nodes' records: the cables each one's bridge reaches the other over, the fewer of the two ends'
    counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 /* `pages` arena pages leased (the bridge's own: map records, the pool's carve), the first a multiple of `align`, all
-   within one MESH_DMA_EXTENT, claimed first fit by compare-exchange from the context's cursor: the first, or MESH_ABSENT
-   with errno EINVAL or ENOMEM */
+   within one MESH_DMA_EXTENT, taken first fit by compare-exchange from the context's rover (`arena_rover`): the
+   first, or MESH_ABSENT with errno EINVAL or ENOMEM */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 /* `pages` arena pages from `page` given back */
 void mesh_arena_give(struct hdr *,uint32_t page,uint32_t pages);
-/* the arena pages no lease holds */
+/* the arena pages no lease has */
 uint32_t mesh_arena_free(struct hdr *);
 
 /* The node's region as the bridge makes it: `pages` arena pages of `pgsz` bytes, `block` pages a block (the bridge's

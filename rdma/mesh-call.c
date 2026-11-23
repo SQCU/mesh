@@ -1,6 +1,6 @@
 #include "mesh.h"
 
-/* the client's region, where it holds a slot of it; else NULL */
+/* the client's region, where it has a slot of it; else NULL */
 static struct hdr *attached(struct mesh_ctx *context){ return context && context->M && context->client?context->M:NULL; }
 
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
@@ -14,14 +14,14 @@ uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room
   return count;
 }
 
-/* The indices claimed (mesh.h mesh_index_take), then each one's word made anew: naming a page popped from the pool
+/* The indices taken (mesh.h mesh_index_take), then each one's word made anew: naming a page popped from the pool
    (its uses 1, the word's) or none, landed 0.  A page a stale landing left at a freed index is dropped as the word is
-   made anew.  Where the pool runs short, the pages taken go back and the indices are freed */
+   made anew.  Where the pool has too few pages, those taken go back and the indices are freed */
 uint32_t mesh_pages(struct mesh_ctx *context,uint32_t count,uint32_t bytes){
   struct hdr *m=attached(context);
   const uint32_t frames=mesh_class_frames(bytes);
   if(!m || !count || count>m->entries || !frames){errno=EINVAL;return MESH_ABSENT;}
-  const uint32_t first=mesh_index_take(m,mesh_owner_byte(context->client),count,&context->index_cursor);
+  const uint32_t first=mesh_index_take(m,mesh_owner_byte(context->client),count);
   if(first==MESH_ABSENT){errno=ENOSPC;return MESH_ABSENT;}
   for(uint32_t i=0;i<count;i++){
     uint32_t pd=MESH_ABSENT;
@@ -95,19 +95,19 @@ void *mesh_page_data(struct mesh_ctx *context,uint32_t index){
 }
 
 void mesh_leave(struct hdr *m,uint64_t client){
-  const uint64_t held=client&~MESH_LEAVING;
-  struct mesh_client *slot=mesh_client_at(m,held);
-  if(!held)return;
+  const uint64_t owner=client&~MESH_LEAVING;
+  struct mesh_client *slot=mesh_client_at(m,owner);
+  if(!owner)return;
   if(client&MESH_LEAVING){if(atomic_load_explicit(&slot->owner,memory_order_acquire)!=client)return;}
-  else if(!atomic_compare_exchange_strong(&slot->owner,&client,held|MESH_LEAVING))return;
-  const uint8_t own=mesh_owner_byte(held);
+  else if(!atomic_compare_exchange_strong(&slot->owner,&client,owner|MESH_LEAVING))return;
+  const uint8_t own=mesh_owner_byte(owner);
   _Atomic uint8_t *owners=mesh_owners(m);
   for(uint32_t i=0;i<m->entries;i++)
     if(atomic_load_explicit(&owners[i],memory_order_relaxed)==own){
       mesh_pd_drop(m,mesh_entry_put(m,i,MESH_ABSENT,0));
       atomic_store_explicit(&owners[i],0,memory_order_release);
     }
-  uint64_t leaving=held|MESH_LEAVING;
+  uint64_t leaving=owner|MESH_LEAVING;
   atomic_compare_exchange_strong(&slot->owner,&leaving,0);
   mesh_notify(&m->control);
 }

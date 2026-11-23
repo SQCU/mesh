@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-/* The fabric as this node's bridge holds it (libmesh: mesh-dataflow.c, mesh-collective.c), read-only: plain C
+/* The fabric as this node's bridge has it (libmesh: mesh-dataflow.c, mesh-collective.c), read-only: plain C
    declarations and integer constants, which C, Objective-C and C++ include and Python binds through mesh_c_build.py.
    Each reader maps the region read-only and attaches no client.  A node is all a reader names of the mesh: never a
    link, port or queue pair. */
@@ -15,11 +15,11 @@ extern "C" {
    where the bridge is unreachable. */
 struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
 int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
-/* The bridge's region: its arena's bytes and the arena bytes no lease of the bridge holds; 0, or -errno where the
+/* The bridge's region: its arena's bytes and the arena bytes no lease of the bridge has; 0, or -errno where the
    bridge is unreachable. */
 int mesh_region(uint64_t *bytes,uint64_t *unleased);
-/* What the bridge's lanes hold queued (struct hdr `busy`: 0 while they hold nothing) and the wall clock in ns at which
-   they last held nothing (0 while they hold any; a read that meets the bridge as it becomes busy is told busy, 1); 0,
+/* What the bridge's lanes have queued (struct hdr `busy`: 0 while they have nothing) and the wall clock in ns at which
+   they last had nothing (0 while they have any; a read that meets the bridge as it becomes busy is told busy, 1); 0,
    or -errno where the bridge is unreachable. */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since);
 
@@ -52,12 +52,12 @@ int mesh_map_wait(uint64_t *serial);
 /* What a node's record carries of its health: `booted`, the wall clock of the node's boot (ns since the epoch), and its
    `available` memory as its bridge last sampled it (the bytes the kernel can give without pressure). */
 struct mesh_health { uint64_t booted,available; };
-/* A node's record as its bridge last sent it: its bridge's node, its bridge's region (bytes its clients may hold), the
+/* A node's record as its bridge last sent it: its bridge's node, its bridge's region (bytes its clients may fill), the
    node's memory (hw.memsize) and model (hw.model, NUL-terminated, MESH_MODEL_BYTES with its NUL), and its health. */
 #define MESH_MODEL_BYTES 32
 struct mesh_node_health { uint32_t node; uint64_t region,memory; char model[MESH_MODEL_BYTES];
                           struct mesh_health health; };
-/* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`
+/* Every node's record the bridge has (mesh_map's nodes, this node's own among them): their count (at most `capacity`
    written), or -errno where the bridge is unreachable. */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
 

@@ -1,6 +1,6 @@
 #include "mesh-bridge.h"
 
-/* the frames the switch's lanes hold queued, told in the region (`busy`), and the wall clock at which none last came to
+/* the frames the switch's lanes have queued, told in the region (`busy`), and the wall clock at which none last came to
    be (`idle_since`, 0 while any is) */
 static void busy_tell(void){
   const uint64_t busy=lanes_busy();
@@ -35,7 +35,7 @@ static struct known *known_at(uint32_t node){
   for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
   struct known *at=NULL;
   if(known_count<MESH_KNOWN)at=known+known_count++;
-  else for(uint32_t i=0;i<known_count;i++)if(!record_held(known[i].node) && (!at || known[i].heard<at->heard))at=known+i;
+  else for(uint32_t i=0;i<known_count;i++)if(!record_of(known[i].node) && (!at || known[i].heard<at->heard))at=known+i;
   if(at)*at=(struct known){.node=node};
   return at;
 }
@@ -63,9 +63,9 @@ void map_adopt(void){
   atomic_store(&M->map_nodes,0);
   atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
 }
-/* RFC 2328 s14: the map with `record` put in (its node's held record replaced, else added) and every record no paired
-   path from this node reaches left out, written only where it differs from the map held (so a record that changes
-   nothing, or that the prune drops at once, moves no serial) */
+/* RFC 2328 s14: the map with `record` put in (its node's stored record replaced, else added) and every record no paired
+   path from this node reaches left out, written only where it differs from the map as it stands (so a record that
+   changes nothing, or that the prune drops at once, moves no serial) */
 static void map_put(const struct mesh_record *record){
   const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
@@ -85,24 +85,24 @@ static void map_put(const struct mesh_record *record){
   }
   /* design/transport.md: a node the prune drops is logged (one put now and never reached yet is not a loss) */
   for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
-    struct known *gone=known_at(next[k].node);
-    say("node %u unreachable, heard %.1f s before\n",next[k].node,gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0);
-    if(gone)gone->gone=now;
+    struct known *node=known_at(next[k].node);
+    say("node %u unreachable, heard %.1f s before\n",next[k].node,node && node->heard?(double)(now-node->heard)/1e9:-1.0);
+    if(node)node->lost_at=now;
   }
-  uint64_t kept=0;
-  for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
-  if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){
+  uint64_t remaining=0;
+  for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+remaining++,next+k,sizeof *next);
+  if(remaining!=n || memcmp(next,r,(size_t)n*sizeof *r)){
     mesh_notify(&M->map);
-    if(map_grow(kept))say("map: no lease for %llu records; %llu kept\n",(unsigned long long)kept,(unsigned long long)map_room);
-    if(kept>map_room)kept=map_room;
-    memcpy(mesh_records(M),next,(size_t)kept*sizeof *next);
-    atomic_store(&M->map_nodes,kept);
+    if(map_grow(remaining))say("map: no lease for %llu records; %llu remaining\n",(unsigned long long)remaining,(unsigned long long)map_room);
+    if(remaining>map_room)remaining=map_room;
+    memcpy(mesh_records(M),next,(size_t)remaining*sizeof *next);
+    atomic_store(&M->map_nodes,remaining);
     mesh_notify(&M->map);
   }
   free(next);free(reached);free(order);
 }
 /* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), boot and facts are the
-   held one's changes only its health and sequence, written under the region's health serial and never the map's: the
+   stored one's changes only its health and sequence, written under the region's health serial and never the map's: the
    map serial moves only where the mesh changes, and a health sample is no change of the mesh */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
@@ -112,12 +112,12 @@ static int record_links_same(const struct mesh_record *a,const struct mesh_recor
          a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
 }
-static void health_put(struct mesh_record *held,const struct mesh_record *record){
+static void health_put(struct mesh_record *stored,const struct mesh_record *record){
   mesh_notify(&M->health);
-  held->sequence=record->sequence;held->health=record->health;
+  stored->sequence=record->sequence;stored->health=record->health;
   mesh_notify(&M->health);
 }
-struct mesh_record *record_held(uint32_t node){
+struct mesh_record *record_of(uint32_t node){
   for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
   return NULL;
 }
@@ -126,8 +126,8 @@ void record_changed(void){
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_STREAMS);
   own.health=health;
-  struct mesh_record *held=record_held(M->node);
-  if(held && record_links_same(held,&own))health_put(held,&own);
+  struct mesh_record *stored=record_of(M->node);
+  if(stored && record_links_same(stored,&own))health_put(stored,&own);
   else map_put(&own);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
@@ -136,9 +136,9 @@ void record_changed(void){
    a record no newer than its newest (record_heard, RFC 2328 s13), its map and
    serials unmoved.  Told from a copy: a port lost meanwhile may write the map */
 void record_retell(void){
-  const struct mesh_record *held=record_held(M->node);
-  if(!held)return;
-  struct mesh_record own;memcpy(&own,held,sizeof own);
+  const struct mesh_record *stored=record_of(M->node);
+  if(!stored)return;
+  struct mesh_record own;memcpy(&own,stored,sizeof own);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
 /* when the next health sample is due (the event loop's turn waits for it: mesh-link.c turn_due) */
@@ -148,7 +148,7 @@ void health_turn(void){
   health_sent=now;health.available=available_now();
   record_changed();
 }
-/* a record heard: as much of it as this bridge's record holds, the rest 0 (design/HETEROGENEOUS-LINKS.md section 6,
+/* a record heard: as much of it as this bridge's record has, the rest 0 (design/HETEROGENEOUS-LINKS.md section 6,
    item 3: struct mesh_record is only appended to, so a longer one's first bytes are this one; a change of MESH_STREAMS or
    of the model's room is not an append, and moves MESH_VERSION), its reach at most MESH_STREAMS nodes;
    one naming no node, or this node, is not another node's */
@@ -158,33 +158,33 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   if(!heard.node || heard.node==M->node)return;
   heard.reached=MIN(heard.reached,(uint32_t)MESH_STREAMS);
   heard.model[sizeof heard.model-1]=0;
-  struct mesh_record *held=record_held(heard.node);
+  struct mesh_record *stored=record_of(heard.node);
   struct known *k=known_at(heard.node);
-  /* design/transport.md, RFC 2328 s13: a record no newer than the newest heard of its node, the map holding
+  /* design/transport.md, RFC 2328 s13: a record no newer than the newest heard of its node, the map having
      it or not, is dropped and not sent on, so a record the map pruned never circulates (a node's later boot is always
      newer) */
   if(k && k->boot && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence))){
     /* the newest known of a node the map dropped while no paired path reached it: put again where a path now does,
        and sent on only then (a pruned record that no path reaches stops here) */
-    if(!held && heard.boot==k->boot && heard.sequence==k->sequence){
+    if(!stored && heard.boot==k->boot && heard.sequence==k->sequence){
       map_put(&heard);
-      for(uint32_t p=0;record_held(heard.node) && p<port_count;p++)
+      for(uint32_t p=0;record_of(heard.node) && p<port_count;p++)
         if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
     }
     return;
   }
-  if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
+  if(stored && (heard.boot<stored->boot || (heard.boot==stored->boot && heard.sequence<=stored->sequence)))return;
   /* design/transport.md: a node that joins or comes back is logged here */
-  if(!held && k && k->gone)say("node %u back after %.1f s\n",heard.node,(double)(now-k->gone)/1e9);
-  else if(!held && k && !k->heard)say("node %u joined\n",heard.node);
-  if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;}
-  if(held && record_links_same(held,&heard))health_put(held,&heard);
+  if(!stored && k && k->lost_at)say("node %u back after %.1f s\n",heard.node,(double)(now-k->lost_at)/1e9);
+  else if(!stored && k && !k->heard)say("node %u joined\n",heard.node);
+  if(k){k->heard=now;k->lost_at=0;k->boot=heard.boot;k->sequence=heard.sequence;}
+  if(stored && record_links_same(stored,&heard))health_put(stored,&heard);
   else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
 /* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first seen (its exit,
-   the event loop's EVFILT_PROC, makes every slot it holds leave: a holder's death is that event, not a poll), one
-   already gone made to leave at once (mesh.h mesh_leave: its indices freed and their pages dropped, the writes on
+   the event loop's EVFILT_PROC, makes every slot it has leave: a client's death is that event, not a poll), one
+   already exited made to leave at once (mesh.h mesh_leave: its indices freed and their pages dropped, the writes on
    its ring left for the port children to carry); on a liveness turn, a slot whose leaving its process left half done as it died finished; and the frames
    queued told (busy_tell) */
 void clients_turn(int liveness){
@@ -197,7 +197,7 @@ void clients_turn(int liveness){
       struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
       if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
     }
-    if(liveness && owner&MESH_LEAVING && !mesh_holds((pid_t)(uint32_t)owner,client->start)){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
+    if(liveness && owner&MESH_LEAVING && !mesh_alive((pid_t)(uint32_t)owner,client->start)){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
     owners[s]=owner;
   }
   busy_tell();
