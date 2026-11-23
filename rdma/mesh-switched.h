@@ -34,7 +34,7 @@
      clamped into what it addresses (its bytes to its page's payload, its destinations to MESH_DESTS, its hops to its
      path, a destination's index to the table), so a header that is not one writes only within its page, its path and
      the table.  Nothing waits and nothing is reported: a destination no allowed neighbour reaches, a page a lost link
-     took, a landing whose receive went again into its own page are each counted (`unreachable`, `lost`: struct
+     took, are each counted (`unreachable`, `lost`: struct
      mesh_switch_counters), never retried.
    - Uses.  A page's uses (mesh.h) count its table words, its writes pending in a ring, its SENDs pushed (an inbound
      ring's entry) or posted (an in-flight ring's entry: struct mesh_switch_lane) and a landing being carried; its last
@@ -223,8 +223,7 @@ struct mesh_switch_log { _Alignas(64) _Atomic uint64_t head; _Alignas(64) _Atomi
      post_send), SENDs completed and their time from post to completion;
    - receives a lane's fill asked for that its class's free stack had no page for (`starved`), the policy's refreshes;
    - destinations no allowed neighbour reaches (`unreachable`), pages an exited child's rings held or its next child
-     found on its inbound rings, SENDs the provider did not take, and landings whose receive was posted again into their
-     own page, their class's free stack empty (`lost`: once a page, not a destination) */
+     found on its inbound rings, and SENDs the provider did not take (`lost`: once a page, not a destination) */
 struct mesh_switch_counters {
   _Alignas(64) _Atomic uint64_t passes,pass_ns[2],part_ns[5];
   _Atomic uint64_t taken,landed,set,forwards,groups;
@@ -1021,10 +1020,7 @@ static inline int mesh_switch_log_take(struct mesh_switch *sw,uint32_t ring,stru
    one more, the page it named before dropped), the entry's use of the page counted first.  The index is clamped into
    the table (its low bits, MESH_TABLE a power of two: a word outside the table is never written), never tested.  An
    index no client has now is set as any other: the page goes back as the index is next allocated (mesh-call.c mesh_pages makes its
-   word new and drops the page it named) or as a later landing there replaces it, and the lane it landed on keeps its
-   receives meanwhile (mesh-link.c link_receive: a landing whose class has no free page posts the landed page again); a
-   lane whose fill comes after its class's stack is empty starts with fewer receives than its share (mesh-link.c
-   switch_receives).  The index is read once: the one clamped is the one set */
+   word new and drops the page it named) or as a later landing there replaces it. The index is read once: the one clamped is the one set */
 _Static_assert(!(MESH_TABLE&(MESH_TABLE-1)),"a table index clamped by its low bits");
 static inline void mesh_switch_set(struct hdr *m,struct mesh_switch *sw,uint32_t pd,const struct mesh_head *head,uint32_t i,uint32_t ring){
   const uint32_t index=__atomic_load_n(&head->dest[i].index,__ATOMIC_RELAXED)&(MESH_TABLE-1);

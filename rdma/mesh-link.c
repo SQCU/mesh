@@ -122,10 +122,8 @@ static void link_failed(struct link *l,int64_t code,uint32_t domain){
    Lane j of the link (its queue pair j) is the switch's lane port 2 MESH_LINK_STREAMS + j, of mesh-switched.h
    mesh_switch_lane_frames(j) frames (lane 0 short, every other long; both ends' plans alike, so both ends' lane j
    alike, TN3205).  On it the child
-   keeps receives posted (one frame count for every SEND and every receive on the lane, TN3205): filled from free pages
-   of the lane's class, and each one a SEND fills posted again at once, into a free page or, where the class has none,
-   into the page that landed (whose landing is then lost), so a lane's posted receives do not run out while every page
-   of its class is used; it posts what its port's inbound rings have, a page a SEND from the page's own memory on a
+   keeps receives posted from free pages of the lane's class (TN3205); it posts what its port's inbound rings have,
+   a page a SEND from the page's own memory on a
    lane of the page's class, each in the lane's in-flight ring; and gives its SENDs' completions to the switch's
    estimators, each dropping its page's use.  What lands is set in the page table and forwarded by its header; what
    this node's clients write is taken from their rings and carried.  Nothing is retained: what cannot go is counted
@@ -162,10 +160,8 @@ static int receives_post(struct link *l,uint32_t j,const uint32_t *page,uint32_t
   if(error)lane_lost(l,j,error<0?-error:error);
   return error;
 }
-/* the lane's receives filled from its class's free stack to as many as its queues' share takes: its first fill (each
-   receive a SEND fills is posted again by link_receive, so the count stays there), and a receive a completion took
-   that named no receive page; a stack found empty posts nothing more this pass and is counted (`starved`: the provider
-   stalls the peer's SEND meanwhile) */
+/* TN3205, Preparing to send: the controller spends one posted receive credit per matching send.
+   Refill each lane to its frame capacity from the available pages of its class. */
 static void switch_receives(struct link *l,uint32_t j){
   struct lane_state *state=l->lane+j;
   const uint64_t frames=mesh_switch_lane_frames(j),most=state->frame_capacity/frames;
@@ -335,14 +331,7 @@ static int link_send(struct link *l,uint32_t served){
   l->completed_at=at;
   return count;
 }
-/* the link's receive completions, each lane's receive posted again at once, so a lane's posted receives stay as
-   many as its fill made them whatever the pool has (TN3205: a receive for every SEND the peer posts): into a page
-   popped from the lane's class, and the page that landed landed (mesh-switched.h mesh_switch_landed: its lines taken,
-   its destinations here set in the table, the rest switched on); where the class's free stack is empty, into the page
-   that landed, which is then not landed, counted (`lost`).  The receives of a poll posted as one list a lane
-   (receives_post).  Nothing of a completion is tested but its lane (one this pass serves) and its status (a failed one
-   fails the link: link_failed): its page is the one its request named, landed as it is.  The completions polled, 0
-   none */
+/* mesh_switch_landed consumes each completed receive. port_pass refills the lanes through switch_receives. */
 static int link_receive(struct link *l,uint32_t served){
   struct mesh_switch *sw=switch_of();
   struct ibv_wc done[RECEIVE_BATCH];
@@ -350,7 +339,6 @@ static int link_receive(struct link *l,uint32_t served){
   if(count<0){link_failed(l,EIO,3);return 0;}
   if(count)atomic_thread_fence(memory_order_acquire);
   const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
-  uint32_t again[MESH_LINK_LANES][RECEIVE_BATCH],agains[MESH_LINK_LANES]={0};
   for(int i=0;i<count;i++){
     const uint32_t j=link_lane(l,done[i].qp_num);
     if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
@@ -361,13 +349,8 @@ static int link_receive(struct link *l,uint32_t served){
     const uint32_t pages=mesh_pool(M)->pages,named=(uint32_t)(done[i].wr_id&UINT32_MAX),pd=named<pages?named:pages-1;
     state->got++;
     atomic_store_explicit(&lanes_of(l,j/2)->posts[1].done[j&1],state->got,memory_order_relaxed);
-    const uint32_t fresh=mesh_pool_pop(M,mesh_switch_lane_frames(j));
-    if(fresh==MESH_ABSENT){again[j][agains[j]++]=pd;MESH_SWITCH_COUNT(sw,l->index,lost,1);continue;}
-    receive_page(l,j,fresh);
-    again[j][agains[j]++]=fresh;
     mesh_switch_landed(M,sw,switch_lane(l->index,j),pd,at,l->index,&togo);
   }
-  for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(agains[j])receives_post(l,j,again[j],agains[j]);
   return count;
 }
 /* the client rings this child takes: ring s the (s mod n)-th, by port index, of the n ports whose child serves (their
