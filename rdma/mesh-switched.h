@@ -168,10 +168,10 @@ struct mesh_switch_splits {
 /* a cable of this node, port p's (its link's lanes), on a line of its own: the bytes pushed onto its inbound rings or
    posted on its lanes and not yet completed (`queued`), of every class, every pushing child's (mesh_switch_forward) and
    its own child's as its SENDs complete (mesh_switch_sent); and its terms, each its own child's measure of its SENDs' completions
-   (mesh_switch_cable_sent), 0 until its first sample: `rate`, the bytes it completes a ns while it has SENDs
-   outstanding (the rate its backlog drains at, an exponential average), and `page[c]`, the least time (ns) from a
-   post to its completion over the SENDs of class c (mesh_switch_class) it has completed (a page's own time on it,
-   nothing queued ahead: every SEND's time is at least that) */
+   (mesh_switch_cable_sent), an exponential average, 0 until its first sample: `rate`, the bytes it completes a ns
+   while it has SENDs outstanding (the rate its backlog drains at), and `page[c]`, the time (ns) from its post to its
+   completion of a SEND of class c (mesh_switch_class) that had the cable to itself (a page's own time on it, nothing
+   queued ahead) */
 struct mesh_switch_cable { _Alignas(64) _Atomic uint64_t queued; _Atomic float rate,page[MESH_CLASSES]; };
 /* a remote link's line as this node took it from the headers that carried it (mesh_switch_lines_take), kept under its
    ends' node table entries (struct mesh_switch_view `slot`), so it outlives every republish of the view that keeps
@@ -502,28 +502,36 @@ static inline void mesh_switch_sent(struct mesh_switch *sw,uint32_t lane,uint64_
 }
 /* Port p's cable's terms (struct mesh_switch_cable `rate`, `page`) from one poll of its SEND completions, by its child:
    the poll read at `done` (its clock, read once a poll), completing `bytes` in all, the earliest of them posted at
-   `first`, the cable's previous poll that completed any at `last` (0: none yet), and for each class the least time
-   from post to completion among the poll's SENDs of it (`least[c]`, INFINITY where it completed none).
+   `first`, the cable's previous poll that completed any at `last` (0: none yet); and, where the poll completed a SEND
+   that had the cable to itself (posted no sooner than `last`, the only one outstanding as the poll began), its class
+   `alone` (else UINT32_MAX) and its post `posted`.
    - The rate: the poll's bytes over the time since `last`, where the earliest was posted before `last` (the cable was
      busy the whole while): the rate a backlog drains at, all its lanes at once.
-   - The page's time: the least post-to-completion time of any SEND of the class the cable has completed: a page's own
-     time on it when nothing is ahead of it (on node B, 2026-11-23: 2.7-3.1 us a short SEND on the Studios' links and
-     4.4-4.9 us on the mini's, about 6.0-6.4 us a long one).  Every SEND's time is at least that, so any SEND lowers it
-     toward the true one, whatever was queued ahead of it, and none raises it.  It was an average of the SENDs that had
-     the cable to themselves: one sample set it, a page alone after a quiet stretch carries a quiet link's first SEND
-     (design/quiet-link.md), and a cable priced high by one is drawn by none and never measured again (B's port 4
-     toward D held 27750 ns for a short page, so no short page went from B to D direct: 4-rank 6 KB all-reduce 17.0 to
-     19.1 us on every node).  A cable that slows keeps its least: its rate, measured while busy, carries the change.
-   The SENDs a poll completes share its one clock read, so the rate is not read from a single SEND's service in a busy
-   poll (a lane's second completion in one poll has none: mesh_switch_sent's `service` counts it 1 ns), and one SEND's
+   - The page's time: that SEND's post to its completion: a page's own time on the cable when nothing is ahead of it
+     (on node B, 2026-11-23: 2.7-3.1 us a short SEND and 6.0-6.4 us a long one on the Studios' links, 4.4-5.7 us and
+     6.1-8.0 us on the mini's), an average of such SENDs from the time the cable's rate gives the page.  It was the
+     first sample as it came, and a page alone after a quiet stretch pays a quiet link's first SEND (design/quiet-link.md:
+     1.8-4.9 us more at the median): B's port 4 toward D held 27750 ns for a short page from one sample, B->D was priced
+     27.75 us, and no short page went from B to D direct (every node's 4-rank 6 KB all-reduce 17.0 to 19.1 us).  From
+     the rate's 0.88 us that sample moves it to 4.2 us, so the link is still drawn and its later samples bring it down.
+     The least time of any SEND is no bound on it: completions are polled 2-8 clock ticks (83-333 ns) after a 36 KiB
+     SEND's post, which priced every link near nothing and sent 72,854 of a 2-rank 393 KB all-gather's 88,000 pages
+     through relays (26.2 to 41.8 us).
+   The SENDs a poll completes share its one clock read, so neither is read from a single SEND's service in a busy poll
+   (a lane's second completion in one poll has none: mesh_switch_sent's `service` counts it 1 ns), and one SEND's
    service on a lane is its share of the cable while the lanes beside it are busy, not the cable's rate */
 static inline void mesh_switch_cable_sent(struct mesh_switch *sw,uint32_t p,uint64_t bytes,uint64_t first,uint64_t last,uint64_t done,
-                                          const double *least){
+                                          uint32_t alone,uint64_t posted){
   struct mesh_switch_cable *x=sw->cable+p%MESH_PORTS;
   if(bytes && last && first<last && done>last)mesh_switch_average(&x->rate,(double)bytes/(double)(done-last));
-  for(uint32_t c=0;c<MESH_CLASSES;c++){
-    const float was=atomic_load_explicit(&x->page[c],memory_order_relaxed);
-    if(least[c]<INFINITY && (!(was>0) || least[c]<was))atomic_store_explicit(&x->page[c],(float)least[c],memory_order_relaxed);
+  /* the page's time an average that starts from the time the measured rate gives the page (its bytes over the rate,
+     the stand-in a draw reads before any sample: mesh_switch_terms_read) and moves an eighth of the way a sample, so
+     one sample moves it an eighth: a sample is taken once the rate is measured */
+  const float rate=atomic_load_explicit(&x->rate,memory_order_relaxed);
+  if(alone<MESH_CLASSES && done>posted && rate>0){
+    const float was=atomic_load_explicit(&x->page[alone],memory_order_relaxed);
+    const double from=was>0?was:(double)mesh_switch_class_frames(alone)*MESH_FRAME/rate;
+    atomic_store_explicit(&x->page[alone],(float)(from+((double)(done-posted)-from)/8),memory_order_relaxed);
   }
 }
 /* where a header's lines lie: after its payload of `bytes` (8-aligned), within the SEND's whole frames, so they cost
@@ -571,10 +579,12 @@ static inline void mesh_switch_ports_read(struct mesh_switch *sw,uint64_t *line)
 }
 /* a serving cable's terms as a draw reads them (mesh_switch_terms_read): the time its bytes queued take to drain
    (`backlog`, ns: over its own measured rate) and, for each class, a page's own time on its link (`own`, ns): the
-   least measured time over the serving cables toward the same peer (mesh_switch_cable_sent), every cable of a link
-   the same one.  Priced by each cable's own, B's ports 0 and 1 toward A, the same cable, differed by 10% (2970 against
-   2696 ns for a short page), so every page went to the lesser one whichever child took it, each one through an
-   inbound ring to another child's pass (2-rank 6 KB calls 0.6-0.9 us slower, the post wait 0.47 to 0.91 us).  Of one link's cables the times
+   least measured time alone over the serving cables toward the same peer, every cable of a link the same one.  A
+   cable's time alone is measured only from a SEND it carried alone (mesh_switch_cable_sent), so a cable kept by its
+   own time is drawn by none and its measure never made again: B's port 3 toward A held 8958 ns for a short page against
+   2696-2970 ns on its two siblings, and B's ports 0 and 1 toward A, the same cable, differed by 10% (2970 against
+   2696), so every page went to the lesser one whichever child took it, each one through an inbound ring to another
+   child's pass (2-rank 6 KB calls 0.6-0.9 us slower, the post wait 0.47 to 0.91 us).  Of one link's cables the times
    now differ by their backlogs alone, so at none the taking child's own port is drawn (mesh_switch_cables_toward) and
    the page is posted in the pass that took it.  Where a measure is not made yet, its link's nominal ones in the view (a
    cable's share of the link's rate, and its latency) stand in: the nominal rate for the rate; for a page's time, its
@@ -582,7 +592,7 @@ static inline void mesh_switch_ports_read(struct mesh_switch *sw,uint64_t *line)
    9.25 GB/s), else over the nominal rate plus the nominal latency */
 struct mesh_switch_terms { double backlog,own[MESH_CLASSES]; };
 static inline void mesh_switch_terms_read(struct mesh_switch *sw,const struct mesh_switch_view *v,const uint64_t *line,struct mesh_switch_terms *t){
-  double measured_own[MESH_PORTS][MESH_CLASSES];
+  double alone[MESH_PORTS][MESH_CLASSES];
   for(uint32_t p=0;p<MESH_PORTS;p++){
     if(mesh_port_state(line[p])!=CHILD_SERVING)continue;
     const struct mesh_switch_cable *x=sw->cable+p;
@@ -592,7 +602,7 @@ static inline void mesh_switch_terms_read(struct mesh_switch *sw,const struct me
     t[p].backlog=(double)atomic_load_explicit(&x->queued,memory_order_relaxed)/rate;
     for(uint32_t c=0;c<MESH_CLASSES;c++){
       const double page=atomic_load_explicit(&x->page[c],memory_order_relaxed),bytes=(double)mesh_switch_class_frames(c)*MESH_FRAME;
-      measured_own[p][c]=page>0?page:INFINITY;
+      alone[p][c]=page>0?page:INFINITY;
       t[p].own[c]=measured>0?bytes/measured:bytes/rate+latency;
     }
   }
@@ -602,7 +612,7 @@ static inline void mesh_switch_terms_read(struct mesh_switch *sw,const struct me
     for(uint32_t c=0;c<MESH_CLASSES;c++){
       double least=INFINITY;
       for(uint32_t q=0;q<MESH_PORTS;q++)
-        if(mesh_port_state(line[q])==CHILD_SERVING && mesh_port_peer(line[q])==mesh_port_peer(line[p]) && measured_own[q][c]<least)least=measured_own[q][c];
+        if(mesh_port_state(line[q])==CHILD_SERVING && mesh_port_peer(line[q])==mesh_port_peer(line[p]) && alone[q][c]<least)least=alone[q][c];
       if(least<INFINITY)t[p].own[c]=least;
     }
   }

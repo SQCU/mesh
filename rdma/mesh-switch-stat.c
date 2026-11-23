@@ -1,7 +1,7 @@
 /* mesh-switch-stat: the switch as the bridge keeps it in its region (mesh-switched.h): its pool's pages and their free
    counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), each
    port's line (its child's state, its link's peer and plan) and cable's queue and measured terms (its rate, bytes a ns,
-   and a short and a long page's least time, ns) and the pages on its inbound rings, its serving or used lanes'
+   and a short and a long page's time alone, ns) and the pages on its inbound rings, its serving or used lanes'
    in-flight positions and feedback, and its published view, one JSON line to stdout.  It reads the region and writes nothing: two lines around
    a workload are its counts (their difference).
 

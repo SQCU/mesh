@@ -301,8 +301,8 @@ static struct mesh_switch_togo togo;
    their order) given back, the lane's completed count one more, and its page's use dropped, through the switch's
    estimators (its post, as its entry stored it, its service from the later of its post and the lane's previous
    completion, its completion); then the cable's terms from the poll (mesh-switched.h
-   mesh_switch_cable_sent: its bytes since the link's previous completing poll, `completed_at`, and each class's least
-   time from post to completion among them).  The completions polled, 0 none */
+   mesh_switch_cable_sent: its bytes since the link's previous completing poll, `completed_at`, and the time of a SEND
+   that had the cable to itself, the only one outstanding as the poll began).  The completions polled, 0 none */
 static int link_send(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
@@ -311,8 +311,11 @@ static int link_send(struct port *port,uint32_t served){
   if(count<0){link_failed(port,EIO,2);return 0;}
   if(!count)return 0;
   const uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  uint64_t bytes=0,first=UINT64_MAX;double least[MESH_CLASSES];
-  for(uint32_t c=0;c<MESH_CLASSES;c++)least[c]=INFINITY;
+  uint64_t outstanding=0,bytes=0,first=UINT64_MAX,alone_posted=0;uint32_t alone=UINT32_MAX;
+  for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(served>>j&1){
+    const struct mesh_switch_lane *x=sw->lane+switch_lane(port,j);
+    outstanding+=atomic_load_explicit(&x->posted,memory_order_relaxed)-atomic_load_explicit(&x->completed,memory_order_relaxed);
+  }
   for(int i=0;i<count;i++){
     const uint32_t j=link_lane(l,done[i].qp_num);
     if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
@@ -325,8 +328,7 @@ static int link_send(struct port *port,uint32_t served){
     const uint64_t start=posted>state->last?posted:state->last,wire=mesh_switch_lane_bytes(switch_lane(port,j));
     mesh_switch_sent(sw,switch_lane(port,j),wire,posted,start,at);
     bytes+=wire;first=MIN(first,posted);
-    const uint32_t c=mesh_switch_class(mesh_switch_lane_frames(j));
-    if(at>posted && (double)(at-posted)<least[c])least[c]=(double)(at-posted);
+    if(outstanding==1 && posted>=l->completed_at){alone=mesh_switch_class(mesh_switch_lane_frames(j));alone_posted=posted;}
     mesh_pd_drop(M,pd);
     MESH_SWITCH_COUNT(sw,port->index,sent,1);MESH_SWITCH_COUNT(sw,port->index,send_ns,at-posted);
     state->last=at;
@@ -336,7 +338,7 @@ static int link_send(struct port *port,uint32_t served){
     atomic_store_explicit(&record->posts[0].done[j&1],completed,memory_order_relaxed);
   }
   if(!bytes)return count;
-  mesh_switch_cable_sent(sw,port->index,bytes,first,l->completed_at,at,least);
+  mesh_switch_cable_sent(sw,port->index,bytes,first,l->completed_at,at,alone,alone_posted);
   l->completed_at=at;
   return count;
 }
