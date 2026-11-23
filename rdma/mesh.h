@@ -29,12 +29,12 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    plus uptime (163's count of its sender's refreshes, which began again at 0 as the sender restarted) */
 #define MESH_VERSION 164u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  188: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  189: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   187, the switch has no refresh's weights (their two copies and `weights_version`: each port child's poller makes its
-   own cost-to-go, mesh-switched.h struct mesh_switch_togo), the view has the policy's time scale (`scale`), and the
-   split tables have no `scale`, `scale_view` or `spare` */
-#define MESH_LAYOUT 188u
+   188, a write ring's cell holds the write of position p while its sequence is p + 1 and is the producer's again once
+   the ring's take is past p (188's sequence 2 (p / MESH_RING) + 1 while full, made 2 (p / MESH_RING) + 2 by its taker
+   after the carry), and a port child's hand names no ring position (188's `take`) */
+#define MESH_LAYOUT 189u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -91,15 +91,18 @@ struct mesh_pool_class { _Alignas(64) _Atomic uint64_t head; _Atomic uint32_t fr
 struct mesh_pool { struct mesh_pool_class cls[MESH_CLASSES]; _Alignas(64) uint32_t pages; };
 
 /* A write as a client's ring cell has it: the page the index named when it was written (`pd`: the write's use is on
-   it until the bridge takes it; the take reads the page, never the index), its payload bytes and its destinations */
+   it until the bridge takes it; the take reads the page, never the index), its payload bytes and its destinations on
+   other nodes (those on this node its writer sets itself: mesh-call.c mesh_write) */
 struct mesh_write { uint32_t pd,bytes,dests,unused; struct mesh_dest dest[MESH_DESTS]; };
 _Static_assert(sizeof(struct mesh_write)==16+8*MESH_DESTS,"mesh_write");
 /* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and one taker, the port child
    whose share it is (ring s the (s mod n)-th of the n serving ports, by the port lines: mesh-switched.h struct
    mesh_switch `port`; as the serving ports change, two may take a moment, each position one compare-exchange's).
-   Cell c has the write of position p (c = p mod MESH_RING) while its sequence is 2 (p / MESH_RING) + 1 and is free for
-   it while its sequence is 2 (p / MESH_RING), so a zeroed ring is empty; `put` is the next position written and `take`
-   the next taken */
+   `put` is the next position written and `take` the next taken.  Cell c (c = p mod MESH_RING) holds the write of
+   position p from the producer's store of its sequence, p + 1, so a zeroed ring is empty; a taker copies the cell, then
+   moves `take` past p by a compare-exchange, and carries its copy where that won; the cell is the producer's again
+   once `take` is past p, which the producer tests against before it writes (mesh_ring_push).  A copy whose
+   compare-exchange lost may be torn by the producer's next lap, and is never carried */
 struct mesh_cell { _Atomic uint64_t sequence; struct mesh_write w; };
 struct mesh_ring { _Alignas(64) _Atomic uint64_t put; _Alignas(64) _Atomic uint64_t take; _Alignas(64) struct mesh_cell cell[MESH_RING]; };
 
@@ -279,14 +282,15 @@ static inline void mesh_pd_drop(struct hdr *m,uint32_t pd){
 
 /* ---- The write rings (`ring_off`) --------------------------------------------------------------------------------- */
 static inline struct mesh_ring *mesh_ring_at(struct hdr *m,uint32_t slot){ return (struct mesh_ring *)((char *)m+m->ring_off)+slot; }
-/* write w put on the ring by its one producer: 1, or 0 where the ring is full.  The put's store is sequentially
-   consistent, ordered before the writer's read of its flag (mesh_ring_flag) */
+/* write w put on the ring by its one producer: 1, or 0 where the ring is full (MESH_RING positions past `take`).  The
+   take is read with acquire, so the taker's copy of the cell's last lap is done before this write's stores; the put's
+   store is sequentially consistent, ordered before the writer's read of its flag (mesh_ring_flag) */
 static inline int mesh_ring_push(struct mesh_ring *r,const struct mesh_write *w){
-  const uint64_t at=atomic_load_explicit(&r->put,memory_order_relaxed),lap=at/MESH_RING;
+  const uint64_t at=atomic_load_explicit(&r->put,memory_order_relaxed);
+  if(at-atomic_load_explicit(&r->take,memory_order_acquire)>=MESH_RING)return 0;
   struct mesh_cell *cell=&r->cell[at%MESH_RING];
-  if(atomic_load_explicit(&cell->sequence,memory_order_acquire)!=2*lap)return 0;
   cell->w=*w;
-  atomic_store_explicit(&cell->sequence,2*lap+1,memory_order_release);
+  atomic_store_explicit(&cell->sequence,at+1,memory_order_release);
   atomic_store(&r->put,at+1);
   return 1;
 }

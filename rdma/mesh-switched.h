@@ -11,10 +11,11 @@
    A SEND fills one receive posted into a page of the lane's class (TN3205: both ends post the same frame count), and
    the lane's child posts that receive again at once (mesh-link.c link_receive: into a free page, else into the page
    that landed, whose landing is then lost), so a lane's receives do not run out while every page of its class is used.
-   - Take.  A client's write (mesh.h struct mesh_write, from its ring) names its page and its destinations: the bridge
-     writes the page's header, sets the table entry of each destination on this node to the page, and forwards the page
-     toward the others (mesh_switch_carry).  Each ring has one taker, which every port child derives from the port
-     lines (struct mesh_switch `port`): ring s the (s mod n)-th, by port index, of the n ports whose child serves.
+   - Take.  A client's write names its page and its destinations: the writer sets the table entry of each destination
+     on this node to the page itself (mesh-call.c mesh_write), and puts the others on its ring (mesh.h struct
+     mesh_write); the bridge writes the page's header and forwards the page toward them (mesh_switch_carry).  Each ring
+     has one taker, which every port child derives from the port lines (struct mesh_switch `port`): ring s the (s mod
+     n)-th, by port index, of the n ports whose child serves.
    - Switching.  At every node a page is at, the destinations it carries on are split over the node's out-neighbours
      (the peers its ports serve toward, as the port lines tell them: mesh_switch_choose): each destination to its
      allowed neighbour of the earliest arrival (that neighbour's cable's wait with the page on it, the link's latency,
@@ -193,14 +194,13 @@ struct mesh_switch_record {
 };
 struct mesh_switch_log { _Alignas(64) _Atomic uint64_t head; _Alignas(64) _Atomic uint64_t tail,dropped; struct mesh_switch_record record[MESH_SWITCH_LOG]; };
 /* a port child's hand, which its parent reads once the child has exited and the next bridge reads as it adopts the
-   region (mesh_switch_left_settle): the ring position of the write it takes (`take`: (slot + 1) << 56 | the position,
-   MESH_HAND_WON once its compare-exchange won, 0 none), and the outbox position it pushes page `page` to (`push`:
-   (lane + 1) << 56 | the position, MESH_HAND_WON once won, 0 none) */
+   region (mesh_switch_left_settle): the outbox position it pushes page `page` to (`push`: (lane + 1) << 56 | the
+   position, MESH_HAND_WON once won, 0 none) */
 #define MESH_HAND_WON (UINT64_C(1)<<55)
 #define MESH_HAND_AT (MESH_HAND_WON-1)
-struct mesh_switch_hand { _Alignas(64) _Atomic uint64_t take,push; _Atomic uint32_t page; };
+struct mesh_switch_hand { _Alignas(64) _Atomic uint64_t push; _Atomic uint32_t page; };
 /* a hand as its child left it, the parent's copy */
-struct mesh_switch_left { uint64_t take,push; uint32_t page; };
+struct mesh_switch_left { uint64_t push; uint32_t page; };
 /* where a pass's time goes, counted in memory (never storage) by each process of the switch, a set a port child (at
    its port's index) and the parent's (at MESH_SWITCH_PARENT), read by mesh-switch-stat:
    - passes, and of one pass in 1024 its time (`pass_ns`: summed, and the passes timed) and each part's (`part_ns`:
@@ -1086,9 +1086,10 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
 }
 /* A client's write carried (the take): its page (`pd`, the page the write's ring use is on) given the write's bytes and
    its header (MESH_HEAD_MAGIC, this node its source, its sender and its path's first node, the node's header counter
-   its `seq`, every destination's next this node), each destination on this node set in the table (mesh_switch_set),
-   the others forwarded (mesh_switch_forward).  A cell naming no page of the pool, no destination or more than
-   MESH_DESTS, or more bytes than its page's payload is carried nowhere, counted (`malformed`) */
+   its `seq`, every destination's next this node), and forwarded toward every destination (mesh_switch_forward), each
+   on another node (its writer set those on this one: mesh-call.c mesh_write; one here on the ring is reached by no
+   neighbour, counted `unreachable`).  A cell naming no page of the pool, no destination or more than MESH_DESTS, or
+   more bytes than its page's payload is carried nowhere, counted (`malformed`) */
 static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const struct mesh_write *w,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand,
                                      const struct mesh_switch_togo *togo){
   const uint32_t self=m->node,pd=w->pd,dests=w->dests;
@@ -1102,21 +1103,20 @@ static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const 
   head->magic=MESH_HEAD_MAGIC;head->source=self;head->bytes=w->bytes;head->hops=0;head->dests=dests;head->lines=0;head->from=self;
   memset(head->path,0,sizeof head->path);head->path[0]=self;
   head->seq=atomic_fetch_add_explicit(&sw->writes,1,memory_order_relaxed);
-  for(uint32_t i=0;i<dests;i++)head->dest[i]=(struct mesh_hop){w->dest[i].node,w->dest[i].index,self,0,0};
-  uint32_t away[MESH_DESTS],naway=0;
-  for(uint32_t i=0;i<dests;i++){
-    if(head->dest[i].node!=self)away[naway++]=i;
-    else mesh_switch_set(m,sw,pd,head,i,ring);
-  }
-  if(naway)mesh_switch_forward(m,sw,pd,head,w->bytes,away,naway,now,ring,hand,togo);
+  uint32_t away[MESH_DESTS];
+  for(uint32_t i=0;i<dests;i++){head->dest[i]=(struct mesh_hop){w->dest[i].node,w->dest[i].index,self,0,0};away[i]=i;}
+  mesh_switch_forward(m,sw,pd,head,w->bytes,away,dests,now,ring,hand,togo);
 }
-/* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by the port child whose
-   hand is `hand`: each ring position named in the hand before its compare-exchange and marked won once won, the write
-   carried from its cell, which stays full meanwhile (so a child that exits mid-write leaves the cell for its parent,
-   or the next bridge, to settle: mesh_switch_left_settle), then the cell given back and the hand cleared, then the
-   write's ring use dropped.  The ring's one taker is the port child whose share it is (mesh-link.c switch_takes, from
-   the port lines); as a port starts or stops serving, the child whose share it was may still be taking, and each
-   position is one compare-exchange's, so each write is one child's.  Returns the writes taken */
+/* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by a port child: each
+   cell holding the write of its position (its sequence the position + 1) copied, then the ring's take moved past it by
+   one compare-exchange, and the copy carried where that won (a copy whose compare-exchange lost is let be: another
+   child took the position, and the producer may be writing the cell's next lap), then the write's ring use dropped.
+   The cell is the producer's again from the compare-exchange on, so a child that exits mid-carry leaves the ring as
+   it is and loses only that write (its ring use with it).  A cell that does not hold the write of the position read
+   ends the take (the ring is empty there, or another child took on: the next pass reads the take again).  The ring's
+   one taker is the port child whose share it is (mesh-link.c switch_takes, from the port lines); as a port starts or
+   stops serving, the child whose share it was may still be taking, and each position is one compare-exchange's, so
+   each write is one child's.  Returns the writes taken */
 static inline uint32_t mesh_switch_ring_dequeue(struct hdr *m,struct mesh_switch *sw,uint32_t slot,uint32_t most,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand,
                                                const struct mesh_switch_togo *togo){
   struct mesh_ring *r=mesh_ring_at(m,slot);
@@ -1124,22 +1124,13 @@ static inline uint32_t mesh_switch_ring_dequeue(struct hdr *m,struct mesh_switch
   uint64_t at=atomic_load_explicit(&r->take,memory_order_relaxed);
   while(taken<most){
     struct mesh_cell *cell=&r->cell[at%MESH_RING];
-    const uint64_t full=2*(at/MESH_RING)+1,seq=atomic_load_explicit(&cell->sequence,memory_order_acquire);
-    if(seq<full)break;
-    if(seq>full){at=atomic_load_explicit(&r->take,memory_order_relaxed);continue;}
-    const uint64_t named=((uint64_t)(slot+1)<<56)|at;
-    atomic_store_explicit(&hand->take,named,memory_order_relaxed);
-    if(!atomic_compare_exchange_weak_explicit(&r->take,&at,at+1,memory_order_acq_rel,memory_order_relaxed))continue;
-    atomic_store_explicit(&hand->take,named|MESH_HAND_WON,memory_order_relaxed);
+    if(atomic_load_explicit(&cell->sequence,memory_order_acquire)!=at+1)break;
     const struct mesh_write w=cell->w;
+    if(!atomic_compare_exchange_weak_explicit(&r->take,&at,at+1,memory_order_acq_rel,memory_order_relaxed))continue;
     mesh_switch_carry(m,sw,&w,now,ring,hand,togo);
-    atomic_store_explicit(&cell->sequence,full+1,memory_order_release);
-    atomic_store_explicit(&hand->take,0,memory_order_release);
     mesh_pd_drop(m,w.pd);
-    taken++;
-    at=atomic_load_explicit(&r->take,memory_order_relaxed);
+    taken++;at++;
   }
-  atomic_store_explicit(&hand->take,0,memory_order_release);
   return taken;
 }
 /* A receive landed in page pd on lane l (the page of the lane's class): the page live, its one use the landing's.  A
@@ -1206,51 +1197,21 @@ static inline uint32_t mesh_switch_receives_drop(struct hdr *m,uint32_t first,ui
   }
   return n;
 }
-/* whether another child's hand names the position `named` (its MESH_HAND_WON aside) in its take (`push` 0) or its
-   push (`push` 1): its child may have won it */
-static inline int mesh_switch_hand_names(const struct mesh_switch *sw,uint64_t named,int push){
+/* whether another child's hand names the outbox position `named` (its MESH_HAND_WON aside): its child may have won it */
+static inline int mesh_switch_hand_names(const struct mesh_switch *sw,uint64_t named){
   int any=0;
   for(uint32_t p=0;p<MESH_PORTS;p++)
-    any|=(atomic_load_explicit(push?&sw->hand[p].push:&sw->hand[p].take,memory_order_acquire)&~MESH_HAND_WON)==(named&~MESH_HAND_WON);
+    any|=(atomic_load_explicit(&sw->hand[p].push,memory_order_acquire)&~MESH_HAND_WON)==(named&~MESH_HAND_WON);
   return any;
 }
 /* A port child's hand as the child left it at its end (`h`), settled as far as it can be now, by the parent's event
    loop (`ring` its counters); what is settled is cleared, and 1 returned once nothing of it is left.  `won` 1: only
    what the child had won (MESH_HAND_WON), so that a cell two dead children's hands name is settled first by its
-   winner's.
-   - Its take: where the cell is still full past the ring's take and the child had won it, or (its win not marked yet)
-     no other hand names that position, the write was carried no further than it got: its ring use dropped, counted
-     (`lost`), and its cell given back.  A cell given back, or one past the take that no one won: nothing.
-   - Its push of `page`: where the child has its cell unfilled (won, or no other hand names it), the cell made a
-     hole; where it won no cell, nothing was pushed.  Either way the page's use for the push dropped, counted (`lost`),
-     and its frames off the lane's queue.  A cell it filled: the outbox's.
-   Where another hand names the position, it is looked at again later (the parent's next turn): the other child ends
-   its own take or push, or its own end is settled */
+   winner's.  Its push of `page`: where the child has its cell unfilled (won, or no other hand names it), the cell made
+   a hole; where it won no cell, nothing was pushed.  Either way the page's use for the push dropped, counted (`lost`),
+   and its frames off the lane's queue.  A cell it filled: the outbox's.  Where another hand names the position, it is
+   looked at again later (the parent's next turn): the other child ends its own push, or its own end is settled */
 static inline int mesh_switch_left_settle(struct hdr *m,struct mesh_switch *sw,struct mesh_switch_left *h,int won,uint32_t ring){
-  if(h->take && (!won || h->take&MESH_HAND_WON)){
-    const uint32_t slot=(uint32_t)(h->take>>56)-1u;
-    const uint64_t at=h->take&MESH_HAND_AT,full=2*(at/MESH_RING)+1;
-    int later=0;
-    if(slot<MESH_CLIENTS){
-      struct mesh_ring *r=mesh_ring_at(m,slot);
-      struct mesh_cell *cell=&r->cell[at%MESH_RING];
-      /* read in this order: the ring's take, the other hands, the cell (a child names its position in its hand from
-         before its win until after its cell is given back, so a cell read full where no other hand names it is no
-         other taker's) */
-      if(atomic_load_explicit(&r->take,memory_order_acquire)>at){
-        const int other=mesh_switch_hand_names(sw,h->take,0);
-        if(atomic_load_explicit(&cell->sequence,memory_order_acquire)==full){
-          if(!(h->take&MESH_HAND_WON) && other)later=1;
-          else{
-            mesh_pd_drop(m,cell->w.pd);
-            MESH_SWITCH_COUNT(sw,ring,lost,1);
-            atomic_store_explicit(&cell->sequence,full+1,memory_order_release);
-          }
-        }
-      }
-    }
-    if(!later)h->take=0;
-  }
   if(h->push && (!won || h->push&MESH_HAND_WON)){
     const uint32_t l=(uint32_t)(h->push>>56)-1u;
     const uint64_t at=h->push&MESH_HAND_AT;
@@ -1259,7 +1220,7 @@ static inline int mesh_switch_left_settle(struct hdr *m,struct mesh_switch *sw,s
       struct mesh_switch_lane *x=sw->lane+l;
       struct mesh_switch_cell *c=sw->ring[l]+at%MESH_SWITCH_RING;
       const int pushed_past=atomic_load_explicit(&x->tail,memory_order_acquire)>at;
-      const int other=mesh_switch_hand_names(sw,h->push,1);
+      const int other=mesh_switch_hand_names(sw,h->push);
       const int unfilled=pushed_past && atomic_load_explicit(&c->sequence,memory_order_acquire)==at;
       int hole=0;
       if(h->push&MESH_HAND_WON)hole=unfilled;
@@ -1274,7 +1235,7 @@ static inline int mesh_switch_left_settle(struct hdr *m,struct mesh_switch *sw,s
     }
     if(!later)h->push=0;
   }
-  return !h->take && !h->push;
+  return !h->push;
 }
 
 /* ---- The policy's refresh: its features from this node's state, its tables published ---------------------------

@@ -51,11 +51,12 @@ struct mesh_dest { uint32_t node,index; };
    EINVAL (not attached, count 0 or past the table, bytes past MESH_LONG_PAYLOAD), ENOSPC (no `count` consecutive free
    indices), ENOMEM (the pool has fewer free pages of the class). */
 uint32_t mesh_pages(struct mesh_ctx *,uint32_t count,uint32_t bytes);
-/* The page at `index` (`bytes` of payload) written to each of dests[0 .. n): one cell of this client's write ring, the
-   page's uses raised by one until the bridge takes it.  0; EBUSY where the page has a SEND or a write out (its uses
-   past 1: the client must not change its bytes); EAGAIN where the ring is full; EINVAL where the index is not this
-   client's or names no page, n is 0 or past MESH_DESTS, a destination index is past the table, or `bytes` is past the
-   page's payload.  The ring has one producer: a client's calls of mesh_write are made one at a time. */
+/* The page at `index` (`bytes` of payload) written to each of dests[0 .. n): each destination on this node set by the
+   call itself (the index names the page, its landed one more), and the others one cell of this client's write ring,
+   the page's uses raised by one until the bridge takes it.  0; EBUSY where the page has a SEND or a write out (its uses
+   past 1: the client must not change its bytes); EAGAIN where the ring is full (nothing set); EINVAL where the index is
+   not this client's or names no page, n is 0 or past MESH_DESTS, a destination index is past the table, or `bytes` is
+   past the page's payload.  The ring has one producer: a client's calls of mesh_write are made one at a time. */
 int mesh_write(struct mesh_ctx *,uint32_t index,uint32_t bytes,const struct mesh_dest *dests,uint32_t n);
 /* Each index of [first, first + count) left naming no page (its landed unchanged), its page dropped; indices != 0: the
    indices freed too.  0; EINVAL where the range is past the table or has an index that is not this client's (then

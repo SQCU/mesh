@@ -217,15 +217,15 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->start=mesh_started(getpid());
     /* the slot's write ring, whose one producer this process is now: its put moved past every position the slot's
-       last client wrote, to its take where the take is past it, then past the cell at put where that cell was filled
-       (its sequence past its lap's free value: a client that exited between its cell's store and put's, the cell
-       taken since or not), so this process's first write finds its cell free; a write so left on the ring flagged for
-       the bridge's port children (mesh.h mesh_ring_flag), which carry it */
+       last client wrote, to its take where the take is past it, then past the cell at put where that cell holds a
+       write (its sequence put + 1: a client that exited between its cell's store and put's), so this process never
+       writes a cell a taker may be copying; a write so left on the ring flagged for the bridge's port children (mesh.h
+       mesh_ring_flag), which carry it */
     struct mesh_ring *ring=mesh_ring_at(m,s);
     uint64_t put=atomic_load_explicit(&ring->put,memory_order_relaxed);
     const uint64_t take=atomic_load_explicit(&ring->take,memory_order_acquire);
     if(take>put)put=take;
-    if(atomic_load_explicit(&ring->cell[put%MESH_RING].sequence,memory_order_acquire)>2*(put/MESH_RING))put++;
+    if(atomic_load_explicit(&ring->cell[put%MESH_RING].sequence,memory_order_acquire)==put+1)put++;
     atomic_store(&ring->put,put);
     if(put>take)mesh_ring_flag(m,s);
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};

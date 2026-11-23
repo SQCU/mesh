@@ -42,9 +42,14 @@ uint32_t mesh_pages(struct mesh_ctx *context,uint32_t count,uint32_t bytes){
   return first;
 }
 
-/* One ring cell: the page's use for the write counted by a compare-exchange from 1 (the word's use alone), so a page
-   with a SEND or a write out is refused, and dropped again where the ring is full; the ring flagged for the bridge's
-   port children (mesh.h mesh_ring_flag) */
+/* The destinations on other nodes one ring cell, those on this node set here.  The page's uses counted first, by one
+   compare-exchange from 1 (the word's use alone, so a page with a SEND or a write out is refused): one for the cell
+   where it has destinations, one for each destination here, so the page is held while it is set here whatever the
+   port children do with the cell meanwhile.  The cell pushed first (its destinations not held up by these), its ring
+   flagged for the bridge's port children (mesh.h mesh_ring_flag); then the page given the write's bytes and each
+   destination here set: its word naming the page, its landed one more (mesh.h mesh_entry_put), the page it named
+   before dropped.  A full ring sets nothing, and its uses are dropped again.  A write whose destinations are all here
+   never enters the ring and needs no link */
 int mesh_write(struct mesh_ctx *context,uint32_t index,uint32_t bytes,const struct mesh_dest *dests,uint32_t n){
   struct hdr *m=attached(context);
   if(!m || index>=m->entries || !dests || !n || n>MESH_DESTS)return EINVAL;
@@ -54,13 +59,25 @@ int mesh_write(struct mesh_ctx *context,uint32_t index,uint32_t bytes,const stru
   if(!mesh_pd_valid(m,pd))return EINVAL;
   struct mesh_pd *p=mesh_pd_at(m,pd);
   if(bytes>MESH_PAYLOAD(p->cls))return EINVAL;
+  struct mesh_write w={.pd=pd,.bytes=bytes};
+  uint32_t here[MESH_DESTS],local=0;
+  for(uint32_t i=0;i<n;i++){
+    if(dests[i].node==m->node)here[local++]=dests[i].index;
+    else w.dest[w.dests++]=dests[i];
+  }
+  const uint32_t held=(w.dests?1u:0u)+local;
   uint32_t alone=1;
-  if(!atomic_compare_exchange_strong_explicit(&p->uses,&alone,2,memory_order_acq_rel,memory_order_relaxed))return EBUSY;
-  struct mesh_write w={.pd=pd,.bytes=bytes,.dests=n};
-  for(uint32_t i=0;i<n;i++)w.dest[i]=dests[i];
-  const uint32_t slot=mesh_owner_byte(context->client)-1u;
-  if(!mesh_ring_push(mesh_ring_at(m,slot),&w)){mesh_pd_drop(m,pd);return EAGAIN;}
-  mesh_ring_flag(m,slot);
+  if(!atomic_compare_exchange_strong_explicit(&p->uses,&alone,1+held,memory_order_acq_rel,memory_order_relaxed))return EBUSY;
+  if(w.dests){
+    const uint32_t slot=mesh_owner_byte(context->client)-1u;
+    if(!mesh_ring_push(mesh_ring_at(m,slot),&w)){
+      for(uint32_t k=0;k<held;k++)mesh_pd_drop(m,pd);
+      return EAGAIN;
+    }
+    mesh_ring_flag(m,slot);
+  }
+  if(local)atomic_store_explicit(&p->bytes,bytes,memory_order_relaxed);
+  for(uint32_t k=0;k<local;k++)mesh_pd_drop(m,mesh_entry_put(m,here[k],pd,1));
   return 0;
 }
 

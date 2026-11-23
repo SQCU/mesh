@@ -925,15 +925,15 @@ static void switch_settle(void){
   struct mesh_switch *sw=mesh_switch_of(M);
   for(int won=1;won>=0;won--)for(uint32_t i=0;i<lefts;i++)mesh_switch_left_settle(M,sw,left+i,won,MESH_SWITCH_PARENT);
   uint32_t still=0;
-  for(uint32_t i=0;i<lefts;i++)if(left[i].take || left[i].push)left[still++]=left[i];
+  for(uint32_t i=0;i<lefts;i++)if(left[i].push)left[still++]=left[i];
   lefts=still;
 }
 /* port p's hand taken as its child left it (and cleared for its next); 0, or ENOMEM where it could not be stored, which
    is said */
 static int switch_left(uint32_t p){
   struct mesh_switch_hand *h=mesh_switch_of(M)->hand+p;
-  const struct mesh_switch_left was={atomic_exchange(&h->take,0),atomic_exchange(&h->push,0),atomic_load(&h->page)};
-  if(!was.take && !was.push)return 0;
+  const struct mesh_switch_left was={atomic_exchange(&h->push,0),atomic_load(&h->page)};
+  if(!was.push)return 0;
   if(lefts==left_room){
     const uint32_t room=left_room?2*left_room:16;
     struct mesh_switch_left *grown=realloc(left,room*sizeof *grown);
@@ -944,7 +944,7 @@ static int switch_left(uint32_t p){
   return 0;
 }
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: a port's child exited, what it had given back: its hand settled (a
-   write it took, a push it began), then its lanes' outboxes emptied (each SEND posted and not completed and each page
+   push it began), then its lanes' outboxes emptied (each SEND posted and not completed and each page
    pushed and not posted dropped, counted `lost`) and the pages posted as its lanes' receives given back, then its
    port's line made new (STARTED, no peer, no plan) for its next child: no process but this one writes it now.  Its
    lanes are no draw's already (lanes_cancel) */

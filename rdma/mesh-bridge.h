@@ -167,7 +167,7 @@ struct link {
    pages of the node's pool, lands pages into the page table and forwards them by their headers, takes its clients'
    writes from its port's share of the rings (mesh-switched.h struct mesh_switch `port`, read every pass), posts its
    lanes' outboxes (each SEND's post time in its outbox cell), counts what it cannot carry and reports nothing, and
-   names in its hand the ring position it takes and the outbox position it pushes.  Against 8, whose
+   names in its hand the outbox position it pushes.  Against 8, whose
    links made queue pairs 0 and 1 for nothing and their data lanes from 2: CHILD_MAKE's plan, CHILD_MADE's `qpn`,
    CHILD_CONNECT's `peer` and CHILD_BROKEN's `broken` name lane j as queue pair j, MESH_LINK_LANES of them (8's 10) */
 #define MESH_CHILD_VERSION 9u
