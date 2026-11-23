@@ -1374,6 +1374,11 @@ def insert_send_recv(graph, node, first, instances, transfer=None):
     value = node.meta.get("val")
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
+    shape = wire_shape(value)
+    staged = None
+    if node.op == "placeholder":
+        with graph.inserting_before(min(node.users)):
+            staged = wire_operand(graph, node, here, value, shape, stage=True)
     made = {}
     for channel, (processor, users) in enumerate(away.items(), first):
         # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
@@ -1383,15 +1388,14 @@ def insert_send_recv(graph, node, first, instances, transfer=None):
         else:
             policy = transfer(node, processor, users)
             consumer = policy.consumer if isinstance(policy, TransferPolicy) else policy[1]
-        shape = wire_shape(value)
         with detect_fake_mode([value]):
             storage = value.new_empty((value.untyped_storage().nbytes() // value.element_size(),))
             landing = storage.as_strided(value.shape, value.stride(), value.storage_offset())
-        wire, packed = node, False
-        if consumer == JOIN and not value.is_contiguous():
+        wire, packed = staged or (node, False)
+        if staged is None and consumer == JOIN and not value.is_contiguous():
             with graph.inserting_before(users[0]):
                 wire, packed = wire_operand(graph, node, here, value, shape, costs=getattr(policy, "wire_costs", None))
-            packed = packed or tuple(shape) != tuple(value.shape)
+        packed = packed or (wire is not node and tuple(shape) != tuple(value.shape))
         sent, arrived = channel_nodes(graph, wire, channel, processor, users[0], policy,
                                       torch.empty_like(wire.meta["val"]) if packed else landing)
         for end in (sent, arrived):
