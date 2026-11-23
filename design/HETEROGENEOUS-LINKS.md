@@ -57,16 +57,17 @@ assumed that both devices held ten. This change edits those passages to say a li
 
 ## 3. Every place the code depends on the lane count
 
-Before this change, in `rdma/`:
+Before this change, in `rdma/`. The right column is the code as the budget change left it, before version 163; where
+163 changed it since, the cell says so (section 5 has the layout now).
 
 | where | what depends on it | after this change |
 |---|---|---|
-| `mesh-bridge.h` `MESH_LINK_LANES` 10, `MESH_LANE_KEEPALIVE` 0, `MESH_LANE_FIRST` 2, `MESH_LANE_PAIRS` 4, `MESH_STREAM_PAIRS` 1, the static asserts, `lane_class`, `lane_stream`, `lane_stripe` | the lane layout: keepalive lane 0, lane 1 reserved and unused (the stripes lane deleted at 125, kept so indices did not move), stream s's large lane 2 + 2s and small lane 3 + 2s | unchanged; the layout is the index space, and a link makes the subset its plan names (`link_plan`) |
-| `mesh-bridge.h` `struct message` `pair[MESH_LINK_LANES][2]` and `count` | the wire's LINK: every lane's queue pair number and first PSN; `count` was always 10 | the same size; `count` is the plan's lanes, 0 in `pair` for a lane the plan leaves out; a HELLO's `count` carries the budget (section 5) |
+| `mesh-bridge.h` `MESH_LINK_LANES` 10, `MESH_LANE_KEEPALIVE` 0, `MESH_LANE_FIRST` 2, `MESH_LANE_PAIRS` 4, `MESH_STREAM_PAIRS` 1, the static asserts, `lane_class`, `lane_stream`, `lane_stripe` | the lane layout: keepalive lane 0, lane 1 reserved and unused (the stripes lane deleted at 125, kept so indices did not move), stream s's large lane 2 + 2s and small lane 3 + 2s | unchanged; the layout is the index space, and a link makes the subset its plan names (`link_plan`). Since 163 the layout has no lane ahead of the streams': `MESH_LINK_LANES` 8, stream s's lanes 2s and 2s + 1, lane j queue pair j; `MESH_LANE_FIRST`, `MESH_LANE_PAIRS` and `MESH_STREAM_PAIRS` are deleted |
+| `mesh-bridge.h` `struct message` `pair[MESH_LINK_LANES][2]` and `count` | the wire's LINK: every lane's queue pair number and first PSN; `count` was always 10 | the same size (144 bytes); `count` is the plan's lanes, 0 in `pair` for a lane the plan leaves out; a HELLO's `count` carries the budget (section 5). Since 163 `pair` has `MESH_LINK_LANES` (8) entries, so the message is 128 bytes, and a reader finds a message's bounds only from a bridge of its own size (`rdma/mesh-bridge.h` `XMAGIC`) |
 | `mesh-bridge.h` `struct link` `peer`, `qpn`, `gate`, `lane` arrays; `struct child_message` `qpn`, `peer` | per-lane state, sized by the layout | unchanged in size; `plan` added to the link, `lanes` to the child message, `budget` to the port |
 | `mesh-observe.h` `MESH_LINK_STREAMS` 4, `MESH_PORTS` = `MESH_STREAMS` / 4 = 8 | each port owns 4 stream slots of the region | unchanged: the slots stay, those beyond a link's plan are never live (no region layout change, `MESH_LAYOUT` 133 kept) |
 | `mesh-verbs.h` `device_up` `max_pairs = max_qp - 1` | a device's usable queue pairs | unchanged; it is now what the port states (its budget) |
-| `mesh-verbs.h` `pair_up(provider, count)` | made queue pairs 0..count-1, ENOSPC past `max_pairs` | `pair_up(provider, plan)`: one queue pair per lane of the plan, queue q lane q, the same ENOSPC check against the plan's count; the completion queues' poll entry kept in the provider |
+| `mesh-verbs.h` `pair_up(provider, count)` | made queue pairs 0..count-1, ENOSPC past `max_pairs` | `pair_up(provider, plan)`: one queue pair per lane of the plan, queue q lane q, the same ENOSPC check against the plan's count; the completion queues' poll entry kept in the provider. Since 163 `pair_up(provider, lanes)`: a plan's lanes are 0 to lanes - 1 |
 | `mesh-link.c` `link_make` | `pair_up(p, MESH_LINK_LANES)`; each lane's share of the completion queues `cqe / MESH_LINK_LANES` | the plan's lanes; the share divided among them |
 | `mesh-link.c` `link_connect` | RTR, RTS, `qpn`, gate of all ten; the keepalive's receives; `lane_reset` of lanes 2..9; four streams' `wire` | the plan's lanes alone; `qpn` UINT32_MAX for a lane left out (no queue pair has that number, `link_lane`); the keepalive's receives only where the plan has its lane; `wire` of the plan's streams |
 | `mesh-link.c` `link_send`, `link_receive` | polled through `queues[0].poll`, lane 0's | through the provider's `poll` (a plan without lane 0 has no `queues[0]` pair) |
@@ -76,7 +77,7 @@ Before this change, in `rdma/`:
 | `mesh-link.c` `streams_open` | opened all four streams of the port | the plan's streams; the others stay not live and not free, so `mesh_streams_free` never offers them |
 | `mesh-link.c` `stream_turn`, `link_held`, `streams_cancel`, `streams_let_go`, `stream_rings`; `mesh-records.c` `busy_tell` | iterate the port's four stream slots | unchanged: a stream that is not live returns at once, and its rings stay leased |
 | `mesh-link.c` `streams_open` bandwidth `bandwidth / MESH_LINK_STREAMS` | each stream's share of the link, which `mesh_map` takes as the link's figure | unchanged, so a one-stream link and a four-stream link are compared on the same footing |
-| `mesh-link.c` `port_pass` | loops lanes 2..9 checking `served` | unchanged |
+| `mesh-link.c` `port_pass` | loops lanes 2..9 checking `served` | unchanged; since 163 it loops the plan's lanes from 0 |
 | `mesh-call.c`, `nccl-mesh.c` | a communicator holds one stream toward each other member's node; concurrency between two nodes = the link's live streams | unchanged; on a one-stream link a second concurrent communicator between the same two nodes is refused at init with EBUSY, as a value |
 
 Nothing outside `rdma/` reads the lane count.
@@ -148,42 +149,38 @@ affected: `device_up` reads the port active before it allocates.
 - **Budget.** A port's child reads its device's usable queue pairs at its opening, `max_qp - 1` as before
   (`mesh_device.max_pairs`), and tells the parent in CHILD_OPENED (`lanes`). The parent keeps it as the port's
   `budget`.
-- **Stated in the HELLO.** The HELLO a bridge sends on a link's control socket carries `count` = 1 + its budget.
-  `hello_budget(count)` reads it back, and a `count` of 0 is a bridge before budgets, which makes all
-  `MESH_LINK_LANES`. The multicast discovery hellos are unchanged.
-- **The plan.** At the greeting each end computes `plan = link_plan(min(own budget, peer's budget))`, a bit a lane of
-  the existing layout. Both ends compute it from the same two numbers. It goes to the child with CHILD_MAKE (`lanes`).
-  The child makes one queue pair per lane of the plan (`pair_up`), tells them in CHILD_MADE, connects only those, and
+- **Stated in the HELLO.** The HELLO a bridge sends on a link's control socket carries its budget in `count` (since
+  MESH_VERSION 163; 1 + the budget before, 0 from a bridge before budgets). The multicast discovery hellos carry none.
+- **The plan.** At the greeting each end computes `plan = link_plan(min(own budget, peer's budget))`, a bit a lane:
+  lane j is queue pair j, stream s's lanes 2s and 2s + 1. Both ends compute it from the same two numbers. It goes to
+  the child with CHILD_MAKE (`lanes`). The child makes one queue pair per lane of the plan (`pair_up`), tells them in CHILD_MADE, connects only those, and
   serves `served = plan`. The LINK names the plan's lanes in `count` and is checked against this end's plan.
 
-| budget (the fewer of the two ends') | plan | lanes | streams | lane 0 |
-|---|---|---|---|---|
-| 0, 1 | 0 | 0 | 0 | not made: the link pairs, records flow, no stream is live |
-| 2 | 0xc | 2 | 1 | not made |
-| 3, 4 | 0xd | 3 | 1 | made |
-| 5, 6 | 0x3d | 5 | 2 | made |
-| 7, 8 | 0xfd | 7 | 3 | made |
-| 9 | 0x3fd | 9 | 4 | made (no reserved lane 1) |
-| 10 and more | 0x3ff | 10 | 4 | made, and lane 1 |
+| budget (the fewer of the two ends') | plan | lanes | streams |
+|---|---|---|---|
+| 0, 1 | 0 | 0 | 0: the link pairs, records flow, no stream is live |
+| 2, 3 | 0x3 | 2 | 1 |
+| 4, 5 | 0xf | 4 | 2 |
+| 6, 7 | 0x3f | 6 | 3 |
+| 8 and more | 0xff | 8 | 4 |
 
-Lane 0 comes first once a stream fits beside it (`rdma/mesh-bridge.h` `link_plan`: bit 0 where the budget is three or
-more). The reserved lane 1 is made only in the full plan, so a full plan is lane for lane the layout of MESH_VERSION
-131. The plan of a smaller budget is always a subset of a larger one's.
+A budget of b gives min(b / 2, `MESH_LINK_STREAMS`) streams of two lanes (`rdma/mesh-bridge.h` `link_plan`). The plan
+of a smaller budget is always a subset of a larger one's.
 
-Lane 0 carried the keepalive in versions before 133 (section 10 has its history). Since version 133 there is no
-keepalive (section 10; design/transport.md section 5: "a link carries no keepalive"), and nothing is posted on lane 0
-or lane 1. The plans stay as in this table, so the two ends' LINKs still match.
+Before MESH_VERSION 163 the layout put two lanes ahead of the streams' (the streams' lanes from 2): lane 0 where the
+budget was three or more, and lane 1 in the full plan of ten. Lane 0 carried the keepalive before version 133 (section
+10 has its history); from 133 to 162 nothing was posted on either, so a budget of 4, 6 or 8 gave a whole stream to
+them. Version 163 gave those queue pairs to the streams.
 
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
   (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports its cable's
   bandwidth (since layout 143; `bandwidth / MESH_LINK_STREAMS` before), so a cable's figure is comparable across plans.
-- **Completion queues.** Each stream lane's share of the two completion queues is `cqe` over the plan's stream lanes
-  (mesh-link.c:603), so a two-lane link's lanes get 2048 frames each, against 512 on a ten-lane link's eight stream
-  lanes. A stream lane's receive window is its share counted in pages, at most the queue pair's receive capacity
-  (mesh-link.c:636-639). Lanes 0 and 1 have no window: nothing is posted on them.
+- **Completion queues.** Each lane's share of the two completion queues is `cqe` over the plan's lanes (mesh-link.c
+  link_make), so a two-lane link's lanes get 2048 frames each, against 512 on an eight-lane link's. A lane's receive
+  window is its share counted in pages, at most the queue pair's receive capacity (mesh-link.c lane_reset).
 
-**What a two-lane link costs.** Node 521750041's link to node 1974797816 gets the 0xc plan: one stream and no
-lane 0.
+**What a two-lane link costs.** Node 521750041's link to node 1974797816 gets the two-lane plan (0x3; 0xc before
+version 163): one stream.
 - One communicator at a time between the two nodes. A second concurrent one is refused at its init with EBUSY as a
   value ("rank 0 could not hold its streams at its bridge"). The first runs exact.
 - No keepalive frames, as on every link since version 133 (section 10), so a controller that slows after a quiet
@@ -214,14 +211,19 @@ A binary built on 26 and run on 27 is untested. Every node builds its own with `
 
 **MESH_VERSION.** Until 7d236bbb, `XMAGIC` added MESH_VERSION to the magic, so bridges of different versions dropped
 each other's hellos and the map parted into one per version. Now `XMAGIC` is fixed at the value version 131 sends, and
-no version enters it, so bridges of any version pair (the operator, 2026-10-21: "rejection filter removal. categorical.
-all of them without sanction in rubric"). For versions to join one map:
+no version enters it, so bridges of any version hear each other (the operator, 2026-10-21: "rejection filter removal.
+categorical. all of them without sanction in rubric"). Since 3d3fd686b a bridge pairs only with one of its own
+MESH_VERSION (`rdma/mesh-link.c` `port_heard`), so a version change parts the map between the old version's nodes and
+the new one's until every node runs the new. For versions to join one map:
 1. *Extend in place* (done here). New information goes in a field the older version sends as 0 and never reads, with 0
    meaning the older behavior. The older version's exchanges keep their meaning, so MESH_VERSION does not change.
    That covers additive changes like this one.
-2. *A version-stating hello* (done in part, 7d236bbb). The header is version-independent: the fixed magic, and the
-   sender's MESH_VERSION in `version` (0 from a bridge before it). No reader tests `version`, so a bridge hears a
-   peer of any version and pairs with it. Not done: logging which version a peer runs.
+2. *A version-stating hello* (done in part, 7d236bbb). The HELLO's fields lie at the same offsets in every version:
+   the fixed magic, and the sender's MESH_VERSION in `version` (0 from a bridge before it), which the greeting tests,
+   so a bridge hears a peer of any version and pairs only with its own. The message's size is not the same in every
+   version: 144 bytes before 163, 128 from 163 (`pair` has `MESH_LINK_LANES` entries), and a reader finds a message's
+   bounds only from a bridge of its own size (`rdma/mesh-bridge.h` `XMAGIC`). Not done: logging which version a peer
+   runs.
 3. *Records appended.* A field added at the end of `struct mesh_record`, the region's header or a slot leaves the
    fields before it where they were, so a newer bridge floods records an older one can still read up to its own
    length.
@@ -233,13 +235,12 @@ all of them without sanction in rubric"). For versions to join one map:
   its link up, allocates a PD and two CQs and makes UC queue pairs until refused would read the count; a second
   context of the same device would tell a per-context count from a per-device one, and a second device with its link
   up (the second Studio, cabled) whether the count is pooled across a machine's devices. If 3 are usable, `max_pairs`
-  for this driver is `max_qp`, and the plan gains lane 0 (0xd).
+  for this driver is `max_qp`, and the plan is still one stream (0x3).
 - **P2. Making until refused (not done).** Each end could make its plan's
-  queue pairs in the order 2, 3, 0, 4, 5, 6, 7, 8, 9, 1, so that the first c made always contain `link_plan(c)`.
+  queue pairs in lane order, so that the first c made always contain `link_plan(c)`.
   It would stop at the first refusal and name in LINK how many it made, and both ends would connect
-  `link_plan(min(made, peer's made))`. Queue pairs made past that stay in INIT until the child's exit. Two 131-
-  compatible ends both make ten, so the wire stays compatible. This removes the reliance on `max_qp - 1` for any
-  hardware.
+  `link_plan(min(made, peer's made))`. Queue pairs made past that stay in INIT until the child's exit. This removes
+  the reliance on `max_qp - 1` for any hardware.
 - **P3. More streams on few queue pairs.** If P1 finds a per-context count, a child can open more than one context on
   its device and spread a link's lanes over them, each context with its own two CQs (max_cq 6, one the kernel's,
   bounds it to two contexts). The progress threads would poll both pairs of CQs. Otherwise, more streams on two queue
@@ -288,9 +289,8 @@ attainble overhead on all transactions in bridge/collective". A stream's lanes c
 nothing else (design/transport.md section 14), so no frame on a timer can fill a receive a holding's unit is owed,
 and no spare receive waits between holdings for one. `link_alive`, `MESH_KEEPALIVE_NS` and the link block's
 keepalive page are deleted; the link block is the spare page alone.
-- On a link of three or more queue pairs, lane 0 now carries nothing, as lane 1 never did. `link_plan` is unchanged:
-  it still makes lane 0 where both ends hold three or more, so two bridges plan alike, and a later change may give
-  the queue pair to a stream.
+- From version 133 to 162, lane 0 carried nothing on a link of three or more queue pairs, as lane 1 never did.
+  Version 163 gave both queue pairs to the streams (section 5).
 - The cost: a Thunderbolt controller that has been quiet is slow on its next frame (the Mac mini's SEND completed in
   6.2 us after 40-50 us of nothing, 1.9 us with a frame every 5 us, below), now at a holding's first SEND and after
   every quiet stretch inside a holding (a layer's 40-50 us between crossings), on every plan.

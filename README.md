@@ -222,8 +222,8 @@ per-controller IOMMU so a buffer is registered separately per device.
 
 The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `max_qp` 3
 on every device, not 11, and its driver keeps a queue pair of each device for itself. A
-link's two bridges state what their devices hold and make the lanes both can, ten where
-both hold ten and one stream's two where either holds two
+link's two bridges state what their devices hold and make the lanes both can, two a stream:
+eight (four streams) where both hold eight or more, and one stream's two where either holds two
 ([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
 
 The verbs transfer is point-to-point per cable, and its out-of-band GID/QPN exchange needs a socket to the directly
@@ -558,8 +558,9 @@ install` by hand, which installs the binary anew whenever libmesh changed) or a 
 renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the bridge's heartbeat SIGHUP,
 which restarts the bridge keeping its region and runs its own new image (design/transport.md section 2); a process
 already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-launchd-agent.sh`). What each layer
-installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts nothing: no version enters the wire's
-magic and no reader tests a message's `version`, so bridges of any version pair (design/transport.md section 14). A
+installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map between the nodes of the old
+version and those of the new until every node runs the new: no version enters the wire's magic, so each hears the
+other, but a bridge pairs only with one of its own version (design/transport.md section 14). A
 MESH_LAYOUT change expires the old region, and a consumer's process holding the older library fails its calls as values
 until it is started again on the new one.
 

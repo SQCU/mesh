@@ -25,11 +25,10 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   rows whose owner word is its own. This allocation granularity is not a minimum transfer size. "Lease" in the code
   means only this: rows owned. It has no term, renewal or expiry.
 - **A link.** The two ports at the ends of one cable and the queue pairs the bridges make on them at each pairing:
-  the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
-  either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
-  [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
-  its streams' lane pairs and, where the plan has them, lanes 0 and 1 (nothing posted on either)
-  ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 10);
+  the unreliable-connected queue pairs of its plan, its streams' lane pairs (lane j queue pair j): eight, four streams,
+  where both ends' devices hold eight or more (macOS 26's hold ten) and fewer where either holds fewer (the M5 Ultra's
+  macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)
+  section 5);
   created, moved through INIT, RTR and RTS, on two
   completion queues of the port's device context.
 - **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the region, a length, a key. The queue pair's
@@ -566,8 +565,9 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   faults, guards not held and terminations it heard. Queue pairs exist only in a child, and a child is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
 - A link's queue pairs are made once and connected once in a child's life. None is moved to another state,
-  destroyed or forgotten; the kernel releases them at the child's exit. A link takes every queue pair its device holds
-  for it (ten of a macOS 26 device's ten; two of the M5 Ultra's macOS 27 device's two by max_qp − 1), so a returning peer's lanes
+  destroyed or forgotten; the kernel releases them at the child's exit. A link takes as many queue pairs as its device
+  holds for it, up to MESH_LINK_LANES (eight of a macOS 26 device's ten, leaving too few for a second link's eight;
+  two of the M5 Ultra's macOS 27 device's two by max_qp − 1), so a returning peer's lanes
   cannot exist beside the old ones, and the old child's exit is their one release (RESET panicked the M5 on 10-19;
   destroy is ruled out by its history, M3).
 - A link lost once its child was asked for lanes (a farewell, the control socket's end, a failed completion, no stream
@@ -621,10 +621,14 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
   calls-in-flight failed and ought to be retried" (the operator, 10-20).
 - XMAGIC marks a message as the mesh's, at the value version 131 sends, fixed: no version enters it, so bridges of any
-  version pair (the operator, 2026-10-21: "rejection filter removal. categorical. all of them without sanction in
-  rubric"). A message states its sender's MESH_VERSION in `version`, which no reader tests. A client reads a region
+  version hear each other (the operator, 2026-10-21: "rejection filter removal. categorical. all of them without
+  sanction in rubric"). A message states its sender's MESH_VERSION in `version`, which the greeting alone tests: a
+  bridge pairs only with one of its own version (rdma/mesh-link.c port_heard). A reader finds a message's bounds only
+  from a bridge whose struct message is its own size (128 bytes from version 163, 144 before: rdma/mesh-bridge.h
+  XMAGIC). A client reads a region
   only at the layout it was built for (MESH_LAYOUT): every field of another layout lies at other offsets, so a client
   writing it would write the bridge's words at random; that is a bound on memory, not a version check.
   A change that keeps every exchange of a version's meaning and adds information only in a field that version sends
-  as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`, a
-  peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before.
+  as 0 keeps the version, as the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) first did in a HELLO's
+  `count` (131 sends 0 there); a change of an exchange's meaning changes it, as version 163 did in making `count` the
+  budget itself and a link's lane j its queue pair j.

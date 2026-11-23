@@ -93,8 +93,8 @@ struct mesh_queue {
   uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
-/* a link's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan
-   with none) and their two completion queues, polled through `poll` */
+/* a link's queue pairs on one port (`count` entries of `queues`, queue q lane q) and their two completion queues,
+   polled through `poll` */
 struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *); };
 /* design/transport.md */
@@ -201,23 +201,22 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   return 0;
 }
-/* a UC queue pair in INIT for each lane of `plan` (a bit a lane, design/HETEROGENEOUS-LINKS.md), queue q lane q, against
-   the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port child's life
-   (design/transport.md section 14: no queue pair is moved to another state, destroyed or forgotten; the kernel releases
-   them at the child's exit).  0, or the error (ENOSPC: the device has no more queue pairs). */
-static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t plan){
+/* a UC queue pair in INIT for each of a link's `lanes` lanes (its plan's lanes 0 to lanes - 1,
+   design/HETEROGENEOUS-LINKS.md), queue q lane q, against the device's usable queue pairs, on the provider's two
+   completion queues: a link's, made once in its port child's life (design/transport.md section 14: no queue pair is
+   moved to another state, destroyed or forgotten; the kernel releases them at the child's exit).  0, or the error
+   (ENOSPC: the device has no more queue pairs). */
+static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t lanes){
   struct mesh_device *device=provider->device;
-  const uint32_t count=(uint32_t)__builtin_popcount(plan),entries=plan?32-(uint32_t)__builtin_clz(plan):0;
-  if(device->pairs+count>device->max_pairs)return ENOSPC;
+  if(device->pairs+lanes>device->max_pairs)return ENOSPC;
   uint32_t frames=device->frame_capacity;
-  provider->queues=calloc(entries?entries:1,sizeof *provider->queues);
+  provider->queues=calloc(lanes?lanes:1,sizeof *provider->queues);
   if(!provider->queues)return ENOMEM;
-  provider->count=(int)entries;provider->psn=arc4random()&0xffffff;
+  provider->count=(int)lanes;provider->psn=arc4random()&0xffffff;
   if(!provider->completion && !(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   if(!provider->sent && !(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   provider->poll=provider->completion->context->ops.poll_cq;
-  for(uint32_t q=0;q<entries;q++){
-    if(!(plan>>q&1))continue;
+  for(uint32_t q=0;q<lanes;q++){
     const int error=pair_make(provider,(int)q);
     if(provider->queues[q].pair)provider->qp_count++;
     if(error)return error;

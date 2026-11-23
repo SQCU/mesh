@@ -33,17 +33,10 @@
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
-   (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lanes 0 and 1, on which nothing is posted, and from
-   MESH_LANE_FIRST pairs (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1, the lane records of pair s).  Every lane of the
-   plan from MESH_LANE_FIRST is a queue pair toward the link's peer, the switch's data lane j at MESH_LANE_FIRST + j
-   (mesh-switched.h); a lane's SENDs land in the order they were posted */
-#define MESH_LINK_LANES 10u
-#define MESH_LANE_FIRST 2u
-#define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
-#define MESH_STREAM_PAIRS (MESH_LANE_PAIRS/MESH_LINK_STREAMS)
-_Static_assert(MESH_LANE_FIRST+2*MESH_LANE_PAIRS==MESH_LINK_LANES,"the lanes' pairs");
-_Static_assert(MESH_STREAM_PAIRS && MESH_STREAM_PAIRS*MESH_LINK_STREAMS==MESH_LANE_PAIRS,"a link's pairs, its streams' whole");
-_Static_assert(MESH_STREAM_PAIRS==1,"a stream one lane pair");
+   (link_plan, design/HETEROGENEOUS-LINKS.md), MESH_LINK_LANES at most, two a stream: stream s's lanes 2 s and 2 s + 1
+   (the region's lane records of pair s, mesh.h struct mesh_lanes).  Lane j is queue pair j toward the link's peer and
+   the switch's lane j of the link's port (mesh-switched.h); a lane's SENDs land in the order they were posted */
+#define MESH_LINK_LANES (2u*MESH_LINK_STREAMS)
 /* TN3205 (README.md): a SEND and the receive it fills cover the same number of frames of MESH_FRAME bytes (mesh-call.h),
    a SEND stalled by the hardware until its receive is posted.  A count of frames: a queue's capacity, a lane's
    share of its completion queues, a SEND's and the send gate's, a type of its own so no count of pages or bytes passes
@@ -51,20 +44,16 @@ _Static_assert(MESH_STREAM_PAIRS==1,"a stream one lane pair");
 struct frames { uint64_t n; };
 static inline struct frames frames_of(uint64_t bytes){ return (struct frames){(bytes+MESH_FRAME-1)/MESH_FRAME}; }
 static inline struct frames frames_min(struct frames a,struct frames b){ return a.n<b.n?a:b; }
-/* design/HETEROGENEOUS-LINKS.md sections 5 and 10: the lanes a link makes, a bit a lane of the layout above, from
-   `budget`, the fewer of the queue pairs its two ends' devices have for it: every lane where both have MESH_LINK_LANES;
-   else no lane 1, lane 0 where they have three or more, and as many streams' lane pairs as the rest has, at most
-   MESH_LINK_STREAMS (two queue pairs: one stream); none where they have fewer than one stream's two.  Lanes 0 and 1
-   carry nothing.  A link's streams past its lanes' are never live.  The plan of fewer queue pairs is a subset of the
-   plan of more */
+/* design/HETEROGENEOUS-LINKS.md section 5: the lanes a link makes, a bit a lane of the layout above, from `budget`, the
+   fewer of the queue pairs its two ends' devices have for it: a stream's two lanes for every two queue pairs of the
+   budget, at most MESH_LINK_STREAMS streams, its lanes from 0; none where the budget is fewer than two.  A link's
+   streams past its lanes' are never live.  The plan of fewer queue pairs is a subset of the plan of more */
 static inline uint32_t link_plan(uint32_t budget){
-  if(budget>=MESH_LINK_LANES)return (UINT32_C(1)<<MESH_LINK_LANES)-1;
-  const uint32_t first=budget>=3,pairs=(budget-first)/(2*MESH_STREAM_PAIRS);
-  const uint32_t streams=pairs<MESH_LINK_STREAMS?pairs:MESH_LINK_STREAMS;
-  return first|(((UINT32_C(1)<<(2*MESH_STREAM_PAIRS*streams))-1)<<MESH_LANE_FIRST);
+  const uint32_t streams=budget/2<MESH_LINK_STREAMS?budget/2:MESH_LINK_STREAMS;
+  return (UINT32_C(1)<<(2*streams))-1;
 }
 static inline uint32_t plan_lanes(uint32_t plan){ return (uint32_t)__builtin_popcount(plan); }
-static inline uint32_t plan_streams(uint32_t plan){ return (uint32_t)__builtin_popcount(plan>>MESH_LANE_FIRST)/(2*MESH_STREAM_PAIRS); }
+static inline uint32_t plan_streams(uint32_t plan){ return plan_lanes(plan)/2; }
 _Static_assert(MESH_LINK_LANES<32,"a bit a lane");
 
 _Static_assert(sizeof(struct ibv_send_wr)==128,"M06");
@@ -100,7 +89,7 @@ static inline uint64_t gate_post(struct send_gate *gate,uint32_t k,struct frames
 }
 /* a request's completion: the frames posted through it completed */
 static inline void gate_complete(struct send_gate *gate,uint64_t id){ gate->completed.n=id&MESH_GATE_MASK;gate->completions++; }
-/* A data lane's progress in its child: SENDs posted (`sent`) and completed (`done`), receives posted (`posted`) and
+/* A lane's progress in its child: SENDs posted (`sent`) and completed (`done`), receives posted (`posted`) and
    landed (`got`), the receives its queues take (`frame_capacity`, its share of them), and its previous SEND completion
    (`last`: its next one's service begins no earlier); the SENDs' pages and post times are the lane's outbox's
    (mesh-switched.h struct mesh_switch_cell: a queue pair completes its SENDs in their order, the outbox's) */
@@ -108,19 +97,22 @@ struct lane_state { uint64_t sent,done,posted,got,frame_capacity,last; };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
-   sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
-   queue pairs its port's device has for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
-   sends 0 there and makes MESH_LINK_LANES, so two ends that both have that many pair as before budgets).  `unused` is
+   sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` the
+   queue pairs its port's device has for a link (its budget: design/HETEROGENEOUS-LINKS.md, link_plan).  `unused` is
    unused */
 enum { HELLO=1, FAREWELL, RECORD, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t unused,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
-static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
-/* the wire's magic: what marks a datagram or a control stream's header as the mesh's, so a reader finds a message's
-   bounds.  It is the value version 131 sends, fixed: no version enters it, so bridges of any version pair (the operator,
-   2026-10-21: "rejection filter removal. categorical. all of them without sanction in rubric"; "even this fake limit
-   too must go away").  A message states its sender's MESH_VERSION in `version` (0 from a bridge before it), which no
-   reader tests */
+/* the wire's magic: what marks a datagram or a control stream's header as the mesh's.  It is the value version 131
+   sends, fixed: no version enters it, so a bridge hears a bridge of any version (the operator, 2026-10-21: "rejection
+   filter removal. categorical. all of them without sanction in rubric"; "even this fake limit too must go away").  A
+   message states its sender's MESH_VERSION in `version` (0 from a bridge before it), which the greeting alone tests:
+   a bridge pairs only with one of its own version (mesh-link.c port_heard).  A reader finds a message's bounds where
+   its sender's struct message is its own size: 128 bytes from version 163 (MESH_LINK_LANES entries in `pair`), 144
+   before.  A HELLO's fields lie at the same offsets in both, so a longer HELLO is read by its first bytes (a datagram
+   cut short, mesh-link.c hello_heard; a control stream's first message, control_heard) and its pairing refused on its
+   version; past that HELLO the stream is misframed, and lost (EPROTO) at the next message its sender sends.  A
+   shorter datagram ends hello_heard's turn */
 #define XMAGIC (0x4d595048u+131u+(1u<<12))
 /* design/transport.md section 14: a port's link lanes (MESH_LINK_LANES), its queue pairs made once and connected once
    in its child's life ("A process a port": `lanes` once the child was asked for them, the parent's; a link lost after it
@@ -136,7 +128,7 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends have, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
-   lane's SEND gate (`gate`: the frames posted and completed; its capacity, set as the lane connects), each data lane's
+   lane's SEND gate (`gate`: the frames posted and completed; its capacity, set as the lane connects), each lane's
    progress (`lane`, struct lane_state).  The child's takes from the clients' write rings (mesh-link.c switch_takes):
    the slot its next pass looks at first (`take_from`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
@@ -169,14 +161,15 @@ struct link {
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX` (its first three words the same for every
    version, so a bridge finds a child of any version that has a device open: child_elsewhere), and struct child_message.
    It changes only where that contract does; a build of the same contract is the same child, whatever its bytes (the
-   operator, 2026-10-21).  8 (design/PAGE-TABLE-SPEC-20261122.md): a child posts its lanes' receives into free pages of
-   the node's pool, lands pages into the page table and forwards them by their headers, takes its clients' writes from
-   the rings its parent names its port's (mesh-switched.h struct mesh_switch `taker`), posts its lanes' outboxes (each
-   SEND's post time in its outbox cell), counts what it cannot carry and reports nothing, and names in its hand the
-   ring position it takes and the outbox position it pushes.  Against 7, whose child took from every ring: the parent
-   names each ring's one taker in the region and the child reads it every pass, so that naming is part of the
-   contract */
-#define MESH_CHILD_VERSION 8u
+   operator, 2026-10-21).  9 (design/PAGE-TABLE-SPEC-20261122.md): a child makes a link's lanes as queue pairs from 0
+   (lane j queue pair j and its port's switch lane j: mesh-bridge.h link_plan), posts its lanes' receives into free
+   pages of the node's pool, lands pages into the page table and forwards them by their headers, takes its clients'
+   writes from the rings its parent names its port's (mesh-switched.h struct mesh_switch `taker`, read every pass),
+   posts its lanes' outboxes (each SEND's post time in its outbox cell), counts what it cannot carry and reports
+   nothing, and names in its hand the ring position it takes and the outbox position it pushes.  Against 8, whose
+   links made queue pairs 0 and 1 for nothing and their data lanes from 2: CHILD_MAKE's plan, CHILD_MADE's `qpn`,
+   CHILD_CONNECT's `peer` and CHILD_BROKEN's `broken` name lane j as queue pair j, MESH_LINK_LANES of them (8's 10) */
+#define MESH_CHILD_VERSION 9u
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
        CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_TERMINATED=12 };
 struct child_message {
@@ -244,14 +237,6 @@ struct port {
    with its record (mesh-records.c health_turn) */
 #define MESH_HEALTH_NS UINT64_C(10000000000)
 
-/* design/transport.md; design/transport.md: the nodes this bridge has heard of, when it last
-   heard each one's record (this node's clock), when it lost each (`lost_at`), and the newest record it ever heard of
-   each (its boot and sequence), stored apart from the map: RFC 2328 s13's database, so a record the map dropped is
-   never taken, nor sent on, again (a node's later boot is always newer); a full table gives the longest unheard of
-   those its place */
-struct known { uint32_t node; uint64_t heard,lost_at,boot,sequence; };
-#define MESH_KNOWN 256
-
 /* the state both translation units read, defined in mesh-link.c */
 extern struct hdr *M;
 extern struct wire_mapping wire;
@@ -262,7 +247,6 @@ extern uint64_t now,sequence;
 extern struct mesh_ctx bridge;
 extern _Atomic int found;
 extern uint64_t memory;
-extern struct known known[MESH_KNOWN];
 extern uint64_t owners[MESH_CLIENTS];
 extern char model[MESH_MODEL_BYTES];
 
@@ -281,7 +265,8 @@ void record_changed(void);
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room);
 void record_retell(void);
 void map_adopt(void);
-struct mesh_record *record_of(uint32_t node);
+void map_tell(struct port *port);
+void records_forget(const struct port *port);
 uint64_t health_due(void);
 void health_turn(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);

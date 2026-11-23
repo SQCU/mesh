@@ -30,19 +30,50 @@ void health_init(void){
   health.available=available_now();
 }
 
+/* design/transport.md, RFC 2328 s13's database: the newest record of each node, this node's own among them, kept
+   whether a paired path from this node reaches it or not, with when this node last heard one (its clock, 0 for its
+   own), when the map last lost the node (`lost_at`), and the ports whose peers have that record (`told`, a bit a port
+   of `ports`: it was heard on the port or sent on it since the port's pairing), so a record is sent only where its
+   peer lacks it; a full table gives the longest unheard of the nodes the map lacks its place */
+struct known { uint64_t heard,lost_at; uint32_t told; struct mesh_record record; };
+_Static_assert(MESH_PORTS<=32,"a port a bit of `told`");
+#define MESH_KNOWN 256
+static struct known known[MESH_KNOWN];
 static uint32_t known_count;
+static uint32_t port_bit(const struct port *port){ return UINT32_C(1)<<(uint32_t)(port-ports); }
+/* the map's record of `node`, NULL where the map has none */
+static struct mesh_record *record_of(uint32_t node){
+  for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
+  return NULL;
+}
 static struct known *known_at(uint32_t node){
-  for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
+  for(uint32_t i=0;i<known_count;i++)if(known[i].record.node==node)return known+i;
   struct known *at=NULL;
   if(known_count<MESH_KNOWN)at=known+known_count++;
-  else for(uint32_t i=0;i<known_count;i++)if(!record_of(known[i].node) && (!at || known[i].heard<at->heard))at=known+i;
-  if(at)*at=(struct known){.node=node};
+  else for(uint32_t i=0;i<known_count;i++)if(!record_of(known[i].record.node) && (!at || known[i].heard<at->heard))at=known+i;
+  if(at)*at=(struct known){.record.node=node};
   return at;
 }
-/* design/transport.md, #region: the map, a record a node: this node's own, rebuilt from its port table when
-   that changes (its sequence one more), and every other node's newest heard; each change written between two
-   notifications of the map serial (odd while it writes), the records in arena pages the bridge leases and leases again
-   larger as the mesh grows; nodes no paired path reaches dropped */
+/* record k sent on every greeted port whose peer lacks it: one not told it, and not the record's own node (a bridge
+   drops its own record, record_heard), each port it is sent on told.  Sent from a copy: a send that loses its port
+   makes this node's record and the map again */
+static void record_tell(struct known *k){
+  const struct mesh_record record=k->record;
+  for(uint32_t p=0;p<port_count;p++){
+    if(!ports[p].greeted || k->told>>p&1 || ports[p].peer==record.node)continue;
+    port_say(ports+p,(struct message){.kind=RECORD},&record,sizeof record);
+    k->told|=UINT32_C(1)<<p;
+  }
+}
+/* a port paired anew: its peer told none of the table's records (it may be another bridge, or one that kept none) */
+void records_forget(const struct port *port){
+  const uint32_t bit=port_bit(port);
+  for(uint32_t k=0;k<known_count;k++)known[k].told&=~bit;
+}
+/* design/transport.md, #region: the map, a record a node a paired path from this node reaches, each its node's record
+   in the table above (this node's own rebuilt from its port table when that changes, its sequence one more; every
+   other node's the newest heard); each change written between two notifications of the map serial (odd while it
+   writes), the records in arena pages the bridge leases and leases again larger as the mesh grows */
 static int map_grow(uint64_t records){
   if(records<=map_room)return 0;
   uint32_t pages=(uint32_t)((records*2*sizeof(struct mesh_record)+M->pgsz-1)/M->pgsz),page=mesh_arena_alloc(&bridge,pages,1);
@@ -63,47 +94,7 @@ void map_adopt(void){
   atomic_store(&M->map_nodes,0);
   atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
 }
-/* RFC 2328 s14: the map with `record` put in (its node's stored record replaced, else added) and every record no paired
-   path from this node reaches left out, written only where it differs from the map as it stands (so a record that
-   changes nothing, or that the prune drops at once, moves no serial) */
-static void map_put(const struct mesh_record *record){
-  const uint64_t n=atomic_load(&M->map_nodes);
-  struct mesh_record *r=mesh_records(M);
-  uint64_t at=0;
-  while(at<n && r[at].node!=record->node)at++;
-  const uint64_t count=at==n?n+1:n;
-  struct mesh_record *next=malloc(count*sizeof *next);
-  unsigned char *reached=calloc(count,1);
-  uint32_t *order=malloc(count*sizeof *order),head=0,tail=0;
-  if(!next || !reached || !order){free(next);free(reached);free(order);say("map: no memory to put node %u's record\n",record->node);return;}
-  memcpy(next,r,(size_t)n*sizeof *r);
-  memcpy(next+at,record,sizeof *record);
-  for(uint64_t k=0;k<count;k++)if(next[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
-  while(head<tail){
-    uint32_t a=order[head++];double beta;
-    for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
-  }
-  /* design/transport.md: a node the prune drops is logged (one put now and never reached yet is not a loss) */
-  for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
-    struct known *node=known_at(next[k].node);
-    say("node %u unreachable, heard %.1f s before\n",next[k].node,node && node->heard?(double)(now-node->heard)/1e9:-1.0);
-    if(node)node->lost_at=now;
-  }
-  uint64_t remaining=0;
-  for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+remaining++,next+k,sizeof *next);
-  if(remaining!=n || memcmp(next,r,(size_t)n*sizeof *r)){
-    mesh_notify(&M->map);
-    if(map_grow(remaining))say("map: no lease for %llu records; %llu remaining\n",(unsigned long long)remaining,(unsigned long long)map_room);
-    if(remaining>map_room)remaining=map_room;
-    memcpy(mesh_records(M),next,(size_t)remaining*sizeof *next);
-    atomic_store(&M->map_nodes,remaining);
-    mesh_notify(&M->map);
-  }
-  free(next);free(reached);free(order);
-}
-/* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), boot and facts are the
-   stored one's changes only its health and sequence, written under the region's health serial and never the map's: the
-   map serial moves only where the mesh changes, and a health sample is no change of the mesh */
+/* design/transport.md: whether two records' reached nodes (each with its stream's bandwidth), boot and facts are the same */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
@@ -117,19 +108,87 @@ static void health_put(struct mesh_record *stored,const struct mesh_record *reco
   stored->sequence=record->sequence;stored->health=record->health;
   mesh_notify(&M->health);
 }
-struct mesh_record *record_of(uint32_t node){
-  for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
-  return NULL;
+/* RFC 2328 s16.1 over the table: the map made again, every record known that a paired path from this node reaches (two
+   nodes paired where each one's record names the other: mesh_joined), in the table's order, written only where it
+   differs from the map as it stands (so a change no path reaches moves no serial).  A node the map loses or gains is
+   logged, and each record it gains is sent where a peer lacks it (record_tell): a port paired while the map lacked
+   the record was never sent it (map_tell sends the map alone), and every other port's peer was told it or sent it */
+static void map_make(void){
+  const uint64_t n=atomic_load(&M->map_nodes);
+  const struct mesh_record *r=mesh_records(M);
+  struct mesh_record *next=malloc(MESH_KNOWN*sizeof *next);
+  unsigned char *reached=calloc(MESH_KNOWN,1);
+  uint32_t *order=malloc(MESH_KNOWN*sizeof *order),*gained=malloc(MESH_KNOWN*sizeof *gained),head=0,tail=0,gains=0;
+  if(!next || !reached || !order || !gained){
+    free(next);free(reached);free(order);free(gained);say("map: no memory to make it again\n");return;
+  }
+  for(uint32_t k=0;k<known_count;k++)if(known[k].record.node==M->node){reached[k]=1;order[tail++]=k;}
+  while(head<tail){
+    const uint32_t a=order[head++];double beta;
+    for(uint32_t b=0;b<known_count;b++)if(!reached[b] && mesh_joined(&known[a].record,&known[b].record,&beta)){reached[b]=1;order[tail++]=b;}
+  }
+  uint64_t count=0;
+  for(uint32_t k=0;k<known_count;k++){
+    struct known *node=known+k;
+    int was=0;
+    for(uint64_t i=0;i<n && !was;i++)was=r[i].node==node->record.node;
+    if(reached[k])next[count++]=node->record;
+    if(node->record.node==M->node || was==reached[k])continue;
+    if(was){
+      say("node %u unreachable, heard %.1f s before\n",node->record.node,node->heard?(double)(now-node->heard)/1e9:-1.0);
+      node->lost_at=now;
+      continue;
+    }
+    if(node->lost_at)say("node %u back after %.1f s\n",node->record.node,(double)(now-node->lost_at)/1e9);
+    else say("node %u joined\n",node->record.node);
+    node->lost_at=0;
+    gained[gains++]=k;
+  }
+  if(count!=n || memcmp(next,r,(size_t)n*sizeof *r)){
+    mesh_notify(&M->map);
+    if(map_grow(count))say("map: no lease for %llu records; %llu remaining\n",(unsigned long long)count,(unsigned long long)map_room);
+    if(count>map_room)count=map_room;
+    memcpy(mesh_records(M),next,(size_t)count*sizeof *next);
+    atomic_store(&M->map_nodes,count);
+    mesh_notify(&M->map);
+  }
+  free(next);free(reached);free(order);
+  /* each from its table entry (record_tell copies it): a port lost meanwhile makes the map again, and moves no entry */
+  for(uint32_t g=0;g<gains;g++)record_tell(known+gained[g]);
+  free(gained);
+}
+/* design/transport.md: `record` stored as its node's newest (`k` its place in the table), heard on port `from` (NULL:
+   this node's own), whose peer is then the one that has it.  One whose node the map has, and whose reached nodes,
+   boot and facts are the map's record's, changes only its health and sequence there, written under the region's
+   health serial and never the map's: the map serial moves only where the mesh changes, and a health sample is no
+   change of the mesh.  Any other makes the map again (map_make) */
+static void map_put(struct known *k,const struct mesh_record *record,const struct port *from){
+  struct mesh_record *mapped=record_of(record->node);
+  k->record=*record;k->told=from?port_bit(from):0;
+  if(mapped && record_links_same(mapped,record))health_put(mapped,record);
+  else map_make();
+}
+/* design/transport.md: the map sent on `port` as its link comes up: each record of it whose peer lacks it
+   (record_tell's rule), this node's own apart (record_changed sends it, naming the link), the peer keeping each until
+   its own record names the link too (map_make) */
+void map_tell(struct port *port){
+  const uint32_t bit=port_bit(port);
+  for(uint32_t k=0;port->greeted && k<known_count;k++){
+    struct known *node=known+k;
+    if(node->record.node==M->node || node->record.node==port->peer || node->told&bit || !record_of(node->record.node))continue;
+    const struct mesh_record record=node->record;
+    port_say(port,(struct message){.kind=RECORD},&record,sizeof record);
+    node->told|=bit;
+  }
 }
 void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=pool_bytes(),.memory=memory};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_STREAMS);
   own.health=health;
-  struct mesh_record *stored=record_of(M->node);
-  if(stored && record_links_same(stored,&own))health_put(stored,&own);
-  else map_put(&own);
-  for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
+  struct known *k=known_at(M->node);
+  map_put(k,&own,NULL);
+  record_tell(k);
 }
 /* design/transport.md: this node's record told again at its current sequence on every greeted port, each
    liveness turn (MESH_PAUSE_NS), so each control socket carries a message well within MESH_PLATFORM_NS; a receiver drops
@@ -158,29 +217,16 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   if(!heard.node || heard.node==M->node)return;
   heard.reached=MIN(heard.reached,(uint32_t)MESH_STREAMS);
   heard.model[sizeof heard.model-1]=0;
-  struct mesh_record *stored=record_of(heard.node);
   struct known *k=known_at(heard.node);
-  /* design/transport.md, RFC 2328 s13: a record no newer than the newest heard of its node, the map having
-     it or not, is dropped and not sent on, so a record the map pruned never circulates (a node's later boot is always
-     newer) */
-  if(k && k->boot && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence))){
-    /* the newest known of a node the map dropped while no paired path reached it: put again where a path now does,
-       and sent on only then (a pruned record that no path reaches stops here) */
-    if(!stored && heard.boot==k->boot && heard.sequence==k->sequence){
-      map_put(&heard);
-      for(uint32_t p=0;record_of(heard.node) && p<port_count;p++)
-        if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
-    }
-    return;
-  }
-  if(stored && (heard.boot<stored->boot || (heard.boot==stored->boot && heard.sequence<=stored->sequence)))return;
-  /* design/transport.md: a node that joins or comes back is logged here */
-  if(!stored && k && k->lost_at)say("node %u back after %.1f s\n",heard.node,(double)(now-k->lost_at)/1e9);
-  else if(!stored && k && !k->heard)say("node %u joined\n",heard.node);
-  if(k){k->heard=now;k->lost_at=0;k->boot=heard.boot;k->sequence=heard.sequence;}
-  if(stored && record_links_same(stored,&heard))health_put(stored,&heard);
-  else map_put(&heard);
-  for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
+  /* design/transport.md, RFC 2328 s13: a record no newer than the newest heard of its node is dropped and not sent on,
+     so no record circulates (a node's later boot is always newer), one the same as that newest telling that `from`'s
+     peer has it; so is one the table has no place for (every node it holds is in the map) */
+  if(!k)return;
+  if(k->heard && heard.boot==k->record.boot && heard.sequence==k->record.sequence){k->told|=port_bit(from);return;}
+  if(k->heard && (heard.boot<k->record.boot || (heard.boot==k->record.boot && heard.sequence<k->record.sequence)))return;
+  k->heard=now;
+  map_put(k,&heard,from);
+  record_tell(k);
 }
 /* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first seen (its exit,
    the event loop's EVFILT_PROC, makes every slot it has leave: a client's death is that event, not a poll), one

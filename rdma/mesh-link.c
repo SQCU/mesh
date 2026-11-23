@@ -55,7 +55,6 @@ static void farewell_text(int64_t code,char *out,size_t room){
   else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
   else snprintf(out,room,"no reason given");
 }
-struct known known[MESH_KNOWN];
 void wake(void){
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -113,7 +112,9 @@ static void link_failed(struct port *port,int64_t code,uint32_t domain){
 }
 
 /* ---- design/PAGE-TABLE-SPEC-20261122.md section 5: the switch's data path, a port child's part (mesh-switched.h) ----
-   Each data lane of the link (MESH_LANE_FIRST + j) is the switch's lane port 2 MESH_LINK_STREAMS + j.  On it the child
+   Lane j of the link (its queue pair j) is the switch's lane port 2 MESH_LINK_STREAMS + j, of mesh-switched.h
+   mesh_switch_lane_frames(j) frames (lane 0 short, every other long; both ends' plans alike, so both ends' lane j
+   alike, TN3205).  On it the child
    keeps receives posted (one frame count for every SEND and every receive on the lane, TN3205): filled from free pages
    of the lane's class, and each one a SEND fills posted again at once, into a free page or, where the class has none,
    into the page that landed (whose landing is then lost), so a lane's posted receives do not run out while every page
@@ -125,29 +126,26 @@ static void link_failed(struct port *port,int64_t code,uint32_t domain){
 static inline struct mesh_switch *switch_of(void){ return mesh_switch_of(M); }
 static inline uint32_t switch_lane(const struct port *port,uint32_t j){ return port->index*2*MESH_LINK_STREAMS+j; }
 static inline struct mesh_switch_hand *hand_of(const struct port *port){ return switch_of()->hand+port->index; }
-/* data lane j's frames: a link's first data lane short (MESH_CLASS_SHORT), every other long (MESH_CLASS_LONG); both
-   ends' plans alike, so both ends' lane j alike (TN3205) */
-static inline uint64_t lane_frames(uint32_t j){ return j?MESH_CLASS_LONG:MESH_CLASS_SHORT; }
-/* page pd made a receive of data lane j (its state RECEIVE on the switch's lane), before it is posted: a child's end
+/* page pd made a receive of lane j (its state RECEIVE on the switch's lane), before it is posted: a child's end
    gives it back from then on, posted or not (mesh-switched.h mesh_switch_receives_drop) */
 static inline void receive_page(const struct port *port,uint32_t j,uint32_t pd){
   struct mesh_pd *p=mesh_pd_at(M,pd);
   atomic_store_explicit(&p->lane,switch_lane(port,j),memory_order_relaxed);
   atomic_store_explicit(&p->state,MESH_PD_RECEIVE,memory_order_release);
 }
-/* pages page[0 .. n) (each a receive of data lane j: receive_page) posted as the lane's receives, each the lane's
+/* pages page[0 .. n) (each a receive of lane j: receive_page) posted as the lane's receives, each the lane's
    frames from its page's start, as one list a post_recv (its call's cost the list's, not each receive's); those the
    provider did not take go back to the pool, and its error loses the lane: 0, or the error */
 #define RECEIVE_BATCH 16u
 static int receives_post(struct port *port,uint32_t j,const uint32_t *page,uint32_t n){
   struct link *l=&port->link;
-  const uint32_t lane=MESH_LANE_FIRST+j;struct lane_state *state=l->lane+lane;
-  const uint64_t bytes=lane_frames(j)*MESH_FRAME;
-  const struct mesh_queue *queue=l->provider.queues+lane;
+  struct lane_state *state=l->lane+j;
+  const uint64_t bytes=mesh_switch_lane_bytes(switch_lane(port,j));
+  const struct mesh_queue *queue=l->provider.queues+j;
   struct ibv_recv_wr request[RECEIVE_BATCH];struct ibv_sge span[RECEIVE_BATCH];
   for(uint32_t k=0;k<n;k++){
     span[k]=dma_span(port,(struct mesh_dma_span){mesh_pd_at(M,page[k])->offset,bytes});
-    request[k]=(struct ibv_recv_wr){.wr_id=((uint64_t)lane<<48)|page[k],.sg_list=span+k,.num_sge=1};
+    request[k]=(struct ibv_recv_wr){.wr_id=((uint64_t)j<<48)|page[k],.sg_list=span+k,.num_sge=1};
     if(k)request[k-1].next=request+k;
   }
   struct ibv_recv_wr *bad=NULL;
@@ -156,7 +154,7 @@ static int receives_post(struct port *port,uint32_t j,const uint32_t *page,uint3
   for(uint32_t k=made;k<n;k++)mesh_pool_push(M,page[k]);
   state->posted+=made;
   atomic_store_explicit(&lanes_of(port,j/2)->posts[1].posted[j&1],state->posted,memory_order_relaxed);
-  if(error)lane_lost(port,lane,error<0?-error:error);
+  if(error)lane_lost(port,j,error<0?-error:error);
   return error;
 }
 /* the lane's receives filled from its class's free stack to as many as its queues' share takes: its first fill (each
@@ -164,8 +162,8 @@ static int receives_post(struct port *port,uint32_t j,const uint32_t *page,uint3
    that named no receive page; a stack found empty posts nothing more this pass and is counted (`starved`: the provider
    stalls the peer's SEND meanwhile) */
 static void switch_receives(struct port *port,uint32_t j){
-  struct lane_state *state=port->link.lane+MESH_LANE_FIRST+j;
-  const uint64_t frames=lane_frames(j),most=state->frame_capacity/frames;
+  struct lane_state *state=port->link.lane+j;
+  const uint64_t frames=mesh_switch_lane_frames(j),most=state->frame_capacity/frames;
   while(state->posted-state->got<most){
     uint32_t page[RECEIVE_BATCH],n=0;
     int starved=0;
@@ -185,10 +183,10 @@ static void switch_receives(struct port *port,uint32_t j){
 static void switch_sends(struct port *port,uint32_t j){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
-  const uint32_t lane=MESH_LANE_FIRST+j,at=switch_lane(port,j);struct lane_state *state=l->lane+lane;
+  const uint32_t at=switch_lane(port,j);struct lane_state *state=l->lane+j;
   struct mesh_switch_lane *x=sw->lane+at;
-  const struct frames each={lane_frames(j)};
-  const struct mesh_queue *queue=l->provider.queues+lane;
+  const struct frames each={mesh_switch_lane_frames(j)};
+  const struct mesh_queue *queue=l->provider.queues+j;
   /* every page the outbox has, as many as the lane's gate takes, one post_send for them all (the provider's call
      costs about 0.85 us whatever it carries: a request list a call, not a call a request) */
   enum { BATCH=16 };
@@ -198,10 +196,10 @@ static void switch_sends(struct port *port,uint32_t j){
     while(mesh_switch_cell_at(sw,at,head,&pd,NULL) && pd==MESH_ABSENT)head++;
     atomic_store_explicit(&x->head,head,memory_order_relaxed);
     struct ibv_send_wr request[BATCH];struct ibv_sge span[BATCH];uint64_t pushed[BATCH];uint32_t n=0;
-    while(n<BATCH && gate_fits(l->gate+lane,each)){
+    while(n<BATCH && gate_fits(l->gate+j,each)){
       if(!mesh_switch_cell_at(sw,at,head+n,&pd,pushed+n) || pd==MESH_ABSENT)break;
       span[n]=dma_span(port,(struct mesh_dma_span){mesh_pd_at(M,pd)->offset,each.n*MESH_FRAME});
-      request[n]=(struct ibv_send_wr){.wr_id=gate_post(l->gate+lane,lane,each),.sg_list=span+n,.num_sge=1,
+      request[n]=(struct ibv_send_wr){.wr_id=gate_post(l->gate+j,j,each),.sg_list=span+n,.num_sge=1,
                                       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
       if(n)request[n-1].next=request+n;
       n++;
@@ -213,16 +211,16 @@ static void switch_sends(struct port *port,uint32_t j){
     const uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     /* the requests before `bad` posted (all of them without an error) */
     const uint32_t made=error?(bad>=request && bad<request+n?(uint32_t)(bad-request):0):n;
-    l->gate[lane].posted.n-=(uint64_t)(n-made)*each.n;
+    l->gate[j].posted.n-=(uint64_t)(n-made)*each.n;
     MESH_SWITCH_COUNT(sw,port->index,post_call_ns,posted-posting);
     for(uint32_t k=0;k<made;k++){
       MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posting>pushed[k]?posting-pushed[k]:0);
       mesh_switch_cell_posted(sw,at,head+k,posted);
-      __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[lane].requests++;
+      __atomic_store_n(&state->sent,state->sent+1,__ATOMIC_RELEASE);l->gate[j].requests++;
     }
     atomic_store_explicit(&x->head,head+made,memory_order_relaxed);
     atomic_store_explicit(&lanes_of(port,j/2)->posts[0].posted[j&1],state->sent,memory_order_relaxed);
-    if(error){lane_lost(port,lane,error<0?-error:error);return;}
+    if(error){lane_lost(port,j,error<0?-error:error);return;}
     if(n<BATCH)return;
   }
 }
@@ -238,17 +236,15 @@ static void link_send(struct port *port,uint32_t served){
   if(count<0){link_failed(port,EIO,2);return;}
   const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   for(int i=0;i<count;i++){
-    const uint32_t lane=link_lane(l,done[i].qp_num);
-    if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
+    const uint32_t j=link_lane(l,done[i].qp_num);
+    if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
     if(done[i].status){link_failed(port,(int64_t)done[i].status,2);return;}
-    gate_complete(l->gate+lane,done[i].wr_id);
-    if(lane<MESH_LANE_FIRST)continue;
-    struct lane_state *state=l->lane+lane;
-    const uint32_t j=lane-MESH_LANE_FIRST;
+    gate_complete(l->gate+j,done[i].wr_id);
+    struct lane_state *state=l->lane+j;
     uint64_t posted=at;
     const uint32_t pd=mesh_switch_completed(sw,switch_lane(port,j),&posted);
     const uint64_t start=posted>state->last?posted:state->last;
-    mesh_switch_sent(sw,switch_lane(port,j),lane_frames(j)*MESH_FRAME,posted,start,at);
+    mesh_switch_sent(sw,switch_lane(port,j),mesh_switch_lane_bytes(switch_lane(port,j)),posted,start,at);
     mesh_pd_drop(M,pd);
     MESH_SWITCH_COUNT(sw,port->index,sent,1);MESH_SWITCH_COUNT(sw,port->index,send_ns,at-posted);
     state->last=at;state->done++;
@@ -258,7 +254,7 @@ static void link_send(struct port *port,uint32_t served){
     atomic_store_explicit(&x->posts[0].done[j&1],state->done,memory_order_relaxed);
   }
 }
-/* the link's receive completions, each data lane's receive posted again at once, so a lane's posted receives stay as
+/* the link's receive completions, each lane's receive posted again at once, so a lane's posted receives stay as
    many as its fill made them whatever the pool has (TN3205: a receive for every SEND the peer posts): into a page
    popped from the lane's class, and the page that landed landed (mesh-switched.h mesh_switch_landed: its lines taken,
    its destinations here set in the table, the rest switched on); where the class's free stack is empty, into the page
@@ -272,26 +268,26 @@ static void link_receive(struct port *port,uint32_t served){
   if(count<0){link_failed(port,EIO,3);return;}
   if(count)atomic_thread_fence(memory_order_acquire);
   const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
-  uint32_t again[MESH_LINK_LANES-MESH_LANE_FIRST][RECEIVE_BATCH],agains[MESH_LINK_LANES-MESH_LANE_FIRST]={0};
+  uint32_t again[MESH_LINK_LANES][RECEIVE_BATCH],agains[MESH_LINK_LANES]={0};
   for(int i=0;i<count;i++){
-    const uint32_t lane=link_lane(l,done[i].qp_num);
-    if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
+    const uint32_t j=link_lane(l,done[i].qp_num);
+    if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
     uint64_t status_opcode;
     memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
     if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode,2);return;}
-    if(!((status_opcode>>32)&IBV_WC_RECV) || lane<MESH_LANE_FIRST)continue;
-    struct lane_state *state=l->lane+lane;
-    const uint32_t j=lane-MESH_LANE_FIRST,pd=(uint32_t)(done[i].wr_id&UINT32_MAX);
+    if(!((status_opcode>>32)&IBV_WC_RECV))continue;
+    struct lane_state *state=l->lane+j;
+    const uint32_t pd=(uint32_t)(done[i].wr_id&UINT32_MAX);
     state->got++;
     atomic_store_explicit(&lanes_of(port,j/2)->posts[1].done[j&1],state->got,memory_order_relaxed);
     if(!mesh_pd_valid(M,pd) || atomic_load_explicit(&mesh_pd_at(M,pd)->state,memory_order_relaxed)!=MESH_PD_RECEIVE)continue;
-    const uint32_t fresh=mesh_pool_pop(M,(uint32_t)lane_frames(j));
+    const uint32_t fresh=mesh_pool_pop(M,mesh_switch_lane_frames(j));
     if(fresh==MESH_ABSENT){again[j][agains[j]++]=pd;MESH_SWITCH_COUNT(sw,port->index,lost,1);continue;}
     receive_page(port,j,fresh);
     again[j][agains[j]++]=fresh;
     mesh_switch_landed(M,sw,switch_lane(port,j),pd,at,port->index,hand_of(port));
   }
-  for(uint32_t j=0;j<MESH_LINK_LANES-MESH_LANE_FIRST;j++)if(agains[j])receives_post(port,j,again[j],agains[j]);
+  for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(agains[j])receives_post(port,j,again[j],agains[j]);
 }
 /* the writes this node's clients put on the rings this child takes (mesh-switched.h struct mesh_switch `taker`: the
    rings its parent names its port's, switch_takers), taken and carried, at most SWITCH_BURST a pass, each of those
@@ -320,7 +316,7 @@ static void port_tell(_Atomic uint64_t *word,uint64_t value){
 }
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's progress thread over the lanes the link serves
    (`served` read once a pass: none posts on a lane its link no longer serves): the receive completions landed
-   (link_receive), the receives topped up, the clients' writes taken (switch_takes), every data lane's outbox posted,
+   (link_receive), the receives topped up, the clients' writes taken (switch_takes), every lane's outbox posted,
    the SEND completions (link_send), the pass counted (`passes`) */
 static void port_pass(struct port *port){
   /* one pass in 1024 timed (counters pass_ns: its time summed and the passes timed; part_ns: each part's time) */
@@ -331,14 +327,14 @@ static void port_pass(struct port *port){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
-  const uint32_t lanes=2*plan_streams(l->plan);
+  const uint32_t lanes=plan_lanes(l->plan);
   if(served)link_receive(port,served);
   if(timed)t[1]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_receives(port,j);
+  for(uint32_t j=0;j<lanes;j++)if(served>>j&1)switch_receives(port,j);
   if(timed)t[2]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served>>MESH_LANE_FIRST)switch_takes(port);
+  if(served)switch_takes(port);
   if(timed)t[3]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  for(uint32_t j=0;j<lanes;j++)if(served>>(MESH_LANE_FIRST+j)&1)switch_sends(port,j);
+  for(uint32_t j=0;j<lanes;j++)if(served>>j&1)switch_sends(port,j);
   if(timed)t[4]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   if(served)link_send(port,served);
   MESH_SWITCH_COUNT(sw,port->index,passes,1);   /* the pass time is the wall time over these (the thread spins) */
@@ -360,7 +356,7 @@ static void *port_progress(void *argument){
   stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
   atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
-  mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_lanes_among_for) */
+  mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_lanes_among) */
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     /* while the port's guard stands, or its link serves no lane, no pass (no post on any queue pair of its device) and
        no lane read: the thread waits on the guard word (design/transport.md B13: a guarded call in the driver costs no
@@ -517,8 +513,7 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    once in its life
    (design/transport.md section 14, "A process a port"): the lanes made (LINK_JOB_MAKE: the port's own address read
    again, then a UC queue pair in INIT for each lane of the link's plan, d6dceac's verbs_up, each lane's share of the
-   completion queues the plan's streams' lanes alone dividing them, lanes 0 and 1 posting nothing:
-   design/HETEROGENEOUS-LINKS.md; EALREADY for a make asked
+   completion queues the plan's lanes dividing them: design/HETEROGENEOUS-LINKS.md; EALREADY for a make asked
    again); or connected to the peer's (LINK_JOB_CONNECT, the plan's lanes alone: RTR, then RTS, each lane's number and
    gate set, every lane's progress made new, and the port's progress thread started).  No queue pair is moved to
    another state, destroyed or forgotten after it: the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its
@@ -539,15 +534,15 @@ static int link_make(struct port *port,const struct link_numbers *numbers){
      lane's connection at the peer with EIO (2026-10-19, after the Mini's power loss) */
   if(ibv_query_port(port->device.context,1,&attributes))return errno?errno:EIO;
   port->device.port=attributes;
-  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(l,numbers)) || (error=pair_up(p,l->plan)))return error;
-  l->share=(struct frames){(uint64_t)MIN(p->completion->cqe,p->sent->cqe)/MAX(plan_lanes(l->plan>>MESH_LANE_FIRST),1u)};
+  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(l,numbers)) || (error=pair_up(p,plan_lanes(l->plan))))return error;
+  l->share=(struct frames){(uint64_t)MIN(p->completion->cqe,p->sent->cqe)/MAX(plan_lanes(l->plan),1u)};
   return 0;
 }
 static void lane_reset(struct port *port,uint32_t k);
 /* design/transport.md section 14: stream s's identity, alike at both ends: FNV-1a over its first lane's two ends, each
    its port's GID and its queue pair's number, the lesser end first; never 0 */
 static uint64_t stream_wire(const struct port *port,const struct link_numbers *numbers,uint32_t s){
-  const uint32_t k=MESH_LANE_FIRST+2*s*MESH_STREAM_PAIRS;
+  const uint32_t k=2*s;
   uint8_t end[2][20];
   memcpy(end[0],port->gid,16);memcpy(end[0]+16,&port->link.qpn[k],4);
   memcpy(end[1],numbers->gid,16);memcpy(end[1]+16,&numbers->peer[k][0],4);
@@ -571,16 +566,17 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
     l->gate[k]=(struct send_gate){.capacity=plan>>k&1?frames_min((struct frames){p->queues[k].send_capacity},share):(struct frames){0}};
   }
   if(!error)error=link_lapsed(l,numbers);
-  for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)lane_reset(port,k);
+  for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)lane_reset(port,k);
   for(uint32_t s=0;s<plan_streams(plan) && !error;s++)l->wire[s]=stream_wire(port,numbers,s);
   return error;
 }
 /* design/transport.md section 14, "A process a port": the link's lane records opened as its lanes connect, by the
    child before any lane is served: each lane's requests posted and completed each way 0 (its queue pairs are new),
    this child their poster (`child`, `child_start`), the peer node, the link's bandwidth and identity told; then each
-   data lane the switch's, live toward the peer, its outbox first emptied of what was pushed onto it after its last
+   lane the switch's, live toward the peer, its outbox first emptied of what was pushed onto it after its last
    child's end (mesh-switched.h mesh_switch_lane_drop: pages for the lane's last link, each counted `lost` in the
-   port's counters: its progress thread passes no lane yet) */
+   port's counters: its progress thread passes no lane yet), the short lane (lane 0) first (a draw that reads a
+   long one live then reads the short one live: mesh-switched.h mesh_switch_lanes_among) */
 static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
@@ -597,11 +593,11 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
   struct mesh_switch *sw=switch_of();
-  for(uint32_t j=0;j<2*plan_streams(l->plan);j++){
+  for(uint32_t j=0;j<plan_lanes(l->plan);j++){
     struct mesh_switch_lane *x=sw->lane+switch_lane(port,j);
     mesh_switch_lane_drop(M,sw,switch_lane(port,j),port->index);
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
-    atomic_store_explicit(&x->frames,lane_frames(j),memory_order_relaxed);
+    atomic_store_explicit(&x->frames,mesh_switch_lane_frames(j),memory_order_relaxed);
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
 }
@@ -649,17 +645,21 @@ static void lane_reset(struct port *port,uint32_t k){
 }
 /* the lane records of a port (`port` NULL: of every port) live no more, as its link is lost or the bridge stops, and
    its switch lanes with them: no draw takes them, and what their outboxes have is dropped as their child ends
-   (switch_child_free) */
+   (switch_child_free).  Its long lanes first and its short lane (lane 0) last, each a release store: a draw reads
+   a link's lanes in their order, the short one first, and one that reads it as this store left it then reads every
+   long one not live, so the cancel never shows a draw the link's long lanes live without its short lane (a short page
+   goes on a short lane alone: mesh-switched.h mesh_switch_lanes_among) */
 void lanes_cancel(const struct port *port){
   for(uint32_t p=0;p<port_count;p++){
     if(port && ports+p!=port)continue;
-    for(uint32_t j=0;j<2*MESH_LINK_STREAMS;j++)atomic_store_explicit(&switch_of()->lane[switch_lane(ports+p,j)].live,0,memory_order_release);
+    for(uint32_t j=2*MESH_LINK_STREAMS;j-->0;)atomic_store_explicit(&switch_of()->lane[switch_lane(ports+p,j)].live,0,memory_order_release);
     for(uint32_t s=0;s<MESH_LINK_STREAMS;s++)atomic_store_explicit(&lanes_of(ports+p,s)->live,0,memory_order_release);
   }
 }
 /* design/transport.md section 14: the link's turn, on the event loop: a job's end taken (made: LINK told the peer every
-   lane; connected: up, every lane served, the stream live, the clients' rings' takers named again with its port among
-   them, switch_takers); a job that failed loses the link (port_lost); while it is
+   lane; connected: up, every lane served, the stream live, the peer sent the map's records it lacks and then this
+   node's own naming the link, the clients' rings' takers named again with its port among them, switch_takers); a job that
+   failed loses the link (port_lost); while it is
    up, a lane a progress thread found failed (`broken`) loses it; then, while no port's job is out past MESH_PLATFORM_NS (B12) and once the port's last
    quiet window has ended (B9), the lanes made once the port is paired (`lanes`: its child asked for them), and connected
    once both ends' are made, each by the port's child and once in its life: a link lost once its lanes were asked for
@@ -686,6 +686,10 @@ static void link_turn(struct port *port){
       say("link %u (%s): %u lanes up toward node %u (plan %#x: %u stream%s), each lane's share %llu frames\n",
           port->index,port->name,plan_lanes(l->plan),port->peer,l->plan,plan_streams(l->plan),plan_streams(l->plan)==1?"":"s",
           (unsigned long long)l->share.n);
+      /* the map's records the peer lacks sent as the link comes up (mesh-records.c map_tell), then this node's own
+         naming the link: the map first, so a record this end's own then brings into its map goes to no peer that has
+         it (map_make) */
+      map_tell(port);
       record_changed();
       switch_takers();
     }
@@ -751,9 +755,8 @@ static void link_heard(struct port *port,const struct message *heard){
   struct link *l=&port->link;
   if(l->heard || (l->state!=LINK_DOWN && l->state!=LINK_MADE))return;
   if(heard->count!=plan_lanes(l->plan)){
-    say("link %u (%s): node %u's LINK names %u lanes, this end's plan %u (plan %#x): %s\n",port->index,port->name,port->peer,heard->count,
-        plan_lanes(l->plan),l->plan,port->heard.count?"the two ends planned apart":"its bridge states no budget and makes every lane, "
-        "and this port has fewer: the link pairs once that node runs a bridge that states its budget");
+    say("link %u (%s): node %u's LINK names %u lanes, this end's plan %u (plan %#x): the two ends planned apart\n",port->index,
+        port->name,port->peer,heard->count,plan_lanes(l->plan),l->plan);
     port_lost(port,EPROTO);
     return;
   }
@@ -802,10 +805,9 @@ uint64_t pool_bytes(void){
 /* design/PAGE-TABLE-SPEC-20261122.md section 2: the pool carved from the arena once, in a region made new (one
    adopted keeps its carve, `pages` set): MESH_POOL_SHORT short and MESH_POOL_LONG long pages, fewer of both in
    proportion where seven eighths of the arena fit fewer (the rest the bridge's other leases: the map's records), each
-   class in runs the arena leases (mesh_arena_alloc: a run within one MESH_DMA_EXTENT, so a SEND of any of its pages
-   lies in one registration), each run followed by MESH_CLASS_LONG - frames frames of slack (a page sent with a long
-   lane's frames reads no further than its run), a run half as long where the arena has none so long; every page
-   free, the short pages' ids first */
+   class in runs the arena leases (mesh_arena_alloc: a run within one MESH_DMA_EXTENT, so a SEND of any of its pages,
+   which covers no more than the page's frames, lies in one registration), a run half as long where the arena has none
+   so long; every page free, the short pages' ids first */
 static void pool_make(void){
   struct mesh_pool *pool=mesh_pool(M);
   if(pool->pages)return;
@@ -816,13 +818,13 @@ static void pool_make(void){
   uint32_t pd=0;
   for(uint32_t c=0;c<MESH_CLASSES;c++){
     struct mesh_pool_class *k=pool->cls+c;
-    const uint32_t frames=c?MESH_CLASS_LONG:MESH_CLASS_SHORT,slack=MESH_CLASS_LONG-frames;
+    const uint32_t frames=c?MESH_CLASS_LONG:MESH_CLASS_SHORT;
     k->frames=frames;k->pages=0;
     atomic_store(&k->head,0);atomic_store(&k->free,0);
-    uint32_t run=(uint32_t)((MESH_DMA_EXTENT/MESH_FRAME-slack)/frames);
+    uint32_t run=(uint32_t)(MESH_DMA_EXTENT/MESH_FRAME/frames);
     while(k->pages<want[c] && run){
       const uint32_t n=MIN(run,want[c]-k->pages);
-      const uint64_t bytes=((uint64_t)n*frames+slack)*MESH_FRAME;
+      const uint64_t bytes=(uint64_t)n*frames*MESH_FRAME;
       const uint32_t first=mesh_arena_alloc(&bridge,(uint32_t)((bytes+M->pgsz-1)/M->pgsz),1);
       if(first==MESH_ABSENT){run/=2;continue;}
       const uint64_t base=M->data_off+(uint64_t)first*M->pgsz;
@@ -928,7 +930,7 @@ static void switch_child_free(struct port *port){
   mesh_switch_receives_drop(M,switch_lane(port,0),2*MESH_LINK_STREAMS);
 }
 /* each client ring's one taker named (mesh-switched.h struct mesh_switch `taker`): ring s the (s mod n)-th, by port
-   index ascending, of the n ports whose link is up with a data lane (its child serves them: child_jobs), none while n
+   index ascending, of the n ports whose link is up with a lane (its child serves them: child_jobs), none while n
    is 0; named again as a link comes up (link_turn), as one is lost (port_lost) and as a port's child is reaped
    (child_reaped), by the event loop.  A child a ring was named for before may take from it a moment longer: each write
    is one child's by the ring's compare-exchange, and a child's death mid-take is its hand's to settle (switch_settle) */
@@ -936,7 +938,7 @@ static void switch_takers(void){
   struct mesh_switch *sw=mesh_switch_of(M);
   uint8_t serving[MESH_PORTS];uint32_t n=0;
   for(uint32_t p=0;p<port_count;p++)
-    if(ports[p].link.state==LINK_UP && ports[p].link.plan>>MESH_LANE_FIRST)serving[n++]=(uint8_t)ports[p].index;
+    if(ports[p].link.state==LINK_UP && ports[p].link.plan)serving[n++]=(uint8_t)ports[p].index;
   for(uint32_t s=0;s<MESH_CLIENTS;s++)
     atomic_store_explicit(&sw->taker[s],(uint8_t)(n?serving[s%n]:MESH_SWITCH_NO_PORT),memory_order_relaxed);
 }
@@ -1005,26 +1007,25 @@ static void message_heard(struct port *port,const struct message *heard,const un
 }
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello
    names the peer (the node it states, whatever node's hello this end dialed), and pairs the link, its plan the fewer
-   queue pairs of the two ends', design/HETEROGENEOUS-LINKS.md, its lanes made (link_turn); a lane's frames are the same
-   constants at both ends (lane_frames).  Then each message is taken (message_heard) */
+   queue pairs of the two ends', design/HETEROGENEOUS-LINKS.md, the peer told none of the records yet
+   (mesh-records.c records_forget), then sent this node's record (link_set) and the rest of the map's it lacks once
+   the link is up, its lanes made (link_turn); a lane's frames are the same
+   constants at both ends (mesh-switched.h mesh_switch_lane_frames).  Then each message is taken (message_heard) */
 static void port_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(!port->greeted){
     if(heard->kind!=HELLO)return;
     /* a bridge of another wire version is not paired with: its hello is let be (mesh.h MESH_VERSION) */
     if(heard->version!=MESH_VERSION)return;
     port->peer=heard->node;port->peer_port=heard->port;port->heard=*heard;port->greeted=1;
-    const uint32_t theirs=hello_budget(heard->count);
-    port->link.plan=link_plan(MIN(port->budget,theirs));
+    records_forget(port);
+    port->link.plan=link_plan(MIN(port->budget,heard->count));
     struct mesh_link_info *link=&mesh_links(M)[port->index];
     atomic_store_explicit(&link->bandwidth,port->bandwidth,memory_order_relaxed);
     atomic_fetch_add_explicit(&link->pairings,1,memory_order_relaxed);
-    say("link %u (%s): paired with node %u (queue pairs for the link: this port's %u, its %u%s; plan %#x, %u lanes, %u stream%s)\n",
-        port->index,port->name,port->peer,port->budget,theirs,heard->count?"":", its bridge stating none",port->link.plan,
+    say("link %u (%s): paired with node %u (queue pairs for the link: this port's %u, its %u; plan %#x, %u lanes, %u stream%s)\n",
+        port->index,port->name,port->peer,port->budget,heard->count,port->link.plan,
         plan_lanes(port->link.plan),plan_streams(port->link.plan),plan_streams(port->link.plan)==1?"":"s");
     link_set(port,port->peer,MESH_PAIRED,0);
-    /* a port newly paired is sent every record the map has, this node's first */
-    for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
-      port_say(port,(struct message){.kind=RECORD},mesh_records(M)+i,sizeof(struct mesh_record));
     if(port->greeted)link_turn(port);
     return;
   }
@@ -1066,8 +1067,8 @@ void port_lost(struct port *port,int64_t code){
   link_set(port,0,port->open?MESH_PAIRING:MESH_STOPPED,code);
 }
 /* the control socket: non-blocking, its sends queued (port_say), its HELLO stating the queue pairs the port's device
-   has for a link (hello_budget); its peer's loss is the kernel's to tell (its end closed, a reset, the link's going
-   off) */
+   has for a link (its budget: link_plan); its peer's loss is the kernel's to tell (its end closed, a reset, the link's
+   going off) */
 static void port_greet(struct port *port){
   int on=1,flags=fcntl(port->control,F_GETFL);
   if(flags<0 || fcntl(port->control,F_SETFL,flags|O_NONBLOCK) || setsockopt(port->control,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) ||
@@ -1075,7 +1076,7 @@ static void port_greet(struct port *port){
     port_lost(port,errno?errno:EIO);return;
   }
   port_watch(port,EVFILT_READ);
-  port_say(port,(struct message){.kind=HELLO,.count=1+port->budget,},NULL,0);
+  port_say(port,(struct message){.kind=HELLO,.count=port->budget},NULL,0);
 }
 /* design/transport.md: the port a link-local peer reached, by its interface; none for a scope of 0 (no
    interface: a LAN address, or the index of an interface that no longer exists) */
@@ -1510,7 +1511,7 @@ static void child_reaped(struct port *port);
    `--child VERSION DEVICE ...`, the three words every version keeps): a child of a launch whose parent ended
    unbidden, which has the device's queue pairs until its exit (child_leave, at most 2 MESH_PLATFORM_NS); its pid and
    start (pid 0: none; one exited or in its exit is none).  A device's queue pairs are one child's at a time: a link
-   takes as many as its device has for it, up to MESH_LINK_LANES (ten of a macOS 26 device's ten,
+   takes as many as its device has for it, up to MESH_LINK_LANES (eight of a macOS 26 device's ten,
    design/HETEROGENEOUS-LINKS.md).  The list has room for one process past the system's most (kern.maxproc, read
    once), so a list that fills it was cut short; where the processes cannot be listed whole, or the memory for the
    list cannot be had, this bridge ends rather than spawn beside a child it did not see */

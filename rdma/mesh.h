@@ -20,17 +20,21 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  162:
+/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  163:
    every SEND is one page of the node's pool, MESH_HEAD bytes of header and then its payload, the header naming each
-   destination as a node and an index of that node's page table (mesh-switched.h) */
-#define MESH_VERSION 162u
+   destination as a node and an index of that node's page table (mesh-switched.h), a page sent on the lanes of its
+   payload's class alone, and a link's lane j its queue pair j (mesh-bridge.h link_plan).  Against 162: the header
+   has no `dest_nodes` (162's destinations as bits over its source's view; each node keys the policy's contexts by its
+   own view), a line's wait is INFINITY where its link is down (162's 0), a link makes no queue pairs 0 and 1 that carry
+   nothing (162's lanes from queue pair 2), a HELLO's `count` is its port's budget (162's 1 + the budget), and a LINK
+   names MESH_LINK_LANES lanes in `pair` (162's 10) */
+#define MESH_VERSION 163u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  182: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  183: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   181, the switch names each client ring's one taker (mesh-switched.h struct mesh_switch `taker`), has its view, its
-   weights and its split tables in two copies each, the published one named by a version word in place of each one's
-   seqlock serial (`view_version`, `weights_version`, `splits_version`), and its counters have no `unowned` */
-#define MESH_LAYOUT 182u
+   182, the pool's runs have no slack after them (a SEND of a page covers its payload's class's frames, never more than
+   the page's own: mesh-switched.h mesh_switch_forward) */
+#define MESH_LAYOUT 183u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -74,8 +78,8 @@ _Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");
    bytes, its uses (a table word naming it, a SEND pushed or posted of it, a write of it pending in a ring, a landing
    being processed: at 0 it goes back to its class's free stack), its state, the lane a receive of it is posted on, and
    `next`, its link on the free stack (the next page's id + 1, 0 none).  The bridge carves the pages from the arena
-   once, at its start, each run of them within one MESH_DMA_EXTENT and followed by MESH_CLASS_LONG - cls frames of
-   slack, so a page of either class may be sent with a long lane's frames */
+   once, at its start, each run of them within one MESH_DMA_EXTENT; a SEND of a page covers its payload's class's
+   frames (mesh-switched.h mesh_switch_forward), never more than its own */
 enum { MESH_PD_FREE, MESH_PD_RECEIVE, MESH_PD_LIVE };
 struct mesh_pd { _Atomic uint64_t next; uint64_t offset; _Atomic uint32_t uses,bytes; uint16_t cls; _Atomic uint16_t state;
   _Atomic uint32_t lane; };

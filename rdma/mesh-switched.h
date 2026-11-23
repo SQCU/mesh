@@ -12,14 +12,16 @@
    - Take.  A client's write (mesh.h struct mesh_write, from its ring) names its page and its destinations: the bridge
      writes the page's header, sets the table entry of each destination on this node to the page, and forwards the page
      toward the others (mesh_switch_carry).  Each ring has one taker, the port child the parent names for it (struct
-     mesh_switch `taker`: ring s the (s mod n)-th, by port index, of the n ports whose link serves a data lane).
+     mesh_switch `taker`: ring s the (s mod n)-th, by port index, of the n ports whose link serves a lane).
    - Switching.  At every node a page is at, the destinations it carries on are split over the node's out-neighbours by
      a draw from the routing weights (mesh_switch_choose): one uniform u per page, each destination's lane the inverse of
      its weights' distribution at u (so destinations whose distributions agree share one SEND), masked to the
-     neighbours off the page's path that reach the destination without coming back, over lanes whose frames fit the
-     page's payload.  The cable to a neighbour is the one with the least bytes queued.  The page is pushed onto each
-     group's lane's outbox (a ring in the region any port child pushes and the lane's port child posts), a use of it a
-     group: the page is switched across the node's ports, whichever child has it.
+     neighbours off the page's path that reach the destination without coming back, over the lanes of its payload's
+     class alone (the frames of the least class that holds the payload, mesh.h mesh_class_frames: a SEND covers its
+     lane's frames, so on a lane of more frames it would carry the pool's next pages with it).  The cable to a
+     neighbour is the one with the least bytes queued.  The page is pushed onto each group's lane's outbox (a ring in
+     the region any port child pushes and the lane's port child posts), a use of it a group: the page is switched
+     across the node's ports, whichever child has it.
    - Landing.  A page landed sets the table entry of each destination here whose turn it is (mesh_switch_set: the
      index's landed count one more, the page it named before dropped) and is forwarded unchanged for the others it
      carries (mesh_switch_landed).  Nothing waits and nothing is reported: a destination no allowed neighbour reaches,
@@ -59,7 +61,7 @@
 
 #define MESH_SWITCH_MAGIC 0x53574349u
 #define MESH_HEAD_MAGIC 0x50414745u                          /* a page's header */
-#define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)   /* a port's data lanes, MESH_LANE_FIRST on */
+#define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)   /* every port's lanes, its link's queue pairs */
 #define MESH_SWITCH_N 8u                                     /* nodes the view has */
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view has */
 #define MESH_SWITCH_RING 32768u                              /* a lane's outbox: every page of the pool once */
@@ -71,7 +73,7 @@
 #define MESH_SWITCH_REFRESH_NS 50000.0                       /* the refresh's period (the bridge's thread) */
 #define MESH_SWITCH_DRAWS 32u                                /* Thompson sampling's draws a refresh */
 #define MESH_SWITCH_ETA 0.5f                                 /* the residual's rate a refresh */
-#define MESH_SWITCH_PAGE ((double)(MESH_CLASS_LONG*MESH_FRAME))   /* the refresh's page: a long page's frames */
+#define MESH_SWITCH_PAGE MESH_CLASS_LONG                      /* the refresh's page, its frames: a long page's */
 _Static_assert(MESH_SWITCH_N<=64 && MESH_SWITCH_N<=MESH_NODES,"a node a bit");
 _Static_assert(MESH_DESTS<=32,"a destination a bit");
 /* a page is in a lane's outbox at most once (its SEND's completion drops the use that blocks its next write or landing),
@@ -84,21 +86,21 @@ _Static_assert(MESH_SWITCH_RING>=MESH_POOL_PAGES && !(MESH_SWITCH_RING&(MESH_SWI
    receiver reading only the destinations it is the next of; UINT32_MAX no one's); and the cost it carried so far (ns:
    queueing at each hop, the wire's time) */
 struct mesh_hop { uint32_t node,index,next; float queued,transit; };
-/* a line: a directed link's predicted wait (ns) and its spread, its rate (bytes a ns, every cable) and latency, as its
-   sender (`from`) measured it at its refresh `stamp` */
+/* a line: a directed link's predicted wait (ns; INFINITY: the link is down, none of its sender's lanes toward its peer
+   live) and its spread, its rate (bytes a ns, every cable) and latency, as its sender (`from`) measured it at its
+   refresh `stamp` */
 struct mesh_switch_line { uint32_t from,to; uint64_t stamp; float wait,spread,rate,latency; };
 /* the header, written by the bridge (never the client): MESH_HEAD_MAGIC; the node that took the write (`source`); the
    payload's bytes; the hops, destinations and lines; the node that sent this SEND (`from`: its receiver appends itself
-   to `path`); `unused`, unused; the nodes visited, `hops` + 1 of them; the destinations; the sequence of the headers
-   its first node made (`seq`: the draw's seed, the records' sampling and their join); and the write's destination
-   nodes as bits over the source's view (`dest_nodes`: the policy's context).  The lines follow the payload in the last
+   to `path`); `unused`, unused; the nodes visited, `hops` + 1 of them; the destinations; and the sequence of the
+   headers its first node made (`seq`: the draw's seed, the records' sampling and their join).  Every field names nodes
+   by their numbers, never by a view's indices (each node's view is its own).  The lines follow the payload in the last
    frame's slack (mesh_switch_lines_at) */
 struct mesh_head {
   uint32_t magic,source,bytes,hops,dests,lines,from,unused;
   uint32_t path[MESH_SWITCH_N];
   struct mesh_hop dest[MESH_DESTS];
   uint64_t seq;
-  uint32_t dest_nodes;
 };
 _Static_assert(sizeof(struct mesh_head)<=MESH_HEAD && MESH_HEAD%64==0,"a header within its MESH_HEAD bytes");
 _Static_assert(sizeof(struct mesh_head)>MESH_HEAD-64,"MESH_HEAD no longer than the header needs");
@@ -144,12 +146,12 @@ struct mesh_switch_splits {
   struct mesh_switch_context key[MESH_SWITCH_CONTEXTS];
   float w[MESH_SWITCH_CONTEXTS][SPLIT_FS];
 };
-/* a lane of this node (port p's data lane j: p 2 MESH_LINK_STREAMS + j): live, its peer node, the bytes queued on it
-   (pushed and not yet completed), its outbox's positions (`tail` the next position pushed, by any port child; `head`
+/* a lane of this node (port p's lane j, its link's queue pair j: p 2 MESH_LINK_STREAMS + j): live, its peer node, the
+   bytes queued on it (pushed and not yet completed), its outbox's positions (`tail` the next position pushed, by any port child; `head`
    the next posted and `done` the next completed, by the lane's child), and its feedback: SENDs completed, their bytes,
    their service and wait (ns, summed), pages landed, the estimate its child keeps (rate in bytes a ns and wait, two
-   floats in one word); and its frames (every SEND's and receive's on the lane, TN3205: the two ends alike; 0 while it
-   never opened) */
+   floats in one word); and its frames (mesh_switch_lane_frames of its index, told for observers; 0 while it never
+   opened) */
 struct mesh_switch_lane {
   _Alignas(64) _Atomic uint32_t live,peer;
   _Atomic uint64_t queued,tail;     /* every pushing child's (mesh_switch_push) */
@@ -240,9 +242,19 @@ _Static_assert(sizeof(struct mesh_switch)<=MESH_SWITCH_BYTES,"the switch within 
 static inline struct mesh_switch *mesh_switch_of(struct hdr *m){ return (struct mesh_switch *)((char *)m+m->switch_off); }
 static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x,&a,4);memcpy(&y,&b,4);return (uint64_t)x|(uint64_t)y<<32; }
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
-/* the bytes every SEND and receive on lane l covers: its frames' */
-static inline uint64_t mesh_switch_lane_bytes(const struct mesh_switch *sw,uint32_t l){
-  return atomic_load_explicit(&sw->lane[l].frames,memory_order_relaxed)*MESH_FRAME;
+/* the frames of a port's lane j, every SEND's and receive's on it (both ends' alike, TN3205): its lane 0 short
+   (MESH_CLASS_SHORT), every other long (MESH_CLASS_LONG) */
+static inline uint32_t mesh_switch_lane_frames(uint32_t j){ return j?MESH_CLASS_LONG:MESH_CLASS_SHORT; }
+/* the bytes every SEND and receive on the switch's lane l (port p's lane j: p 2 MESH_LINK_STREAMS + j) covers: its
+   frames', a constant of its index */
+static inline uint64_t mesh_switch_lane_bytes(uint32_t l){ return (uint64_t)mesh_switch_lane_frames(l%(2*MESH_LINK_STREAMS))*MESH_FRAME; }
+/* the switch's lanes of `frames` frames, bits over its lanes: a port's lanes of those frames, at every port (the port's
+   bits times a word with a 1 at each port's first lane), so a draw finds a class's lanes without reading a lane */
+_Static_assert(64%(2*MESH_LINK_STREAMS)==0,"a port's lanes a whole number of a mask's bits");
+static inline uint64_t mesh_switch_class_lanes(uint32_t frames){
+  uint64_t port=0;
+  for(uint32_t j=0;j<2*MESH_LINK_STREAMS;j++)if(mesh_switch_lane_frames(j)==frames)port|=UINT64_C(1)<<j;
+  return port*(~UINT64_C(0)/((UINT64_C(1)<<(2*MESH_LINK_STREAMS))-1));
 }
 /* the published copy of the view, the weights or the split tables by its version (one acquire load: the copy's writes
    before its publish seen): 0 or 1 */
@@ -323,7 +335,7 @@ static inline uint32_t mesh_switch_completed(struct mesh_switch *sw,uint32_t l,u
    (its push ends, or its death is settled: mesh_switch_left_settle) */
 static inline void mesh_switch_lane_drop(struct hdr *m,struct mesh_switch *sw,uint32_t l,uint32_t ring){
   struct mesh_switch_lane *x=sw->lane+l;
-  const uint64_t wire=mesh_switch_lane_bytes(sw,l);
+  const uint64_t wire=mesh_switch_lane_bytes(l);
   uint64_t at=atomic_load_explicit(&x->done,memory_order_relaxed);
   uint32_t pd;
   while(mesh_switch_cell_at(sw,l,at,&pd,NULL)){
@@ -412,21 +424,23 @@ static inline void mesh_switch_sent(struct mesh_switch *sw,uint32_t lane,uint64_
   rate=rate>0?rate+(r-rate)/8:r;waited+=((float)wait-waited)/8;
   atomic_store_explicit(&x->estimate,mesh_switch_pack(rate,waited),memory_order_relaxed);
 }
-/* where a header's lines lie: after its payload (8-aligned), within the SEND's whole frames, so they cost no wire; and
-   how many fit in `wire` bytes */
-static inline struct mesh_switch_line *mesh_switch_lines_at(struct mesh_head *head){
-  return (struct mesh_switch_line *)((char *)head+MESH_HEAD+((uint64_t)head->bytes+7)/8*8);
+/* where a header's lines lie: after its payload of `bytes` (8-aligned), within the SEND's whole frames, so they cost
+   no wire; and how many fit in `wire` bytes.  `bytes` is the payload's as the caller read and bounded it once, never
+   the header's word read again: every client maps the region writable */
+static inline struct mesh_switch_line *mesh_switch_lines_at(struct mesh_head *head,uint32_t bytes){
+  return (struct mesh_switch_line *)((char *)head+MESH_HEAD+((uint64_t)bytes+7)/8*8);
 }
-static inline uint32_t mesh_switch_lines_fit(const struct mesh_head *head,uint64_t wire){
-  const uint64_t at=MESH_HEAD+((uint64_t)head->bytes+7)/8*8,room=wire>at?(wire-at)/sizeof(struct mesh_switch_line):0;
+static inline uint32_t mesh_switch_lines_fit(uint32_t bytes,uint64_t wire){
+  const uint64_t at=MESH_HEAD+((uint64_t)bytes+7)/8*8,room=wire>at?(wire-at)/sizeof(struct mesh_switch_line):0;
   return room<MESH_SWITCH_LINES?(uint32_t)room:MESH_SWITCH_LINES;
 }
-/* the lines a header carries taken into the published view where newer than its own (a node's lines about its own
-   links are the ones it measured: a link's line is only ever made by its sender) */
-static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_head *head,uint64_t wire){
+/* the lines a header carries (its `lines`, read once, as many as fit after `bytes` in `wire`) taken into the published
+   view where newer than its own (a node's lines about its own links are the ones it measured: a link's line is only
+   ever made by its sender) */
+static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_head *head,uint32_t bytes,uint64_t wire){
   struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
-  const uint32_t lines=head->lines<mesh_switch_lines_fit(head,wire)?head->lines:mesh_switch_lines_fit(head,wire);
-  const struct mesh_switch_line *line=mesh_switch_lines_at(head);
+  const uint32_t carried=__atomic_load_n(&head->lines,__ATOMIC_RELAXED),fit=mesh_switch_lines_fit(bytes,wire),lines=carried<fit?carried:fit;
+  const struct mesh_switch_line *line=mesh_switch_lines_at(head,bytes);
   for(uint32_t i=0;i<lines;i++){
     const struct mesh_switch_line *a=line+i;
     if(a->from==v->self)continue;
@@ -440,7 +454,8 @@ static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_hea
   }
 }
 /* the lines a header sends, from view v: this node's own links first (their wait the least bytes queued over the rate
-   of the neighbour's lanes), then the view's others, newest first, as many as fit */
+   of the neighbour's lanes, INFINITY where the link is down: mesh_switch_refresh), then the view's others, newest
+   first, as many as fit */
 static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,const struct mesh_switch_view *v,struct mesh_switch_line *line){
   uint32_t n=0;
   const uint64_t stamp=atomic_load_explicit(&sw->stamp,memory_order_relaxed);
@@ -458,65 +473,62 @@ static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,const struc
   }
   return n;
 }
-/* the wait now on this node's lanes toward `peer` (the least queued bytes over the lane's rate), its lane, and the
-   neighbour's lanes' rate summed (bytes a ns, 0: no live lane) */
 _Static_assert(MESH_SWITCH_LANES==64,"a lane a bit, and every bit of a mask a lane");
-/* the lanes live toward `peer`, bits over the switch's lanes */
+/* the lanes live toward `peer`, bits over the switch's lanes, of every class (a cable's queue counts all its lanes:
+   mesh_switch_lanes_among takes from the mask the lanes of its page's class alone) */
 static inline uint64_t mesh_switch_lanes_mask(struct mesh_switch *sw,uint32_t peer){
   uint64_t mask=0;
   for(uint32_t l=0;l<MESH_SWITCH_LANES;l++)
     if(atomic_load_explicit(&sw->lane[l].live,memory_order_acquire) && atomic_load_explicit(&sw->lane[l].peer,memory_order_relaxed)==peer)mask|=UINT64_C(1)<<l;
   return mask;
 }
-/* mesh_switch_lanes_toward over the lanes of `mask` alone (the refresh's: struct mesh_switch_weights `toward`), each
-   read live again; every lane where `mask` is 0 */
-static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra,uint64_t need);
-static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra){
-  return mesh_switch_lanes_among_for(sw,mask,peer,fallback_rate,best,rate,extra,0);
-}
-/* among the lanes whose SENDs carry `need` bytes (0: any), the one of the least wait with `extra` bytes more, or with
-   its own SEND's bytes where `extra` is negative */
 /* the calling thread's own port (a port child's progress thread, mesh-link.c port_progress; UINT32_MAX elsewhere): of
    lanes whose waits are equal, one of its own port's is posted by this thread in this pass, any other's waits for its
    own child's pass (the handoff through the outbox) */
 static __thread uint32_t mesh_switch_home=UINT32_MAX;
-static inline double mesh_switch_lanes_among_for(struct mesh_switch *sw,uint64_t mask,uint32_t peer,double fallback_rate,uint32_t *best,double *rate,double extra,uint64_t need){
-  double least=INFINITY;*best=UINT32_MAX;*rate=0;
-  const uint64_t every=~UINT64_C(0)>>(64-MESH_SWITCH_LANES);
+/* Of the lanes of `mask` (0: every lane; the refresh's: struct mesh_switch_weights `toward`, each read live again)
+   live toward `peer` and of `frames` frames (a page goes on the lanes of its payload's class alone: the lanes of
+   mesh_switch_class_lanes, no lane read for it), the one of the least wait with `extra` bytes more: its wait (ns),
+   *best the lane; INFINITY and UINT32_MAX where none is.  A cable's
+   lanes share it: a lane's wait is its cable's (port's) bytes queued over all its live lanes toward the peer, of every
+   class, plus `extra`, over the cable's rate (`fallback_rate`, the view's per cable, else its lanes' estimates summed).
+   Where none of those frames is found, every lane is read once more where the mask was not every lane (one come up
+   since the refresh) or a lane of another class toward the peer was live (a link's lanes come up one after another,
+   its short lane first, mesh-link.c lanes_open: a lane read live, by its acquire, shows every lane made live before
+   it) */
+static inline double mesh_switch_lanes_among(struct mesh_switch *sw,uint64_t mask,uint32_t peer,uint32_t frames,double fallback_rate,double extra,uint32_t *best){
+  double least=INFINITY;*best=UINT32_MAX;
+  const uint64_t every=~UINT64_C(0)>>(64-MESH_SWITCH_LANES),of_class=mesh_switch_class_lanes(frames);
   if(!mask)mask=every;
-  const uint64_t given=mask;
-  /* a cable's lanes share it: each cable's (port's) bytes queued over all its live lanes toward the peer, and its rate
-     (the view's per cable, else its lanes' estimates summed) */
   enum { CABLES=MESH_SWITCH_LANES/(2*MESH_LINK_STREAMS) };
-  double queued[CABLES]={0},estimate[CABLES]={0};uint64_t live=0;
-  for(uint64_t k=mask;k;k&=k-1){
-    const uint32_t l=(uint32_t)__builtin_ctzll(k);
-    struct mesh_switch_lane *x=sw->lane+l;
-    if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->peer,memory_order_relaxed)!=peer)continue;
-    live|=UINT64_C(1)<<l;
-    const uint32_t c=l/(2*MESH_LINK_STREAMS);
-    queued[c]+=(double)atomic_load_explicit(&x->queued,memory_order_relaxed);
-    float r,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&r,&waited);
-    estimate[c]+=r>0?r:0;
+  for(uint32_t pass=0;pass<2;pass++,mask=every){
+    double queued[CABLES]={0},estimate[CABLES]={0};uint64_t live=0;
+    for(uint64_t k=mask;k;k&=k-1){
+      const uint32_t l=(uint32_t)__builtin_ctzll(k);
+      struct mesh_switch_lane *x=sw->lane+l;
+      if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->peer,memory_order_relaxed)!=peer)continue;
+      live|=UINT64_C(1)<<l;
+      const uint32_t c=l/(2*MESH_LINK_STREAMS);
+      queued[c]+=(double)atomic_load_explicit(&x->queued,memory_order_relaxed);
+      float r,waited;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&r,&waited);
+      estimate[c]+=r>0?r:0;
+    }
+    for(uint64_t k=live&of_class;k;k&=k-1){
+      const uint32_t l=(uint32_t)__builtin_ctzll(k),c=l/(2*MESH_LINK_STREAMS);
+      const double each=fallback_rate>0?fallback_rate:estimate[c]>0?estimate[c]:1;
+      const double wait=(queued[c]+extra)/each;
+      const int home=c==mesh_switch_home,best_home=*best!=UINT32_MAX && *best/(2*MESH_LINK_STREAMS)==mesh_switch_home;
+      if(wait<least || (wait==least && *best!=UINT32_MAX && (home>best_home || (home==best_home &&
+                        atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)<atomic_load_explicit(&sw->lane[*best].queued,memory_order_relaxed))))){least=wait;*best=l;}
+    }
+    if(*best!=UINT32_MAX || (mask==every && !live))break;
   }
-  uint32_t counted=0;
-  for(uint64_t k=live;k;k&=k-1){
-    const uint32_t l=(uint32_t)__builtin_ctzll(k),c=l/(2*MESH_LINK_STREAMS);
-    const double each=fallback_rate>0?fallback_rate:estimate[c]>0?estimate[c]:1;
-    if(!(counted>>c&1)){*rate+=each;counted|=1u<<c;}
-    const uint64_t carries=mesh_switch_lane_bytes(sw,l);
-    if(need>carries)continue;
-    const double wait=(queued[c]+(extra<0?(double)carries:extra))/each;
-    const int home=c==mesh_switch_home,best_home=*best!=UINT32_MAX && *best/(2*MESH_LINK_STREAMS)==mesh_switch_home;
-    if(wait<least || (wait==least && *best!=UINT32_MAX && (home>best_home || (home==best_home &&
-                      atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)<atomic_load_explicit(&sw->lane[*best].queued,memory_order_relaxed))))){least=wait;*best=l;}
-  }
-  /* none of the mask's lanes live: every lane looked at (one come up since the refresh) */
-  if(*best==UINT32_MAX && given!=every)return mesh_switch_lanes_among_for(sw,every,peer,fallback_rate,best,rate,extra,need);
   return least;
 }
-static inline double mesh_switch_lanes_toward(struct mesh_switch *sw,uint32_t peer,double fallback_rate,uint32_t *best,double *rate){
-  return mesh_switch_lanes_among(sw,~UINT64_C(0)>>(64-MESH_SWITCH_LANES),peer,fallback_rate,best,rate,0);
+/* the least wait now toward `peer` on its lanes of `frames` frames, nothing added (mesh_switch_lanes_among over every
+   lane): INFINITY where none of them is live */
+static inline double mesh_switch_lanes_toward(struct mesh_switch *sw,uint32_t peer,uint32_t frames,double fallback_rate,uint32_t *best){
+  return mesh_switch_lanes_among(sw,0,peer,frames,fallback_rate,0,best);
 }
 
 /* ---- The draw ---------------------------------------------------------------------------------------------------- */
@@ -558,18 +570,28 @@ static inline uint32_t mesh_switch_contexts(const struct mesh_switch_view *v,str
   }
   return n;
 }
-/* the w of context (source, dest_nodes, onward) from the published tables (their copy as its version names it, read
-   once): 1 found (w filled, *context its index, *point the tables' refresh), 0 none or the tables not active.  A
-   context's index stays under MESH_SWITCH_CONTEXTS whatever `contexts` the copy says */
-static inline int mesh_switch_split_w(const struct mesh_switch *sw,uint32_t source,uint32_t dest_nodes,uint32_t onward,float *w,uint32_t *context,uint64_t *point,
-                                      uint32_t *argmax,float *scale){
+/* a header's destinations' nodes as bits over view v */
+static inline uint32_t mesh_switch_dest_nodes(const struct mesh_switch_view *v,const struct mesh_head *head){
+  uint32_t bits=0;
+  for(uint32_t i=0;i<head->dests && i<MESH_DESTS;i++){const uint32_t d=mesh_switch_index(v,head->dest[i].node);if(d<32)bits|=1u<<d;}
+  return bits;
+}
+/* the w of a page's context from the published tables (their copy as its version names it, read once): its source,
+   its destinations' nodes (mesh_switch_dest_nodes) and the ones it carries on from here (`onward`), each over view v,
+   this node's, whose indices the tables' keys are in (mesh_switch_contexts); 1 found (w filled, *context its index,
+   *point the tables' refresh), 0 none or the tables not active.  A context's index stays under MESH_SWITCH_CONTEXTS
+   whatever `contexts` the copy says */
+static inline int mesh_switch_split_w(const struct mesh_switch *sw,const struct mesh_switch_view *v,const struct mesh_head *head,uint32_t onward,float *w,
+                                      uint32_t *context,uint64_t *point,uint32_t *argmax,float *scale){
   const struct mesh_switch_splits *x=sw->splits+mesh_switch_published(&sw->splits_version);
   int found=0;
-  if(x->active)
+  if(x->active){
+    const uint32_t source=mesh_switch_index(v,head->source),dest_nodes=mesh_switch_dest_nodes(v,head);
     for(uint32_t c=0;c<x->contexts && c<MESH_SWITCH_CONTEXTS;c++){
       const struct mesh_switch_context *k=x->key+c;
       if(k->source==source && k->dest_nodes==dest_nodes && k->onward==onward){memcpy(w,x->w[c],sizeof x->w[c]);*context=c;found=1;break;}
     }
+  }
   *point=x->point;*argmax=x->argmax;*scale=x->scale;
   return found;
 }
@@ -596,16 +618,16 @@ static inline uint32_t mesh_switch_split_draw(const struct route_draw *d,const f
 }
 /* A page at this node (its header: its destinations and path) split over the node's out-neighbours for the
    destinations it carries on (`away`, `naway` of them: places in the header's dest[]): each group's lane (the
-   neighbour's cable with the least bytes queued, among lanes whose frames are at least `frames`, the class of the
-   page's payload) and its destinations (bits over `away`).
+   neighbour's cable with the least bytes queued, among its lanes of `frames` frames, the class of the page's payload,
+   never a lane of more) and its destinations (bits over `away`).
    The draw's record (split.h struct route_draw, as rdma/route reads it): for each carried destination d and neighbour
    k, the arrival through k (its lanes' wait now, the page's time on them, the link's latency, then the refresh's
    cost-to-go from k to d), whether k reaches d without coming back here (valid), and whether it is allowed from the
    page's path (off it, reaching d avoiding it: mask).
    The draw, at u = the page's seed (its source, its `seq`, its first carried destination's index):
-   - where the policy's split tables are active and have the page's context (its source, its destination nodes, the
-     ones carried here: mesh_switch_split_w), the split is split.h's table under the context's w at u: exactly the
-     trainer's action, *logp its log-probability;
+   - where the policy's split tables are active and have the page's context (its source, its destinations' nodes, the
+     ones carried here, each over this node's view: mesh_switch_split_w), the split is split.h's table under the
+     context's w at u: exactly the trainer's action, *logp its log-probability;
    - else each destination i takes the neighbour k at which its masked, renormalised weights' distribution first passes
      u; where its weights give its allowed neighbours nothing, the allowed one of the least cost-to-go; *logp the
      length of u's interval that makes the split.
@@ -616,7 +638,7 @@ static inline uint32_t mesh_switch_split_draw(const struct route_draw *d,const f
    and every index stays within its array whatever a copy rewritten under the draw has in it: a view index under
    `nodes` (at most MESH_SWITCH_N); a neighbour k under `deg` (at most MESH_SWITCH_N); a neighbour's view index under
    MESH_SWITCH_N, as the refresh stores it (togo[nb] within togo), and under `nodes` before v->node[nb] is read; a
-   lane under MESH_SWITCH_LANES (mesh_switch_lanes_among_for's, or none where the neighbour is no view node) */
+   lane under MESH_SWITCH_LANES (mesh_switch_lanes_among's, or none where the neighbour is no view node) */
 static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct mesh_switch_view *v,const struct mesh_switch_weights *w,
                                           const struct mesh_head *head,const uint32_t *away,uint32_t naway,uint32_t frames,
                                           uint32_t *lane,uint64_t *group,uint32_t *unreachable,
@@ -630,21 +652,21 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
   for(uint32_t h=0;h<=head->hops && h<MESH_SWITCH_N;h++){const uint32_t i=mesh_switch_index(v,head->path[h]);if(i<64)visited|=UINT64_C(1)<<i;}
   const double u=mesh_switch_uniform(((uint64_t)head->source<<32)^head->seq*0x9e3779b97f4a7c15ULL^(naway?head->dest[away[0]].index:0));
   uint32_t choice[MESH_DESTS],node[MESH_DESTS],neighbour[MESH_SWITCH_N];
-  uint32_t best_lane[MESH_SWITCH_N];double rate[MESH_SWITCH_N],wait[MESH_SWITCH_N],latency[MESH_SWITCH_N];
+  uint32_t best_lane[MESH_SWITCH_N];double wait[MESH_SWITCH_N],latency[MESH_SWITCH_N];
   for(uint32_t k=0;k<deg;k++){
     const uint32_t nb=neighbour[k]=__atomic_load_n(&w->neighbour[k],__ATOMIC_RELAXED);
     const struct mesh_switch_link *x=nb<nodes?mesh_switch_link_of((struct mesh_switch_view *)v,v->self,v->node[nb]):NULL;
-    /* the lane's wait with this page's own frames on it: its time to clear the lane (design: (backlog + bytes) / rate) */
-    best_lane[k]=UINT32_MAX;rate[k]=0;
-    wait[k]=nb<nodes?mesh_switch_lanes_among_for(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,-1,(uint64_t)frames*MESH_FRAME):INFINITY;
+    /* the wait on the lane of the page's class with the page's own frames on it: its time to clear the lane (design:
+       (backlog + bytes) / rate) */
+    best_lane[k]=UINT32_MAX;
+    wait[k]=nb<nodes?mesh_switch_lanes_among(sw,w->toward[k],v->node[nb],frames,x?x->rate/x->cables:0,(double)frames*MESH_FRAME,best_lane+k):INFINITY;
     latency[k]=x?x->latency:0;
   }
-  /* the policy's context: the page's source and destination nodes, the carried ones (view indices) */
+  /* the policy's context: the page's source and destinations' nodes, the carried ones (this node's view indices) */
   uint32_t onward=0;
   for(uint32_t j=0;j<naway;j++){node[j]=mesh_switch_index(v,head->dest[away[j]].node);if(node[j]<32)onward|=1u<<node[j];}
   float cw[SPLIT_FS],scale=1;uint32_t ctx=UINT32_MAX,argmax=0;uint64_t at_point=0;
-  const int split=nodes<=SPLIT_N && deg<=SPLIT_DEG &&
-                  mesh_switch_split_w(sw,mesh_switch_index(v,head->source),head->dest_nodes,onward,cw,&ctx,&at_point,&argmax,&scale);
+  const int split=nodes<=SPLIT_N && deg<=SPLIT_DEG && mesh_switch_split_w(sw,v,head,onward,cw,&ctx,&at_point,&argmax,&scale);
   if(!split)ctx=UINT32_MAX;
   if(context)*context=ctx;
   if(point)*point=at_point;
@@ -730,18 +752,21 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
   return used;
 }
 /* ---- The refresh -------------------------------------------------------------------------------------------------
-   The weights' target from what the node knows now: each hop's cost its wait (this node's own lanes' least queue over
-   their rate, a remote link's line) plus a page's time on one cable plus its latency.  A policy (`policy` NULL: the
-   default) writes target[d][k], a distribution over the neighbours for each destination, from that state (the view,
-   the cost-to-go, each neighbour's wait now); the default is Thompson sampling over paths: `draws` draws of every
-   hop's wait (its line's mean plus its spread times a normal draw), each destination's share of a neighbour the draws
-   in which the earliest path to it leaves through that neighbour. */
+   The weights' target from what the node knows now, for the refresh's page (`frames` frames, a class's): each hop's
+   cost its wait (this node's own lanes of that class, their least queue over their rate; a remote link's line) plus
+   the page's time on one cable plus its latency, and INFINITY where the link is down (none of those lanes live, or a
+   line whose wait is not finite: no path crosses it).  A policy (`policy` NULL: the default) writes target[d][k], a
+   distribution over the neighbours for each destination, from that state (the view, the cost-to-go, each neighbour's
+   wait now); the default is Thompson sampling over paths: `draws` draws of every hop's wait (its line's mean plus its
+   spread times a normal draw), each destination's share of a neighbour the draws in which the earliest path to it
+   leaves through that neighbour. */
 struct mesh_switch_state {
   const struct mesh_switch_view *view;
   uint32_t self,deg,neighbour[MESH_SWITCH_N];
   double hop[MESH_SWITCH_LINKS],spread[MESH_SWITCH_LINKS];      /* each view link's cost (ns) and its spread */
-  /* each of this node's own links' wait now (ns: its lanes' least queue over their rate, INFINITY where none toward its
-     peer is live), made once a refresh for the state, the lines and the tokens alike; 0 for another node's link */
+  /* each of this node's own links' wait now (ns: its lanes' of the refresh's page's class, their least queue over their
+     rate; INFINITY where none of them toward its peer is live, the link down), made once a refresh for the state, the
+     lines and the tokens alike; 0 for another node's link */
   double wait[MESH_SWITCH_LINKS];
   double first[MESH_SWITCH_N];                                   /* each neighbour's hop from here, now */
   float togo[MESH_SWITCH_N][MESH_SWITCH_N];
@@ -749,8 +774,8 @@ struct mesh_switch_state {
   double page;
 };
 /* the policy's input at one of its refreshes, from this node's state (mesh_switch_tokens_make: route.h's features, made
-   here): a token for each of this node's own links (lane[i], of view link link_of[i]) and for each of its contexts
-   (context[c], key[c] as the split tables have it) */
+   here): a token for each of this node's own links not down (lane[i], of view link link_of[i]) and for each of its
+   contexts (context[c], key[c] as the split tables have it) */
 struct mesh_switch_tokens {
   uint32_t lanes,contexts;
   uint64_t point,at;
@@ -786,19 +811,22 @@ static inline void mesh_switch_arrivals(const struct mesh_switch_view *v,uint32_
     }
   }
 }
-/* the refresh's state (its view v, the published copy): each own link's wait from its lanes, once; a neighbour each own
-   link of a finite wait whose peer is a view node (its index under v->nodes, so under MESH_SWITCH_N) */
-static inline void mesh_switch_state_make(struct mesh_switch *sw,const struct mesh_switch_view *v,double page,struct mesh_switch_state *s){
+/* the refresh's state (its view v, the published copy) for a page of `frames` frames: each own link's wait from its
+   lanes of those frames, once; each link down (a wait not finite: an own link none of whose lanes is live, a remote one
+   whose line says so) a hop of INFINITY and no spread; a neighbour each own link not down whose peer is a view node
+   (its index under v->nodes, so under MESH_SWITCH_N) */
+static inline void mesh_switch_state_make(struct mesh_switch *sw,const struct mesh_switch_view *v,uint32_t frames,struct mesh_switch_state *s){
   memset(s,0,sizeof *s);
-  s->view=v;s->page=page;s->self=mesh_switch_index(v,v->self);s->stamp=atomic_load_explicit(&sw->stamp,memory_order_relaxed);
+  s->view=v;s->page=(double)frames*MESH_FRAME;s->self=mesh_switch_index(v,v->self);s->stamp=atomic_load_explicit(&sw->stamp,memory_order_relaxed);
   for(uint32_t l=0;l<v->links;l++){
     const struct mesh_switch_link *x=v->link+l;
     float wait,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&wait,&spread);
-    if(x->from==v->self){uint32_t best;double rate;const double now=mesh_switch_lanes_toward(sw,x->to,x->rate/x->cables,&best,&rate);
+    if(x->from==v->self){uint32_t best;const double now=mesh_switch_lanes_toward(sw,x->to,frames,x->rate/x->cables,&best);
                          s->wait[l]=best==UINT32_MAX?INFINITY:now;wait=(float)s->wait[l];spread=0;}
-    s->hop[l]=wait+page/(x->rate/x->cables)+x->latency;s->spread[l]=spread;
+    const int down=!isfinite(wait);
+    s->hop[l]=down?INFINITY:wait+s->page/(x->rate/x->cables)+x->latency;s->spread[l]=down?0:spread;
     const uint32_t b=mesh_switch_index(v,x->to);
-    if(x->from==v->self && isfinite(wait) && b<v->nodes && s->deg<MESH_SWITCH_N){s->neighbour[s->deg]=b;s->first[s->deg]=s->hop[l];s->deg++;}
+    if(x->from==v->self && !down && b<v->nodes && s->deg<MESH_SWITCH_N){s->neighbour[s->deg]=b;s->first[s->deg]=s->hop[l];s->deg++;}
   }
   double at[MESH_SWITCH_N];
   for(uint32_t a=0;a<v->nodes;a++){mesh_switch_arrivals(v,a,0,0,s->hop,at);for(uint32_t b=0;b<v->nodes;b++)s->togo[a][b]=isfinite(at[b])?(float)at[b]:1e12f;}
@@ -829,14 +857,15 @@ static inline double mesh_switch_time_scale(const struct mesh_switch_view *v,dou
    copies stand under it but for the view's lines): the state over the published view, the target (the policy's, else
    Thompson's), the residual (target less the published weights) applied at the rate eta (1: the target itself), the
    weights written whole in the copy not published and published, the split tables' time scale made again where the view
-   changed, this node's own links' lines from the state's waits, this node's stamp moved */
+   changed, this node's own links' lines from the state's waits, this node's stamp moved.  `frames`: the refresh's
+   page's (MESH_SWITCH_PAGE) */
 static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_switch_policy *policy,uint32_t draws,float eta,uint64_t seed,
-                                       double page){
+                                       uint32_t frames){
   const uint64_t view_ver=atomic_load_explicit(&sw->view_version,memory_order_relaxed),weights_ver=atomic_load_explicit(&sw->weights_version,memory_order_relaxed);
   struct mesh_switch_view *v=sw->view+(view_ver&1);
   const struct mesh_switch_weights *was=sw->weights+(weights_ver&1);
   struct mesh_switch_weights *w=sw->weights+((weights_ver+1)&1);
-  struct mesh_switch_state s;mesh_switch_state_make(sw,v,page,&s);
+  struct mesh_switch_state s;mesh_switch_state_make(sw,v,frames,&s);
   float target[MESH_SWITCH_N][MESH_SWITCH_N];memset(target,0,sizeof target);
   if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed) && !(policy && policy->target)){
     /* no draw reads the weights (the earliest arrival routes): they stand, and the refresh is the cost-to-go and the
@@ -867,14 +896,15 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
     x->scale=(float)mesh_switch_time_scale(v,ROUTE_PAGE);x->scale_view=view_ver+1;
     atomic_store_explicit(&sw->splits_version,splits_ver+1,memory_order_release);
   }
-  /* this node's own links' lines, for the headers it sends: each one's wait now (the state's, 0 where no lane is live),
-     its spread the wait's change */
+  /* this node's own links' lines, for the headers it sends: each one's wait now (the state's: INFINITY where the link
+     is down, so no node routes through it), its spread the wait's change (0 where the link is down now or was at the
+     line before: a down link's wait has no spread) */
   for(uint32_t l=0;l<v->links;l++){
     struct mesh_switch_link *x=v->link+l;
     if(x->from!=v->self)continue;
-    const double now=isfinite(s.wait[l])?s.wait[l]:0;
+    const double now=s.wait[l];
     float before,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&before,&spread);
-    spread=spread+((float)fabs(now-before)-spread)/4;
+    spread=isfinite(now) && isfinite(before)?spread+((float)fabs(now-before)-spread)/4:0;
     atomic_store_explicit(&x->line,mesh_switch_pack((float)now,spread),memory_order_relaxed);
   }
   atomic_fetch_add_explicit(&sw->stamp,1,memory_order_relaxed);
@@ -913,22 +943,14 @@ static inline int mesh_switch_log_take(struct mesh_switch *sw,uint32_t ring,stru
    word new and drops the page it named) or as a later landing there replaces it, and the lane it landed on keeps its
    receives meanwhile (mesh-link.c link_receive: a landing whose class has no free page posts the landed page again); a
    lane whose fill comes after its class's stack is empty starts with fewer receives than its share (mesh-link.c
-   switch_receives) */
+   switch_receives).  The index is read once: the one bounded is the one set */
 static inline int mesh_switch_set(struct hdr *m,struct mesh_switch *sw,uint32_t pd,const struct mesh_head *head,uint32_t i,uint32_t ring){
-  const struct mesh_hop *d=head->dest+i;
-  if(d->index>=m->entries){MESH_SWITCH_COUNT(sw,ring,malformed,1);return 0;}
+  const uint32_t index=__atomic_load_n(&head->dest[i].index,__ATOMIC_RELAXED);
+  if(index>=m->entries){MESH_SWITCH_COUNT(sw,ring,malformed,1);return 0;}
   mesh_pd_use(m,pd);
-  mesh_pd_drop(m,mesh_entry_put(m,d->index,pd,1));
+  mesh_pd_drop(m,mesh_entry_put(m,index,pd,1));
   MESH_SWITCH_COUNT(sw,ring,set,1);
   return 1;
-}
-/* a header's destinations' nodes as bits over this node's published view (its copy as its version names it, read
-   once) */
-static inline uint32_t mesh_switch_dest_nodes(const struct mesh_switch *sw,const struct mesh_head *head){
-  const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
-  uint32_t bits=0;
-  for(uint32_t i=0;i<head->dests && i<MESH_DESTS;i++){const uint32_t d=mesh_switch_index(v,head->dest[i].node);if(d<32)bits|=1u<<d;}
-  return bits;
 }
 /* The forward: page pd's destinations that this node carries on (`away`: places in its header's dest[]) split
    (mesh_switch_choose) into groups, a lane each, one group a peer, and the page itself pushed onto every group's lane:
@@ -937,11 +959,14 @@ static inline uint32_t mesh_switch_dest_nodes(const struct mesh_switch *sw,const
    carries named no one's next (another hop's SEND carries it, it is set here, or nothing reaches it), the sender, and
    the lines (as many as the frames of the payload's class fit).  Each group adds a use of the page and its frames to
    its lane's queue; a push the outbox has no room for gives that use back, counted (`lost`).  A destination no allowed
-   neighbour reaches is not carried, counted (`unreachable`).  `ring` the caller's log ring and counters (its port's),
-   `now` its clock, `hand` its hand (a port child's) */
-static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint32_t pd,struct mesh_head *head,const uint32_t *away,uint32_t naway,
-                                       uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
-  const uint32_t self=m->node,frames=mesh_class_frames(head->bytes);
+   neighbour reaches is not carried, counted (`unreachable`).  `bytes` the payload's bytes as the caller bounded them by
+   the page's class (the write's, or the landed header's read once): the class's frames, so the lanes the page goes on,
+   each SEND's frames and the lines' place, come from them and never from the header's word read again (every client
+   maps the region writable), so no SEND covers more than the page's own frames.  `ring` the caller's log ring and
+   counters (its port's), `now` its clock, `hand` its hand (a port child's) */
+static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint32_t pd,struct mesh_head *head,uint32_t bytes,const uint32_t *away,
+                                       uint32_t naway,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
+  const uint32_t self=m->node,frames=mesh_class_frames(bytes);
   const int logging=mesh_switch_sampled(sw,head);
   uint32_t groups=0,lane[MESH_DESTS],unreachable=0;uint64_t group[MESH_DESTS];
   struct route_draw draw;float logp=0;uint32_t context=UINT32_MAX;uint64_t point=0;
@@ -954,7 +979,7 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
   if(logging && groups){
     struct mesh_switch_record r;memset(&r,0,sizeof r);
     r.kind=MESH_LOG_DRAW;r.node=self;r.seq=head->seq;r.at=now;r.draw=draw;r.logp=logp;r.source=head->source;
-    r.dest=head->dest[away[0]].node;r.index=head->dest[away[0]].index;r.bytes=head->bytes;r.context=context;r.point=(uint32_t)point;
+    r.dest=head->dest[away[0]].node;r.index=head->dest[away[0]].index;r.bytes=bytes;r.context=context;r.point=(uint32_t)point;
     mesh_switch_log_put(sw,ring,&r);
   }
   if(unreachable)MESH_SWITCH_COUNT(sw,ring,unreachable,__builtin_popcount(unreachable));
@@ -972,8 +997,9 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
   for(uint32_t i=0;i<head->dests && i<MESH_DESTS;i++)if(!(carried>>i&1))head->dest[i].next=UINT32_MAX;
   head->from=self;
   struct mesh_switch_line lines[MESH_SWITCH_LINES];
-  const uint32_t nlines=mesh_switch_lines_give(sw,v,lines),fit=mesh_switch_lines_fit(head,(uint64_t)frames*MESH_FRAME);
-  head->lines=nlines<fit?nlines:fit;memcpy(mesh_switch_lines_at(head),lines,head->lines*sizeof *lines);
+  const uint32_t nlines=mesh_switch_lines_give(sw,v,lines),fit=mesh_switch_lines_fit(bytes,(uint64_t)frames*MESH_FRAME),
+                 sent=nlines<fit?nlines:fit;
+  head->lines=sent;memcpy(mesh_switch_lines_at(head,bytes),lines,sent*sizeof *lines);
   /* each group's destinations its peer's, with the cost they carry on (the lane's queue over its rate, its frames' time
      on the wire), all before the first push makes the page another process's to post */
   for(uint32_t g=0;g<groups;g++){
@@ -981,12 +1007,12 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
     float rate,waited;mesh_switch_unpack(atomic_load_explicit(&sw->lane[l].estimate,memory_order_relaxed),&rate,&waited);
     const double each=rate>0?rate:1;
     const float queued=(float)((double)atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)/each),
-                transit=(float)((double)mesh_switch_lane_bytes(sw,l)/each);
+                transit=(float)((double)mesh_switch_lane_bytes(l)/each);
     for(uint32_t j=0;j<naway;j++)if(group[g]>>j&1){struct mesh_hop *d=head->dest+away[j];d->next=peer;d->queued+=queued;d->transit+=transit;}
   }
   for(uint32_t g=0;g<groups;g++){
     const uint32_t l=lane[g];
-    const uint64_t wire=mesh_switch_lane_bytes(sw,l);
+    const uint64_t wire=mesh_switch_lane_bytes(l);
     mesh_pd_use(m,pd);
     atomic_fetch_add_explicit(&sw->lane[l].queued,wire,memory_order_relaxed);
     if(mesh_switch_push(sw,l,pd,now,hand))continue;
@@ -997,10 +1023,9 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
 }
 /* A client's write carried (the take): its page (`pd`, the page the write's ring use is on) given the write's bytes and
    its header (MESH_HEAD_MAGIC, this node its source, its sender and its path's first node, the node's header counter
-   its `seq`, every destination's next this node, the destinations' nodes as view bits its `dest_nodes`), each
-   destination on this node set in the table (mesh_switch_set), the others forwarded (mesh_switch_forward).  A cell
-   naming no page of the pool, no destination or more than MESH_DESTS, or more bytes than its page's payload is
-   carried nowhere, counted (`malformed`) */
+   its `seq`, every destination's next this node), each destination on this node set in the table (mesh_switch_set),
+   the others forwarded (mesh_switch_forward).  A cell naming no page of the pool, no destination or more than
+   MESH_DESTS, or more bytes than its page's payload is carried nowhere, counted (`malformed`) */
 static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const struct mesh_write *w,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
   const uint32_t self=m->node,pd=w->pd,dests=w->dests;
   if(!mesh_pd_valid(m,pd) || !dests || dests>MESH_DESTS || w->bytes>MESH_PAYLOAD(mesh_pd_at(m,pd)->cls)){
@@ -1014,13 +1039,12 @@ static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const 
   memset(head->path,0,sizeof head->path);head->path[0]=self;
   head->seq=atomic_fetch_add_explicit(&sw->writes,1,memory_order_relaxed);
   for(uint32_t i=0;i<dests;i++)head->dest[i]=(struct mesh_hop){w->dest[i].node,w->dest[i].index,self,0,0};
-  head->dest_nodes=mesh_switch_dest_nodes(sw,head);
   uint32_t away[MESH_DESTS],naway=0;
   for(uint32_t i=0;i<dests;i++){
     if(head->dest[i].node!=self)away[naway++]=i;
     else mesh_switch_set(m,sw,pd,head,i,ring);
   }
-  if(naway)mesh_switch_forward(m,sw,pd,head,away,naway,now,ring,hand);
+  if(naway)mesh_switch_forward(m,sw,pd,head,w->bytes,away,naway,now,ring,hand);
 }
 /* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by the port child whose
    hand is `hand`: each ring position named in the hand before its compare-exchange and marked won once won, the write
@@ -1058,8 +1082,10 @@ static inline uint32_t mesh_switch_ring_dequeue(struct hdr *m,struct mesh_switch
    path past MESH_SWITCH_N) is counted (`malformed`) and the page given back.  Else the page given the header's bytes,
    this node appended to its path, its lines taken (as many as the lane's frames fit), each destination here whose
    next this node is set in the table (mesh_switch_set) and its record made where the page is sampled, the
-   destinations elsewhere whose next this node is forwarded (mesh_switch_forward), and the landing's use dropped.
-   `now` the child's clock at the landing */
+   destinations elsewhere whose next this node is forwarded (mesh_switch_forward), and the landing's use dropped.  The
+   header's bytes, destinations and hops are each read once, and the values bounded are the ones used (every client
+   maps the region writable, and a local reader has the page once a destination here is set).  `now` the child's clock
+   at the landing */
 static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32_t l,uint32_t pd,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
   struct mesh_pd *p=mesh_pd_at(m,pd);
   atomic_store_explicit(&p->uses,1,memory_order_relaxed);
@@ -1067,18 +1093,19 @@ static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint3
   atomic_fetch_add_explicit(&sw->lane[l].landed,1,memory_order_relaxed);
   MESH_SWITCH_COUNT(sw,ring,landed,1);
   struct mesh_head *head=mesh_head_of(m,pd);
-  const uint32_t self=m->node;
-  if(head->magic!=MESH_HEAD_MAGIC || head->bytes>MESH_PAYLOAD(p->cls) || !head->dests || head->dests>MESH_DESTS || head->hops>=MESH_SWITCH_N-1){
+  const uint32_t self=m->node,bytes=__atomic_load_n(&head->bytes,__ATOMIC_RELAXED),dests=__atomic_load_n(&head->dests,__ATOMIC_RELAXED),
+                 hops=__atomic_load_n(&head->hops,__ATOMIC_RELAXED);
+  if(head->magic!=MESH_HEAD_MAGIC || bytes>MESH_PAYLOAD(p->cls) || !dests || dests>MESH_DESTS || hops>=MESH_SWITCH_N-1){
     MESH_SWITCH_COUNT(sw,ring,malformed,1);
     mesh_pd_drop(m,pd);
     return;
   }
-  atomic_store_explicit(&p->bytes,head->bytes,memory_order_relaxed);
-  head->path[++head->hops]=self;
-  mesh_switch_lines_take(sw,head,mesh_switch_lane_bytes(sw,l));
+  atomic_store_explicit(&p->bytes,bytes,memory_order_relaxed);
+  head->hops=hops+1;head->path[hops+1]=self;
+  mesh_switch_lines_take(sw,head,bytes,mesh_switch_lane_bytes(l));
   const int logging=mesh_switch_sampled(sw,head);
   uint32_t away[MESH_DESTS],naway=0;
-  for(uint32_t i=0;i<head->dests;i++){
+  for(uint32_t i=0;i<dests;i++){
     const struct mesh_hop *d=head->dest+i;
     if(d->next!=self)continue;
     if(d->node!=self){away[naway++]=i;continue;}
@@ -1087,10 +1114,10 @@ static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint3
        queueing on that hop's own clock, the wire's time) */
     struct mesh_switch_record r;memset(&r,0,sizeof r);
     r.kind=MESH_LOG_SET;r.node=self;r.seq=head->seq;r.at=now;r.latency=d->queued+d->transit;r.queueing=d->queued;
-    r.source=head->source;r.dest=self;r.index=d->index;r.bytes=head->bytes;r.context=UINT32_MAX;
+    r.source=head->source;r.dest=self;r.index=d->index;r.bytes=bytes;r.context=UINT32_MAX;
     mesh_switch_log_put(sw,ring,&r);
   }
-  if(naway)mesh_switch_forward(m,sw,pd,head,away,naway,now,ring,hand);
+  if(naway)mesh_switch_forward(m,sw,pd,head,bytes,away,naway,now,ring,hand);
   mesh_pd_drop(m,pd);
 }
 
@@ -1174,7 +1201,7 @@ static inline int mesh_switch_left_settle(struct hdr *m,struct mesh_switch *sw,s
       else hole=unfilled;
       if(hole){c->pd=MESH_ABSENT;atomic_store_explicit(&c->sequence,at+1,memory_order_release);}
       if(!later && (hole || !(h->push&MESH_HAND_WON)) && mesh_pd_valid(m,h->page)){
-        atomic_fetch_sub_explicit(&x->queued,mesh_switch_lane_bytes(sw,l),memory_order_relaxed);
+        atomic_fetch_sub_explicit(&x->queued,mesh_switch_lane_bytes(l),memory_order_relaxed);
         mesh_pd_drop(m,h->page);
         MESH_SWITCH_COUNT(sw,ring,lost,1);
       }
@@ -1203,7 +1230,9 @@ static inline double mesh_switch_time_scale(const struct mesh_switch_view *v,dou
      route.h's (ROUTE_PAGE);
    - each lane's wait its line's: a remote link's as the pages carried it, each of this node's own links' the wait the
      refresh just made of its lanes (mesh_switch_refresh's lines, from its state: mesh-link.c switch_watch calls the
-     refresh, then this, on the refresh thread); duplex share 1 (a bridge sees no other node's reverse traffic);
+     refresh, then this, on the refresh thread); duplex share 1 (a bridge sees no other node's reverse traffic); an own
+     link that is down (its wait not finite) no lane of the node now, so no token, as it is no neighbour of the
+     weights' (mesh_switch_state_make);
    - the cost-to-go the last refresh's (the weights'), the bytes in flight and posted this node's own lanes' queues;
    - the per-pattern features of what is left to send, waiting and received, and the live collectives, 0: the bridge
      carries writes, not collectives.
@@ -1243,7 +1272,7 @@ static inline void mesh_switch_tokens_make(struct mesh_switch *sw,uint64_t now,u
   st.posted=queued;
   out->point=point;out->at=now;out->scale=(float)s.unit;out->lanes=0;
   for(int l=0;l<s.f.lanes;l++){
-    if(v->link[l].from!=v->self)continue;
+    if(v->link[l].from!=v->self || !isfinite(st.wait[l]))continue;
     out->link_of[out->lanes]=(uint32_t)l;route_lane_token(&s,&st,&t,l,out->lane[out->lanes]);out->lanes++;
   }
   out->contexts=mesh_switch_contexts(v,out->key);
