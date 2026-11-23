@@ -97,10 +97,9 @@ _Static_assert(offsetof(struct message,port)==36 && offsetof(struct message,vers
    pairs again with the port's next child), on the two completion queues its device's context has, each lane's share of them (`share`
    frames, a request one frame at least: no lane overruns its queues), and each lane's queue pair number (`qpn`, by which
    a completion names its lane).  The parent's: its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its
-   command out to the child (`job`, sent at `job_at`: mesh-link.c ports_stalled), the pairing it belongs to (`pairing`,
-   moved at its loss, so an answer of a pairing since lost is dropped as it comes: mesh-link.c child_heard), the
-   peer's lanes (`peer`, heard in its LINK: `heard`), and the lanes its child found failed (`broken`, as its report
-   told them: the event loop loses the link on reading it).  The
+   command out to the child (`job`, sent at `job_at`: mesh-link.c ports_stalled; none from the link's loss on, so an
+   answer to a command of the pairing lost is dropped as it comes: mesh-link.c link_lost, child_heard), and the peer's
+   lanes (`peer`, heard in its LINK: `heard`).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends have, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
@@ -115,8 +114,7 @@ struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,lanes;
   _Atomic int done;
-  _Atomic uint32_t broken,pairing;
-  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],job_pairing,psn;
+  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],psn;
   struct frames share;
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at,completed_at;
@@ -124,18 +122,20 @@ struct link {
   uint32_t take_from,send_from;
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
-   their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
-   parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE), connect them to the peer's
-   (CHILD_CONNECT: the peer's lanes, address, node and the link's bandwidth), serve no lane again (CHILD_HALT), end
-   (CHILD_END).  The child's, each naming the pairing it was asked for: the device opened or not (CHILD_OPENED: its
+   their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message), each
+   written by one thread at each end (the parent's event loop, the child's main thread).  The parent's, a command at
+   a time, each answered in its order: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE names the lanes
+   of the plan in `lanes`), connect them to the peer's (CHILD_CONNECT: the peer's lanes, address, node and the link's
+   bandwidth); and end (CHILD_HALT, the child's one end, its reason in `result`: 0 the bridge stopping, so the child
+   exits once its own windows have ended; else the code its link was lost with, so it exits MESH_PLATFORM_NS on and
+   once its windows have ended: mesh-link.c child_end).  The child's: the device opened or not (CHILD_OPENED: its
    address and bandwidth, and in `lanes` the queue pairs the device has for a link), the lanes made or not
-   (CHILD_MAKE names the lanes of the plan in `lanes`; CHILD_MADE: each lane's queue pair number, the first sequence
-   number and each lane's share), connected or not (CHILD_CONNECTED), the lanes its poller found failed
-   (CHILD_BROKEN, naming its connect's pairing), a fault absorbed on the provider's doorbell (CHILD_FAULTED), its
-   port's peer interface terminating (CHILD_TERMINATED, as the child heard it: B9b; the parent hears the same
-   termination on its own listener and loses the link there first, mesh-link.c terminations_heard).  A child that tells
-   one of the last three has halted itself and takes no command again (mesh-link.c child_halt); kind 11 is no
-   message */
+   (CHILD_MADE: each lane's queue pair number, the first sequence number and each lane's share), connected or not
+   (CHILD_CONNECTED); and its own halt (CHILD_BROKEN, once in its life, its reason in `result`: EIO a lane's or a
+   completion's failure, ENETDOWN a fault absorbed on the provider's doorbell, ETIMEDOUT its port's peer interface
+   terminating as the child heard it, B9b), after which it takes no command and ends as at a loss.  No message names a
+   pairing: from its make on a child serves one pairing, and any loss after the make ends it, so no answer of a
+   pairing lost can act on another pairing's queue pairs, which belong to another process */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX` (its first three words the same for every
    version, so a bridge finds a child of any version that has a device open: child_elsewhere), and struct child_message.
@@ -147,14 +147,17 @@ struct link {
    its port's inbound rings have, each SEND in its lane's in-flight ring, and counts what it cannot carry and reports
    nothing (each of these the region's, of MESH_LAYOUT).  Against 8, whose
    links made queue pairs 0 and 1 for nothing and their data lanes from 2: CHILD_MAKE's plan, CHILD_MADE's `qpn`,
-   CHILD_CONNECT's `peer` and CHILD_BROKEN's `broken` name lane j as queue pair j, MESH_LINK_LANES of them (8's 10) */
-#define MESH_CHILD_VERSION 9u
-enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
-       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_TERMINATED=12 };
+   CHILD_CONNECT's `peer` and CHILD_BROKEN's `broken` name lane j as queue pair j, MESH_LINK_LANES of them (8's 10).
+   10: the child owns its exit.  CHILD_HALT is its one end and states why in `result` (0 the bridge stopping, else
+   the loss's code), and the child exits by its own windows and that reason; CHILD_END goes.  CHILD_BROKEN, its reason
+   in `result`, is its one report of its own halt, so CHILD_FAULTED and CHILD_TERMINATED go, and a child halted
+   by any of them ends.  No message names a pairing (`pairing` and `broken` go), and the kinds are numbered anew */
+#define MESH_CHILD_VERSION 10u
+enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN };
 struct child_message {
-  uint32_t kind,pairing;
+  uint32_t kind;
   int32_t result,refused;
-  uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,broken,node,lanes;
+  uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,node,lanes;
   uint16_t lid,padding;
   uint8_t gid[16];
   uint64_t bandwidth;
@@ -186,13 +189,14 @@ struct port {
   struct link link;
   /* the parent's: the port's child (design/transport.md section 14, "A process a port"): its process (0 none), its entry among the region's processes
      (`child_entry`, mesh-observe.h struct mesh_bridge_pages `child`) and socket, the pause a spawn that failed sets
-     before the next (`spawn_at`), whether the port's link, lost once its lanes were asked for, waits to end its child
-     (`recycle`) and whether that end was asked (`ending`), the part of its child's next message read (`child_in`,
+     before the next (`spawn_at`), whether its child, halted (its link lost once its lanes were asked for, or its own
+     halt told), is ending, so the port waits for its exit before its next spawn (`recycle`), the part of its child's
+     next message read (`child_in`,
      `child_in_length` bytes of it), and a child of its device from an earlier launch last found alive (`elsewhere`:
      mesh-link.c child_elsewhere) */
   pid_t child,elsewhere;
   uint32_t child_entry;
-  int child_fd,recycle,ending;
+  int child_fd,recycle;
   uint32_t child_in_length;
   uint64_t spawn_at;
   unsigned char child_in[sizeof(struct child_message)];
