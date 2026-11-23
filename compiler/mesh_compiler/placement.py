@@ -698,7 +698,7 @@ RULES = {
     ATEN.index_put.default: accumulated,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
     MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
-    ADDMM: lambda node, shapes, out: [*aligned(node, shapes[:1], out), *RULES[MM](node, shapes[1:], out)],
+    ADDMM: lambda node, shapes, out: [*aligned(node, shapes[:1], out), [0, None], [None, 1]],
     ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
     ATEN.sum.dim_IntList: over(1, None, True), ATEN.mean.dim: over(1, None),
     ATEN.any.dim: over(1, None), ATEN.any.dims: over(1, None),
@@ -944,7 +944,8 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
             whole[u, one] = reshard(graph, v, None, None, (one,))[0]
     held = [(None, None, (one,), [whole[u, one]]) if several(v) else v for u, v in zip(operands(node), held)]
     if distribute and node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
-        if node.target is ADDMM and any(v[0] == axis for v, axis in zip(held[1:], (1, 0))):
+        if node.target is ADDMM and node.kwargs.get("alpha", 1) and any(
+                v[0] == axis for v, axis in zip(held[1:], (1, 0))):
             return partitioned_addmm(graph, node, held, want, replaced, whole)
         shapes = read_shapes(node)
         rows, out = partition_rows(node, shapes)
