@@ -84,7 +84,7 @@ whole elements.
 reduction's position j, belong to share j mod 8. A rank moves its shares on its threads, share s on thread s mod its
 thread count. The first thread is the calling thread's. The process takes one client slot of its node's bridge for
 each thread, so each thread has a write ring of its own. The thread count is `NCCL_MESH_THREADS` where set (1 to 8),
-else half the node's performance cores, at most 8, and fewer where the bridge's client slots run out. A call whose
+else 4 (the fastest measured on the fleet), at most half the node's top-level cores, and fewer where the bridge's client slots run out. A call whose
 messages are one page each moves on the calling thread alone. Between calls a thread looks for the next one for
 2 ms, then sleeps until a call wakes it. Each thread copies its own shares' pages in and out, and makes its shares'
 part of the call's local copy and of a reduction. So a large call's copies run on all the threads at once, and the
@@ -205,7 +205,7 @@ NCCL's own.
 | variable | read by | meaning |
 |---|---|---|
 | `NCCL_COMM_ID` | `ncclGetUniqueId` | the bootstrap root's `host:port` |
-| `NCCL_MESH_THREADS` | the process's first communicator | the threads a call's shares move on, 1 to 8 (default: half the performance cores, at most 8) |
+| `NCCL_MESH_THREADS` | the process's first communicator | the threads a call's shares move on, 1 to 8 (default 4, at most half the top-level cores) |
 | `MESH_REGION` | libmesh | another region's name on the same machine (mesh.h `mesh_name`) |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against |
 

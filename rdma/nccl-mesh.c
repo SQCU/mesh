@@ -244,8 +244,12 @@ static void attach_settle(void) {
   free(a);
   attached = NULL;
 }
-/* the threads a process moves a communicator's shares on: NCCL_MESH_THREADS where set (1 to SHARES), else half the
-   node's performance cores (its bridge's port children spin on others), at most SHARES */
+/* the threads a process moves a communicator's shares on: NCCL_MESH_THREADS where set (1 to SHARES), else
+   THREADS_DEFAULT, at most half the node's top-level cores (its bridge's port children spin on the others).
+   THREADS_DEFAULT is the fastest measured on the fleet (b80ab9e22; ten top-level cores, five or six port children):
+   four ranks moved 12 MB all-gathers at 101, 112, 104 and 98 GB/s on 3, 4, 5 and 8 threads, all-reduces at 78, 91, 81
+   and 73 */
+#define THREADS_DEFAULT 4
 static uint32_t threads_wanted(void) {
   const char *set = getenv("NCCL_MESH_THREADS");
   long n = set && *set ? strtol(set, NULL, 10) : 0;
@@ -253,7 +257,7 @@ static uint32_t threads_wanted(void) {
     int cores = 0;
     size_t size = sizeof cores;
     if (sysctlbyname("hw.perflevel0.physicalcpu", &cores, &size, NULL, 0) || cores <= 0) cores = 2;
-    n = cores / 2;
+    n = cores / 2 < THREADS_DEFAULT ? cores / 2 : THREADS_DEFAULT;
   }
   return n < 1 ? 1 : n > (long)SHARES ? SHARES : (uint32_t)n;
 }

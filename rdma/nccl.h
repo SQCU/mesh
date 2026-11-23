@@ -48,7 +48,7 @@
    Shares and threads.  Every rank cuts a call's pages into SHARES (8) shares alike: page j of a message, and a
    reduction's position j, are share j % SHARES's.  A rank moves its shares on its threads, share s on thread s % its
    threads, the first the calling thread's: the process takes a client slot of its node's bridge for each thread
-   (NCCL_MESH_THREADS where set, 1 to SHARES, else half the node's performance cores, at most SHARES; fewer where the
+   (NCCL_MESH_THREADS where set, 1 to SHARES, else 4, at most half the node's top-level cores; fewer where the
    slots run out), and each communicator starts a thread for each slot past the first.  A call with pages in one share
    only (a message of one page) moves on the calling thread alone.  A thread between calls looks for the next for 2
    ms, then sleeps until one wakes it.  Each thread copies its shares' pages in and out, and makes its shares' part of
