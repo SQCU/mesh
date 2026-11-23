@@ -233,26 +233,29 @@ static void switch_sends(struct port *port,uint32_t j){
     if(n<BATCH)return;
   }
 }
+/* the cost-to-go this child's poller keeps and its draws read (mesh-switched.h struct mesh_switch_togo), in its own
+   memory: a step each idle pass (port_pass) */
+static struct mesh_switch_togo togo;
 /* design/transport.md: the link's SEND completions (a lane no longer served drops its own; a failed one fails the
    link, link_failed): each one's outbox cell given back and its page's use dropped, through the switch's estimators
    (its post, as its cell stored it, its service from the later of its post and the lane's previous completion, its
    completion), its frames completed through the gate; then the cable's terms from the poll (mesh-switched.h
    mesh_switch_cable_sent: its bytes since the link's previous completing poll, `completed_at`, and the time of a SEND
-   that had the cable to itself, the only one outstanding as the poll began) */
-static void link_send(struct port *port,uint32_t served){
+   that had the cable to itself, the only one outstanding as the poll began).  The completions polled, 0 none */
+static int link_send(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   struct ibv_wc done[16];
   const int count=l->provider.poll(l->provider.sent,16,done);
-  if(count<0){link_failed(port,EIO,2);return;}
-  if(!count)return;
+  if(count<0){link_failed(port,EIO,2);return 0;}
+  if(!count)return 0;
   const uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   uint64_t outstanding=0,bytes=0,first=UINT64_MAX,alone_posted=0;uint32_t alone=UINT32_MAX;
   for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(served>>j&1)outstanding+=l->lane[j].sent-l->lane[j].done;
   for(int i=0;i<count;i++){
     const uint32_t j=link_lane(l,done[i].qp_num);
     if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
-    if(done[i].status){link_failed(port,(int64_t)done[i].status,2);return;}
+    if(done[i].status){link_failed(port,(int64_t)done[i].status,2);return count;}
     gate_complete(l->gate+j,done[i].wr_id);
     struct lane_state *state=l->lane+j;
     uint64_t posted=at;
@@ -269,22 +272,23 @@ static void link_send(struct port *port,uint32_t served){
     atomic_store_explicit(&x->sends,atomic_load_explicit(&x->sends,memory_order_relaxed)+1,memory_order_relaxed);
     atomic_store_explicit(&x->posts[0].done[j&1],state->done,memory_order_relaxed);
   }
-  if(!bytes)return;
+  if(!bytes)return count;
   mesh_switch_cable_sent(sw,port->index,bytes,first,l->completed_at,at,alone,alone_posted);
   l->completed_at=at;
+  return count;
 }
 /* the link's receive completions, each lane's receive posted again at once, so a lane's posted receives stay as
    many as its fill made them whatever the pool has (TN3205: a receive for every SEND the peer posts): into a page
    popped from the lane's class, and the page that landed landed (mesh-switched.h mesh_switch_landed: its lines taken,
    its destinations here set in the table, the rest switched on); where the class's free stack is empty, into the page
    that landed, which is then not landed, counted (`lost`).  The receives of a poll posted as one list a lane
-   (receives_post) */
-static void link_receive(struct port *port,uint32_t served){
+   (receives_post).  The completions polled, 0 none */
+static int link_receive(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   struct ibv_wc done[RECEIVE_BATCH];
   const int count=l->provider.poll(l->provider.completion,RECEIVE_BATCH,done);
-  if(count<0){link_failed(port,EIO,3);return;}
+  if(count<0){link_failed(port,EIO,3);return 0;}
   if(count)atomic_thread_fence(memory_order_acquire);
   const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   uint32_t again[MESH_LINK_LANES][RECEIVE_BATCH],agains[MESH_LINK_LANES]={0};
@@ -293,7 +297,7 @@ static void link_receive(struct port *port,uint32_t served){
     if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
     uint64_t status_opcode;
     memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
-    if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode,2);return;}
+    if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode,2);return count;}
     if(!((status_opcode>>32)&IBV_WC_RECV))continue;
     struct lane_state *state=l->lane+j;
     const uint32_t pd=(uint32_t)(done[i].wr_id&UINT32_MAX);
@@ -304,9 +308,10 @@ static void link_receive(struct port *port,uint32_t served){
     if(fresh==MESH_ABSENT){again[j][agains[j]++]=pd;MESH_SWITCH_COUNT(sw,port->index,lost,1);continue;}
     receive_page(port,j,fresh);
     again[j][agains[j]++]=fresh;
-    mesh_switch_landed(M,sw,switch_lane(port,j),pd,at,port->index,hand_of(port));
+    mesh_switch_landed(M,sw,switch_lane(port,j),pd,at,port->index,hand_of(port),&togo);
   }
   for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(agains[j])receives_post(port,j,again[j],agains[j]);
+  return count;
 }
 /* the client rings this child takes: ring s the (s mod n)-th, by port index, of the n ports whose child serves (their
    lines CHILD_SERVING with a lane), bits over the slots; none while this port does not serve.  Made again only as the
@@ -342,9 +347,9 @@ static void ring_vacant(uint32_t slot,struct mesh_ring *r){
    on its own ring use, its writer there or exited); a flagged ring found empty whose slot is vacant has its flag
    cleared (ring_vacant), so the scan reads only the rings of clients that write.  As the serving ports change, the
    child whose share a ring was may take from it a moment longer, and the ring's compare-exchange gives each write to
-   one child */
+   one child.  The writes taken */
 #define SWITCH_BURST 16u
-static void switch_takes(struct port *port){
+static uint32_t switch_takes(struct port *port){
   struct mesh_switch *sw=switch_of();
   struct link *l=&port->link;
   const uint64_t mine=switch_mine(port)&atomic_load_explicit(&M->attached,memory_order_relaxed);
@@ -355,15 +360,17 @@ static void switch_takes(struct port *port){
     struct mesh_ring *r=mesh_ring_at(M,slot);
     if(!mesh_ring_pending(r)){ring_vacant(slot,r);continue;}
     if(!at)at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    taken+=mesh_switch_ring_dequeue(M,sw,slot,SWITCH_BURST-taken,at,port->index,hand_of(port));
+    taken+=mesh_switch_ring_dequeue(M,sw,slot,SWITCH_BURST-taken,at,port->index,hand_of(port),&togo);
   }
   l->take_from=(from+1)%MESH_CLIENTS;
+  return taken;
 }
 
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's progress thread over the lanes the link serves
    (`served` read once a pass: none posts on a lane its link no longer serves): the receive completions landed
    (link_receive), the receives topped up, the clients' writes taken (switch_takes), every lane's outbox posted,
-   the SEND completions (link_send), the pass counted (`passes`) */
+   the SEND completions (link_send), the pass counted (`passes`); a pass that polled no completion and took no write
+   takes one step of its poller's cost-to-go (mesh-switched.h mesh_switch_togo_step), so a busy pass gains nothing */
 static void port_pass(struct port *port){
   /* one pass in 1024 timed (counters pass_ns: its time summed and the passes timed; part_ns: each part's time) */
   static __thread uint32_t timing;
@@ -374,15 +381,17 @@ static void port_pass(struct port *port){
   struct mesh_switch *sw=switch_of();
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   const uint32_t lanes=plan_lanes(l->plan);
-  if(served)link_receive(port,served);
+  uint32_t worked=0;
+  if(served)worked|=(uint32_t)link_receive(port,served);
   if(timed)t[1]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for(uint32_t j=0;j<lanes;j++)if(served>>j&1)switch_receives(port,j);
   if(timed)t[2]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served)switch_takes(port);
+  if(served)worked|=switch_takes(port);
   if(timed)t[3]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for(uint32_t j=0;j<lanes;j++)if(served>>j&1)switch_sends(port,j);
   if(timed)t[4]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served)link_send(port,served);
+  if(served)worked|=(uint32_t)link_send(port,served);
+  if(!worked)mesh_switch_togo_step(sw,&togo);
   MESH_SWITCH_COUNT(sw,port->index,passes,1);   /* the pass time is the wall time over these (the thread spins) */
   if(timed){
     t[5]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -770,11 +779,10 @@ static void link_heard(struct port *port,const struct message *heard){
 
 /* ---- design/PAGE-TABLE-SPEC-20261122.md: the switch, the parent's part -----------------------------------------
    The parent carves the node's pool once and makes its switch at its start, keeps the switch's view of the fabric and
-   the node table (a node the map has, live while it does) as its event loop writes the map (switch_view), and runs
-   the refresh: a thread of its own that recomputes the cost-to-go from the estimators every SWITCH_REFRESH_NS
-   (mesh-switched.h mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it
-   had is given back here (switch_child_free): nothing is sent again, and each page it had is counted `lost` */
-#define SWITCH_REFRESH_NS ((uint64_t)MESH_SWITCH_REFRESH_NS)
+   the node table (a node the map has, live while it does) as its event loop writes the map (switch_view); each port
+   child's poller makes its own cost-to-go (mesh-switched.h mesh_switch_togo_step), and the parent has no thread but
+   its event loop unless a theta is loaded (switch_watch).  A port's child exited, what it had is given back here
+   (switch_child_free): nothing is sent again, and each page it had is counted `lost` */
 /* the node table's entry of `node`, made (generation 1) as the map first has the node; MESH_ABSENT where every entry
    has another node (the event loop's alone: switch_view) */
 static uint32_t node_slot(uint32_t node){
@@ -984,18 +992,22 @@ static void switch_policy_load(void){
   switch_policy_on=1;
   say("bridge: the routing policy's theta %s in memory (%lld bytes): its tables route\n",SWITCH_THETA,(long long)st.st_size);
 }
-/* the refresh, on a thread of its own: the cost-to-go recomputed over the published view, the policy's tables
-   published */
+/* the policy's refresh, on a thread of its own, started only where a theta is loaded (switch_policy_on, the mode
+   chosen once as the bridge starts): every SWITCH_REFRESH_NS the cost-to-go made whole over the published view, as
+   each port child makes its own a step a pass (mesh-switched.h mesh_switch_togo_whole), then the policy's tables
+   from this node's tokens, published */
+#define SWITCH_REFRESH_NS UINT64_C(50000)
 static void *switch_watch(void *unused){
   (void)unused;
   pthread_setname_np("mesh.switch");
   struct mesh_switch *sw=mesh_switch_of(M);
   uint64_t point=0;
   static struct mesh_switch_tokens tokens;
+  static struct mesh_switch_togo policy_togo;
   const struct mesh_switch_policy policy={NULL,switch_policy_splits};
   while(!stop){
-    mesh_switch_refresh(sw,MESH_SWITCH_PAGE,clock_ns());
-    if(switch_policy_on)mesh_switch_policy_refresh(sw,&policy,clock_ns(),++point,0,&tokens);
+    mesh_switch_togo_whole(sw,&policy_togo);
+    mesh_switch_policy_refresh(sw,&policy_togo,&policy,clock_ns(),++point,0,&tokens);
     MESH_SWITCH_COUNT(sw,MESH_SWITCH_PARENT,refreshes,1);
     struct timespec pause={0,(long)SWITCH_REFRESH_NS};
     nanosleep(&pause,NULL);
@@ -2122,12 +2134,14 @@ int main(int argc,char **argv){
   mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize();M->magic=MESH_MAGIC;
-  /* the refresh at the progress threads' class: its SWITCH_REFRESH_NS pause near its length (at the default class
-     the system's timer slack made 50 us about 460 us) */
-  pthread_t refresher;
-  pthread_attr_t refreshing;pthread_attr_init(&refreshing);pthread_attr_set_qos_class_np(&refreshing,QOS_CLASS_USER_INTERACTIVE,0);
-  if(pthread_create(&refresher,&refreshing,switch_watch,NULL))die("the switch's refresh");
-  pthread_attr_destroy(&refreshing);
+  /* the policy's refresh, where a theta is loaded, at the progress threads' class: its SWITCH_REFRESH_NS pause near
+     its length (at the default class the system's timer slack made 50 us about 460 us) */
+  if(switch_policy_on){
+    pthread_t refresher;
+    pthread_attr_t refreshing;pthread_attr_init(&refreshing);pthread_attr_set_qos_class_np(&refreshing,QOS_CLASS_USER_INTERACTIVE,0);
+    if(pthread_create(&refresher,&refreshing,switch_watch,NULL))die("the switch's policy refresh");
+    pthread_attr_destroy(&refreshing);
+  }
   /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
      once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
      else as they stand at the bound */

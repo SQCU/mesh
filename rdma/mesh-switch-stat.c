@@ -68,11 +68,10 @@ int main(void){
            U(x->service),U(x->wait),U(x->landed),rate,wait);
     first=0;
   }
-  /* the view and the refresh's state as published (each its copy as its version names it) */
+  /* the view as published (its copy as its version names it) */
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
-  const struct mesh_switch_weights *w=sw->weights+mesh_switch_published(&sw->weights_version);
   printf("],\"view\":[");
   for(uint32_t i=0;i<v->nodes && i<MESH_SWITCH_N;i++)printf("%s%u",i?",":"",v->node[i]);
-  printf("],\"refreshes\":%llu}\n",(unsigned long long)w->refreshes);
+  printf("]}\n");
   return 0;
 }

@@ -29,13 +29,12 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    plus uptime (163's count of its sender's refreshes, which began again at 0 as the sender restarted) */
 #define MESH_VERSION 164u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  187: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  188: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   186, the switch keeps the remote links' lines apart from the view, under their ends' node table entries
-   (mesh-switched.h struct mesh_switch `heard`, the view's `slot`), and none of its own links' (the view's links have
-   no line or stamp), each cable has its measured rate and a page's time alone for each class (struct
-   mesh_switch_cable), and the stamps' clock offset (`stamp_offset`) is where the refresh's count (`stamp`) was */
-#define MESH_LAYOUT 187u
+   187, the switch has no refresh's weights (their two copies and `weights_version`: each port child's poller makes its
+   own cost-to-go, mesh-switched.h struct mesh_switch_togo), the view has the policy's time scale (`scale`), and the
+   split tables have no `scale`, `scale_view` or `spare` */
+#define MESH_LAYOUT 188u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
