@@ -14,6 +14,14 @@ The reference operation is `C = A @ B`. For a column partition a worker reads `A
 
 The existing Metal GPU evaluation provides a case where the distinction changes the physical program. With the same input IR, choice zero yielded two operations, two groups and 512 temporary bytes. Choice seven yielded one operation, one group and zero temporary bytes. In the public FX six-linear-layer example, both choices yielded thirteen groups for this input. Fresh and reopened Metal images for both choices returned the reference result within tolerance on three changing inputs. Calling the constructor on an unrewritten program returned `EINVAL`. These observations refer to the revisions above.
 
+Metal `62ed94fb` and compiler-emit `c493cbe` make the same distinction for each named matrix product. The caller supplies an ordered set of candidate implementations for that operation. The target rewrite checks each candidate against its typed operands and records its mapping. Numerical construction reads the mapping. A six-product FX model used different supplied orders on alternating products. Fresh and reopened images agreed with the reference within a maximum absolute error of 1.05 × 10⁻⁷.
+
+### Who orders two independent readers?
+
+**A:** Compiler-emit's `MetalRows` constructor projected the solved dependency graph onto commands, computed a priority for each command group, and called another constructor that ran the dispatch solver. It supplied two answers for the same choice. One was an unsigned rank inherited from the default order. The other came from the caller's weighting function. `MetalIssueOrder` used the rank whenever its array was present. In a two-reader program the ordinary weighting and a weighting that favored the second reader both put that reader's last command in position seven.
+
+**B:** Compiler-emit `6905e7a` projects the selected graph onto its command groups once. The caller's weighting function reads those groups and their positions in the solved graph. Metal `66f5bf91` passes the resulting weights and the dependency edges to `mesh_graph_heap_order`. The installer takes that schedule as an operand. An image loader restores the schedule from its serialized positions. The standalone compile-and-record entry computes a schedule from its own supplied rows. In the same two-reader program, the two weightings now put the second reader in positions seven and three, respectively. The evaluator checked every zero-delay edge against each order.
+
 | Unit on the distributed FX-to-Metal path | Producer, consumer and evidence in this review |
 |---|---|
 | Export and placement | PyTorch exports the FX instructions and typed tensors. `place` supplies each worker's actual matrix extents and input owners. The threads-and-queues backend checked asymmetric, empty and strided partitions. Two physical nodes checked a caller-owned activation and the full gathered result. [Placement review](matmul-local-extents-20261123.md) |
