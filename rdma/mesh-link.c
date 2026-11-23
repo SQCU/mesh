@@ -370,10 +370,10 @@ static int link_receive(struct link *l,uint32_t served){
   for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(agains[j])receives_post(l,j,again[j],agains[j]);
   return count;
 }
-/* the client rings this child takes: ring s the (s mod n)-th, by port index, of the n ports whose child serves (their
-   lines CHILD_SERVING with a lane: `line`, every port's as the pass read it), bits over the slots; none while this
-   port does not serve.  Made again only as the serving ports change (`serving`, the child's copy of them, a bit a
-   port) */
+/* the client rings whose share is this child's (it takes their every write, mesh-switched.h mesh_switch_ring_dequeue):
+   ring s the (s mod n)-th, by port index, of the n ports whose child serves (their lines CHILD_SERVING with a lane:
+   `line`, every port's as the pass read it), bits over the slots; none while this port does not serve.  Made again
+   only as the serving ports change (`serving`, the child's copy of them, a bit a port) */
 static uint64_t switch_mine(const struct link *l,const uint64_t *line){
   static uint32_t serving=UINT32_MAX;
   static uint64_t mine;
@@ -397,25 +397,27 @@ static void ring_vacant(uint32_t slot,struct mesh_ring *r){
   atomic_fetch_and(&M->attached,~bit);
   if(atomic_load(owner) || atomic_load(&r->put)>atomic_load(&r->take))atomic_fetch_or(&M->attached,bit);
 }
-/* the writes this node's clients put on the rings this child takes (its share, switch_mine, of the rings flagged
-   attached: mesh.h mesh_ring_flag), taken and carried, at most SWITCH_BURST a pass, each of those rings looked at from
-   the slot after the one where this child began its last pass, whichever client the slot is now (a write is carried
-   on its own ring use, its writer there or exited); a flagged ring found empty whose slot is vacant has its flag
-   cleared (ring_vacant), so the scan reads only the rings of clients that write.  As the serving ports change, the
-   child whose share a ring was may take from it a moment longer, and the ring's compare-exchange gives each write to
-   one child.  The writes taken */
+/* the writes this node's clients put on the rings flagged attached (mesh.h mesh_ring_flag) that this child takes:
+   from a ring of its share (switch_mine) every write, from any other the writes of which its port is a first hop
+   (mesh-switched.h mesh_switch_ring_dequeue, `deferred` its word a ring), taken and carried, at most SWITCH_BURST a
+   pass, the rings looked at from the slot after the one where this child began its last pass, whichever client the
+   slot is now (a write is carried on its own ring use, its writer there or exited); a ring of its share found empty
+   whose slot is vacant has its flag cleared (ring_vacant), so the scan reads only the rings of clients that write.
+   The ring's compare-exchange gives each write to one child.  The writes taken */
 #define SWITCH_BURST 16u
 static uint32_t switch_takes(struct link *l,const uint64_t *line){
+  static uint64_t deferred[MESH_CLIENTS];
   struct mesh_switch *sw=switch_of();
-  const uint64_t mine=switch_mine(l,line)&atomic_load_explicit(&M->attached,memory_order_relaxed);
+  const uint64_t share=switch_mine(l,line),flagged=atomic_load_explicit(&M->attached,memory_order_relaxed);
   const uint32_t from=l->take_from%MESH_CLIENTS;
   uint32_t taken=0;uint64_t at=0;
-  for(uint64_t k=from?mine>>from|mine<<(MESH_CLIENTS-from):mine;k && taken<SWITCH_BURST;k&=k-1){
+  for(uint64_t k=from?flagged>>from|flagged<<(MESH_CLIENTS-from):flagged;k && taken<SWITCH_BURST;k&=k-1){
     const uint32_t slot=((uint32_t)__builtin_ctzll(k)+from)%MESH_CLIENTS;
+    const int mine=share>>slot&1;
     struct mesh_ring *r=mesh_ring_at(M,slot);
-    if(!mesh_ring_pending(r)){ring_vacant(slot,r);continue;}
+    if(!mesh_ring_pending(r)){if(mine)ring_vacant(slot,r);continue;}
     if(!at)at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    taken+=mesh_switch_ring_dequeue(M,sw,slot,SWITCH_BURST-taken,at,l->index,&togo);
+    taken+=mesh_switch_ring_dequeue(M,sw,slot,SWITCH_BURST-taken,at,l->index,&togo,mine,deferred+slot);
   }
   l->take_from=(from+1)%MESH_CLIENTS;
   return taken;

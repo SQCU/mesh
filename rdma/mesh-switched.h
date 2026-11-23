@@ -12,9 +12,11 @@
    that landed, whose landing is then lost), so a lane's receives do not run out while every page of its class is used.
    - Take.  A client's write names its page and its destinations: the writer sets the table entry of each destination
      on this node to the page itself (mesh-call.c mesh_write), and puts the others on its ring (mesh.h struct
-     mesh_write); the bridge writes the page's header and forwards the page toward them (mesh_switch_carry).  Each ring
-     has one taker, which every port child derives from the port lines (struct mesh_switch `port`): ring s the (s mod
-     n)-th, by port index, of the n ports whose child serves.
+     mesh_write); the bridge writes the page's header and forwards the page toward them (mesh_switch_carry).  A write
+     is taken by a child whose port is one of its first hops, so the child that takes it posts it; each ring also has
+     one child whose share it is, which every port child derives from the port lines (struct mesh_switch `port`: ring
+     s the (s mod n)-th, by port index, of the n ports whose child serves), and which takes a write no first hop's
+     child took within one of its passes (mesh_switch_ring_dequeue).
    - Switching.  At every node a page is at, the destinations it carries on are split over the node's out-neighbours
      (the peers its ports serve toward, as the port lines tell them: mesh_switch_choose): each destination to its
      allowed neighbour of the earliest arrival (that neighbour's cable's wait with the page on it, the link's latency,
@@ -697,9 +699,14 @@ static inline double mesh_switch_link_cost(struct mesh_switch *sw,const struct m
    (mesh_switch_line_cost: its line's idle term and what is left of its backlog, else the view's nominal terms).  Made
    in `made` a step at a time (mesh_switch_togo_step: for each class, the links' costs, then the paths through each node
    in turn), copied into `to` as a cycle ends, then made again; made anew from its first step where the view's version
-   moved (`view`: the version the cycle is over, plus 1) */
+   moved (`view`: the version the cycle is over, plus 1).  As a cycle ends, `first` too: for each class and view node d,
+   the ports (bits) whose cable a page of the class reaches d through soonest with no backlog, its own time on the
+   cable then the cost-to-go from its peer (a link's cables alike, each priced by its link's least own time:
+   mesh_switch_terms_read), 0 where no port reaches d; the ports whose children take a client's write toward d
+   (mesh_switch_ring_dequeue) */
 struct mesh_switch_togo {
   float to[MESH_CLASSES][MESH_SWITCH_N][MESH_SWITCH_N],made[MESH_CLASSES][MESH_SWITCH_N][MESH_SWITCH_N];
+  uint32_t first[MESH_CLASSES][MESH_SWITCH_N];
   uint64_t view;
   uint32_t step;
 };
@@ -737,6 +744,24 @@ static inline int mesh_switch_togo_step(struct mesh_switch *sw,struct mesh_switc
   if(++g->step<MESH_CLASSES*(n+1))return 0;
   for(uint32_t cc=0;cc<MESH_CLASSES;cc++)for(uint32_t i=0;i<MESH_SWITCH_N;i++)for(uint32_t j=0;j<MESH_SWITCH_N;j++)
     g->to[cc][i][j]=g->made[cc][i][j]<INFINITY?g->made[cc][i][j]:1e12f;
+  /* the first hops at no backlog, from the port lines and cables' terms read once */
+  uint64_t line[MESH_PORTS];struct mesh_switch_terms t[MESH_PORTS];
+  mesh_switch_ports_read(sw,line);mesh_switch_terms_read(sw,v,line,t);
+  for(uint32_t cc=0;cc<MESH_CLASSES;cc++){
+    const uint32_t of_class=mesh_switch_class_plan(mesh_switch_class_frames(cc));
+    for(uint32_t dd=0;dd<MESH_SWITCH_N;dd++){
+      double least=1e12;uint32_t ports=0;
+      for(uint32_t p=0;p<MESH_PORTS && dd<n && dd!=self;p++){
+        if(mesh_port_state(line[p])!=CHILD_SERVING || !(mesh_port_plan(line[p])&of_class))continue;
+        const uint32_t nb=mesh_switch_index(v,mesh_port_peer(line[p]));
+        if(nb>=n)continue;
+        const double cost=t[p].own[cc]+(nb==dd?0:(double)g->to[cc][nb][dd]);
+        if(cost<least){least=cost;ports=UINT32_C(1)<<p;}
+        else if(cost==least)ports|=UINT32_C(1)<<p;
+      }
+      g->first[cc][dd]=ports;
+    }
+  }
   g->step=0;
   return 1;
 }
@@ -1116,18 +1141,37 @@ static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const 
   for(uint32_t i=0;i<dests;i++){head->dest[i]=(struct mesh_hop){w->dest[i].node,w->dest[i].index,self,0,0};away[i]=i;}
   mesh_switch_forward(m,sw,pd,head,bytes,away,dests,now,ring,togo);
 }
-/* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by a port child: each
-   cell holding the write of its position (its sequence the position + 1) copied, then the ring's take moved past it by
-   one compare-exchange, and the copy carried where that won (a copy whose compare-exchange lost is let be: another
-   child took the position, and the producer may be writing the cell's next lap), then the write's ring use dropped.
-   The cell is the producer's again from the compare-exchange on, so a child that exits mid-carry leaves the ring as
-   it is and loses only that write (its ring use with it).  A cell that does not hold the write of the position read
-   ends the take (the ring is empty there, or another child took on: the next pass reads the take again).  The ring's
-   one taker is the port child whose share it is (mesh-link.c switch_takes, from the port lines); as a port starts or
-   stops serving, the child whose share it was may still be taking, and each position is one compare-exchange's, so
-   each write is one child's.  Returns the writes taken */
+/* whether port `port`'s cable is a first hop at no backlog (togo `first`, its poller's) of write w toward one of its
+   destinations, for the class of its bytes (bounded by its page's class, as mesh_switch_carry bounds them), each
+   destination's node as the published view indexes it; a destination outside the view is no port's */
+static inline int mesh_switch_first_of(struct hdr *m,const struct mesh_switch *sw,const struct mesh_switch_togo *togo,
+                                       const struct mesh_write *w,uint32_t port){
+  const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
+  const uint32_t pages=mesh_pool(m)->pages,pd=w->pd<pages?w->pd:pages-1,dests=w->dests<MESH_DESTS?w->dests:MESH_DESTS,
+                 payload=MESH_PAYLOAD(mesh_pd_at(m,pd)->cls),bytes=w->bytes<payload?w->bytes:payload,
+                 c=mesh_switch_class(mesh_class_frames(bytes));
+  for(uint32_t i=0;i<dests;i++){
+    const uint32_t d=mesh_switch_index(v,w->dest[i].node);
+    if(d<MESH_SWITCH_N && togo->first[c][d]>>(port%MESH_PORTS)&1)return 1;
+  }
+  return 0;
+}
+/* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by port `ring`'s child:
+   each cell holding the write of its position (its sequence the position + 1) copied, then the ring's take moved past
+   it by one compare-exchange, and the copy carried where that won (a copy whose compare-exchange lost is let be:
+   another child took the position, and the producer may be writing the cell's next lap), then the write's ring use
+   dropped.  The cell is the producer's again from the compare-exchange on, so a child that exits mid-carry leaves the
+   ring as it is and loses only that write (its ring use with it).  A cell that does not hold the write of the position
+   read ends the take (the ring is empty there, or another child took on: the next pass reads the take again).
+   Who takes a write: a child whose port is one of its first hops (mesh_switch_first_of), from any client's ring, so
+   the page is posted by the child that took it, with no push to another port's inbound ring; and the child whose
+   share the ring is (`share`: mesh-link.c switch_mine, from the port lines), any write, but one of which its port is
+   no first hop only at the second pass that finds it at the ring's head (`*deferred`, the child's own word for the
+   ring: the position left, plus 1), so a first hop's child has a pass to take it and no write waits longer.  A write
+   no first hop's child takes ends a child's take of the ring there (the ring is taken in order).  Each position is one
+   compare-exchange's, so each write is one child's.  Returns the writes taken */
 static inline uint32_t mesh_switch_ring_dequeue(struct hdr *m,struct mesh_switch *sw,uint32_t slot,uint32_t most,uint64_t now,uint32_t ring,
-                                               const struct mesh_switch_togo *togo){
+                                               const struct mesh_switch_togo *togo,int share,uint64_t *deferred){
   struct mesh_ring *r=mesh_ring_at(m,slot);
   uint32_t taken=0;
   uint64_t at=atomic_load_explicit(&r->take,memory_order_relaxed);
@@ -1135,6 +1179,10 @@ static inline uint32_t mesh_switch_ring_dequeue(struct hdr *m,struct mesh_switch
     struct mesh_cell *cell=&r->cell[at%MESH_RING];
     if(atomic_load_explicit(&cell->sequence,memory_order_acquire)!=at+1)break;
     const struct mesh_write w=cell->w;
+    if(!mesh_switch_first_of(m,sw,togo,&w,ring)){
+      if(!share)break;
+      if(*deferred!=at+1){*deferred=at+1;break;}
+    }
     if(!atomic_compare_exchange_weak_explicit(&r->take,&at,at+1,memory_order_acq_rel,memory_order_relaxed))continue;
     mesh_switch_carry(m,sw,&w,now,ring,togo);
     mesh_pd_drop(m,w.pd);
