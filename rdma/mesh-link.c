@@ -2067,8 +2067,10 @@ static void node_settled(int due){
    state given back (region_adopt), then the node's record, its pool and switch, its sockets read on the loop and
    `bridge_pid` set last, so no client reads it as live before; then SETTLING's IOKit (iokit_watch: B9b's terminations
    heard from here on, the ports made), RUNNING once IOKit's registry is quiet (no termination in its course, B9), at
-   most MESH_PLATFORM_NS on */
+   most MESH_PLATFORM_NS on.  The turn's clock (`now`) read first: main starts a node before its loop's first turn
+   reads it, and a port made here takes its opening's time from it (port_found, port_want: a due of 0 is none) */
 static void node_start(int adopted){
+  now=clock_ns();
   if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
   M->node=node.id;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
