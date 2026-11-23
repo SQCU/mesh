@@ -103,9 +103,10 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled), the pairing it belongs to (`pairing`, moved at
    its loss and at a halt, mesh-link.c port_halt, so a job of a pairing since lost makes no call and is dropped as it
    ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes
-   the progress thread serves (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where
-   it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the termination's queue's,
-   B9b), and the lanes a progress thread found failed (`broken`: the event loop loses the link on reading it).  The
+   the progress thread serves while its port's line is CHILD_SERVING (`served`, a bit a lane, the event loop's to set
+   and to clear, a thread's to clear, every lane, where it found a lane or a completion failed, mesh-link.c lane_lost
+   and link_failed, and the termination's queue's, B9b), and the lanes a progress thread found failed (`broken`: the
+   event loop loses the link on reading it).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends have, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each

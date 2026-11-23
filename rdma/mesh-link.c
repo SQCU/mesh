@@ -79,11 +79,12 @@ static void port_halt(struct port *port,_Atomic uint32_t *which){
   atomic_fetch_or(which,UINT32_C(1)<<port->index);
 }
 
-/* a lane's failure, found by a progress thread: served no more, its port's line leaving (no draw takes any lane of
-   the link from the next pass on), and the link lost by the event loop on reading `broken` (link_turn) */
+/* a lane's failure, found by a progress thread: no lane of its link served from here (as at a failed completion,
+   link_failed: nothing more is posted on any of them), its port's line leaving (no draw takes any lane of the link from
+   the next pass on), and the link lost by the event loop on reading `broken` (link_turn) */
 static void lane_lost(struct port *port,uint32_t lane,int64_t code){
   struct link *l=&port->link;
-  if(atomic_fetch_and_explicit(&l->served,~(UINT32_C(1)<<lane),memory_order_acq_rel)>>lane&1)
+  if(atomic_exchange_explicit(&l->served,0,memory_order_acq_rel)>>lane&1)
     say("link %u (%s): lane %u failed: %s; the link toward node %u lost\n",port->index,port->name,lane,
         strerror((int)(code>0?code:EIO)),port->peer);
   port_leaving(port);
@@ -378,13 +379,12 @@ static int link_receive(struct port *port,uint32_t served){
   return count;
 }
 /* the client rings this child takes: ring s the (s mod n)-th, by port index, of the n ports whose child serves (their
-   lines CHILD_SERVING with a lane), bits over the slots; none while this port does not serve.  Made again only as the
-   serving ports change (`serving`, the child's copy of them, a bit a port) */
-static uint64_t switch_mine(const struct port *port){
+   lines CHILD_SERVING with a lane: `line`, every port's as the pass read it), bits over the slots; none while this
+   port does not serve.  Made again only as the serving ports change (`serving`, the child's copy of them, a bit a
+   port) */
+static uint64_t switch_mine(const struct port *port,const uint64_t *line){
   static uint32_t serving=UINT32_MAX;
   static uint64_t mine;
-  uint64_t line[MESH_PORTS];
-  mesh_switch_ports_read(switch_of(),line);
   uint32_t serves=0;
   for(uint32_t p=0;p<MESH_PORTS;p++)if(mesh_port_state(line[p])==CHILD_SERVING && mesh_port_plan(line[p]))serves|=UINT32_C(1)<<p;
   if(serves==serving)return mine;
@@ -413,10 +413,10 @@ static void ring_vacant(uint32_t slot,struct mesh_ring *r){
    child whose share a ring was may take from it a moment longer, and the ring's compare-exchange gives each write to
    one child.  The writes taken */
 #define SWITCH_BURST 16u
-static uint32_t switch_takes(struct port *port){
+static uint32_t switch_takes(struct port *port,const uint64_t *line){
   struct mesh_switch *sw=switch_of();
   struct link *l=&port->link;
-  const uint64_t mine=switch_mine(port)&atomic_load_explicit(&M->attached,memory_order_relaxed);
+  const uint64_t mine=switch_mine(port,line)&atomic_load_explicit(&M->attached,memory_order_relaxed);
   const uint32_t from=l->take_from%MESH_CLIENTS;
   uint32_t taken=0;uint64_t at=0;
   for(uint64_t k=from?mine>>from|mine<<(MESH_CLIENTS-from):mine;k && taken<SWITCH_BURST;k&=k-1){
@@ -431,10 +431,13 @@ static uint32_t switch_takes(struct port *port){
 }
 
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's progress thread over the lanes the link serves
-   (`served` read once a pass: none posts on a lane its link no longer serves): the receive completions landed
-   (link_receive), the receives topped up, the clients' writes taken (switch_takes), the port's inbound rings posted
-   (switch_sends), the SEND completions (link_send), the pass counted (`passes`); a pass that polled no completion and took no write
-   takes one step of its poller's cost-to-go (mesh-switched.h mesh_switch_togo_step), so a busy pass gains nothing */
+   (`served` and every port's line read once a pass: none posts on a lane its link no longer serves, and none at all
+   while its port's line is not CHILD_SERVING, so a line its parent or a lane's failure moved to leaving stops every
+   post from the next pass on, before the halt reaches the child): the receive completions landed (link_receive), the
+   receives topped up, the clients' writes taken (switch_takes, the port's share of the rings from the same lines), the
+   port's inbound rings posted (switch_sends), the SEND completions (link_send), the pass counted (`passes`); a pass
+   that polled no completion and took no write takes one step of its poller's cost-to-go (mesh-switched.h
+   mesh_switch_togo_step), so a busy pass gains nothing */
 static void port_pass(struct port *port){
   /* one pass in 1024 timed (counters pass_ns: its time summed and the passes timed; part_ns: each part's time) */
   static __thread uint32_t timing;
@@ -443,14 +446,16 @@ static void port_pass(struct port *port){
   if(timed)t[0]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
-  const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
+  uint64_t line[MESH_PORTS];
+  mesh_switch_ports_read(sw,line);
+  const uint32_t served=mesh_port_state(line[port->index])==CHILD_SERVING?atomic_load_explicit(&l->served,memory_order_acquire):0;
   const uint32_t lanes=plan_lanes(l->plan);
   uint32_t worked=0;
   if(served)worked|=(uint32_t)link_receive(port,served);
   if(timed)t[1]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for(uint32_t j=0;j<lanes;j++)if(served>>j&1)switch_receives(port,j);
   if(timed)t[2]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if(served)worked|=switch_takes(port);
+  if(served)worked|=switch_takes(port,line);
   if(timed)t[3]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   if(served)switch_sends(port,served);
   if(timed)t[4]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
