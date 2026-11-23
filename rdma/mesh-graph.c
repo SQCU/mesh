@@ -2772,9 +2772,13 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
 }
 int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const double *latency, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion) {
-  for (uint32_t j = 0; j < vertices; j++)
+  double max_time = 0;
+  for (uint32_t j = 0; j < vertices; j++) {
     if (!(length[j] >= 0 && length[j] <= DBL_MAX) || resource[j] >= resources ||
         (latency && !(latency[j] >= 0 && latency[j] <= DBL_MAX-length[j]))) return EINVAL;
+    max_time = fmax(max_time, length[j] + (latency ? latency[j] : 0));
+  }
+  const double unit = max_time ? scalbn(1., ilogb(max_time)) : 1.;
   for (size_t e = 0; e < edges; e++)
     if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
   if (!vertices) return 0;
@@ -2805,7 +2809,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
       result = EDOM;
   }
   if (!result) {
-    for (uint32_t j = 0; j < vertices; j++) { lower[j] = length[j]; upper[j] = infinity; }
+    for (uint32_t j = 0; j < vertices; j++) { lower[j] = length[j] / unit; upper[j] = infinity; }
     lower[vertices] = 0; upper[vertices] = infinity;
     if (Highs_addVars(highs, columns, lower, upper) == kHighsStatusError ||
         Highs_changeColCost(highs, (HighsInt)vertices, 1) == kHighsStatusError)
@@ -2814,7 +2818,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
   if (!result) {
     HighsInt nonzeros = 0;
     for (uint32_t j = 0; j < vertices; j++) {
-      start[total] = nonzeros; lower[total] = latency ? latency[j] : 0; upper[total] = infinity; total++;
+      start[total] = nonzeros; lower[total] = latency ? latency[j] / unit : 0; upper[total] = infinity; total++;
       index[nonzeros] = (HighsInt)vertices; value[nonzeros++] = 1;
       index[nonzeros] = (HighsInt)j; value[nonzeros++] = -1;
     }
@@ -2823,7 +2827,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
     for (size_t e = 0; e < edges; e++) {
       if (e && pair[e] == pair[e - 1]) continue;
       const uint32_t i = (uint32_t)(pair[e] >> 32), j = (uint32_t)pair[e];
-      start[total] = nonzeros; lower[total] = length[j]+(latency ? latency[i] : 0); upper[total] = infinity; total++;
+      start[total] = nonzeros; lower[total] = length[j] / unit + (latency ? latency[i] / unit : 0); upper[total] = infinity; total++;
       index[nonzeros] = (HighsInt)j; value[nonzeros++] = 1;
       index[nonzeros] = (HighsInt)i; value[nonzeros++] = -1;
     }
@@ -2853,7 +2857,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
       qsort(key, count, sizeof *key, completion_key_before);
       double sum = 0, squares = 0, left = 0;
       for (size_t k = 0; k < count && !result; k++) {
-        const double d = length[key[k].vertex];
+        const double d = length[key[k].vertex] / unit;
         sum += d; squares += d * d; left += d * key[k].at;
         const double right = (sum * sum + squares) / 2;
         if (!((right - left) / sum > tolerance)) continue;
@@ -2866,7 +2870,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
           value = longer; entries = more;
         }
         start[cuts] = nonzeros; lower[cuts] = right / sum; upper[cuts] = infinity; cuts++;
-        for (size_t q = 0; q <= k; q++) { index[nonzeros] = (HighsInt)key[q].vertex; value[nonzeros++] = length[key[q].vertex] / sum; }
+        for (size_t q = 0; q <= k; q++) { index[nonzeros] = (HighsInt)key[q].vertex; value[nonzeros++] = (length[key[q].vertex] / unit) / sum; }
       }
     }
     if (result) break;
@@ -2883,7 +2887,7 @@ int mesh_graph_completion_arrivals(uint32_t vertices, const double *length,const
     if (Highs_addRows(highs, cuts, lower, upper, nonzeros, start, index, value) == kHighsStatusError) { result = EDOM; break; }
     total += cuts;
   }
-  if (!result) for (uint32_t j = 0; j < vertices; j++) completion[j] = column[j]+(latency ? latency[j] : 0);
+  if (!result) for (uint32_t j = 0; j < vertices; j++) completion[j] = column[j] * unit + (latency ? latency[j] : 0);
   if (highs) Highs_destroy(highs);
   free(pair); free(first); free(member); free(key); free(lower); free(upper); free(value); free(column); free(dual);
   free(row_value); free(row_dual); free(start); free(index);
