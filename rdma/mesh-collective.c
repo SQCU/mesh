@@ -527,6 +527,9 @@ static void plan_groups(struct mesh_plan_flow_geometry *g){
   }
   g->group_bytes=at;
 }
+static uint64_t plan_origins(const struct plan_step *p){
+  return p->publications+(uint64_t)p->flow->transfers*sizeof(struct mesh_publication);
+}
 static void plan_layout(struct plan_step *p){
   uint64_t at=sizeof(struct mesh_state);
   p->phases=at;
@@ -534,12 +537,12 @@ static void plan_layout(struct plan_step *p){
   p->counts=plan_align(p->phases+at);
   p->completions=plan_align(p->counts+(uint64_t)p->geometry->ranges*plan_step_copies(p)*sizeof(uint64_t));
   p->supplied=plan_align(p->completions+(uint64_t)p->geometry->sending*plan_step_copies(p)*2*sizeof(uint64_t));
-  uint64_t origin=p->flow->releases;
+  p->publications=plan_align(p->supplied+(uint64_t)p->flow->releases*sizeof(uint64_t));
+  uint64_t origin=plan_origins(p);
   for(uint32_t d=0;d<p->flow->demands;d++)
     if(p->flow->demand[d].source==p->flow->self)
-      origin+=p->geometry->cuts[d]->instructions*(uint64_t)plan_step_copies(p);
-  p->publications=plan_align(p->supplied+origin*sizeof(uint64_t));
-  p->status=plan_align(p->publications+(uint64_t)p->flow->transfers*sizeof(struct mesh_publication));
+      origin+=p->geometry->cuts[d]->instructions*(uint64_t)plan_step_copies(p)*sizeof(uint64_t);
+  p->status=plan_align(origin);
   p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
   p->submits=plan_align(p->deliveries+p->room*sizeof(struct mesh_delivery));
   p->syncs=plan_align(p->submits+p->submit_room*sizeof(struct mesh_submission));
@@ -3446,7 +3449,7 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
   }
   memcpy(((char *)compiled->state[f])+p->rows,p->wait_row,((size_t)p->flow->calls+1)*sizeof *p->wait_row);
   struct mesh_publication *publications=(void *)((char *)state+p->publications);
-  uint64_t origin=p->supplied+p->flow->releases*sizeof(uint64_t);
+  uint64_t origin=plan_origins(p);
   for(uint32_t i=0;i<p->flow->transfers;i++){
     const struct mesh_declared *t=p->flow->declared+i;
     const struct mesh_plan_demand *d=p->flow->demand+p->flow->of[i];
