@@ -30,11 +30,12 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    nothing of it, clamping each field that addresses memory (mesh-switched.h mesh_switch_landed) */
 #define MESH_VERSION 165u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  191: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  192: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and the switch's inbound and in-flight
-   rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`); against 190, the switch's
-   counters have no `malformed` (nothing of a landed header or a ring cell is tested now, so nothing is counted so) */
-#define MESH_LAYOUT 191u
+   rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`); against 191, each inbound ring
+   has MESH_POOL_PAGES entries, not a class's pages (a page goes on the ring of its payload's class, so a short ring may
+   hold long pages too) */
+#define MESH_LAYOUT 192u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes

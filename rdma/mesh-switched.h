@@ -75,7 +75,7 @@
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)   /* every port's lanes, its link's queue pairs */
 #define MESH_SWITCH_N 8u                                     /* nodes the view has */
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view has */
-#define MESH_SWITCH_INBOUND 16384u                           /* an inbound ring's entries: every page of a class once */
+#define MESH_SWITCH_INBOUND 32768u                           /* an inbound ring's entries: every page of the pool once */
 #define MESH_SWITCH_FLIGHT 4096u                             /* a lane's in-flight ring: its SENDs outstanding, at most */
 #define MESH_SWITCH_LINES 24u                                /* lines a header carries */
 #define MESH_SWITCH_LOG 8192u                                /* records a process's log ring */
@@ -87,13 +87,15 @@ _Static_assert(MESH_DESTS<=32,"a destination a bit");
 /* A page is on the inbound rings toward a cable at most once: its push holds a use until its SEND completes or is
    given back, and that use blocks the page's next write (mesh-call.c mesh_write's compare-exchange from 1) and its use
    as a receive (a page is posted as one only off its class's free stack), and a forward pushes a page toward each cable
-   once (one group a neighbour, a cable serving one peer).  So an inbound ring as deep as its class's pages never
-   fills, and its producer tests no room.  An in-flight ring holds a lane's SENDs posted and not completed, at most the
-   lane's depth (its queue's share of the frames its queue pair's SENDs take, over the lane's frames, and never past
-   MESH_SWITCH_FLIGHT: mesh-link.c lane_reset; a queue pair takes mesh-verbs.h QD 4095 frames at most), each at the
-   position its wr_id names (its low 48 bits, of which the ring's size is a divisor) */
-_Static_assert(MESH_SWITCH_INBOUND>=MESH_POOL_SHORT && MESH_SWITCH_INBOUND>=MESH_POOL_LONG && !(MESH_SWITCH_INBOUND&(MESH_SWITCH_INBOUND-1)),
-               "an inbound ring has room for every page of its class once");
+   once (one group a neighbour, a cable serving one peer).  A page goes on the ring of its payload's class, not of its
+   own (mesh_switch_forward: a long page whose payload a short page holds, a message's last, goes as a short SEND), so
+   a short ring may hold every page of the pool, and a long ring every long page.  So an inbound ring as deep as the
+   pool's pages never fills, and its producer tests no room.  An in-flight ring holds a lane's SENDs posted and not
+   completed, at most the lane's depth (its queue's share of the frames its queue pair's SENDs take, over the lane's
+   frames, and never past MESH_SWITCH_FLIGHT: mesh-link.c lane_reset; a queue pair takes mesh-verbs.h QD 4095 frames at
+   most), each at the position its wr_id names (its low 48 bits, of which the ring's size is a divisor) */
+_Static_assert(MESH_SWITCH_INBOUND>=MESH_POOL_PAGES && !(MESH_SWITCH_INBOUND&(MESH_SWITCH_INBOUND-1)),
+               "an inbound ring has room for every page of the pool once");
 _Static_assert(!(MESH_SWITCH_FLIGHT&(MESH_SWITCH_FLIGHT-1)) && MESH_SWITCH_FLIGHT<=(UINT64_C(1)<<48),"an in-flight position a wr_id's");
 
 /* ---- The header (a page's first MESH_HEAD bytes) ------------------------------------------------------------------- */
