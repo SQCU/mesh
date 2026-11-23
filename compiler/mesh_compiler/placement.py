@@ -8,13 +8,14 @@ import sys
 
 import torch
 from schedule_emit.export import derived_graph
+from torch._decomp.decompositions import addmm
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 from torch.fx.proxy import GraphAppendingTracer
 from torch.utils import _pytree as pytree
 
 from .ir import (CLONE, JOIN, PAGES, RECV, SEND, aliased, aliasing, constant, evaluated, given, leaves_of, results_of,
-                 shape, view, views)
+                 shape, trace_formulation, view, views)
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -688,6 +689,7 @@ RULES = {
     ATEN.index_put.default: accumulated,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
     MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
+    ADDMM: lambda node, shapes, out: [*aligned(node, shapes[:1], out), *RULES[MM](node, shapes[1:], out)],
     ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
     ATEN.sum.dim_IntList: over(1, None, True), ATEN.mean.dim: over(1, None),
     ATEN.any.dim: over(1, None), ATEN.any.dims: over(1, None),
@@ -896,6 +898,24 @@ def meshed(graph, node, held, replaced):
         dims, sizes, grid, shards)
 
 
+# torch/_decomp/decompositions.py addmm supplies opmath, alpha, beta, and the beta=0 bias rule.
+# Split the contraction across K and place its epilogue on the selected result shards.
+def partitioned_addmm(graph, node, held, want, replaced, whole):
+    traced, copied, result = trace_formulation(graph, functools.partial(addmm, **node.kwargs), node.args)
+    placed = dict(zip(node.args, held, strict=True))
+    first = want if isinstance(want, str) else flat(want[2])[0]
+    for op in traced.graph.nodes:
+        if op.op == "call_function":
+            made = copied[op]
+            made.meta = {**node.meta, **made.meta}
+            inputs = [placed[n] for n in operands(made)]
+            site = want if made is result or made.target is MM else flat(inputs[0][2])[0] or first
+            with graph.inserting_before(made):
+                placed[made] = partitioned(graph, made, inputs, site, replaced, whole)
+    replaced.append(node)
+    return placed[result]
+
+
 # Rejection filters are not part of even temporary integration validation.
 # A partition-rule miss retains the operation; transfer() reshards its result to the requested placement.
 def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fixed_sites=False):
@@ -915,11 +935,8 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
             whole[u, one] = reshard(graph, v, None, None, (one,))[0]
     held = [(None, None, (one,), [whole[u, one]]) if several(v) else v for u, v in zip(operands(node), held)]
     if distribute and node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
-        if node.target is ADDMM:
-            product = graph.call_function(MM, node.args[1:])
-            product.meta = dict(node.meta)
-            held = [partitioned(graph, product, held[1:], want, replaced, whole), held[0]]
-            node.target, node.args = ADD, (product, node.args[0])
+        if node.target is ADDMM and any(v[0] == axis for v, axis in zip(held[1:], (1, 0))):
+            return partitioned_addmm(graph, node, held, want, replaced, whole)
         shapes = read_shapes(node)
         rows, out = partition_rows(node, shapes)
         if node.target is VIEW and held[0][0] is not None:

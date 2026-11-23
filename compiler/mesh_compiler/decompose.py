@@ -13,12 +13,11 @@ import operator
 import torch
 from torch._guards import detect_fake_mode
 from torch.export.graph_signature import OutputKind
-from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.graph_module import _assign_attr, _get_attr
 from torch.utils import _pytree as pytree
 
 from .devices import on_devices
-from .ir import RETURNED, Exported, shape, views
+from .ir import RETURNED, Exported, shape, trace_formulation, views
 from .ir import given as ir_given
 from .operations import (FRAGMENT, LSTSQ_FIXED, _eigen_geev, _fragment_decoded, _lapack_eigen, _lapack_hermitian,
                          _lapack_least_squares, _lapack_singular, _least_squares_qr, _least_squares_svd, _lstsq_driver,
@@ -126,12 +125,8 @@ def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
                 given[k] = operand
             args, kwargs = pytree.tree_unflatten(given, spec)
             return formulation(*args, **kwargs)
-        operands = [flat[k].meta["val"] for k in held]
-        with detect_fake_mode(operands):
-            traced = make_fx(formula, decomposition_table=table, tracing_mode="fake")(*operands)
-        copied = dict(zip([n for n in traced.graph.nodes if n.op == "placeholder"], [flat[k] for k in held]))
         with graph.inserting_before(node):
-            result = graph.graph_copy(traced.graph, copied)
+            traced, copied, result = trace_formulation(graph, formula, [flat[k] for k in held], table)
         made = [copied[n] for n in traced.graph.nodes if n.op not in ("placeholder", "output")]
         kept = {key: value for key, value in node.meta.items() if key not in TRACED + VIEWED + AXES}
         device = targets[node.meta["processor"]][1]
@@ -335,17 +330,13 @@ def _fresh(value):
 # (_owned), their nodes the same metadata
 def _formulated(graph, formula, operands, source, processor, mapping, decomposed, origin, owner=None):
     table = torch.export.default_decompositions()
-    values = [operand.meta["val"] for operand in operands]
-    with detect_fake_mode(values):
-        traced = make_fx(formula, decomposition_table=table, tracing_mode="fake")(*values)
-    copied = dict(zip([n for n in traced.graph.nodes if n.op == "placeholder"], operands))
-    result = graph.graph_copy(traced.graph, copied)
+    traced, copied, result = trace_formulation(graph, formula, operands, table)
     kept = {key: value for key, value in source.meta.items() if key not in TRACED + VIEWED + AXES}
     for made in [copied[n] for n in traced.graph.nodes if n.op not in ("placeholder", "output")]:
         made.meta.update(kept, processor=processor)
         decomposed[made] = origin
     if owner is not None:
-        _owned(owner, traced, copied, {**kept, "processor": processor}, values[0].device, origin)
+        _owned(owner, traced, copied, {**kept, "processor": processor}, operands[0].meta["val"].device, origin)
     _axes_onto(source, result, mapping, within=False)
     return result
 

@@ -11,6 +11,7 @@ from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._functorch._aot_autograd.schemas import JointWithDescriptors
 from torch._guards import detect_fake_mode
 from torch.export.graph_signature import OutputKind
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.node import map_arg
 from torch.fx.operator_schemas import normalize_function
 from torch.utils import _pytree as pytree
@@ -176,6 +177,15 @@ def viewable(value, sizes):
     except (RuntimeError, ValueError):
         return False
     return True
+
+
+def trace_formulation(graph, formula, operands, decomposition_table=None):
+    values = [operand.meta["val"] for operand in operands]
+    with detect_fake_mode(values):
+        traced = make_fx(formula, decomposition_table=decomposition_table, tracing_mode="fake")(*values)
+    copied = dict(zip((n for n in traced.graph.nodes if n.op == "placeholder"), operands, strict=True))
+    result = graph.graph_copy(traced.graph, copied)
+    return traced, copied, result
 
 
 def evaluated(node, processor):
