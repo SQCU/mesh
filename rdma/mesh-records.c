@@ -60,7 +60,7 @@ static struct known *known_at(uint32_t node){
 static void record_tell(struct known *k){
   const struct mesh_record record=k->record;
   for(uint32_t p=0;p<port_count;p++){
-    if(!ports[p].greeted || k->told>>p&1 || ports[p].peer==record.node)continue;
+    if(!port_greeted(ports+p) || k->told>>p&1 || ports[p].peer==record.node)continue;
     port_say(ports+p,(struct message){.kind=RECORD},&record,sizeof record);
     k->told|=UINT32_C(1)<<p;
   }
@@ -175,7 +175,7 @@ static void map_put(struct known *k,const struct mesh_record *record,const struc
    its own record names the link too (map_make) */
 void map_tell(struct port *port){
   const uint32_t bit=port_bit(port);
-  for(uint32_t k=0;port->greeted && k<known_count;k++){
+  for(uint32_t k=0;port_greeted(port) && k<known_count;k++){
     struct known *node=known+k;
     if(node->record.node==M->node || node->record.node==port->peer || node->told&bit || !record_of(node->record.node))continue;
     const struct mesh_record record=node->record;
@@ -200,7 +200,7 @@ void record_retell(void){
   const struct mesh_record *stored=record_of(M->node);
   if(!stored)return;
   struct mesh_record own;memcpy(&own,stored,sizeof own);
-  for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
+  for(uint32_t p=0;p<port_count;p++)if(port_greeted(ports+p))port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
 /* when the next health sample is due (the event loop's turn waits for it: mesh-link.c turn_due) */
 uint64_t health_due(void){ return health_sent+MESH_HEALTH_NS; }

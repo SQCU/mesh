@@ -35,8 +35,8 @@ static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){
 
 /* design/transport.md section 2: the watch on the exits of the region's processes (the bridge, its children, the
    clients), written once for every caller: the bridge for the children of the bridge before (mesh-link.c
-   adopting_read, NODE_ADOPTING) and a spawn for a child of its device from an earlier launch (child_spawn), and the
-   heartbeat for an expired region's processes (mesh-heartbeat.c region_replace).
+   adopting_read, NODE_ADOPTING), and the heartbeat for an expired region's processes (mesh-heartbeat.c
+   region_replace).
    Whether the process a struct mesh_process names is alive: a child of the caller until its exit is complete (waitid
    with WNOWAIT, which leaves it to be reaped; until it is reaped its pid names it alone), any other process until its
    exit begins (mesh_alive); pid 0 names none */

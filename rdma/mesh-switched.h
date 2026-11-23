@@ -271,12 +271,13 @@ static inline uint32_t mesh_port_state(uint64_t line){ return (uint32_t)(line&0x
 static inline uint32_t mesh_port_plan(uint64_t line){ return (uint32_t)(line>>8&0xff); }
 static inline uint32_t mesh_port_peer(uint64_t line){ return (uint32_t)(line>>32); }
 /* port p's line moved to `state` from any of the states `from` (bits over enum child_state), by one compare-exchange
-   (sequentially consistent, as the child's pairing and lanes served it is sequenced with are: mesh-link.c port_halt,
-   child_jobs), its peer and plan those given where `state` is CHILD_SERVING, else as they were: 1 where it moved, 0
-   where its state was none of `from`.  Its callers: a port's child as it opens its device, makes and connects its
-   lanes, and as it leaves (a halt, a lane's failure, a termination or a fault heard, its end); the parent as it loses
-   the link (port_lost, lanes_cancel).  The parent alone makes the line new (STARTED, peer and plan 0) once the child
-   has exited (mesh-link.c switch_child_free) */
+   (sequentially consistent), its peer and plan those given where `state` is CHILD_SERVING, else as they were: 1 where
+   it moved, 0 where its state was none of `from`.  Its callers: a port's child's main thread as it opens its device,
+   makes and connects its lanes (mesh-link.c device_open, lanes_make, lanes_open), and any of the child's contexts as it
+   halts (mesh-link.c child_halt: its poller at a lane's failure, its main thread at a termination heard, a command
+   that failed or its end, the fault handler); the parent as it loses the link from the make on, or stops (mesh-link.c
+   port_leaving).  The parent alone makes the line new (STARTED, peer and plan 0) once the child has exited
+   (mesh-link.c switch_child_free) */
 static inline int mesh_port_move(struct mesh_switch *sw,uint32_t p,uint32_t from,uint32_t state,uint32_t peer,uint32_t plan){
   _Atomic uint64_t *word=&sw->port[p%MESH_PORTS];
   uint64_t was=atomic_load(word);
