@@ -1365,7 +1365,10 @@ def insert_send_recv(graph, node, first, instances, transfer=None):
             sent.meta["processor"] = here
         with graph.inserting_before(users[0]):
             arrived = graph.call_function(RECV, (channel,))
-            arrived.meta.update(processor=processor, val=value)
+            with detect_fake_mode([value]):
+                storage = value.new_empty((value.untyped_storage().nbytes() // value.element_size(),))
+                landing = storage.as_strided(value.shape, value.stride(), value.storage_offset())
+            arrived.meta.update(processor=processor, val=landing)
         # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
         if transfer is None:
             kind, exchange, consumer = node.meta.get("collectives", {}).get(processor, ("broadcast", node, JOIN))
