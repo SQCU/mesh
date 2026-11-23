@@ -103,8 +103,10 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes
    the progress thread serves while its port's line is CHILD_SERVING (`served`, a bit a lane, the event loop's to set
    and to clear, a thread's to clear, every lane, where it found a lane or a completion failed, mesh-link.c lane_lost
-   and link_failed, and the termination's queue's, B9b), and the lanes a progress thread found failed (`broken`: the
-   event loop loses the link on reading it).  The
+   and link_failed, and the termination's queue's, B9b), the child's end (`closing`, its main thread's to set:
+   mesh-link.c child_leave; its progress thread returns at the end of its pass), the two one 8-byte word the parked
+   progress thread waits on, so a change of either wakes it, and the lanes a progress thread found failed (`broken`:
+   the event loop loses the link on reading it).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends have, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
@@ -119,7 +121,8 @@ struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,lanes;
   _Atomic int done;
-  _Atomic uint32_t served,broken,pairing;
+  _Alignas(8) _Atomic uint32_t served;
+  _Atomic uint32_t closing,broken,pairing;
   uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],job_pairing,psn;
   struct frames share;
   struct lane_state lane[MESH_LINK_LANES];
@@ -127,6 +130,8 @@ struct link {
   uint64_t wire[MESH_LINK_STREAMS];
   uint32_t take_from,send_from;
 };
+_Static_assert(offsetof(struct link,served)%8==0 && offsetof(struct link,closing)==offsetof(struct link,served)+4,
+               "a link's lanes served and its closing one 8-byte word");
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
    parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE), connect them to the peer's
@@ -170,7 +175,8 @@ struct child_message {
    any thread, before which no port job is dispatched on it and the bridge does not exit: B9), whether its device is to
    be opened (`opening`: at the start, at its link's coming on, at a hello heard while it is not open, B16, and as the
    call it was concluded around returns, B12; never on a clock), its link lanes, and its progress thread (`threads` 1
-   once started, in the child alone), and the threads that post on its queue pairs (`thread`: its progress thread,
+   once started, and `passing` 1 from its start to its return, in the child alone: mesh-link.c child_leave waits for its
+   return), and the threads that post on its queue pairs (`thread`: its progress thread,
    storing itself as it starts, and its link job's while one runs, by which a provider's fault names its port,
    mesh-link.c fault_heard); the queue pairs its device has for a link as its child told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); the registrations its device refused
    in a row (`refusals`) and the time before which it is not opened again after one (`retry_at`: mesh-link.c port_opened);
@@ -182,7 +188,7 @@ struct port {
   int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
-  _Atomic int done,closing;
+  _Atomic int done,passing;
   uint64_t next,bandwidth,job_at,retry_at;
   _Atomic uint64_t quiet_at;
   struct message heard;

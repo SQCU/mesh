@@ -472,38 +472,47 @@ static void port_pass(struct port *port){
 }
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
    its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the lanes
-   served while they are none, looking again every MESH_PAUSE_NS (the stop's `closing`).  It starts at the end of the
-   link's connect, once every verbs object of the child is made and connected, and none is made or changed after it:
-   the parent asks a child for its lanes once (a link lost after that ends the child, port_lost's `recycle`), and the
-   kernel releases the objects at the child's exit.  So no post crosses a make, a connect or a teardown */
+   served while they are none, looking again every MESH_PAUSE_NS (a fault absorbed meanwhile).  It starts at the end of
+   the link's connect, once every verbs object of the child is made and connected, and none is made or changed after
+   it: the parent asks a child for its lanes once (a link lost after that ends the child, port_lost's `recycle`), and
+   the kernel releases the objects at the child's exit.  So no post crosses a make, a connect or a teardown.  It
+   returns at the end of the pass in which its child closes (`closing`: child_leave), and says so (`passing` 0, its
+   child's loop woken), so a child that ends leaves no page in the thread's hands: a pass's carries, landings and
+   posts are each whole by its end.  `passing` is stored before `closing` is first read, and child_leave stores
+   `closing` before it reads `passing` (each sequentially consistent), so a child that reads it 0 is ended before the
+   thread's first pass, or after its return */
 static void *port_progress(void *argument){
   struct port *port=argument;
+  struct link *l=&port->link;
   pthread_setname_np("mesh.rdma");
   /* fault_heard: this thread its port's, and its handler on a stack of its own */
   stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
   atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
   mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_cables_toward) */
-  while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
+  atomic_store(&port->passing,1);
+  while(!atomic_load(&l->closing)){
     /* while its link serves no lane, no pass (no post on any queue pair of its device) and no lane read: the thread
-       waits on the lanes served, so a change of that word between the read and the wait ends the wait at once, woken
-       by the link's coming up and by a halt or the child's end (progress_wake), looking again every MESH_PAUSE_NS (the
-       stop's `closing`) */
-    if(!atomic_load_explicit(&port->link.served,memory_order_acquire)){
+       waits on the lanes served and `closing` as one 8-byte word (struct link), so a change of either between the
+       reads and the wait ends the wait at once, woken by the link's coming up, by a halt and by the child's end
+       (progress_wake), looking again every MESH_PAUSE_NS */
+    if(!atomic_load_explicit(&l->served,memory_order_acquire)){
       /* a fault absorbed on the port (fault_heard: the handler, which may make no call but mmap, munmap and sigaction,
          halted the port) wakes its child's loop, which tells its parent at once, not at its next tick */
       if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
-      os_sync_wait_on_address_with_timeout(&port->link.served,0,sizeof port->link.served,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+      os_sync_wait_on_address_with_timeout(&l->served,0,sizeof l->served+sizeof l->closing,OS_SYNC_WAIT_ON_ADDRESS_NONE,
                                            OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
       continue;
     }
     port_pass(port);
   }
+  atomic_store_explicit(&port->passing,0,memory_order_release);
+  wake();
   return NULL;
 }
-/* the progress thread, parked while its link serves no lane, looks again */
+/* the progress thread, parked while its link serves no lane, looks again (its lanes served or its closing moved) */
 static void progress_wake(struct port *port){
-  os_sync_wake_by_address_all(&port->link.served,sizeof port->link.served,OS_SYNC_WAKE_BY_ADDRESS_NONE);
+  os_sync_wake_by_address_all(&port->link.served,sizeof port->link.served+sizeof port->link.closing,OS_SYNC_WAKE_BY_ADDRESS_NONE);
 }
 /* design/transport.md: the port's progress thread started, once; 0, or pthread_create's error */
 static int port_threads(struct port *port){
@@ -984,8 +993,11 @@ void switch_view(void){
    rings (each SEND posted and not completed) and its port's inbound rings (each page pushed toward it and not posted)
    emptied, each page's use dropped, counted `lost`, and the pages posted as its lanes' receives given back, then its
    port's line made new (STARTED, no peer, no plan) for its next child: no process but this one writes it now.  Its
-   lanes are no draw's already (lanes_cancel).  A page the child held between two of these (mid-carry, mid-landing, or
-   between an inbound ring and an in-flight ring) is not found, and stays in use */
+   lanes are no draw's already (lanes_cancel).  A child that ended between passes (every end it was asked for or chose:
+   child_leave waits for its progress thread's return) held no page outside these; one that ended inside a pass (a
+   crash, or its progress thread still inside a provider call at its leave's bound) may have held one mid-carry,
+   mid-landing or between an inbound ring and an in-flight ring, which is not found and stays in use (the operator's
+   O4: accepted, no record) */
 static void switch_child_free(struct port *port){
   struct mesh_switch *sw=mesh_switch_of(M);
   for(uint32_t j=0;j<2*MESH_LINK_STREAMS;j++)mesh_switch_flight_drop(M,sw,switch_lane(port,j),MESH_SWITCH_PARENT);
@@ -1802,7 +1814,8 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    pairing read again (port_halt's sequence).  The child ends at its parent's word, once its own windows have ended (at
    most MESH_PLATFORM_NS on), or at its parent's loss (the socket's end, or a message to it the socket did not take
    whole: child_tell), its lanes served no more and its line leaving, MESH_PLATFORM_NS and its windows on (at most
-   twice that): its exit, the kernel's release of its device's objects, no verbs call made */
+   twice that), and in either case once its progress thread has returned from its last pass (within the same bound):
+   its exit, the kernel's release of its device's objects, no verbs call made */
 static uint32_t child_asked;
 static uint64_t child_bandwidth;
 static int child_halted;
@@ -1812,15 +1825,26 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
   mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN|1u<<CHILD_LANES_MADE|1u<<CHILD_SERVING,CHILD_LEAVING,0,0);
-  atomic_store_explicit(&port->closing,1,memory_order_release);
+  atomic_store(&port->link.closing,1);
   progress_wake(port);
+  /* the parent's socket read no more: its end, or a message after the last, would end each wait below at once */
+  struct kevent64_s parent;EV_SET64(&parent,3,EVFILT_READ,EV_DELETE,0,0,0,0,0);
+  kevent64(events,&parent,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
   const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   for(;;){
     const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
     const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows));
-    if(at>=until)break;
-    struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
-    nanosleep(&rest,NULL);
+    /* its progress thread inside a pass, or yet to see `closing` (port_progress): what that pass carries, lands or
+       posts is in its hands alone, so the exit waits for its return, which wakes this wait; and for the bound at
+       most, since a thread inside a provider call may never return (what it holds then is lost, as at a crash) */
+    const int passing=atomic_load(&port->passing);
+    if(at>=bound || (at>=until && !passing))break;
+    const uint64_t rest=(passing?bound:until)-at;
+    /* the wait on the child's queue, so a wake (the progress thread's return, a termination heard) ends it at once and
+       the windows are read again */
+    struct timespec wait={(time_t)(rest/1000000000u),(long)(rest%1000000000u)};
+    struct kevent64_s woken;
+    kevent64(events,NULL,0,&woken,1,0,&wait);
   }
   exit(0);
 }
