@@ -91,9 +91,11 @@
    the init), takes its source pages, and gathers each rank's status, node, pool and standing listener's address over
    the bootstrap; every rank then computes the depth and takes its receive rings, and a second round gathers each
    rank's status and the first receive index of each of its channels: the only exchanges its calls need.  A rank that
-   cannot go on fails every rank's init alike.  The bootstrap's waits are 100 ms slices that read the communicator's
-   revoke; nothing else bounds them.  ncclCommSplit gathers every rank's (color, key) over comm's bootstrap and makes
-   each color's communicator, sorted by key then rank, at its first rank's standing listener; ncclCommShrink makes the
+   cannot go on fails every rank's init alike.  The bootstrap's waits are plain blocking calls on its sockets: an
+   init's waits end when its peers answer (a rank whose root does not listen yet connects again every 100 ms), and a
+   split's or a grow's exchange over comm also at comm's revoke, which shuts comm's sockets down; nothing else bounds
+   them.  ncclCommSplit gathers every rank's (color, key) over comm's bootstrap and makes each color's communicator,
+   sorted by key then rank, at its first rank's standing listener; ncclCommShrink makes the
    remaining ranks' communicator at the first remaining rank's standing listener, exchanging nothing over comm (with
    NCCL_SHRINK_ABORT, comm is revoked first); a rank of no color, or excluded, gets NULL.  ncclCommGrow meets at the id
    that ncclCommGetUniqueId gives comm's root, which the root gives comm's ranks over comm's bootstrap; a joining

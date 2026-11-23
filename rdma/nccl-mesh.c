@@ -21,8 +21,6 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <poll.h>
-#include <fcntl.h>
 #include <sys/sysctl.h>
 
 enum { CALL_ALLREDUCE, CALL_BROADCAST, CALL_REDUCE, CALL_REDUCE_SCATTER, CALL_ALLGATHER, CALL_ALLTOALL, CALL_GATHER,
@@ -485,14 +483,13 @@ static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_unlock(&attach_lock);
 }
 
-/* comm's bootstrap's sockets released, under its guard */
+/* comm's bootstrap's sockets released: at its init's failure or its free, when no other thread holds it, so no
+   revoke reads them meanwhile */
 static void bootstrap_free(struct ncclComm *comm) {
-  pthread_mutex_lock(&comm->guard);
   for (int r = 0; comm->peers && r < comm->nranks; r++)
     if (comm->peers[r] >= 0) close(comm->peers[r]);
   free(comm->peers);
   comm->peers = NULL;
-  pthread_mutex_unlock(&comm->guard);
 }
 
 static void comm_free(struct ncclComm *comm) {
@@ -563,12 +560,15 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
    node's fabric address, else on its host name), and the root listens on that host alone where it is an IPv6 address
    (the fabric's ULA), else on every address; rank 0 takes every rank's report there and sends each the whole table,
    once for each of the init's two rounds, on sockets the communicator has for its later exchanges (a split's, a
-   grow's) and releases where its init fails.  A non-root's connect does not block: it is looked at every
-   BOOTSTRAP_SLICE_MS and tried again a slice after it fails; the root looks for a connection every slice; each wait
-   reads the communicator's revoke (ncclCommRevoke, ncclCommDestroy) at each look, and the revoke shuts the sockets
-   down, so an exchange under way ends.  Nothing else bounds a wait of the bootstrap. */
+   grow's) and releases where its init fails.  Every wait is a plain blocking call on its own socket: a non-root's
+   connect (where no address of the root takes it, tried again BOOTSTRAP_RETRY_MS later: an NCCL_COMM_ID may name a
+   root not listening yet, where a listener this library opens listens before any rank has its id), the root's
+   accept, and each send and receive.  A communicator under init is no other thread's until its init returns it, so
+   no revoke reaches its init, whose waits its peers alone end; an exchange on a communicator made ends at its revoke
+   too (ncclCommRevoke, ncclCommDestroy), which shuts its sockets down.  Nothing else bounds a wait of the
+   bootstrap. */
 static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
-#define BOOTSTRAP_SLICE_MS 100
+#define BOOTSTRAP_RETRY_MS 100
 
 /* a rank's report in a communicator's init's first round: its status (0, else why it cannot go on, so every rank fails
    alike), its bridge's node, its node's pool (`pages`: the fewer pages of its two classes, mesh.h struct mesh_pool)
@@ -596,14 +596,14 @@ static uint32_t comm_depth(const struct report *reports, int nranks) {
 }
 
 /* a listener on `host` alone where it is an IPv6 address, else on every address, at *port (0: any, *port then the
-   one bound), non-blocking (each accept is looked for first): its descriptor, or -1 and errno */
+   one bound), blocking (an accept waits for its connection): its descriptor, or -1 and errno */
 static int bootstrap_listen(const char *host, uint16_t *port) {
   struct sockaddr_in6 at = {.sin6_len = sizeof at, .sin6_family = AF_INET6, .sin6_port = htons(*port)};
   socklen_t length = sizeof at;
   int on = 1, fd = socket(AF_INET6, SOCK_STREAM, 0);
   if (inet_pton(AF_INET6, host, &at.sin6_addr) != 1) at.sin6_addr = in6addr_any;
   if (fd >= 0 && !setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) && !bind(fd, (struct sockaddr *)&at, sizeof at) &&
-      !listen(fd, 64) && !getsockname(fd, (struct sockaddr *)&at, &length) && !fcntl(fd, F_SETFL, O_NONBLOCK)) {
+      !listen(fd, 64) && !getsockname(fd, (struct sockaddr *)&at, &length)) {
     *port = ntohs(at.sin6_port);
     return fd;
   }
@@ -655,45 +655,35 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   return ncclSuccess;
 }
 
-/* `size` bytes sent or received whole on comm's bootstrap socket `fd`, its waits in slices (the socket's SO_RCVTIMEO
-   and SO_SNDTIMEO) that read the revoke: 0, ECANCELED (revoked), ECONNRESET (the peer ended the connection), or the
+/* `size` bytes sent or received whole on comm's bootstrap socket `fd`, each a plain blocking call, which comm's revoke
+   ends by shutting the socket down: 0, ECANCELED (revoked), ECONNRESET (the peer ended the connection), or the
    errno */
 static int whole(struct ncclComm *comm, int fd, void *bytes, size_t size, int sending) {
   for (size_t done = 0; done < size;) {
     const ssize_t moved = sending ? send(fd, (char *)bytes + done, size - done, 0) : recv(fd, (char *)bytes + done, size - done, 0);
-    if (moved < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-      if (revoked(comm)) return ECANCELED;
-      continue;
+    if (moved < 0 && errno == EINTR) continue;
+    if (moved <= 0) {
+      const int error = moved ? errno : ECONNRESET;
+      return revoked(comm) ? ECANCELED : error;
     }
-    if (moved <= 0) return moved ? errno : ECONNRESET;
     done += (size_t)moved;
   }
   return 0;
 }
 
-/* socket `fd` of comm's init placed at peers[r] (-1: the one there released), blocking in slices (an accepted one takes
-   its listener's O_NONBLOCK), under comm's guard, where a revoke shuts it down, a send on it after that or a peer's
-   reset an error, never SIGPIPE */
-static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
-  const struct timeval slice = {0, BOOTSTRAP_SLICE_MS * 1000};
-  if (fd >= 0) {
-    fcntl(fd, F_SETFL, 0);
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &(int){1}, sizeof(int));
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &slice, sizeof slice);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &slice, sizeof slice);
-  }
-  pthread_mutex_lock(&comm->guard);
-  if (fd < 0 && comm->peers[r] >= 0) close(comm->peers[r]);
-  comm->peers[r] = fd;
-  pthread_mutex_unlock(&comm->guard);
+/* a bootstrap socket `fd` whose sends never raise SIGPIPE: one after its peer's reset, or after its communicator's
+   revoke shut it down, is an error (EPIPE) */
+static int bootstrap_socket(int fd) {
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &(int){1}, sizeof(int));
+  return fd;
 }
 
 /* the bootstrap's sockets of comm's init at `id`: a non-root's to the root (peers[0], placed once connected), or the
    root's to each rank r (peers[r], placed by the rank its first-round report names, that report put in `reports`; a
-   socket not yet placed waits at peers[0]; one whose report fails or names no rank still to meet is released alone,
-   the root accepting the next).  The root accepts on `standing` where it is a listener (a parent's standing listener,
-   left open), else on the listener ncclGetUniqueId opened for `id`, else on one it opens at id's port, releasing
-   either once every rank has met: 0, ECANCELED (comm revoked), or the errno */
+   connection whose report fails or names no rank still to meet is released alone, the root accepting the next).  The
+   root accepts on `standing` where it is a listener (a parent's standing listener, left open), else on the listener
+   ncclGetUniqueId opened for `id`, else on one it opens at id's port, releasing either once every rank has met.
+   peers[] is written here and at the communicator's free alone, while no other thread holds it: 0, or the errno */
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports, int standing) {
   int *peers = comm->peers, status = 0;
   char host[NCCL_UNIQUE_ID_BYTES + 1];
@@ -703,49 +693,38 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   *colon = 0;
   if (comm->rank) {
     struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
-    while (peers[0] < 0 && !revoked(comm)) {
+    while (peers[0] < 0) {
       if (!getaddrinfo(host, colon + 1, &hint, &addresses)) {
-        for (struct addrinfo *a = addresses; a && peers[0] < 0 && !revoked(comm); a = a->ai_next) {
+        for (struct addrinfo *a = addresses; a && peers[0] < 0; a = a->ai_next) {
           const int fd = socket(a->ai_family, SOCK_STREAM, 0);
           if (fd < 0) continue;
-          int error = fcntl(fd, F_SETFL, O_NONBLOCK) || connect(fd, a->ai_addr, a->ai_addrlen) ? errno : 0;
-          struct pollfd look = {fd, POLLOUT, 0};
-          socklen_t length = sizeof error;
-          while (error == EINPROGRESS || error == EINTR)
-            if (revoked(comm)) error = ECANCELED;
-            else if (poll(&look, 1, BOOTSTRAP_SLICE_MS) < 0) error = errno == EINTR ? EINPROGRESS : errno;
-            else if (look.revents && getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length)) error = errno;
-          if (error) close(fd);
-          else bootstrap_put(comm, 0, fd);
+          if (connect(fd, a->ai_addr, a->ai_addrlen)) close(fd);
+          else peers[0] = bootstrap_socket(fd);
         }
         freeaddrinfo(addresses);
       }
-      if (peers[0] < 0) usleep(BOOTSTRAP_SLICE_MS * 1000);
+      if (peers[0] < 0) usleep(BOOTSTRAP_RETRY_MS * 1000);
     }
-    return revoked(comm) ? ECANCELED : 0;
+    return 0;
   }
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = standing >= 0 ? standing : !strcmp(root.id, id) ? root.fd : -1;
   if (listener < 0 && (listener = bootstrap_listen(host, &port)) < 0) return errno;
   for (int r = 1; r < comm->nranks && !status;) {
+    const int fd = accept(listener, NULL, NULL);
+    if (fd < 0) {
+      if (errno != EINTR && errno != ECONNABORTED) status = errno;
+      continue;
+    }
     struct report heard;
-    struct pollfd look = {listener, POLLIN, 0};
-    int fd = -1;
-    while (fd < 0 && !status)
-      if (revoked(comm)) status = ECANCELED;
-      else if (poll(&look, 1, BOOTSTRAP_SLICE_MS) < 0 && errno != EINTR) status = errno;
-      else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
-    if (!status) bootstrap_put(comm, 0, fd);
-    if (!status && revoked(comm)) status = ECANCELED;
-    const int read = status ? status : whole(comm, fd, &heard, sizeof heard, 0);
-    if (read == ECANCELED) status = read;
-    if (status) { bootstrap_put(comm, 0, -1); break; }
     /* a connection whose report does not come, or names no rank still to meet, is released alone */
-    if (read || heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0) { bootstrap_put(comm, 0, -1); continue; }
+    if (whole(comm, bootstrap_socket(fd), &heard, sizeof heard, 0) || heard.rank <= 0 || heard.rank >= comm->nranks ||
+        peers[heard.rank] >= 0) {
+      close(fd);
+      continue;
+    }
     reports[heard.rank] = heard;
-    pthread_mutex_lock(&comm->guard);
-    peers[heard.rank] = fd; peers[0] = -1;
-    pthread_mutex_unlock(&comm->guard);
+    peers[heard.rank] = fd;
     r++;
   }
   if (listener != standing) close(listener);
@@ -795,8 +774,7 @@ static ncclResult_t exchange(struct ncclComm *comm, const void *local, size_t by
    standing listener, from which every rank computes the same depth (comm_depth).  Then each rank takes its receive
    rings, nranks depth indices a channel (comm_receives), and the second round gathers each rank's status and the
    first receive index of each of its channels: with the first, the only exchange its calls need.  A rank that cannot
-   go on, or a depth of 0, fails every rank alike, made with nothing of its bridge's and its sockets released; a revoke
-   fails it as a value */
+   go on, or a depth of 0, fails every rank alike, made with nothing of its bridge's and its sockets released */
 static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   const int nranks = made->nranks, rank = made->rank;
   struct report *reports = calloc((size_t)nranks, sizeof *reports);
@@ -820,7 +798,6 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
   else if (status)
     result = fail(ncclSystemError, "communicator %s: its %u source pages of each class of this node's bridge, or its listener: %s",
                   made->name, SOURCES * CHANNELS, strerror(status));
-  else if (met == ECANCELED || revoked(made)) result = revoked_fail(made);
   else if (met) result = fail(ncclRemoteError, "communicator %s: the bootstrap at %s: %s", made->name, made->id, strerror(met));
   for (int r = 0; !result && r < nranks; r++)
     if (reports[r].status)
@@ -836,7 +813,6 @@ static ncclResult_t comm_init(struct ncclComm *made, int standing) {
     if (own->status)
       result = fail(ncclSystemError, "communicator %s: its %u receive indices of this node's bridge: %s", made->name,
                     (uint32_t)nranks * made->depth * CHANNELS, strerror(own->status));
-    else if (met == ECANCELED || revoked(made)) result = revoked_fail(made);
     else if (met) result = fail(ncclRemoteError, "communicator %s: the bootstrap at %s: %s", made->name, made->id, strerror(met));
     for (int r = 0; !result && r < nranks; r++)
       if (bases[r].status)

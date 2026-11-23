@@ -175,8 +175,11 @@ Making a communicator does the following, and a rank that cannot go on fails eve
 5. It takes the communicator's receive rings, and the second round gathers every rank's channels' first receive
    indices.
 
-The bootstrap's waits are 100 ms slices that read the revoke; nothing else bounds them. Two ranks of a communicator
-may share a node; a page between them is set at the destination index on that node without a SEND.
+The bootstrap's waits are plain blocking calls on its sockets. An init's waits end when its peers answer: a rank whose
+root does not listen yet connects again every 100 ms, and no revoke reaches an init, since no other thread holds the
+communicator until its init returns it. A split's or a grow's exchange over a communicator also ends at that
+communicator's revoke, which shuts its sockets down. Nothing else bounds them. Two ranks of a communicator may share
+a node; a page between them is set at the destination index on that node without a SEND.
 
 **Splits, shrinks and grows**:
 
