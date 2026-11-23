@@ -51,9 +51,8 @@ With B a rank's count of bytes, the calls move pages so:
 "One page" is at most `MESH_LONG_PAYLOAD` bytes (mesh-call.h). The single-phase all-reduce is not a timing rule: where
 the data is one page, both forms send one page to each peer, and the single phase saves a round.
 
-A rank's own part is copied in place, and not at all where it is there already (NCCL's in-place forms). Where the
-call also sends those bytes (an all-gather, a broadcast's root), each page of the copy is made from the source page
-the page was just copied into, after its first write. The all-to-all has no in-place form, as in NCCL.
+A rank's own part is copied in place, and not at all where it is there already (NCCL's in-place forms). The all-to-all
+has no in-place form, as in NCCL.
 
 ### Reductions
 

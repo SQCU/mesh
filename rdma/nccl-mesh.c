@@ -936,12 +936,11 @@ static _Thread_local struct call *calls;
 static _Thread_local size_t call_count, call_capacity;
 
 /* A phase of a call as this rank moves it: the messages it sends (`out`: `bytes` at `data`, premultiplied where `pre`,
-   to rank `to`, or to every other rank where `to` is -1, and copied to `local` too where it is set: this rank's own
-   part, made from each page as it is copied in) and those it receives (`in`: `bytes` from rank `from`, copied to
-   `to`), and, where `acc` is set, its reduction: `bytes` at `acc` made the combine, rank by rank, of every rank's,
-   this rank's at `own` and every other's a message to it.  A pair of ranks carries at most one message in a phase,
-   so a message's first page is its pair's count of pages as the phase begins */
-struct out { const unsigned char *data; size_t bytes; int to, pre; unsigned char *local; };
+   to rank `to`, or to every other rank where `to` is -1) and those it receives (`in`: `bytes` from rank `from`,
+   copied to `to`), and, where `acc` is set, its reduction: `bytes` at `acc` made the combine, rank by rank, of every
+   rank's, this rank's at `own` and every other's a message to it.  A pair of ranks carries at most one message in a
+   phase, so a message's first page is its pair's count of pages as the phase begins */
+struct out { const unsigned char *data; size_t bytes; int to, pre; };
 struct in { int from; size_t bytes; unsigned char *to; };
 struct phase { struct out *out; struct in *in; uint32_t outs, ins; unsigned char *acc; const unsigned char *own; size_t bytes; };
 
@@ -1010,9 +1009,8 @@ static int other(int me, uint32_t g) { return (int)g + ((int)g >= me); }
 /* the channel's pages of the phase sent one after another (each message's pages of the channel; each page to its
    destinations, one write to each MESH_DESTS of them by rank, every write from a source page of the channel's own,
    each destination the index its own pair's page number for the page names in its receive ring, of the channel's
-   indices there; and, where the message has a `local`, the page copied there from its source page once its first
-   write is on the ring, while its bytes are still in the core's cache), while a source page is free and the
-   channel's write ring takes them: 0 (the rest wait for a later pass), or -1 with the call's failure in *result */
+   indices there), while a source page is free and the channel's write ring takes them: 0 (the rest wait for a later
+   pass), or -1 with the call's failure in *result */
 static int send_some(struct channel_phase *m, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
@@ -1049,11 +1047,6 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
           *result = comm_fail(comm, ncclInternalError, "communicator %s: %s's write of its source page %u: %s", comm->name,
                               CALL_NAME[c->what], m->copied, strerror(status));
           return -1;
-        }
-        if (x->local && !m->g) {
-          size_t offset;
-          page_at(x->bytes, m->j, &offset);
-          memcpy(x->local + offset, mesh_page_data(channel->context, m->copied), m->copied_bytes);
         }
         m->copied = MESH_ABSENT;
         m->g += n;
@@ -1201,11 +1194,10 @@ static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c,
 
 /* A call's work descriptor (call_move), which every thread that moves a channel of it reads: its phases (a second for
    an all-reduce of more than one page: the all-gather of the reduced segments); this rank's one copy of its own part
-   where it lies apart from where it goes and no out-message carries it (`local`; an out-message's own: struct out),
-   and the reduction's own contribution where comm's scratch makes it (`fill`, the bytes it is copied, or
-   premultiplied, from), each made by the channels, page by page; the channels with pages (`active`: channels 0 to
-   active - 1) and the threads that move them (`threads`, thread t channels t, t + threads, ...); each thread's result
-   and its message */
+   where it lies apart from where it goes (`local`), and the reduction's own contribution where comm's scratch makes it
+   (`fill`, the bytes it is copied, or premultiplied, from), each made by the channels, page by page; the channels with
+   pages (`active`: channels 0 to active - 1) and the threads that move them (`threads`, thread t channels t,
+   t + threads, ...); each thread's result and its message */
 struct local { const unsigned char *from; unsigned char *to; size_t bytes; };
 struct work {
   struct call *call;
@@ -1340,15 +1332,13 @@ static const unsigned char *own_of(struct work *work, const unsigned char *from,
   work->fill = from;
   return comm->scratch;
 }
-/* this rank's own part, `bytes` at `from`, copied to `to` where the two lie apart: from each page of out-message
-   `sent` as it is copied in (send_some), where `sent` is given (a message of those bytes to other ranks), else by the
-   channels page by page (`local`, channel_local); here at once where they overlap; nothing where they are one */
-static void local_of(struct work *work, const unsigned char *from, unsigned char *to, size_t bytes, struct out *sent) {
+/* this rank's own part, `bytes` at `from`, copied to `to`: by the channels where the two lie apart (`local`), else
+   here at once; nothing where they are one */
+static void local_of(struct work *work, const unsigned char *from, unsigned char *to, size_t bytes) {
   const uintptr_t f = (uintptr_t)from, t = (uintptr_t)to;
   if (from == to) return;
-  if (f + bytes > t && t + bytes > f) memmove(to, from, bytes);
-  else if (sent) sent->local = to;
-  else work->local = (struct local){from, to, bytes};
+  if (f + bytes <= t || t + bytes <= f) work->local = (struct local){from, to, bytes};
+  else memmove(to, from, bytes);
 }
 /* the most pages any of a phase's messages, or its reduction, has */
 static uint64_t phase_pages(const struct phase *p) {
@@ -1369,8 +1359,7 @@ static uint64_t phase_pages(const struct phase *p) {
      AlltoAll       segment d of this rank's to rank d, landing at recvbuff + rank B
      Gather         every other rank's B to the root, landing at its recvbuff + rank B
      Scatter        the root's segment d to rank d
-   This rank's own part is copied in place (none where it is there already), from each page as it is copied in where
-   the call sends those bytes (an all-gather, a broadcast's root: local_of); a reduction goes rank by rank, so every
+   This rank's own part is copied in place (none where it is there already); a reduction goes rank by rank, so every
    rank computes the same bits; a floating average premultiplies every contribution by 1 / nranks, and an integer one
    divides the reduced sum by nranks.  Its pages are moved in channels, on as many of the pool's threads as it has
    channels with pages (work_launch): a call of one page on the calling thread alone */
@@ -1390,23 +1379,23 @@ static ncclResult_t call_move(struct call *c) {
   ncclResult_t result = ncclSuccess;
   switch (c->what) {
   case CALL_ALLGATHER:
-    out[p->outs++] = (struct out){send, bytes, -1, 0, NULL};
-    local_of(&work, send, recv + (size_t)me * bytes, bytes, n > 1 ? out : NULL);
+    local_of(&work, send, recv + (size_t)me * bytes, bytes);
+    out[p->outs++] = (struct out){send, bytes, -1, 0};
     for (int s = 0; s < n; s++)
       if (s != me) in[p->ins++] = (struct in){s, bytes, recv + (size_t)s * bytes};
     break;
   case CALL_BROADCAST:
     if (me != root) { in[p->ins++] = (struct in){root, bytes, recv}; break; }
-    out[p->outs++] = (struct out){send, bytes, -1, 0, NULL};
-    local_of(&work, send, recv, bytes, n > 1 ? out : NULL);
+    local_of(&work, send, recv, bytes);
+    out[p->outs++] = (struct out){send, bytes, -1, 0};
     break;
   case CALL_REDUCE:
-    if (me != root) { out[p->outs++] = (struct out){send, bytes, root, c->premultiplied, NULL}; break; }
+    if (me != root) { out[p->outs++] = (struct out){send, bytes, root, c->premultiplied}; break; }
     p->acc = recv; p->bytes = bytes;
     break;
   case CALL_REDUCE_SCATTER:
     for (int d = 0; d < n; d++)
-      if (d != me) out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, c->premultiplied, NULL};
+      if (d != me) out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, c->premultiplied};
     p->acc = recv; p->bytes = bytes;
     break;
   case CALL_ALLREDUCE:
@@ -1414,29 +1403,29 @@ static ncclResult_t call_move(struct call *c) {
     for (int d = 0; d < n; d++) {
       size_t length;
       const size_t first = segment(c->count, n, d, &length);
-      if (d != me) out[p->outs++] = (struct out){send + first * z, length * z, d, c->premultiplied, NULL};
+      if (d != me) out[p->outs++] = (struct out){send + first * z, length * z, d, c->premultiplied};
       else { p->acc = recv + first * z; p->bytes = length * z; }
     }
     break;
   case CALL_ALLTOALL:
-    local_of(&work, send + (size_t)me * bytes, recv + (size_t)me * bytes, bytes, NULL);
+    local_of(&work, send + (size_t)me * bytes, recv + (size_t)me * bytes, bytes);
     for (int d = 0; d < n; d++)
       if (d != me) {
-        out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0, NULL};
+        out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0};
         in[p->ins++] = (struct in){d, bytes, recv + (size_t)d * bytes};
       }
     break;
   case CALL_GATHER:
-    if (me != root) { out[p->outs++] = (struct out){send, bytes, root, 0, NULL}; break; }
-    local_of(&work, send, recv + (size_t)root * bytes, bytes, NULL);
+    if (me != root) { out[p->outs++] = (struct out){send, bytes, root, 0}; break; }
+    local_of(&work, send, recv + (size_t)root * bytes, bytes);
     for (int s = 0; s < n; s++)
       if (s != root) in[p->ins++] = (struct in){s, bytes, recv + (size_t)s * bytes};
     break;
   default: /* CALL_SCATTER */
     if (me != root) { in[p->ins++] = (struct in){root, bytes, recv}; break; }
-    local_of(&work, send + (size_t)root * bytes, recv, bytes, NULL);
+    local_of(&work, send + (size_t)root * bytes, recv, bytes);
     for (int d = 0; d < n; d++)
-      if (d != root) out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0, NULL};
+      if (d != root) out[p->outs++] = (struct out){send + (size_t)d * bytes, bytes, d, 0};
     break;
   }
   if (p->acc) {
@@ -1444,12 +1433,12 @@ static ncclResult_t call_move(struct call *c) {
     const unsigned char *own = c->what == CALL_REDUCE_SCATTER ? send + (size_t)me * bytes : send + at;
     if (!(p->own = own_of(&work, own, p->acc, p->bytes))) result = fail(ncclSystemError, "communicator %s: out of memory", comm->name);
     /* the single-phase all-reduce sends what it reduces with, made once */
-    if (c->what == CALL_ALLREDUCE && bytes <= MESH_LONG_PAYLOAD) out[p->outs++] = (struct out){p->own, bytes, -1, 0, NULL};
+    if (c->what == CALL_ALLREDUCE && bytes <= MESH_LONG_PAYLOAD) out[p->outs++] = (struct out){p->own, bytes, -1, 0};
   }
   if (!result && c->what == CALL_ALLREDUCE && bytes > MESH_LONG_PAYLOAD) {
     struct phase *q = work.phase + 1;
     *q = (struct phase){out + n, in + n, 0, 0, NULL, NULL, 0};
-    q->out[q->outs++] = (struct out){p->acc, p->bytes, -1, 0, NULL};
+    q->out[q->outs++] = (struct out){p->acc, p->bytes, -1, 0};
     for (int s = 0; s < n; s++)
       if (s != me) {
         size_t length;
