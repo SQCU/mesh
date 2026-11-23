@@ -1,6 +1,6 @@
 /* mesh-switch-stat: the switch as the bridge keeps it in its region (mesh-switched.h): its pool's pages and their free
    counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), its live
-   lanes' outboxes and feedback and its published view and weights, one JSON line to stdout.  It reads the region and
+   lanes' outboxes and feedback, and its published view and the refresh's neighbours, one JSON line to stdout.  It reads the region and
    writes nothing: two lines around a workload are its counts (their difference).
 
    usage: mesh-switch-stat   (MESH_REGION names another region, as the clients' attach) */
@@ -54,19 +54,13 @@ int main(void){
            U(x->service),U(x->wait),U(x->landed),rate,wait);
     first=0;
   }
-  /* the view and the weights as published (each its copy as its version names it) */
+  /* the view and the refresh's state as published (each its copy as its version names it) */
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
   const struct mesh_switch_weights *w=sw->weights+mesh_switch_published(&sw->weights_version);
   printf("],\"view\":[");
   for(uint32_t i=0;i<v->nodes && i<MESH_SWITCH_N;i++)printf("%s%u",i?",":"",v->node[i]);
   printf("],\"refreshes\":%llu,\"neighbour\":[",(unsigned long long)w->refreshes);
   for(uint32_t k=0;k<w->deg && k<MESH_SWITCH_N;k++)printf("%s%u",k?",":"",w->neighbour[k]);
-  printf("],\"w\":[");
-  for(uint32_t d=0;d<w->nodes && d<MESH_SWITCH_N;d++){
-    printf("%s[",d?",":"");
-    for(uint32_t k=0;k<w->deg && k<MESH_SWITCH_N;k++)printf("%s%.3f",k?",":"",w->w[d][k]);
-    printf("]");
-  }
   printf("]}\n");
   return 0;
 }

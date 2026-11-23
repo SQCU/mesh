@@ -29,7 +29,7 @@ LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdm
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 .build/mesh-stat: mesh-stat.c mesh-observe.h $(MESH_H) .build/libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
-# the switch's counters, lanes and weights read from the region, one JSON line
+# the switch's counters, lanes and view read from the region, one JSON line
 .build/mesh-switch-stat: mesh-switch-stat.c mesh-switched.h $(MESH_H) $(ROUTE_H) Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-switch-stat.c

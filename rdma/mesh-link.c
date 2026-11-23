@@ -732,12 +732,10 @@ static void link_heard(struct port *port,const struct message *heard){
 /* ---- design/PAGE-TABLE-SPEC-20261122.md: the switch, the parent's part -----------------------------------------
    The parent carves the node's pool once and makes its switch at its start, keeps the switch's view of the fabric as
    the records give it, keeps the node table (a node the map has, live while it does), and runs the refresh: a thread
-   of its own that recomputes the routing weights from the estimators every SWITCH_REFRESH_NS (mesh-switched.h
-   mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it had is given back
+   of its own that recomputes the node's out-neighbours, the cost-to-go and its own links' lines from the estimators
+   every SWITCH_REFRESH_NS (mesh-switched.h mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it had is given back
    here (switch_child_free): nothing is sent again, and each page it had is counted `lost` */
 #define SWITCH_REFRESH_NS ((uint64_t)MESH_SWITCH_REFRESH_NS)
-#define SWITCH_DRAWS MESH_SWITCH_DRAWS
-#define SWITCH_ETA MESH_SWITCH_ETA
 /* the node table's entry of `node`, made (generation 1) as the map first has the node; MESH_ABSENT where every entry
    has another node (the refresh thread's alone) */
 static uint32_t node_slot(uint32_t node){
@@ -940,17 +938,18 @@ static void switch_policy_load(void){
   switch_policy_on=1;
   say("bridge: the routing policy's theta %s in memory (%lld bytes): its tables route\n",SWITCH_THETA,(long long)st.st_size);
 }
-/* the refresh, on a thread of its own: the view updated, the weights recomputed, the policy's tables published */
+/* the refresh, on a thread of its own: the view updated, the neighbours, cost-to-go and lines recomputed, the policy's
+   tables published */
 static void *switch_watch(void *unused){
   (void)unused;
   pthread_setname_np("mesh.switch");
   struct mesh_switch *sw=mesh_switch_of(M);
-  uint64_t seed=mesh_switch_mix((uint64_t)getpid()^clock_ns()),point=0;
+  uint64_t point=0;
   static struct mesh_switch_tokens tokens;
-  const struct mesh_switch_policy policy={NULL,NULL,switch_policy_splits};
+  const struct mesh_switch_policy policy={NULL,switch_policy_splits};
   while(!stop){
     switch_view();
-    mesh_switch_refresh(sw,NULL,SWITCH_DRAWS,SWITCH_ETA,seed=mesh_switch_mix(seed),MESH_SWITCH_PAGE);
+    mesh_switch_refresh(sw,MESH_SWITCH_PAGE);
     if(switch_policy_on)mesh_switch_policy_refresh(sw,&policy,clock_ns(),++point,0,&tokens);
     MESH_SWITCH_COUNT(sw,MESH_SWITCH_PARENT,refreshes,1);
     struct timespec pause={0,(long)SWITCH_REFRESH_NS};

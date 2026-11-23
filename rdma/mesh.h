@@ -30,11 +30,11 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    names MESH_LINK_LANES lanes in `pair` (162's 10) */
 #define MESH_VERSION 163u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  183: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  184: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   182, the pool's runs have no slack after them (a SEND of a page covers its payload's class's frames, never more than
-   the page's own: mesh-switched.h mesh_switch_forward) */
-#define MESH_LAYOUT 183u
+   183, the switch keeps no routing weights (mesh-switched.h struct mesh_switch's `weighted` and the refresh's `w` and
+   `nodes` deleted: the earliest arrival routes, else the policy's split tables) */
+#define MESH_LAYOUT 184u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
