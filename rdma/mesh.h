@@ -102,10 +102,9 @@ struct mesh_pool { struct mesh_pool_class cls[MESH_CLASSES]; _Alignas(64) uint32
    other nodes (those on this node its writer sets itself: mesh-call.c mesh_write) */
 struct mesh_write { uint32_t pd,bytes,dests,unused; struct mesh_dest dest[MESH_DESTS]; };
 _Static_assert(sizeof(struct mesh_write)==16+8*MESH_DESTS,"mesh_write");
-/* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and as takers the port children,
-   each position one compare-exchange's: a child whose port is a write's first hop, and the child whose share the ring
-   is (ring s the (s mod n)-th of the n serving ports, by the port lines: mesh-switched.h struct mesh_switch `port`),
-   which takes a write the others left (mesh-switched.h mesh_switch_ring_dequeue).
+/* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and one taker, the port child
+   whose share it is (ring s the (s mod n)-th of the n serving ports, by the port lines: mesh-switched.h struct
+   mesh_switch `port`; as the serving ports change, two may take a moment, each position one compare-exchange's).
    `put` is the next position written and `take` the next taken.  Cell c (c = p mod MESH_RING) holds the write of
    position p from the producer's store of its sequence, p + 1, so a zeroed ring is empty; a taker copies the cell, then
    moves `take` past p by a compare-exchange, and carries its copy where that won; the cell is the producer's again
