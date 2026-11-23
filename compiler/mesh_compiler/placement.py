@@ -277,9 +277,11 @@ def bases(sizes):
 
 
 def own(graph, node, dimension, sizes, j):
-    if not uneven(sizes) or held_by(sizes, j)[1] == most(sizes):
+    if not uneven(sizes):
         return node
     start, count = held_by(sizes, j)
+    if count == most(sizes) or count == shape(node)[dimension]:
+        return node
     return call(graph, SLICE, (node, dimension, start, start + count), node.meta["processor"])
 
 
@@ -440,8 +442,12 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if several(value) or isinstance(dimension, tuple):
         return nodes if value[:3] == (dimension, sizes, processors) else across(
             graph, value, dimension, sizes, processors, exact)
-    if (held, extents, holders) == (dimension, sizes, processors) and not (exact and uneven(sizes)):
-        return nodes
+    if (held, extents, holders) == (dimension, sizes, processors):
+        if not uneven(sizes):
+            return nodes
+        if not exact:
+            return [padded(graph, n, held, sizes, i, holders[i]) if shape(n)[held] < most(sizes) else n
+                    for i, n in enumerate(nodes)]
     if len(processors) == 1 or dimension is None:
         dimension, sizes = None, None
     if uneven(extents):
@@ -1022,9 +1028,12 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
     queries = ranges(sizes, extent, len(processors)) if whole else ()
     joined = [v[0] is not None and along not in row and admissible(row[v[0]]) and
               (v[1] == STRIPED or sum(v[1]) == shapes[i][v[0]]) for i, (v, row) in enumerate(zip(held, rows))]
+    local_extent = (sizes == STRIPED or sum(sizes) == extent) and (
+        node.target in (MM, BMM, ADDMM, ATEN.permute.default, ATEN.t.default, ATEN.transpose.int)
+        or torch.Tag.pointwise in getattr(node.target, "tags", ()))
     columns = [None if join else reshard(graph, plainly(graph, v) if (v[0], v[1], v[2]) != (
         row.index(along) if along in row else None, sizes, processors) else v,
-        row.index(along) if along in row else None, sizes, processors)
+        row.index(along) if along in row else None, sizes, processors, exact=local_extent)
         for v, row, join in zip(held[bool(window):], rows[bool(window):], joined[bool(window):])]
     columns[:0] = [regions] if window else []
     # Y. Xu et al., GSPMD, arXiv:2105.04663, sections 4.3 and 4.5; design/aot-compilation-change-request.md A4
@@ -1076,7 +1085,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
         order = {label: blocks for label, blocks in order.items() if carried(label) and
                  [index for block in blocks for index in range(*block)] != list(range(extent_of(node, label, out)))}
         arguments = iter(local)
-        if summing(along):
+        if summing(along) and not local_extent:
             local = [masked(graph, n, row.index(along), sizes, j, processor) if along in row else n
                      for n, row in zip(local, rows)]
             arguments = iter(local)
@@ -1098,7 +1107,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
                 sized[label] = sum(len(range(*block)) for block in blocks)
             shard.args = (shard.args[0], sized)
         shard.meta.update(of=node.name, order=order, pairs=pairs, units=(
-            len(range(j, extent, len(processors))) if sizes == STRIPED else max(sizes) if uneven(sizes) else sizes[j],
+            held_by(sizes, j)[1] if local_extent or sizes == STRIPED else most(sizes),
             extent if sizes == STRIPED else sum(sizes)))
         shards.append(evaluated(shard, processor))
         # a window shard's computed rows cut to its own: a multi-result shard's each result's by its projection
