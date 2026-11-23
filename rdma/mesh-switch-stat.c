@@ -1,7 +1,8 @@
 /* mesh-switch-stat: the switch as the bridge keeps it in its region (mesh-switched.h): its pool's pages and their free
-   counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), its live
-   lanes' outboxes and feedback, and its published view and the refresh's neighbours, one JSON line to stdout.  It reads the region and
-   writes nothing: two lines around a workload are its counts (their difference).
+   counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), each
+   port's line (its child's state, its link's peer and plan) and cable's queue, its serving or used lanes' outboxes and
+   feedback, and its published view, one JSON line to stdout.  It reads the region and writes nothing: two lines around
+   a workload are its counts (their difference).
 
    usage: mesh-switch-stat   (MESH_REGION names another region, as the clients' attach) */
 #include <errno.h>
@@ -42,15 +43,24 @@ int main(void){
     printf("\"starved\":%llu,\"refreshes\":%llu,",U(c->starved),U(c->refreshes));
     printf("\"unreachable\":%llu,\"lost\":%llu,\"malformed\":%llu}",U(c->unreachable),U(c->lost),U(c->malformed));
   }
+  printf("],\"ports\":[");
+  uint64_t line[MESH_PORTS];
+  for(uint32_t p=0;p<MESH_PORTS;p++){
+    line[p]=atomic_load_explicit(&sw->port[p],memory_order_acquire);
+    printf("%s{\"port\":%u,\"state\":%u,\"peer\":%u,\"plan\":%u,\"queued\":%llu}",p?",":"",p,mesh_port_state(line[p]),
+           mesh_port_peer(line[p]),mesh_port_plan(line[p]),U(sw->cable[p].queued));
+  }
   printf("],\"lanes\":[");
   int first=1;
   for(uint32_t l=0;l<MESH_SWITCH_LANES;l++){
     const struct mesh_switch_lane *x=sw->lane+l;
-    if(!U(x->sends) && !U(x->landed) && !U(x->live))continue;
+    const uint32_t p=mesh_switch_port_of(l),j=l%(2*MESH_LINK_STREAMS);
+    const int serving=mesh_port_state(line[p])==CHILD_SERVING && mesh_port_plan(line[p])>>j&1;
+    if(!U(x->sends) && !U(x->landed) && !serving)continue;
     float rate,wait;mesh_switch_unpack(atomic_load_explicit(&x->estimate,memory_order_relaxed),&rate,&wait);
-    printf("%s{\"lane\":%u,\"live\":%llu,\"peer\":%llu,\"frames\":%llu,\"queued\":%llu,\"tail\":%llu,\"head\":%llu,\"done\":%llu,"
+    printf("%s{\"lane\":%u,\"serving\":%d,\"frames\":%u,\"tail\":%llu,\"head\":%llu,\"done\":%llu,"
            "\"sends\":%llu,\"bytes\":%llu,\"service\":%llu,\"wait\":%llu,\"landed\":%llu,\"rate\":%g,\"est_wait\":%g}",
-           first?"":",",l,U(x->live),U(x->peer),U(x->frames),U(x->queued),U(x->tail),U(x->head),U(x->done),U(x->sends),U(x->bytes),
+           first?"":",",l,serving,mesh_switch_lane_frames(j),U(x->tail),U(x->head),U(x->done),U(x->sends),U(x->bytes),
            U(x->service),U(x->wait),U(x->landed),rate,wait);
     first=0;
   }
@@ -59,8 +69,6 @@ int main(void){
   const struct mesh_switch_weights *w=sw->weights+mesh_switch_published(&sw->weights_version);
   printf("],\"view\":[");
   for(uint32_t i=0;i<v->nodes && i<MESH_SWITCH_N;i++)printf("%s%u",i?",":"",v->node[i]);
-  printf("],\"refreshes\":%llu,\"neighbour\":[",(unsigned long long)w->refreshes);
-  for(uint32_t k=0;k<w->deg && k<MESH_SWITCH_N;k++)printf("%s%u",k?",":"",w->neighbour[k]);
-  printf("]}\n");
+  printf("],\"refreshes\":%llu}\n",(unsigned long long)w->refreshes);
   return 0;
 }

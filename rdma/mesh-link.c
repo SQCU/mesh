@@ -59,25 +59,34 @@ void wake(void){
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
 }
+/* the port's line (mesh-switched.h struct mesh_switch `port`) leaving where its child has made its lanes or serves
+   them: from the next pass on no draw pushes onto its lanes and no child takes for it (a child whose lanes are not
+   made keeps its device for a later pairing) */
+static inline struct mesh_switch *switch_of(void){ return mesh_switch_of(M); }
+static void port_leaving(const struct port *port){
+  mesh_port_move(switch_of(),port->index,1u<<CHILD_LANES_MADE|1u<<CHILD_SERVING,CHILD_LEAVING,0,0);
+}
 /* design/transport.md: a port halted from any thread (a peer interface's termination heard, a provider's fault
    absorbed; atomics alone): its pairing lost, so no job of it makes a further call (B10), then no lane of its link
-   served, both sequentially consistent (link_turn's connect stores served and reads the pairing again), and its bit set
-   in `which` for the event loop: the child's report to its parent (child_reports), the parent's conclusion
-   (terminations_turn) */
+   served and its line leaving, each sequentially consistent (child_jobs' connect moves the line to serving, stores
+   served and reads the pairing again), and its bit set in `which` for the event loop: the child's report to its
+   parent (child_reports), the parent's conclusion (terminations_turn) */
 _Static_assert(MESH_PORTS<=32,"a bit a port");
 static void port_halt(struct port *port,_Atomic uint32_t *which){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
+  port_leaving(port);
   atomic_fetch_or(which,UINT32_C(1)<<port->index);
 }
 
-/* a lane's failure, found by a progress thread: served no more, and the link lost by the event loop on reading
-   `broken` (link_turn) */
+/* a lane's failure, found by a progress thread: served no more, its port's line leaving (no draw takes any lane of
+   the link from the next pass on), and the link lost by the event loop on reading `broken` (link_turn) */
 static void lane_lost(struct port *port,uint32_t lane,int64_t code){
   struct link *l=&port->link;
   if(atomic_fetch_and_explicit(&l->served,~(UINT32_C(1)<<lane),memory_order_acq_rel)>>lane&1)
     say("link %u (%s): lane %u failed: %s; the link toward node %u lost\n",port->index,port->name,lane,
         strerror((int)(code>0?code:EIO)),port->peer);
+  port_leaving(port);
   atomic_fetch_or_explicit(&l->broken,UINT32_C(1)<<lane,memory_order_release);
   wake();
 }
@@ -100,11 +109,12 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
   return k;
 }
 /* design/transport.md: the link's first failed completion, on any lane, or a failed poll: no lane of the
-   link served from here, so nothing is posted on it again, and the link lost by the event loop on reading `broken`
-   (link_turn) */
+   link served from here, so nothing is posted on it again, its port's line leaving, and the link lost by the event
+   loop on reading `broken` (link_turn) */
 static void link_failed(struct port *port,int64_t code,uint32_t domain){
   struct link *l=&port->link;
   const uint32_t served=atomic_exchange_explicit(&l->served,0,memory_order_acq_rel);
+  port_leaving(port);
   if(served)say("link %u (%s): a completion failed (code %lld, domain %u): no lane served, the link toward node %u lost\n",
                 port->index,port->name,(long long)code,domain,port->peer);
   atomic_fetch_or_explicit(&l->broken,served,memory_order_release);
@@ -123,7 +133,6 @@ static void link_failed(struct port *port,int64_t code,uint32_t domain){
    forwarded by its header; what this node's clients write is taken from their rings and carried.  Nothing is retained:
    what cannot go is counted (mesh-switched.h struct mesh_switch_counters), never retried.  The child's log ring,
    counters and hand are its port's */
-static inline struct mesh_switch *switch_of(void){ return mesh_switch_of(M); }
 static inline uint32_t switch_lane(const struct port *port,uint32_t j){ return port->index*2*MESH_LINK_STREAMS+j; }
 static inline struct mesh_switch_hand *hand_of(const struct port *port){ return switch_of()->hand+port->index; }
 /* page pd made a receive of lane j (its state RECEIVE on the switch's lane), before it is posted: a child's end
@@ -289,24 +298,44 @@ static void link_receive(struct port *port,uint32_t served){
   }
   for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(agains[j])receives_post(port,j,again[j],agains[j]);
 }
-/* the writes this node's clients put on the rings this child takes (mesh-switched.h struct mesh_switch `taker`: the
-   rings its parent names its port's, switch_takers), taken and carried, at most SWITCH_BURST a pass, each of those
-   rings with writes on it looked at from the slot after the one where this child began its last pass, whichever
-   client the slot is now (a write is carried on its own ring use, its writer there or exited).  As the parent names
-   another port for a ring this child may take from it a moment longer, and the ring's compare-exchange gives each
-   write to one child */
+/* the client rings this child takes: ring s the (s mod n)-th, by port index, of the n ports whose child serves (their
+   lines CHILD_SERVING with a lane), bits over the slots; none while this port does not serve.  Made again only as the
+   serving ports change (`serving`, the child's copy of them, a bit a port) */
+static uint64_t switch_mine(const struct port *port){
+  static uint32_t serving=UINT32_MAX;
+  static uint64_t mine;
+  uint64_t line[MESH_PORTS];
+  mesh_switch_ports_read(switch_of(),line);
+  uint32_t serves=0;
+  for(uint32_t p=0;p<MESH_PORTS;p++)if(mesh_port_state(line[p])==CHILD_SERVING && mesh_port_plan(line[p]))serves|=UINT32_C(1)<<p;
+  if(serves==serving)return mine;
+  serving=serves;mine=0;
+  if(serving>>port->index&1){
+    const uint32_t n=(uint32_t)__builtin_popcount(serving),r=(uint32_t)__builtin_popcount(serving&((UINT32_C(1)<<port->index)-1));
+    for(uint32_t s=r;s<MESH_CLIENTS;s+=n)mine|=UINT64_C(1)<<s;
+  }
+  return mine;
+}
+/* the writes this node's clients put on the rings this child takes (switch_mine), taken and carried, at most
+   SWITCH_BURST a pass, each of those rings with writes on it looked at from the slot after the one where this child
+   began its last pass, whichever client the slot is now (a write is carried on its own ring use, its writer there or
+   exited).  As the serving ports change, the child whose share a ring was may take from it a moment longer, and the
+   ring's compare-exchange gives each write to one child */
 #define SWITCH_BURST 16u
+_Static_assert(MESH_CLIENTS==64,"a client slot a bit of a mask");
 static void switch_takes(struct port *port){
   struct mesh_switch *sw=switch_of();
   struct link *l=&port->link;
+  const uint64_t mine=switch_mine(port);
+  const uint32_t from=l->take_from%MESH_CLIENTS;
   uint32_t taken=0;uint64_t at=0;
-  for(uint32_t k=0;k<MESH_CLIENTS && taken<SWITCH_BURST;k++){
-    const uint32_t slot=(l->take_from+k)%MESH_CLIENTS;
-    if((uint32_t)atomic_load_explicit(&sw->taker[slot],memory_order_relaxed)!=port->index || !mesh_ring_pending(mesh_ring_at(M,slot)))continue;
+  for(uint64_t k=from?mine>>from|mine<<(MESH_CLIENTS-from):mine;k && taken<SWITCH_BURST;k&=k-1){
+    const uint32_t slot=((uint32_t)__builtin_ctzll(k)+from)%MESH_CLIENTS;
+    if(!mesh_ring_pending(mesh_ring_at(M,slot)))continue;
     if(!at)at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     taken+=mesh_switch_ring_dequeue(M,sw,slot,SWITCH_BURST-taken,at,port->index,hand_of(port));
   }
-  l->take_from=(l->take_from+1)%MESH_CLIENTS;
+  l->take_from=(from+1)%MESH_CLIENTS;
 }
 
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: one pass of a port's progress thread over the lanes the link serves
@@ -354,7 +383,7 @@ static void *port_progress(void *argument){
   stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
   atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
-  mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_lanes_among) */
+  mesh_switch_home=port->index;   /* this thread posts its own port's lanes (mesh-switched.h mesh_switch_cables_toward) */
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     /* while its link serves no lane, no pass (no post on any queue pair of its device) and no lane read: the thread
        waits on the lanes served, so a change of that word between the read and the wait ends the wait at once, woken
@@ -449,15 +478,18 @@ uint64_t owners[MESH_CLIENTS];
 /* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
 /* design/node-addressed-transfers.md: this node's reach as its record tells it (mesh-records.c record_changed): an
-   entry a cable whose link is up with lanes, the peer node and that cable's port bandwidth, at most `room`; their
-   count.  mesh-dataflow.c mesh_join counts a pair's entries as its parallel cables (the fewer of the two ends'), so a
-   pair of three cables is three links of the map, never one link at their summed bandwidth.  The entries name nodes
+   entry a cable whose child serves a stream (its port's line CHILD_SERVING), the peer node its line names and that
+   cable's port bandwidth, at most `room`; their count.  mesh-dataflow.c mesh_join counts a pair's entries as its
+   parallel cables (the fewer of the two ends'), so a pair of three cables is three links of the map, never one link
+   at their summed bandwidth.  The entries name nodes
    and bandwidths, never ports: which cable carries a page is the switch's, as it moves (mesh-switched.h) */
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
-  for(uint32_t p=0;p<port_count && count<room;p++)
-    if(ports[p].link.state==LINK_UP && ports[p].peer && plan_streams(ports[p].link.plan))
-      reach[count++]=(struct mesh_reach){.node=ports[p].peer,.padding=1,.bandwidth=ports[p].bandwidth};
+  for(uint32_t p=0;p<port_count && count<room;p++){
+    const uint64_t line=atomic_load(&switch_of()->port[ports[p].index]);
+    if(mesh_port_state(line)==CHILD_SERVING && mesh_port_peer(line) && plan_streams(mesh_port_plan(line)))
+      reach[count++]=(struct mesh_reach){.node=mesh_port_peer(line),.padding=1,.bandwidth=ports[p].bandwidth};
+  }
   return count;
 }
 /* a port's link as the port table tells it; a change is a new record */
@@ -537,11 +569,12 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
 /* design/transport.md section 14, "A process a port": the link's lane records opened as its lanes connect, by the
    child before any lane is served: each lane's requests posted and completed each way 0 (its queue pairs are new),
    this child their poster (`child`, `child_start`), the peer node, the link's bandwidth and identity told; then each
-   lane the switch's, live toward the peer, its outbox first emptied of what was pushed onto it after its last
-   child's end (mesh-switched.h mesh_switch_lane_drop: pages for the lane's last link, each counted `lost` in the
-   port's counters: its progress thread passes no lane yet), the short lane (lane 0) first (a draw that reads a
-   long one live then reads the short one live: mesh-switched.h mesh_switch_lanes_among) */
-static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
+   lane's outbox emptied of what was pushed onto it after its last child's end (mesh-switched.h mesh_switch_lane_drop:
+   pages for the lane's last link, each counted `lost` in the port's counters: its progress thread passes no lane
+   yet), and the port's line moved from its lanes made to serving toward the peer with the link's plan (one release
+   of them all: a draw that reads it serving reads every lane's outbox emptied).  1 where the line moved, 0 where it
+   was not at its lanes made (a halt came first: it is leaving) */
+static int lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
     struct mesh_lanes *x=lanes_of(port,s);
@@ -553,17 +586,10 @@ static void lanes_open(struct port *port,uint32_t node,uint64_t bandwidth){
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
     atomic_store_explicit(&x->bandwidth,bandwidth,memory_order_relaxed);
     atomic_store_explicit(&x->wire,l->wire[0],memory_order_relaxed);
-    atomic_thread_fence(memory_order_release);
-    atomic_store_explicit(&x->live,1,memory_order_release);
   }
   struct mesh_switch *sw=switch_of();
-  for(uint32_t j=0;j<plan_lanes(l->plan);j++){
-    struct mesh_switch_lane *x=sw->lane+switch_lane(port,j);
-    mesh_switch_lane_drop(M,sw,switch_lane(port,j),port->index);
-    atomic_store_explicit(&x->peer,node,memory_order_relaxed);
-    atomic_store_explicit(&x->frames,mesh_switch_lane_frames(j),memory_order_relaxed);
-    atomic_store_explicit(&x->live,1,memory_order_release);
-  }
+  for(uint32_t j=0;j<plan_lanes(l->plan);j++)mesh_switch_lane_drop(M,sw,switch_lane(port,j),port->index);
+  return mesh_port_move(sw,port->index,1u<<CHILD_LANES_MADE,CHILD_SERVING,node,l->plan);
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
@@ -605,30 +631,22 @@ static void lane_reset(struct port *port,uint32_t k){
   l->lane[k]=(struct lane_state){.frame_capacity=room.n};
   atomic_thread_fence(memory_order_release);
 }
-/* the lane records of a port (`port` NULL: of every port) live no more, as its link is lost or the bridge stops, and
-   its switch lanes with them: no draw takes them, and what their outboxes have is dropped as their child ends
-   (switch_child_free).  Its long lanes first and its short lane (lane 0) last, each a release store: a draw reads
-   a link's lanes in their order, the short one first, and one that reads it as this store left it then reads every
-   long one not live, so the cancel never shows a draw the link's long lanes live without its short lane (a short page
-   goes on a short lane alone: mesh-switched.h mesh_switch_lanes_among) */
+/* the line of a port (`port` NULL: of every port) leaving, as its link is lost or the bridge stops, where its child
+   has made its lanes (port_leaving): no draw takes its lanes and no child takes for it from the next pass on, even
+   while its progress thread is stuck in a provider call, and what their outboxes have is dropped as their child ends
+   (switch_child_free) */
 void lanes_cancel(const struct port *port){
-  for(uint32_t p=0;p<port_count;p++){
-    if(port && ports+p!=port)continue;
-    for(uint32_t j=2*MESH_LINK_STREAMS;j-->0;)atomic_store_explicit(&switch_of()->lane[switch_lane(ports+p,j)].live,0,memory_order_release);
-    for(uint32_t s=0;s<MESH_LINK_STREAMS;s++)atomic_store_explicit(&lanes_of(ports+p,s)->live,0,memory_order_release);
-  }
+  for(uint32_t p=0;p<port_count;p++)if(!port || ports+p==port)port_leaving(ports+p);
 }
 /* design/transport.md section 14: the link's turn, on the event loop: a job's end taken (made: LINK told the peer every
    lane; connected: up, every lane served, the stream live, the peer sent the map's records it lacks and then this
-   node's own naming the link, the clients' rings' takers named again with its port among them, switch_takers); a job that
-   failed loses the link (port_lost); while it is
+   node's own naming the link); a job that failed loses the link (port_lost); while it is
    up, a lane a progress thread found failed (`broken`) loses it; then, while no port's job is out past MESH_PLATFORM_NS (B12) and once the port's last
    quiet window has ended (B9), the lanes made once the port is paired (`lanes`: its child asked for them), and connected
    once both ends' are made, each by the port's child and once in its life: a link lost once its lanes were asked for
    pairs again with the port's next child (design/transport.md section 14, "A process a port": port_lost, child_turn,
    child_reaped) */
 static void child_job(struct port *port,int job);
-static void switch_takers(void);
 static void link_turn(struct port *port){
   struct link *l=&port->link;
   if(l->job){
@@ -653,7 +671,6 @@ static void link_turn(struct port *port){
          it (map_make) */
       map_tell(port);
       record_changed();
-      switch_takers();
     }
   }
   const int quiet=now<port->quiet_at;
@@ -732,9 +749,8 @@ static void link_heard(struct port *port,const struct message *heard){
 /* ---- design/PAGE-TABLE-SPEC-20261122.md: the switch, the parent's part -----------------------------------------
    The parent carves the node's pool once and makes its switch at its start, keeps the switch's view of the fabric and
    the node table (a node the map has, live while it does) as its event loop writes the map (switch_view), and runs
-   the refresh: a thread of its own that recomputes the node's out-neighbours, the cost-to-go and its own links' lines
-   from the estimators every SWITCH_REFRESH_NS (mesh-switched.h mesh_switch_refresh), so no page and no child ever
-   waits on it.  A port's child exited, what it had is given back here (switch_child_free): nothing is sent again, and
+   the refresh: a thread of its own that recomputes the cost-to-go and its own links' lines from the estimators every
+   SWITCH_REFRESH_NS (mesh-switched.h mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it had is given back here (switch_child_free): nothing is sent again, and
    each page it had is counted `lost` */
 #define SWITCH_REFRESH_NS ((uint64_t)MESH_SWITCH_REFRESH_NS)
 /* the node table's entry of `node`, made (generation 1) as the map first has the node; MESH_ABSENT where every entry
@@ -748,12 +764,12 @@ static uint32_t node_slot(uint32_t node){
   atomic_store_explicit(&x->node,node,memory_order_release);
   return n;
 }
-/* the frames the switch's lanes have queued and not completed (struct hdr `busy`) */
+/* the frames the switch's cables have queued and not completed (struct hdr `busy`) */
 uint64_t lanes_busy(void){
   const struct mesh_switch *sw=mesh_switch_of(M);
   uint64_t busy=0;
   if(sw->magic!=MESH_SWITCH_MAGIC)return 0;
-  for(uint32_t l=0;l<MESH_SWITCH_LANES;l++)busy+=atomic_load(&sw->lane[l].queued)/MESH_FRAME;
+  for(uint32_t p=0;p<MESH_PORTS;p++)busy+=atomic_load(&sw->cable[p].queued)/MESH_FRAME;
   return busy;
 }
 /* the payload bytes of the pool's pages, what this node's clients may fill (its record's `region`) */
@@ -841,7 +857,10 @@ void switch_view(void){
     if(s==MESH_ABSENT)continue;
     struct mesh_node *x=mesh_node_at(M,s);
     uint64_t bandwidth=0;
-    for(uint32_t p=0;p<port_count;p++)if(ports[p].link.state==LINK_UP && ports[p].peer==nodes[i])bandwidth+=ports[p].bandwidth;
+    for(uint32_t p=0;p<port_count;p++){
+      const uint64_t line=atomic_load(&mesh_switch_of(M)->port[ports[p].index]);
+      if(mesh_port_state(line)==CHILD_SERVING && mesh_port_peer(line)==nodes[i])bandwidth+=ports[p].bandwidth;
+    }
     atomic_store(&x->bandwidth,bandwidth);
     atomic_store_explicit(&x->live,1,memory_order_release);
     live|=1u<<s;
@@ -878,27 +897,16 @@ static int switch_left(uint32_t p){
 }
 /* design/PAGE-TABLE-SPEC-20261122.md section 5: a port's child exited, what it had given back: its hand settled (a
    write it took, a push it began), then its lanes' outboxes emptied (each SEND posted and not completed and each page
-   pushed and not posted dropped, counted `lost`) and the pages posted as its lanes' receives given back.  Its lanes
-   are no draw's already (lanes_cancel) */
+   pushed and not posted dropped, counted `lost`) and the pages posted as its lanes' receives given back, then its
+   port's line made new (STARTED, no peer, no plan) for its next child: no process but this one writes it now.  Its
+   lanes are no draw's already (lanes_cancel) */
 static void switch_child_free(struct port *port){
   struct mesh_switch *sw=mesh_switch_of(M);
   switch_left(port->index);
   switch_settle();
   for(uint32_t j=0;j<2*MESH_LINK_STREAMS;j++)mesh_switch_lane_drop(M,sw,switch_lane(port,j),MESH_SWITCH_PARENT);
   mesh_switch_receives_drop(M,switch_lane(port,0),2*MESH_LINK_STREAMS);
-}
-/* each client ring's one taker named (mesh-switched.h struct mesh_switch `taker`): ring s the (s mod n)-th, by port
-   index ascending, of the n ports whose link is up with a lane (its child serves them: child_jobs), none while n
-   is 0; named again as a link comes up (link_turn), as one is lost (port_lost) and as a port's child is reaped
-   (child_reaped), by the event loop.  A child a ring was named for before may take from it a moment longer: each write
-   is one child's by the ring's compare-exchange, and a child's death mid-take is its hand's to settle (switch_settle) */
-static void switch_takers(void){
-  struct mesh_switch *sw=mesh_switch_of(M);
-  uint8_t serving[MESH_PORTS];uint32_t n=0;
-  for(uint32_t p=0;p<port_count;p++)
-    if(ports[p].link.state==LINK_UP && ports[p].link.plan)serving[n++]=(uint8_t)ports[p].index;
-  for(uint32_t s=0;s<MESH_CLIENTS;s++)
-    atomic_store_explicit(&sw->taker[s],(uint8_t)(n?serving[s%n]:MESH_SWITCH_NO_PORT),memory_order_relaxed);
+  atomic_store(&sw->port[port->index],0);
 }
 /* design/switched-multipath-dma.md: the trained routing policy in the bridge (rdma/route forward.c on the CPU): its
    theta read as the bridge starts from the POSIX shared memory object SWITCH_THETA (route_params_read_stream's bytes,
@@ -936,8 +944,8 @@ static void switch_policy_load(void){
   switch_policy_on=1;
   say("bridge: the routing policy's theta %s in memory (%lld bytes): its tables route\n",SWITCH_THETA,(long long)st.st_size);
 }
-/* the refresh, on a thread of its own: the neighbours, cost-to-go and lines recomputed over the published view, the
-   policy's tables published */
+/* the refresh, on a thread of its own: the cost-to-go and lines recomputed over the published view, the policy's
+   tables published */
 static void *switch_watch(void *unused){
   (void)unused;
   pthread_setname_np("mesh.switch");
@@ -990,11 +998,11 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
   message_heard(port,heard,payload);
 }
 
-/* design/transport.md section 14, #loss: a link lost has the clients' rings its port took given to the ports still up
-   (switch_takers), its lanes no draw's (lanes_cancel) and served no more before
-   its control socket closes (its child told, CHILD_HALT: no post on them once the peer can read the loss), what they
-   carried counted `lost` as its child's end is freed (switch_child_free); no verbs call is made
-   (design/RDMA-KERNEL-RECOVERY.md "October 18").  A link whose child was asked for its lanes (`lanes`) waits for that
+/* design/transport.md section 14, #loss: a link lost has its port's line leaving where its lanes were made (the
+   clients' rings its port took are then the other serving ports' shares, and its lanes no draw's: lanes_cancel), its
+   lanes served no more before its control socket closes (its child told, CHILD_HALT: no post on them once the peer
+   can read the loss), what they carried counted `lost` as its child's end is freed (switch_child_free); no verbs call
+   is made (design/RDMA-KERNEL-RECOVERY.md "October 18").  A link whose child was asked for its lanes (`lanes`) waits for that
    child's end (`recycle`: child_turn asks it once the port's quiet window has ended), whose exit the kernel's release
    of the lanes is, the port closed and greeting no peer meanwhile, and pairs again with the port's next child ("A
    process a port"); a port lost before its lanes were asked for and still open says hello at once (port_hello: the
@@ -1004,7 +1012,7 @@ static int child_send(struct port *port,struct child_message said);
 void port_lost(struct port *port,int64_t code){
   quiet_until(&port->quiet_at,now+MESH_PLATFORM_NS);
   link_lost(port);
-  switch_takers();
+  lanes_cancel(port);
   if(port->child){
     child_send(port,(struct child_message){.kind=CHILD_HALT,.pairing=atomic_load(&port->link.pairing)});
     if(port->link.lanes && !stop){port->recycle=1;port->open=0;}
@@ -1020,7 +1028,6 @@ void port_lost(struct port *port,int64_t code){
     else if(port->peer)say("link %u (%s): node %u lost: code %lld\n",port->index,port->name,port->peer,(long long)code);
     else say("link %u (%s): lost: code %lld\n",port->index,port->name,(long long)code);
   }
-  lanes_cancel(port);
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->in_length=0;port->out_length=port->out_sent=0;
   link_set(port,0,port->open?MESH_PAIRING:MESH_STOPPED,code);
 }
@@ -1632,9 +1639,9 @@ static void child_turn(struct port *port){
 /* the port's child ended: its last messages taken, its exit reaped, a job of it out ended (ECHILD); one that ended
    unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, at the
    events that open any port, however often its children ended (the operator, 2026-10-23 01:03Z: "this is not a real feature.
-   delete it and anything like it").  Its lanes no draw's, what it had given back (switch_child_free: its queue pairs
-   went with it, so nothing lands in or is read from its pages again), its link down with no lanes, the clients' rings'
-   takers named again without it (switch_takers), and the port to be opened by its next child */
+   delete it and anything like it").  Its lanes no draw's, what it had given back and its line made new
+   (switch_child_free: its queue pairs went with it, so nothing lands in or is read from its pages again), its link
+   down with no lanes, and the port to be opened by its next child */
 static void child_reaped(struct port *port){
   struct link *l=&port->link;
   const pid_t pid=port->child;
@@ -1661,7 +1668,6 @@ static void child_reaped(struct port *port){
   l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=(struct frames){0};l->plan=0;
   memset(l->qpn,0,sizeof l->qpn);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
-  switch_takers();
   port->opening=1;
 }
 
@@ -1711,12 +1717,14 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    listener cannot be armed ends there, terminations_watch).  It takes the parent's messages on descriptor 3 one after
    another: an open, a make or a connect of its link as a job on its port's queue (link_job, device_open; one asked
    while a job is out, or while a halt of its own is not yet answered by the parent's, is refused), a halt (no lane
-   served, a job out lapsed), an end, and a message of any other kind let be; and tells each job's end, naming the
-   pairing it was asked for.  A connect that ends while its pairing stands opens the link's lanes (lanes_open) and
-   then serves every lane, its pairing read again (port_halt's sequence).  The child ends at its parent's word, once
-   its own windows have ended (at most MESH_PLATFORM_NS on), or at its parent's loss (the socket's end, or a message
-   to it the socket did not take whole: child_tell), its lanes served no more, MESH_PLATFORM_NS and its windows on (at
-   most twice that): its exit, the kernel's release of its device's objects, no verbs call made */
+   served, a job out lapsed, its line leaving where its lanes were made), an end, and a message of any other kind let
+   be; and tells each job's end, naming the pairing it was asked for.  Its state is its port's line (mesh-switched.h
+   enum child_state), which it moves as its device opens, as its lanes are made and as they serve: a connect that ends
+   while its pairing stands opens the link's lanes (lanes_open, its line serving) and then serves every lane, its
+   pairing read again (port_halt's sequence).  The child ends at its parent's word, once its own windows have ended (at
+   most MESH_PLATFORM_NS on), or at its parent's loss (the socket's end, or a message to it the socket did not take
+   whole: child_tell), its lanes served no more and its line leaving, MESH_PLATFORM_NS and its windows on (at most
+   twice that): its exit, the kernel's release of its device's objects, no verbs call made */
 static uint32_t child_asked;
 static uint64_t child_bandwidth;
 static int child_halted;
@@ -1725,6 +1733,7 @@ static uint32_t child_got;
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
+  mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN|1u<<CHILD_LANES_MADE|1u<<CHILD_SERVING,CHILD_LEAVING,0,0);
   atomic_store_explicit(&port->closing,1,memory_order_release);
   progress_wake(port);
   const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
@@ -1746,7 +1755,7 @@ static void child_command(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
   if(heard->kind==CHILD_OPEN){if(!port->job)device_open(port);return;}
   if(heard->kind==CHILD_HALT){
-    atomic_fetch_add(&l->pairing,1);atomic_store(&l->served,0);progress_wake(port);
+    atomic_fetch_add(&l->pairing,1);atomic_store(&l->served,0);port_leaving(port);progress_wake(port);
     child_halted=0;
     return;
   }
@@ -1772,6 +1781,7 @@ static void child_jobs(struct port *port){
     port->job=0;
     struct child_message said={.kind=CHILD_OPENED,.result=port->result,.refused=port->refused};
     if(!port->result){
+      mesh_port_move(switch_of(),port->index,1u<<CHILD_STARTED|1u<<CHILD_DEVICE_OPEN,CHILD_DEVICE_OPEN,0,0);
       port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
       said.lid=port->lid;memcpy(said.gid,port->gid,16);said.bandwidth=port_bandwidth(&port->device.port);
       said.lanes=port->device.max_pairs;
@@ -1783,16 +1793,17 @@ static void child_jobs(struct port *port){
   l->job=0;
   struct child_message said={.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=child_asked,.result=l->result};
   if(!said.result && l->job_pairing!=atomic_load(&l->pairing))said.result=ECANCELED;
+  if(!said.result && job==LINK_JOB_MAKE && !mesh_port_move(switch_of(),port->index,1u<<CHILD_DEVICE_OPEN,CHILD_LANES_MADE,0,0))said.result=ECANCELED;
   if(!said.result && job==LINK_JOB_MAKE){
     for(uint32_t k=0;k<MESH_LINK_LANES;k++)said.qpn[k]=l->plan>>k&1?l->provider.queues[k].pair->qp_num:UINT32_MAX;
     said.psn=l->provider.psn;said.share=(uint32_t)l->share.n;
     port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
     said.lid=port->lid;memcpy(said.gid,port->gid,16);
   }
+  else if(!said.result && !lanes_open(port,port->peer,child_bandwidth))said.result=ECANCELED;
   else if(!said.result){
-    lanes_open(port,port->peer,child_bandwidth);
     atomic_store(&l->served,l->plan);
-    if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);said.result=ECANCELED;}
+    if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);port_leaving(port);said.result=ECANCELED;}
     progress_wake(port);
   }
   child_tell(port,said);
@@ -1922,12 +1933,12 @@ static void region_children(void){
 }
 /* the adopted region's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last) and
    before any child is spawned, once the children of the bridge before have ended (region_children): every lane record
-   not live and with no peer, the links' table cleared, a client slot whose leaving a process that died left half done
+   with no peer, the links' table cleared, a client slot whose leaving a process that died left half done
    finished (mesh.h mesh_leave, which any party can repeat to the same end), then what the bridge before had given
-   back at once, as a child's end gives it back (switch_child_free): every switch lane made not live, each hand of its
-   children settled, each lane's outbox emptied (a SEND posted or a page pushed: its use dropped, counted `lost`), and
-   every page posted as a receive given back (a switch of another layout is not read: what its outboxes and hands had
-   stays in use).  A child's device may still land bytes into a page its receives were posted into until the kernel
+   back at once, as a child's end gives it back (switch_child_free): each hand of its children settled, each lane's
+   outbox emptied (a SEND posted or a page pushed: its use dropped, counted `lost`), and every page posted as a
+   receive given back (a switch of another layout is not read: what its outboxes and hands had stays in use).  A
+   child's device may still land bytes into a page its receives were posted into until the kernel
    releases its objects in the child's exit, which another use may have by then: that is region memory, data, never
    firmware; the firmware rule, one process driving a device's queue pairs at a time, is met by the stop's wait on
    its own children until their exits end or MESH_PLATFORM_NS passes (main), and, where a bridge ended without that
@@ -1945,7 +1956,7 @@ static void region_adopt(void){
   region_children();
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_lanes *x=mesh_lanes_at(M,s);
-    atomic_store(&x->live,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
+    atomic_store(&x->peer,0);atomic_store(&x->wire,0);
   }
   struct mesh_link_info *links=mesh_links(M);
   for(uint32_t p=0;p<MESH_PORTS;p++){
@@ -1959,7 +1970,6 @@ static void region_adopt(void){
   uint64_t lost=0;
   if(sw->magic==MESH_SWITCH_MAGIC){
     const uint64_t before=atomic_load(&sw->counters[MESH_SWITCH_PARENT].lost);
-    for(uint32_t l=0;l<MESH_SWITCH_LANES;l++)atomic_store_explicit(&sw->lane[l].live,0,memory_order_release);
     for(uint32_t p=0;p<MESH_PORTS;p++)switch_left(p);
     switch_settle();
     for(uint32_t l=0;l<MESH_SWITCH_LANES;l++)mesh_switch_lane_drop(M,sw,l,MESH_SWITCH_PARENT);

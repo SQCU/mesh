@@ -30,11 +30,12 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    names MESH_LINK_LANES lanes in `pair` (162's 10) */
 #define MESH_VERSION 163u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  184: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  185: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   183, the switch keeps no routing weights (mesh-switched.h struct mesh_switch's `weighted` and the refresh's `w` and
-   `nodes` deleted: the earliest arrival routes, else the policy's split tables) */
-#define MESH_LAYOUT 184u
+   184, the switch has a line a port (mesh-switched.h struct mesh_switch `port`: its child's state, its link's peer and
+   plan, all in one cache line) and a queue a cable (`cable`), and no `taker`, no lane's live, peer, frames or queued,
+   and no neighbours or lanes in the refresh's weights; the lane records' `live` is `unused` */
+#define MESH_LAYOUT 185u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -95,10 +96,11 @@ struct mesh_pool { struct mesh_pool_class cls[MESH_CLASSES]; _Alignas(64) uint32
 struct mesh_write { uint32_t pd,bytes,dests,unused; struct mesh_dest dest[MESH_DESTS]; };
 _Static_assert(sizeof(struct mesh_write)==16+8*MESH_DESTS,"mesh_write");
 /* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and one taker, the port child
-   the bridge names for it (mesh-switched.h struct mesh_switch `taker`; as the bridge names another, both may take a
-   moment, each position one compare-exchange's).  Cell c has the write of position p (c = p mod MESH_RING) while
-   its sequence is 2 (p / MESH_RING) + 1 and is free for it while its sequence is 2 (p / MESH_RING), so a zeroed ring
-   is empty; `put` is the next position written and `take` the next taken */
+   whose share it is (ring s the (s mod n)-th of the n serving ports, by the port lines: mesh-switched.h struct
+   mesh_switch `port`; as the serving ports change, two may take a moment, each position one compare-exchange's).
+   Cell c has the write of position p (c = p mod MESH_RING) while its sequence is 2 (p / MESH_RING) + 1 and is free for
+   it while its sequence is 2 (p / MESH_RING), so a zeroed ring is empty; `put` is the next position written and `take`
+   the next taken */
 struct mesh_cell { _Atomic uint64_t sequence; struct mesh_write w; };
 struct mesh_ring { _Alignas(64) _Atomic uint64_t put; _Alignas(64) _Atomic uint64_t take; _Alignas(64) struct mesh_cell cell[MESH_RING]; };
 
@@ -108,14 +110,15 @@ struct mesh_ring { _Alignas(64) _Atomic uint64_t put; _Alignas(64) _Atomic uint6
 struct mesh_node { _Alignas(64) _Atomic uint32_t node; _Atomic uint32_t live; _Atomic uint64_t generation,bandwidth; };
 _Static_assert(sizeof(struct mesh_node)==64,"mesh_node");
 
-/* The bridge's lane records (never a client's): a port's lane pair s, its peer and identity while live, each lane's
-   requests posted and completed each way, its passes and SEND times, and the port child that posts them (`child`,
-   `child_start`); `unused` and `spare` are unused (every field keeps its offset: the heartbeat and observers read them) */
+/* The bridge's lane records (never a client's): a port's lane pair s, its peer and identity as its lanes last opened
+   (whether they serve is its port's line: mesh-switched.h struct mesh_switch `port`), each lane's requests posted and
+   completed each way, its passes and SEND times, and the port child that posts them (`child`, `child_start`); `unused`
+   and `spare` are unused (every field keeps its offset: the heartbeat and observers read them) */
 struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2],unused[2]; };
 _Static_assert(sizeof(struct mesh_posts)==64 && offsetof(struct mesh_posts,done)==16,"mesh_posts ABI");
 struct mesh_lanes {
   _Alignas(64) _Atomic uint32_t peer;
-  _Atomic uint32_t live;
+  uint32_t unused;
   uint64_t spare;
   _Atomic uint64_t bandwidth,wire;
   /* the passes its port's progress thread made (mesh-link.c port_pass) */
