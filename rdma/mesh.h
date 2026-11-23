@@ -20,22 +20,24 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  165:
+/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  166:
    every SEND is one page of the node's pool, MESH_HEAD bytes of header and then its payload, the header naming each
-   destination as a node and an index of that node's page table (mesh-switched.h struct mesh_head), a page sent on the
-   lanes of its payload's class alone, a link's lane j its queue pair j (mesh-bridge.h link_plan), and a line
-   (mesh-switched.h struct mesh_switch_line) carrying for each page class its link's measured time now and its idle
-   time, stamped with its sender's boot plus uptime.  Against 164: the header has no magic word (164's first, by which
-   its receiver dropped a page as no header), so each of its fields lies 4 bytes earlier, and its receiver tests
-   nothing of it, clamping each field that addresses memory (mesh-switched.h mesh_switch_landed) */
-#define MESH_VERSION 165u
+   destination as a node and an index of that node's page table (mesh-switched.h struct mesh_head), its receiver
+   testing nothing of it and clamping each field that addresses memory (mesh-switched.h mesh_switch_landed), a page
+   sent on the lanes of its payload's class alone, a link's lane j its queue pair j (mesh-bridge.h link_plan), and a
+   line (mesh-switched.h struct mesh_switch_line) carrying for each page class its link's time and its idle time,
+   stamped with its sender's boot plus uptime.  Against 165: a line a node passes on carries its time as that node
+   counts it as it sends (the sender's backlog less the time the node has held the line, mesh_switch_lines_give), and
+   a stamp is only ever compared with its own sender's, so a line's age is counted on each node's own clock; 165 sent
+   the sender's time as it was and judged a line's age by its stamp against the receiver's clock */
+#define MESH_VERSION 166u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  192: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  193: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and the switch's inbound and in-flight
-   rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`); against 191, each inbound ring
-   has MESH_POOL_PAGES entries, not a class's pages (a page goes on the ring of its payload's class, so a short ring may
-   hold long pages too) */
-#define MESH_LAYOUT 192u
+   rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane `flight`), each inbound ring of
+   MESH_POOL_PAGES entries; against 192, each remote line this node keeps (mesh-switched.h struct mesh_switch_heard)
+   has the time this node took it (`taken`), from which its backlog drains */
+#define MESH_LAYOUT 193u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes

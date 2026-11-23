@@ -51,9 +51,10 @@
      The trained recurrent policy (rdma/route) plugs in through struct mesh_switch_policy, as the split tables.
    - The estimators.  Diachronic and incremental: each cable's rate and a page's own time on it, for each class, from
      its SENDs' completions (mesh_switch_cable_sent; each lane's sums and estimate too, mesh_switch_sent); each remote
-     link's terms from the lines pages carry (mesh_switch_lines_take), live while young (MESH_SWITCH_STALE_NS); each
-     node's own links' lines made by the forward that sends them, stamped with its boot plus its uptime.  Nothing waits
-     for any of it.
+     link's terms from the lines pages carry (mesh_switch_lines_take), each line's backlog draining on this node's own
+     clock from the time it took the line (mesh_switch_line_cost); each node's own links' lines made by the forward that
+     sends them, stamped with its boot plus its uptime, which orders that node's own lines alone.  Nothing waits for any
+     of it.
 
    Every hop adds the node to the page's visited set and a lane is taken only toward a neighbour off it that reaches
    the destination avoiding it, so a path is simple and ends; each destination is in exactly one group at every hop.
@@ -105,11 +106,14 @@ _Static_assert(!(MESH_SWITCH_FLIGHT&(MESH_SWITCH_FLIGHT-1)) && MESH_SWITCH_FLIGH
    queueing at each hop, the wire's time) */
 struct mesh_hop { uint32_t node,index,next; float queued,transit; };
 /* a line: a directed link as its sender (`from`) measured it at `stamp` (its boot plus its uptime, ns: mesh_switch_stamp,
-   a clock every node's stamps share), for each class c of page (0 short, 1 long: mesh_switch_class): `cost[c]`, the
-   time (ns) a page of that class pushed then took to land through it, its quickest cable's backlog and the page's own
-   time on that cable (INFINITY: the link is down, none of its sender's ports serving toward its peer), and `idle[c]`,
-   the page's own time on its quickest cable with nothing queued (0: not measured), from its sender's measures of its
-   own cables (struct mesh_switch_cable) */
+   which orders that sender's own lines, a restarted bridge's after its last one's, and is never read against another
+   node's clock), for each class c of page (0 short, 1 long: mesh_switch_class): `cost[c]`, the time (ns) a page of
+   that class pushed then took to land through it, its quickest cable's backlog and the page's own time on that cable
+   (INFINITY: the link is down, none of its sender's ports serving toward its peer), and `idle[c]`, the page's own time
+   on its quickest cable with nothing queued (0: not measured), from its sender's measures of its own cables (struct
+   mesh_switch_cable).  A node that passes on another's line sends its cost as it counts it then
+   (mesh_switch_lines_give: its backlog less the time the node has held it), so a line's age is counted on each node's
+   own clock in turn */
 struct mesh_switch_line { uint32_t from,to; uint64_t stamp; float cost[MESH_CLASSES],idle[MESH_CLASSES]; };
 _Static_assert(sizeof(struct mesh_switch_line)==32,"a line's 32 bytes");
 /* the header, written by the bridge (never the client): the node that took the write (`source`); the payload's bytes;
@@ -170,9 +174,10 @@ struct mesh_switch_splits {
    queued ahead) */
 struct mesh_switch_cable { _Alignas(64) _Atomic uint64_t queued; _Atomic float rate,page[MESH_CLASSES]; };
 /* a remote link's line as this node took it from the headers that carried it (mesh_switch_lines_take), kept under its
-   ends' node table entries (struct mesh_switch_view `slot`), so it outlives every republish of the view: its
-   sender's stamp (0: no line heard) and its terms (struct mesh_switch_line) */
-struct mesh_switch_heard { _Atomic uint64_t stamp; _Atomic float cost[MESH_CLASSES],idle[MESH_CLASSES]; };
+   ends' node table entries (struct mesh_switch_view `slot`), so it outlives every republish of the view that keeps
+   the link: its sender's stamp (0: no line heard), the time this node took it (`taken`, its uptime clock,
+   CLOCK_UPTIME_RAW ns, from which its backlog drains: mesh_switch_line_cost) and its terms (struct mesh_switch_line) */
+struct mesh_switch_heard { _Atomic uint64_t stamp,taken; _Atomic float cost[MESH_CLASSES],idle[MESH_CLASSES]; };
 /* an entry of an inbound ring or an in-flight ring: page `pd`, and `at`, its push's clock on an inbound ring (the
    pusher's as its pass began) and its SEND's post on an in-flight ring (the lane child's clock as the post returned) */
 struct mesh_switch_entry { uint64_t at; uint32_t pd,unused; };
@@ -241,7 +246,7 @@ enum child_state { CHILD_STARTED, CHILD_DEVICE_OPEN, CHILD_LANES_MADE, CHILD_SER
    `cable`: each port's bytes queued and terms.  `heard`: each remote link's line, [its sender's node table
    entry][its receiver's, this node's MESH_NODES].  `inbound`: the inbound rings, [the pushing port][the cable's
    port][the class].  `stamp_offset`: the stamps' clock less the uptime clock
-   (mesh_switch_stamp), the parent's to set */
+   (mesh_switch_stamp), the parent's to set, once */
 _Static_assert(2*MESH_LINK_STREAMS<=8,"a port's plan a byte of its line");
 struct mesh_switch {
   uint32_t magic,padding;
@@ -289,8 +294,8 @@ _Static_assert(MESH_CLASSES==2,"two classes: short and long");
 static inline uint32_t mesh_switch_class(uint32_t frames){ return frames!=MESH_CLASS_SHORT; }
 static inline uint32_t mesh_switch_class_frames(uint32_t c){ return c?MESH_CLASS_LONG:MESH_CLASS_SHORT; }
 /* the stamp of uptime `now` (CLOCK_UPTIME_RAW, ns, the clock every process of the node reads): this node's boot plus its
-   uptime since, as the parent keeps their offset from the uptime clock (mesh-link.c switch_clock), the clock a line's
-   stamp is read on wherever it goes */
+   uptime since, their offset from the uptime clock the parent's, set once as it makes the switch (mesh-link.c
+   switch_make): an order of this node's own lines alone, never read against another node's clock */
 static inline uint64_t mesh_switch_stamp(const struct mesh_switch *sw,uint64_t now){
   return now+(uint64_t)atomic_load_explicit(&sw->stamp_offset,memory_order_relaxed);
 }
@@ -392,10 +397,32 @@ static inline uint32_t mesh_switch_index(const struct mesh_switch_view *v,uint32
   for(uint32_t i=0;i<v->nodes;i++)if(v->node[i]==node)return i;
   return UINT32_MAX;
 }
+static inline struct mesh_switch_link *mesh_switch_link_of(struct mesh_switch_view *v,uint32_t from,uint32_t to){
+  for(uint32_t l=0;l<v->links;l++)if(v->link[l].from==from && v->link[l].to==to)return v->link+l;
+  return NULL;
+}
+/* the line this node keeps of the remote link from view node a to view node b (a not this node), under their node
+   table entries; NULL where either is no view node or has no entry */
+static inline struct mesh_switch_heard *mesh_switch_heard_at(struct mesh_switch *sw,const struct mesh_switch_view *v,uint32_t a,uint32_t b){
+  if(a>=MESH_SWITCH_N || b>=MESH_SWITCH_N)return NULL;
+  const uint32_t sa=v->slot[a],sb=v->slot[b];
+  return sa<MESH_NODES && sb<=MESH_NODES?&sw->heard[sa][sb]:NULL;
+}
+/* the same by the link's ends' node numbers, `from` -> `to` (a header's line names them so) */
+static inline struct mesh_switch_heard *mesh_switch_heard_of(struct mesh_switch *sw,const struct mesh_switch_view *v,uint32_t from,uint32_t to){
+  return mesh_switch_heard_at(sw,v,mesh_switch_index(v,from),mesh_switch_index(v,to));
+}
+/* view link x's line as this node keeps it, by the link's ends' view indices (no node number looked up) */
+static inline struct mesh_switch_heard *mesh_switch_heard_link(struct mesh_switch *sw,const struct mesh_switch_view *v,const struct mesh_switch_link *x){
+  return mesh_switch_heard_at(sw,v,x->ends&255,x->ends>>8&255);
+}
 /* the view made from the fabric as the records give it, in the copy not published, then published: `nodes` node
    numbers (unsorted, at most MESH_SWITCH_N of them taken), each with its node table entry (`slots`: struct
    mesh_switch_view `slot`), and `links` directed pairs (node numbers, at most MESH_SWITCH_LINKS), each its cables,
-   rate (bytes a ns, every cable) and latency (ns); the policy's features' time scale made from them */
+   rate (bytes a ns, every cable) and latency (ns); the policy's features' time scale made from them.  A remote link
+   the published view lacks starts with no line kept (its stamp 0): what this node kept of it is from before it left
+   the view, its sender's word on a link since lost (INFINITY, the link down, among them), which no later line of the
+   sender's may have replaced */
 struct mesh_switch_fabric_link { uint32_t from,to,cables; double rate,latency; };
 static inline double mesh_switch_time_scale(const struct mesh_switch_view *v,double page);
 static inline void mesh_switch_view_set(struct mesh_switch *sw,uint32_t self,const uint32_t *nodes,const uint32_t *slots,uint32_t n,
@@ -416,6 +443,11 @@ static inline void mesh_switch_view_set(struct mesh_switch *sw,uint32_t self,con
     x->ends=(mesh_switch_index(v,x->from)&255)|(mesh_switch_index(v,x->to)&255)<<8;
   }
   v->links=made;
+  for(uint32_t l=0;l<made;l++){
+    const struct mesh_switch_link *x=v->link+l;
+    struct mesh_switch_heard *h=mesh_switch_heard_link(sw,v,x);
+    if(h && !mesh_switch_link_of((struct mesh_switch_view *)was,x->from,x->to))atomic_store_explicit(&h->stamp,0,memory_order_relaxed);
+  }
   /* each node's reach avoiding each set: a breadth-first search over the links' ends */
   uint32_t next[MESH_SWITCH_N]={0};
   for(uint32_t l=0;l<made;l++){const uint32_t a=v->link[l].ends&255,b=v->link[l].ends>>8&255;if(a<k && b<k)next[a]|=1u<<b;}
@@ -433,44 +465,24 @@ static inline void mesh_switch_view_set(struct mesh_switch *sw,uint32_t self,con
   v->scale=mesh_switch_time_scale(v,ROUTE_PAGE);
   atomic_store_explicit(&sw->view_version,version+1,memory_order_release);
 }
-static inline struct mesh_switch_link *mesh_switch_link_of(struct mesh_switch_view *v,uint32_t from,uint32_t to){
-  for(uint32_t l=0;l<v->links;l++)if(v->link[l].from==from && v->link[l].to==to)return v->link+l;
-  return NULL;
-}
-/* the line this node keeps of the remote link from view node a to view node b (a not this node), under their node
-   table entries; NULL where either is no view node or has no entry */
-static inline struct mesh_switch_heard *mesh_switch_heard_at(struct mesh_switch *sw,const struct mesh_switch_view *v,uint32_t a,uint32_t b){
-  if(a>=MESH_SWITCH_N || b>=MESH_SWITCH_N)return NULL;
-  const uint32_t sa=v->slot[a],sb=v->slot[b];
-  return sa<MESH_NODES && sb<=MESH_NODES?&sw->heard[sa][sb]:NULL;
-}
-/* the same by the link's ends' node numbers, `from` -> `to` (a header's line names them so) */
-static inline struct mesh_switch_heard *mesh_switch_heard_of(struct mesh_switch *sw,const struct mesh_switch_view *v,uint32_t from,uint32_t to){
-  return mesh_switch_heard_at(sw,v,mesh_switch_index(v,from),mesh_switch_index(v,to));
-}
-/* view link x's line as this node keeps it, by the link's ends' view indices (no node number looked up) */
-static inline struct mesh_switch_heard *mesh_switch_heard_link(struct mesh_switch *sw,const struct mesh_switch_view *v,const struct mesh_switch_link *x){
-  return mesh_switch_heard_at(sw,v,x->ends&255,x->ends>>8&255);
-}
-/* A remote line is live state while it is younger than MESH_SWITCH_STALE_NS on this node's stamps' clock, the clock
-   its sender stamped it on (each node's boot plus its uptime: mesh_switch_stamp); past that its link counts at its
-   idle terms (the page's own time on its quickest cable with nothing queued), not at the wait it had then.  50 ms,
-   because: a node's lines ride every page it sends, so a line of a node that carries traffic is microseconds old; a
-   queue a line describes drains within its own wait (on node B, 2026-11-23, the 446 us of A -> C and the 881 us of
-   M -> C held at idle were leftovers of traffic that had ended); and two nodes' stamps differ by the offset of their
-   wall clocks, which NTP keeps to milliseconds on one network.  50 ms is far above the first two and above the third,
-   so a live line is not taken for a stale one, and a stale one counts at most 50 ms past its traffic */
-#define MESH_SWITCH_STALE_NS UINT64_C(50000000)
-/* remote view link x's time for a page of class c at stamp `at`, from its line as this node keeps it (`h`, NULL:
-   none): the line's cost while the line is live (INFINITY where it says the link is down), else its idle term; and
-   *idle its idle term.  The view's nominal (the page's frames over the link's rate a cable, plus its latency) stands
-   for an idle term the line has not measured, and for both where there is no line */
-static inline double mesh_switch_line_cost(const struct mesh_switch_heard *h,const struct mesh_switch_link *x,uint32_t c,uint64_t at,double *idle){
+/* remote view link x's time for a page of class c at this node's uptime `now` (CLOCK_UPTIME_RAW, ns), from its line as
+   this node keeps it (`h`, NULL: none), and *idle its idle term (the page's own time on its sender's quickest cable
+   with nothing queued; the view's nominal, the page's frames over the link's rate a cable plus its latency, where the
+   line measured none).  A line's cost is its idle term and the backlog ahead of the page, and a backlog drains a
+   nanosecond each nanosecond, so the link counts at its idle term plus what the line's cost had beyond it less the
+   time since this node took the line (`taken`), and never below its idle term: a link whose traffic ended counts at
+   its idle term once its last line's backlog has drained.  Each time is on this node's own clock; no node's stamp is
+   read against another's.  INFINITY where the line says the link is down (until a later line of its sender's, or its
+   return to the view: mesh_switch_view_set).  The nominal stands for both where there is no line */
+static inline double mesh_switch_line_cost(const struct mesh_switch_heard *h,const struct mesh_switch_link *x,uint32_t c,uint64_t now,double *idle){
   const uint64_t stamp=h?atomic_load_explicit(&h->stamp,memory_order_relaxed):0;
   const double nominal=(double)mesh_switch_class_frames(c)*MESH_FRAME/(x->rate/x->cables)+x->latency,
                measured=stamp?atomic_load_explicit(&h->idle[c],memory_order_relaxed):0;
   *idle=measured>0?measured:nominal;
-  return stamp && at<stamp+MESH_SWITCH_STALE_NS?atomic_load_explicit(&h->cost[c],memory_order_relaxed):*idle;
+  if(!stamp)return *idle;
+  const uint64_t taken=atomic_load_explicit(&h->taken,memory_order_relaxed);
+  const double left=(double)atomic_load_explicit(&h->cost[c],memory_order_relaxed)-*idle-(now>taken?(double)(now-taken):0);
+  return left>0?*idle+left:*idle;
 }
 
 /* ---- The estimators ---------------------------------------------------------------------------------------------
@@ -518,10 +530,11 @@ static inline uint32_t mesh_switch_lines_fit(uint32_t bytes,uint64_t wire){
   return room<MESH_SWITCH_LINES?(uint32_t)room:MESH_SWITCH_LINES;
 }
 /* the lines a header carries (its `lines`, read once, as many as fit after `bytes` in `wire`) taken where newer than
-   the one this node keeps of the link (struct mesh_switch `heard`): a link's line is only ever made by its sender, so
-   a stamp is only ever compared with its sender's own, and a sender restarted, its boot later, is taken at once.  A
-   node's lines about its own links are its own measures, never taken */
-static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_head *head,uint32_t bytes,uint64_t wire){
+   the one this node keeps of the link (struct mesh_switch `heard`), each with this node's uptime `now` as it took it:
+   a link's line is only ever made by its sender, so a stamp is only ever compared with its sender's own, and a sender
+   restarted, its boot later, is taken at once.  A node's lines about its own links are its own measures, never
+   taken */
+static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_head *head,uint32_t bytes,uint64_t wire,uint64_t now){
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
   const uint32_t carried=__atomic_load_n(&head->lines,__ATOMIC_RELAXED),fit=mesh_switch_lines_fit(bytes,wire),lines=carried<fit?carried:fit;
   const struct mesh_switch_line *line=mesh_switch_lines_at(head,bytes);
@@ -536,6 +549,7 @@ static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_hea
         for(uint32_t c=0;c<MESH_CLASSES;c++){
           atomic_store_explicit(&h->cost[c],a->cost[c],memory_order_relaxed);atomic_store_explicit(&h->idle[c],a->idle[c],memory_order_relaxed);
         }
+        atomic_store_explicit(&h->taken,now,memory_order_relaxed);
         break;
       }
   }
@@ -605,10 +619,12 @@ static inline struct mesh_switch_line mesh_switch_own_line(const uint64_t *line,
 }
 /* the lines a header sends, at most `fit` (as many as its frames' slack holds: mesh_switch_lines_fit), so a full page
    makes none: this node's own links first, each view link from this node as its draw read its cables (`line`, `t`:
-   mesh_switch_own_line) stamped `stamp`, then the remote links' lines this node keeps (struct mesh_switch `heard`),
-   each its sender's stamp, in the view's order */
+   mesh_switch_own_line) stamped with this node's stamp of its uptime `now`, then the remote links' lines this node
+   keeps (struct mesh_switch `heard`), each its sender's stamp and its cost as this node counts it at `now`
+   (mesh_switch_line_cost: its backlog less the time this node has held it), in the view's order */
 static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,const struct mesh_switch_view *v,const uint64_t *line,const struct mesh_switch_terms *t,
-                                              uint64_t stamp,uint32_t fit,struct mesh_switch_line *out){
+                                              uint64_t now,uint32_t fit,struct mesh_switch_line *out){
+  const uint64_t stamp=mesh_switch_stamp(sw,now);
   uint32_t n=0;
   for(uint32_t l=0;l<v->links && n<fit;l++)
     if(v->link[l].from==v->self)out[n++]=mesh_switch_own_line(line,t,v->self,v->link[l].to,stamp);
@@ -619,17 +635,20 @@ static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,const struc
     if(!s)continue;
     struct mesh_switch_line *a=out+n++;
     a->from=x->from;a->to=x->to;a->stamp=s;
-    for(uint32_t c=0;c<MESH_CLASSES;c++){a->cost[c]=atomic_load_explicit(&h->cost[c],memory_order_relaxed);a->idle[c]=atomic_load_explicit(&h->idle[c],memory_order_relaxed);}
+    for(uint32_t c=0;c<MESH_CLASSES;c++){
+      double idle;
+      a->cost[c]=(float)mesh_switch_line_cost(h,x,c,now,&idle);a->idle[c]=atomic_load_explicit(&h->idle[c],memory_order_relaxed);
+    }
   }
   return n;
 }
-/* view link l's time for a page of class c at stamp `at` (*idle its time with nothing queued): this node's own link's
-   from its cables (`line`, `t` as the caller read them: mesh_switch_own_line, INFINITY where none serves), another's
-   from its line as this node keeps it (mesh_switch_line_cost) */
+/* view link l's time for a page of class c at this node's uptime `now` (*idle its time with nothing queued): this
+   node's own link's from its cables (`line`, `t` as the caller read them: mesh_switch_own_line, INFINITY where none
+   serves), another's from its line as this node keeps it (mesh_switch_line_cost) */
 static inline double mesh_switch_link_cost(struct mesh_switch *sw,const struct mesh_switch_view *v,const uint64_t *line,const struct mesh_switch_terms *t,
-                                           uint32_t l,uint32_t c,uint64_t at,double *idle){
+                                           uint32_t l,uint32_t c,uint64_t now,double *idle){
   const struct mesh_switch_link *x=v->link+l;
-  if(x->from!=v->self)return mesh_switch_line_cost(mesh_switch_heard_link(sw,v,x),x,c,at,idle);
+  if(x->from!=v->self)return mesh_switch_line_cost(mesh_switch_heard_link(sw,v,x),x,c,now,idle);
   const struct mesh_switch_line a=mesh_switch_own_line(line,t,x->from,x->to,0);
   *idle=a.idle[c];
   return a.cost[c];
@@ -640,17 +659,17 @@ static inline double mesh_switch_link_cost(struct mesh_switch *sw,const struct m
    draws read (mesh_switch_choose), in the child's own memory: Floyd-Warshall over the view's links between nodes other
    than this one (a page that comes back here is on no path: a draw's paths avoid the nodes a page visited, this node
    among them), each link's cost the time a page of the class takes through it as the class's step began
-   (mesh_switch_line_cost: its line while live, else its idle terms, else the view's nominal ones).  Made in `made` a
-   step at a time (mesh_switch_togo_step: for each class, the links' costs, then the paths through each node in turn),
-   copied into `to` as a cycle ends, then made again; made anew from its first step where the view's version moved
-   (`view`: the version the cycle is over, plus 1) */
+   (mesh_switch_line_cost: its line's idle term and what is left of its backlog, else the view's nominal terms).  Made
+   in `made` a step at a time (mesh_switch_togo_step: for each class, the links' costs, then the paths through each node
+   in turn), copied into `to` as a cycle ends, then made again; made anew from its first step where the view's version
+   moved (`view`: the version the cycle is over, plus 1) */
 struct mesh_switch_togo {
   float to[MESH_CLASSES][MESH_SWITCH_N][MESH_SWITCH_N],made[MESH_CLASSES][MESH_SWITCH_N][MESH_SWITCH_N];
   uint64_t view;
   uint32_t step;
 };
 /* one step of the cost-to-go `g` over the published view: a cycle is 2 (n + 1) steps for a view of n nodes, each
-   class's links' costs (n^2 stores, a kept line read a link and its age on this node's stamps' clock, one clock read)
+   class's links' costs (n^2 stores, a kept line read a link and its age on this node's clock, one clock read)
    and then its paths through each of the n nodes (n^2 additions each), tens of nanoseconds a step (an estimate), so a
    port child's idle pass takes one (mesh-link.c port_pass) and no pass grows past its usual spread.  1 where the step
    ended a cycle (`to` made new) */
@@ -664,12 +683,12 @@ static inline int mesh_switch_togo_step(struct mesh_switch *sw,struct mesh_switc
   float (*d)[MESH_SWITCH_N]=g->made[c];
   if(!k){
     for(uint32_t i=0;i<MESH_SWITCH_N;i++)for(uint32_t j=0;j<MESH_SWITCH_N;j++)d[i][j]=i==j?0:INFINITY;
-    const uint64_t at=mesh_switch_stamp(sw,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    const uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     for(uint32_t l=0;l<v->links && l<MESH_SWITCH_LINKS;l++){
       const struct mesh_switch_link *x=v->link+l;
       const uint32_t a=x->ends&255,b=x->ends>>8&255;
       if(a>=n || b>=n || a==self || b==self)continue;
-      double idle;const double cost=mesh_switch_line_cost(mesh_switch_heard_link(sw,v,x),x,c,at,&idle);
+      double idle;const double cost=mesh_switch_line_cost(mesh_switch_heard_link(sw,v,x),x,c,now,&idle);
       if(cost<d[a][b])d[a][b]=(float)cost;
     }
   }else if(k-1!=self){
@@ -1019,10 +1038,11 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
   for(uint32_t g=0;g<groups;g++)for(uint32_t j=0;j<naway;j++)if(group[g].dests>>j&1)carried|=1u<<away[j];
   for(uint32_t i=0;i<head->dests && i<MESH_DESTS;i++)if(!(carried>>i&1))head->dest[i].next=UINT32_MAX;
   head->from=self;
-  /* the lines: this node's own links' from the cables the draw read, stamped now, then those it keeps of others' */
+  /* the lines: this node's own links' from the cables the draw read, stamped now, then those it keeps of others' as it
+     counts them now */
   struct mesh_switch_line lines[MESH_SWITCH_LINES];
   const uint32_t fit=mesh_switch_lines_fit(bytes,(uint64_t)frames*MESH_FRAME),
-                 sent=mesh_switch_lines_give(sw,v,line,terms,mesh_switch_stamp(sw,now),fit,lines);
+                 sent=mesh_switch_lines_give(sw,v,line,terms,now,fit,lines);
   head->lines=sent;memcpy(mesh_switch_lines_at(head,bytes),lines,sent*sizeof *lines);
   /* each group's destinations its peer's, with the cost they carry on (its cable's backlog, the page's own time on
      it), all before the first push makes the page another process's to post */
@@ -1110,7 +1130,7 @@ static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint3
                  hops=hops_read<MESH_SWITCH_N-2?hops_read:MESH_SWITCH_N-2;
   atomic_store_explicit(&p->bytes,bytes,memory_order_relaxed);
   head->hops=hops+1;head->path[hops+1]=self;
-  mesh_switch_lines_take(sw,head,bytes,mesh_switch_lane_bytes(l));
+  mesh_switch_lines_take(sw,head,bytes,mesh_switch_lane_bytes(l),now);
   const int logging=mesh_switch_sampled(sw,head);
   uint32_t away[MESH_DESTS],naway=0;
   for(uint32_t i=0;i<dests;i++){
@@ -1168,9 +1188,9 @@ static inline double mesh_switch_time_scale(const struct mesh_switch_view *v,dou
    - the fabric is the view (its links route.h's lanes, view indices its nodes, the ranks its compute nodes), its page
      route.h's (ROUTE_PAGE);
    - each lane's wait the time a long page takes through it beyond its idle time (mesh_switch_link_cost): a remote
-     link's from its line as the pages carried it (0 where the line is stale), each of this node's own links' its
-     cables' backlog now; duplex share 1 (a bridge sees no other node's reverse traffic); an own link that is down (its
-     wait not finite: no port serves it) no lane of the node now, so no token;
+     link's from its line as the pages carried it, less the time since this node took it (0 once it has drained), each
+     of this node's own links' its cables' backlog now; duplex share 1 (a bridge sees no other node's reverse
+     traffic); an own link that is down (its wait not finite: no port serves it) no lane of the node now, so no token;
    - the cost-to-go a long page's (`togo`, the caller's, made over the same view: mesh_switch_togo_whole), the bytes in
      flight and posted this node's own cables' queues;
    - the per-pattern features of what is left to send, waiting and received, and the live collectives, 0: the bridge
@@ -1202,9 +1222,8 @@ static inline void mesh_switch_tokens_make(struct mesh_switch *sw,const struct m
     }
   }
   st.tau=(double)now;
-  const uint64_t at=mesh_switch_stamp(sw,now);
   for(int l=0;l<s.f.lanes;l++){
-    double idle;const double cost=mesh_switch_link_cost(sw,v,line,terms,(uint32_t)l,mesh_switch_class(MESH_CLASS_LONG),at,&idle);
+    double idle;const double cost=mesh_switch_link_cost(sw,v,line,terms,(uint32_t)l,mesh_switch_class(MESH_CLASS_LONG),now,&idle);
     st.wait[l]=!isfinite(cost)?INFINITY:cost>idle?cost-idle:0;st.dup[l]=1;
   }
   for(uint32_t a=0;a<ROUTE_N;a++)for(uint32_t b=0;b<ROUTE_N;b++)st.togo[a][b]=a<v->nodes && b<v->nodes?(a==b?0:to[a][b]):1e12;

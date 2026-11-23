@@ -921,24 +921,16 @@ static void pool_make(void){
   say("bridge: pool carved: %u short pages (of %u frames) and %u long (of %u) in an arena of %llu bytes\n",pool->cls[0].pages,
       pool->cls[0].frames,pool->cls[1].pages,pool->cls[1].frames,(unsigned long long)arena);
 }
-/* design/PAGE-TABLE-SPEC-20261122.md section 5: the stamps' clock (mesh-switched.h mesh_switch_stamp), this node's boot
-   (M->boot, the wall clock as the bridge started) plus its uptime since on CLOCK_MONOTONIC, which keeps the wall
-   clock's frequency as NTP disciplines it (clock_gettime(3): CLOCK_MONOTONIC_RAW is the one unaffected by frequency
-   adjustments) but none of its steps, so every node's stamps are read on one clock: the uptime clock the children read
-   (CLOCK_UPTIME_RAW) drifts from another node's by tens of ppm, seconds a day.  Its offset from the uptime clock is
-   set at the start and at every turn of the event loop, at most MESH_PAUSE_NS apart, between which the uptime clock
-   drifts from it by microseconds */
-static uint64_t boot_monotonic;
-static void switch_clock(void){
-  const uint64_t uptime=clock_gettime_nsec_np(CLOCK_UPTIME_RAW),since=clock_gettime_nsec_np(CLOCK_MONOTONIC)-boot_monotonic;
-  atomic_store_explicit(&mesh_switch_of(M)->stamp_offset,(int64_t)(M->boot+since)-(int64_t)uptime,memory_order_relaxed);
-}
 /* the switch made new over the pool (no SEND or ring entry of a bridge before survives its stop: region_adopt gave
-   back what they had), its stamps' clock set */
+   back what they had), and its stamps' clock set (design/PAGE-TABLE-SPEC-20261122.md section 5, mesh-switched.h
+   mesh_switch_stamp): this node's boot (M->boot, the wall clock as the bridge started) plus its uptime since
+   (CLOCK_UPTIME_RAW, the clock every process of the node reads), its offset from the uptime clock set once here.  A
+   stamp orders this node's own lines, a restarted bridge's after its last one's (its boot later); no node reads it
+   against its own clock (a line's age is counted on the node that keeps it: mesh_switch_line_cost) */
 static void switch_make(void){
   struct mesh_switch *sw=mesh_switch_of(M);
   mesh_switch_init(sw);
-  switch_clock();
+  atomic_store_explicit(&sw->stamp_offset,(int64_t)M->boot-(int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW),memory_order_relaxed);
   if(getenv("MESH_SWITCH_LOG"))atomic_store(&sw->logging,1);
   const struct mesh_pool *pool=mesh_pool(M);
   say("bridge: switch made over a pool of %u pages (%u free short, %u free long)\n",pool->pages,
@@ -2154,7 +2146,7 @@ int main(int argc,char **argv){
   const int adopted=region_open(&geometry,&fd);
   if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
-  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;boot_monotonic=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
   say("bridge node %u: region %s %s\n",node,MESH_NAME,adopted?"adopted from the bridge before this one (its clients' indices and pages stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
@@ -2200,7 +2192,6 @@ int main(int argc,char **argv){
   uint64_t liveness=0;
   while(!stop){
     now=clock_ns();
-    switch_clock();
     if(atomic_load_explicit(&found,memory_order_acquire))ports_found();
     terminations_turn();
     arrivals_turn();
