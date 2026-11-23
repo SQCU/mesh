@@ -3541,7 +3541,8 @@ static int plan_schedule_inputs(const struct mesh_plan_analysis *analysis,struct
     const struct plan_schedule_result *schedule=schedules?schedules[f]:NULL;
     const struct mesh_function *source=analysis->function+f;
     if(!schedule){if(analysis->flow[f].demands || source->tasks)return EINVAL;continue;}
-    if(!schedule->function || !schedule->geometry || schedule->geometry->source!=analysis->flow+f ||
+    if(!schedule->rank_time || !schedule->completed || !schedule->function || !schedule->geometry ||
+       schedule->geometry->source!=analysis->flow+f ||
        schedule->first>schedule->tasks || schedule->function->tasks!=schedule->tasks-schedule->first ||
        schedule->tasks>schedule->instructions)return EINVAL;
     const int status=plan_function_compatible(source,schedule->function);
