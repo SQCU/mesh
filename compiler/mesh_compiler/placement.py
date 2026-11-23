@@ -222,6 +222,14 @@ def sized(sizes, units):
     return sizes
 
 
+def block_boundaries(extent, units, block):
+    shards = len(units)
+    if extent < shards * block:
+        block = 1
+    sizes = counts(-(-extent // block), units, shards)
+    return tuple(min(extent, end * block) for end in itertools.accumulate(sizes, initial=0))
+
+
 class Stripes(str):
     extent = shards = None
 
