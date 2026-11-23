@@ -3,28 +3,17 @@ entry point loads it when torch is imported, so a program only names it: init_pr
 
 compiler is the torch.compile backend "mesh" (setup.py's torch_dynamo_backends entry point, a backend torch documents
 for a package to register): torch.compile(f, backend="mesh") compiles f with Inductor, its collectives the library's,
-with nothing wrapped around a compiled graph's run.  Every collective, compiled or eager, is committed by _stream.mm's
-one commit rule (README, Performance).
+with nothing wrapped around a compiled graph's run.  Every collective, compiled or eager, is complete when it returns
+(_stream.mm issue).
 
-empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
-DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
-lies; records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the region (0:
-outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more.
+empty() makes a host tensor, whose bytes the host reaches where they lie (an MPS one through torch's DLPack interop over
+a Metal buffer of shared storage: _stream.mm host_empty), which a collective reads and writes in place; records() is the
+host tensors' buffers live now and address(t) where the host reaches a tensor's bytes (0: it does not); check_memory()
+warns where this process's MPS tensors of torch's allocator come to 1 GiB or more.
 
-merge_partials() is the softmax over a split as the library's collective (the torch operator torch_mesh::merge_partials:
-an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials): each member's attention over
-its own keys merged by the rows' logsumexp into the attention over all of them; partition's ring attention merges by it
-(a reduce-scatter by the operator).
-
-declare() is the process's transfer program declared (libnccl-mesh's ncclMeshDeclareBegin/End, design/declared-programs.md):
-the collectives a `with torch_mesh.declare():` block issues, on any groups, are captured with their tensors as the steps
-of the program, nothing moving; every later collective that crosses a link runs the next step in order and must be it
-(the same collective, group, shape, dtype and tensors: a step's tensors are its own, allocated once, such as empty()'s,
-and reused), else it fails.  Every rank declares its own calls of the same steps at the same point; a program that
-changes shape declares again where it changes.
-
-plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
-compiled then, so none is planned where it is issued.
+merge_partials() is the softmax over a split as a collective (the torch operator torch_mesh::merge_partials: every
+member's partials all-gathered and merged by their log-sum-exp, backend.merged): each member's attention over its own
+keys merged by the rows' logsumexp into the attention over all of them; partition's ring attention merges the same way.
 
 record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
 compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back."""
@@ -37,21 +26,16 @@ def _autoload():
 def compiler(gm, example_inputs):
     """Inductor's compilation of a graph (torch._dynamo.lookup_backend("inductor"), as torch's composable backends
     compose it), its collectives the library's (_stream.mm's kernels for torch's functional collectives on MPS), with
-    nothing wrapped around its run.  A compiled collective's publication is committed by the same rule as an eager
-    one's (_stream.mm, the commit rule; README, Performance), so how a program is written does not decide how fast its
-    collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
-    under the same rule).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather
-    than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
-    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory).  Its products of a
-    few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
-    a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
+    nothing wrapped around its run.  The graph the backend is handed is a forward (a training graph's backward runs
+    from autograd).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather than
+    lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
+    (torch/_inductor/comm_lowering.py), a buffer of torch's allocator the host does not reach.  Its products of a few
+    fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of a
+    [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
     torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
     product's one use folded into it, a cat of two row segments that is its x read in place, and up to four consecutive
-    independent products one dispatch (torch_mesh::linears).  A graph's sums on a group, where every collective it
-    names that group in is one of them and all of one form, are one issue's repeats (each node told their count:
-    rdma/nccl.h ncclMeshFused repeats), so the host issues their crossing once a graph.  Inductor's run-time size,
-    alignment and scalar asserts are off: each is a check at every call of what the compile fixed (design/data-model.md
-    section 6)."""
+    independent products one dispatch (torch_mesh::linears).  Inductor's run-time size, alignment and scalar asserts are
+    off: each is a check at every call of what the compile fixed (design/data-model.md section 6)."""
     from pathlib import Path
 
     import torch
@@ -64,9 +48,6 @@ def compiler(gm, example_inputs):
     _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
 
     aten = torch.ops.aten
-    # each fused crossing's op and where its group's name lies among its arguments, its repeats the next
-    CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2,
-                 torch.ops.torch_mesh.allgatherv.default: 3, torch.ops.torch_mesh.allgatherv_out.default: 4}
 
     def rows(x, w):
         """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed
@@ -74,15 +55,6 @@ def compiler(gm, example_inputs):
         x, w = x.meta.get('val'), w.meta.get('val')
         return (x is not None and w is not None and x.device.type == 'mps' and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
-
-    def told(node, repeats):
-        """A crossing's node told its repeats (the argument after its group's name), the fake values Inductor records
-        for its call alike."""
-        i = CROSSINGS[node.target] + 1
-        node.args = (*node.args[:i], repeats)
-        if 'eager_input_vals' in node.meta:
-            values, named = node.meta['eager_input_vals']
-            node.meta['eager_input_vals'] = ((*values[:i], repeats), named)
 
     def joined(x):
         """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
@@ -131,33 +103,11 @@ def compiler(gm, example_inputs):
                     graph.erase_node(m)
             i += len(group)
 
-    def native(node):
-        """A sum's crossing (linear_sum) on a mesh group of two ranks or more called natively, its crossing's form and
-        encodes _stream.mm's (torch_mesh::fused_step), no Python op between the graph and them."""
-        import torch.distributed as dist
-        group = dist.distributed_c10d._resolve_process_group(node.args[2])
-        if isinstance(group, backend.ProcessGroupMesh) and group.size() > 1:
-            x, w = node.args[:2]
-            repeats = node.args[3] if len(node.args) > 3 else 1
-            node.target = torch.ops.torch_mesh.fused_step.default
-            node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
-            node.meta.pop('eager_input_vals', None)
-
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
                 if node.target is torch.ops._c10d_functional.all_reduce.default:
                     node.target = torch.ops.torch_mesh.all_reduce.default
-                    told(node, 1)
-                    made = node.args[0]
-                    if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
-                            and made.args[2:] in ((), (None,), (None, 0))):
-                        with graph.inserting_before(node):
-                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
-                        summed.meta['val'] = node.meta['val']
-                        node.replace_all_uses_with(summed)
-                        graph.erase_node(node)
-                        graph.erase_node(made)
                     continue
                 mm = node.target is aten.mm.default and rows(*node.args)
                 addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
@@ -182,29 +132,17 @@ def compiler(gm, example_inputs):
                         users[0].replace_all_uses_with(made)
                         graph.erase_node(users[0])
             grouped(graph)
-            for name in {node.args[CROSSINGS[node.target]] for node in graph.nodes if node.target in CROSSINGS}:
-                nodes = [node for node in graph.nodes if any(isinstance(a, str) and a == name for a in node.args)]
-                forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta')
-                                      else tuple(a) if isinstance(a, list) else a for a in n.args[:CROSSINGS.get(n.target, 2)]))
-                         for n in nodes}
-                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
-                    for n in nodes:
-                        told(n, len(nodes))
-            for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
-                native(node)
-            from .declarations import compiled_graph
-            compiled_graph(graph)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
 
 def empty(*size, dtype=None, device='mps'):
-    """A tensor of region memory (rdma/NCCL.md "Memory"), uninitialized: collectives read and write it in place where
-    the library reads its operands in place.  An 'mps' one is an MPS tensor whose storage is the lease's Metal buffer
-    (ncclMeshMemBuffer), made through DLPack; it returns its lease once the GPU's work before its release is done."""
+    """A host tensor, uninitialized: collectives read and write it where it lies.  An 'mps' one is an MPS tensor whose
+    storage is a Metal buffer of shared storage, made through DLPack; it lets its buffer go once the GPU's work before
+    its release is done.  A 'cpu' one is torch's CPU tensor."""
     import torch
     from torch._guards import detect_fake_mode
 
@@ -217,77 +155,42 @@ def empty(*size, dtype=None, device='mps'):
     if fake is not None:
         with fake:
             return torch.empty(sizes, dtype=dtype or torch.get_default_dtype(), device=kind)
-    return _stream.region_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
+    return _stream.host_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
 
 
 def records():
-    """The region tensors empty() made that are live now: each {address, bytes} of its lease."""
+    """The MPS host tensors empty() made that are live now: each {address, bytes} of its buffer."""
     from . import _stream
     return [{'address': a, 'bytes': b} for a, b in _stream.records()]
 
 
 def address(tensor):
-    """Where a tensor's bytes lie in the region (its first byte's address), 0 where they lie outside it."""
+    """Where the host reaches a tensor's bytes (its first byte's address), 0 where it does not (an MPS tensor of
+    torch's allocator, whose buffers are the GPU's private storage)."""
     from . import _stream
     return _stream.address(tensor)
 
 
 def check_memory():
-    """Bytes of this process's MPS tensors outside the region (torch.mps.current_allocated_memory: torch's allocator
-    makes no region tensor), with a warning where they come to 1 GiB or more
-    (docs/writing-a-service.md#memory-outside-the-region)."""
+    """Bytes of this process's MPS tensors of torch's allocator (torch.mps.current_allocated_memory: torch's allocator
+    makes no host tensor), with a warning where they come to 1 GiB or more
+    (docs/writing-a-service.md#memory-the-host-reaches)."""
     import warnings
 
     import torch
     outside = torch.mps.current_allocated_memory()
     if outside >= 2**30:
-        warnings.warn(f'mesh: {outside / 2**30:.2f} GiB of MPS tensors lie outside the region: no peer can be passed them '
-                      'zero copy, and the GPU wires them beside the region, which risks the node. Make them with '
-                      'torch_mesh.empty (docs/writing-a-service.md#memory-outside-the-region)', stacklevel=2)
+        warnings.warn(f'mesh: {outside / 2**30:.2f} GiB of MPS tensors of torch\'s allocator: a collective stages each '
+                      'through a host tensor by a copy, and the GPU wires them beside the host tensors, which risks the '
+                      'node. Make them with torch_mesh.empty (docs/writing-a-service.md#memory-the-host-reaches)', stacklevel=2)
     return outside
-
-
-class _Declaration:
-    """`with declare():` (ncclMeshDeclareBegin on entry, ncclMeshDeclareEnd on exit, after torch's stream has taken what
-    the block issued)."""
-
-    def __enter__(self):
-        from . import backend
-        backend.check(backend.LIB.ncclMeshDeclareBegin())
-        return self
-
-    def __exit__(self, kind, value, traceback):
-        from . import backend
-        ended = backend.LIB.ncclMeshDeclareEnd()
-        if kind is None:
-            backend.check(ended)
-        return False
-
-
-def declare():
-    """The process's transfer program declared by the collectives a `with` block issues (this module's docstring)."""
-    return _Declaration()
-
-
-def plan(group, calls):
-    """The collectives a program issues on `group` (None: the default group) declared once, in their order: `calls`
-    the groups, each a list of torch_mesh.backend.Call (one torch collective, or one coalesced batch, a group) or (that
-    list, repeat) issued repeat times in a row, the order repeated from the group's next collective on (backend
-    ProcessGroupMesh.plan; partition's ops give their own, partition.calls).  Every rank declares its own calls, the same
-    groups in the same order, at the same point.  Returns each group's (send entries, landing entries) on this rank."""
-    import torch.distributed as dist
-
-    from . import backend
-    group = group or dist.distributed_c10d._get_default_group()
-    return backend._mesh(group.group_name, 'plan').plan(calls)
 
 
 def merge_partials(out, lse, group=None, root=-1):
     """Every member's attention over its own keys merged into the attention over all of them (split-KV attention's
-    merge: libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials, through the torch operator
-    torch_mesh::merge_partials): `out` (rows x dim, any leading shape) and `lse` (each row's logsumexp, -inf where it saw
-    no key), the same rows on every member.  Returns (the attention in out's dtype, each row's logsumexp), on every member
-    (`root` -1) or at `root`."""
+    merge, through the torch operator torch_mesh::merge_partials): `out` (rows x dim, any leading shape) and `lse` (each
+    row's logsumexp, -inf where it saw no key), the same rows on every member.  Returns (the attention in out's dtype,
+    each row's logsumexp), on every member (`root` -1) or at `root`."""
     import torch
     import torch.distributed as dist
 
@@ -304,11 +207,10 @@ class Recording:
 
     def __init__(self, step, name, k):
         self.step, self.name, self.k, self.graphs, self.replays, self.unrolled = step, name, k, 0, 0, {}
-        self.declarations = {}
 
     def issue(self, steps):
-        """`steps` steps issued back to back on torch's stream with no wait: steps // k replays of the k-step graph,
-        then one of the rest's."""
+        """`steps` steps issued back to back on torch's stream: steps // k replays of the k-step graph, then one of the
+        rest's."""
         full, rest = divmod(steps, self.k)
         for n in [self.k] * full + [rest] * bool(rest):
             if n not in self.unrolled:
@@ -323,47 +225,19 @@ class Recording:
         def steps():
             for _ in range(n):
                 self.step()
-        return torch.compile(steps, backend=lambda gm, inputs: self._backend(gm, inputs, n), fullgraph=True, dynamic=False)
+        return torch.compile(steps, backend=self._backend, fullgraph=True, dynamic=False)
 
-    def _backend(self, gm, example_inputs, n):
-        """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
-        outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
-        timeout.  The meeting is a host wait, so a publication waiting in torch's open buffer is committed first."""
+    def _backend(self, gm, example_inputs):
+        """compiler's graph, then every rank's compilation of it met at the default group's store, bounded by the
+        store's timeout, so no rank's first collective of the graph meets a peer still compiling."""
         import torch.distributed as dist
-
-        from . import _stream
-        from .declarations import _CAPTURE
-        captured = []
-        token = _CAPTURE.set(captured)
-        try:
-            made = compiler(gm, example_inputs)
-        finally:
-            _CAPTURE.reset(token)
-        groups, forms = {}, []
-        for lowered, prepared in captured:
-            forms.extend(prepared)
-            for name, calls in lowered.items():
-                groups.setdefault(name, []).extend(calls)
-        self.declarations[n] = groups, forms
+        made = compiler(gm, example_inputs)
         if dist.is_initialized():
-            _stream.commit()
             store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
             store.set(f'{key}/{dist.get_rank()}', b'1')
             store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
         self.graphs += 1
         return made
-
-    def schedule(self, group, steps):
-        """The actual compiled chunks of one invocation, before timing starts."""
-        groups, forms = [], []
-        full, rest = divmod(steps, self.k)
-        for n in [self.k] * full + [rest] * bool(rest):
-            if n not in self.declarations:
-                raise ValueError(f'recording chunk {n} must be compiled before declaring an invocation')
-            declared, prepared = self.declarations[n]
-            groups.extend(declared.get(group.group_name, []))
-            forms.extend(prepared)
-        return groups, forms
 
 
 _recordings = 0
@@ -374,26 +248,23 @@ def record(step, k=1):
     CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of `k` steps
     unrolled (torch.compile with fullgraph, its collectives functional ones), so a replay's host cost (the graph's
     guards, its subclass wrapping, Inductor's wrapper) is paid once for k steps, compiled at its first replay by the "mesh"
-    backend (compiler: Inductor's kernels, the graph's collectives each issued on torch's stream under the one commit
-    rule and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
-    its tensors keep what they held, and each replay writes them.  Every rank records the same steps in the same
-    order.  What the 10-01 form (mesh 4cbe704, metal-microbench 35c30a9 metal_recording.m) did beyond this needs an
-    interposed recorder of torch's Metal commands, which has no documented extension point (README, Record and
-    replay)."""
+    backend (compiler: Inductor's kernels, the graph's collectives each complete where it is called) after every rank
+    has compiled it.  Nothing runs while it records: its tensors keep what they held, and each replay writes them.
+    Every rank records the same steps in the same order.  What the 10-01 form (mesh 4cbe704, metal-microbench 35c30a9
+    metal_recording.m) did beyond this needs an interposed recorder of torch's Metal commands, which has no documented
+    extension point (README, Record and replay)."""
     global _recordings
     _recordings += 1
     return Recording(step, _recordings, k)
 
 
 def replay(recording, steps=1):
-    """`steps` steps of a record()ed step issued back to back on torch's stream (Recording.issue), with no wait between
-    them: the steps are an operand's leading dimension, each reading what the last wrote in the stream's order; every
-    rank replays alike.  The one wait is where a consumer reads, the time this returns: the last graph's interval in
-    the stream over its steps, the span between two MPS timing events torch records before and after it (each event's
-    time taken as its listener runs, equally late for both), read once the end event has passed.  With the graphs back
-    to back the span runs from the end of the graph before it to its own end, the GPU's time or the host's issue,
-    whichever is slower; as before, a first replay's compile falls inside it.  The steps' outputs are read where the
-    caller reads them (torch commits and waits at .item(), .cpu() and torch.mps.synchronize())."""
+    """`steps` steps of a record()ed step issued back to back on torch's stream (Recording.issue): the steps are an
+    operand's leading dimension, each reading what the last wrote in the stream's order; every rank replays alike.  The
+    time this returns is the last graph's interval in the stream over its steps, the span between two MPS timing events
+    torch records before and after it (each event's time taken as its listener runs, equally late for both), read once
+    the end event has passed; as before, a first replay's compile falls inside it.  The steps' outputs are read where
+    the caller reads them (torch commits and waits at .item(), .cpu() and torch.mps.synchronize())."""
     import torch
     if steps < 1:
         return 0.0

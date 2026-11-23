@@ -1,6 +1,7 @@
-"""Attention for a torch program that trains it, its scores in region leases (metal-microbench docs/facts.md: torch's
-MPS allocator serves a tensor of 10 MiB or more from a 1 GiB heap the GPU wires whole, and torch's SDPA on MPS, where
-autograd records it, is its math form, the scores, their softmax and its gradient each such a tensor of torch's).
+"""Attention for a torch program that trains it, its scores in host tensors (torch_mesh.empty; metal-microbench
+docs/facts.md: torch's MPS allocator serves a tensor of 10 MiB or more from a 1 GiB heap the GPU wires whole, and
+torch's SDPA on MPS, where autograd records it, is its math form, the scores, their softmax and its gradient each such
+a tensor of torch's).
 
   attention(query, key, value, is_causal=False, scale=None)    F.scaled_dot_product_attention's (no mask, dropout or
                                                                GQA): [..., L, E] queries over [..., S, E] keys
@@ -77,8 +78,8 @@ class _Attention(torch.autograd.Function):
 
 
 def attention(query, key, value, is_causal=False, scale=None):
-    """F.scaled_dot_product_attention(query, key, value, is_causal=is_causal, scale=scale), its scores in region
-    leases."""
+    """F.scaled_dot_product_attention(query, key, value, is_causal=is_causal, scale=scale), its scores in host
+    tensors (torch_mesh.empty)."""
     scale = query.size(-1) ** -0.5 if scale is None else scale
     if torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value)):
         return _Attention.apply(query, key, value, is_causal, scale)

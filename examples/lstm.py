@@ -21,7 +21,7 @@ class Tick:
     # docs/writing-a-service.md#the-lstm
     def __init__(self, mesh, weights, biases, rows, steps):
         """weights and biases: each layer's [4, H, K] and [4, H] split along the units (the backend's ragged shards),
-        each rank's held from here as [4 x its units, K] and [4 x its units] in region tensors."""
+        each rank's held from here as [4 x its units, K] and [4 x its units] in host tensors."""
         self.rows, self.steps, self.L = rows, steps, len(weights)
         held = lambda t: torch_mesh.empty(t.to_local().shape, dtype=t.dtype).copy_(t.to_local()).view(-1, *t.shape[2:])
         H, HR = weights[0].shape[1], weights[0].to_local().shape[1]
@@ -74,13 +74,13 @@ class Tick:
 # docs/writing-a-service.md#the-lstm
 def inputs(config, steps, rows):
     g, H, KIN = np.random.default_rng(0), config['width'], config['input_width']
-    k, part, scratch = 1 / np.sqrt(H), config['weights'] + '.part', chain.region(chain.CHUNK, torch.float64)
+    k, part, scratch = 1 / np.sqrt(H), config['weights'] + '.part', chain.host(chain.CHUNK, torch.float64)
     normal = lambda b: g.standard_normal(out=b)
     uniform = lambda b: np.add(np.multiply(g.random(out=b), 2 * k, out=b), -k, out=b)
-    np.save(config['input'], chain._drawn(chain.region((steps, rows, KIN), torch.half), normal, scratch))
+    np.save(config['input'], chain._drawn(chain.host((steps, rows, KIN), torch.half), normal, scratch))
     os.makedirs(part, exist_ok=True)
     for l in range(config['layers']):
         for name, columns in ((f'w_ih_{l}', KIN if l == 0 else H), (f'w_hh_{l}', H)):
-            np.save(f'{part}/{name}.npy', chain._drawn(chain.region((4 * H, columns), torch.half), uniform, scratch))
+            np.save(f'{part}/{name}.npy', chain._drawn(chain.host((4 * H, columns), torch.half), uniform, scratch))
         np.save(f'{part}/b_{l}.npy', (g.uniform(-k, k, 4 * H) + g.uniform(-k, k, 4 * H)).astype(np.float16))
     os.replace(part, config['weights'])

@@ -1,14 +1,13 @@
 /* Read-only install preflight, using the same holder identity as mesh-heartbeat.
    This is an observer, never a client and never an owner of region memory. */
 #include "mesh.h"
-#include "mesh-dataflow.h"
 #include <errno.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-/* Layouts from 153 on (a later build's too: an install of an earlier build reads its region) differ in transport entries/pins and the header's tail (node_off, switch_off), not
-   holder identity: the observer reads only magic, version, clients and client_off, whose offsets are these in every
-   one of them (compared against the 153 committed header). */
+/* The observer reads only magic, version, clients and client_off, whose offsets are these in every layout from 153 on
+   (a later build's too: an install of an earlier build reads its region), and the client slots' owner and start. */
 _Static_assert(offsetof(struct hdr,version)==4 &&
                offsetof(struct hdr,clients)==28 && offsetof(struct hdr,client_off)==80,"install observer header ABI");
 _Static_assert(sizeof(struct mesh_client)==64 && offsetof(struct mesh_client,owner)==0 &&

@@ -27,13 +27,13 @@ fi
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
-# MESH_USER_BUILT=1: the build made already by a MESH_USER_PREPARE run of this source (its kernels' binary archive is
-# made anew at every make: about a minute, not to be spent with no bridge running)
+# MESH_USER_BUILT=1: the build made already by a MESH_USER_PREPARE run of this source, so no build time is spent with no
+# bridge running
 [ "${MESH_USER_BUILT:-}" = 1 ] || make -C "$source/rdma" all install >/dev/null || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
 bound=$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))') || exit 1
-csum=$({ printf '%s\n' "$bound"; cat "$source/rdma/mesh-plan.h" "$source/rdma/nccl.h" "$source/rdma/mesh_c_build.py"; } | shasum)
+csum=$({ printf '%s\n' "$bound"; cat "$source/rdma/mesh-view.h" "$source/rdma/mesh-call.h" "$source/rdma/nccl.h" "$source/rdma/mesh_c_build.py"; } | shasum)
 [ -f "$source/rdma/_mesh_c$bound" ] && [ "$(cat "$venv/mesh-c.sum" 2>/dev/null)" = "$csum" ] \
   || { "$venv/bin/python" "$source/rdma/mesh_c_build.py" >/dev/null && printf '%s\n' "$csum" > "$venv/mesh-c.sum"; } || exit 1
 "$venv/bin/python" -c 'import sys, sysconfig; open(sysconfig.get_paths()["purelib"] + "/mesh.pth", "w").write(sys.argv[1] + "\n")' "$source/rdma" || exit 1

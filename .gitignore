@@ -4,9 +4,9 @@ networks.conf
 rdma/mesh-flow
 rdma/mesh-heartbeat
 rdma/mesh-stat
+rdma/mesh-switch-stat
+rdma/mesh-cluster
 rdma/*.dylib
-rdma/*.metallib
-rdma/*.binarchive
 rdma/Mesh.swiftmodule
 rdma/Mesh.swiftdoc
 rdma/Mesh.swiftsourceinfo
@@ -49,4 +49,3 @@ tailscale.key
 # a day, not requirements or this repository's versions, so the record stays out of git and goes to peers directly
 # (README, "Gitignored documents go to peers directly").
 NODE-STANDUPS.md
-rdma/mesh-order-state

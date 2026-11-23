@@ -1,10 +1,9 @@
 #include "mesh-bridge.h"
 
-/* design/declared-programs.md: the units the lanes hold outstanding, told in the region (`busy`), and
-   the wall clock at which none last came to be (`idle_since`, 0 while any is) */
+/* the frames the switch's lanes hold queued, told in the region (`busy`), and the wall clock at which none last came to
+   be (`idle_since`, 0 while any is) */
 static void busy_tell(void){
-  uint64_t busy=0;
-  orders_busy(&busy);
+  const uint64_t busy=lanes_busy();
   if(busy)atomic_store_explicit(&M->idle_since,0,memory_order_relaxed);
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);
@@ -16,7 +15,7 @@ static uint64_t available_now(void){
   int level=0;size_t size=sizeof level;
   return sysctlbyname("kern.memorystatus_level",&level,&size,NULL,0) || level<0?0:(uint64_t)level*(memory/100);
 }
-/* design/transport.md: what this node's record carries of its health (mesh-plan.h struct mesh_health), its
+/* design/transport.md: what this node's record carries of its health (mesh-view.h struct mesh_health), its
    boot read once and its available memory at most MESH_HEALTH_NS apart (health_turn) */
 static struct mesh_health health;
 static uint64_t health_sent;
@@ -51,8 +50,7 @@ static int map_grow(uint64_t records){
   memcpy(mesh_at(M,page),mesh_records(M),(size_t)atomic_load(&M->map_nodes)*sizeof(struct mesh_record));
   atomic_store(&M->map_off,(uint64_t)(mesh_at(M,page)-(unsigned char *)M));
   mesh_bridge_pages(M)->map=page;mesh_bridge_pages(M)->map_pages=pages;
-  if(map_pages)mesh_bits_clear(mesh_arena_bits(M),map_page,map_pages);
-  held_pages+=pages;held_pages-=map_pages;
+  if(map_pages)mesh_arena_give(M,map_page,map_pages);
   map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
   return 0;
 }
@@ -62,7 +60,6 @@ void map_adopt(void){
   const struct mesh_bridge_pages *own=mesh_bridge_pages(M);
   if(own->map==MESH_ABSENT)return;
   map_page=own->map;map_pages=own->map_pages;map_room=(uint32_t)((uint64_t)map_pages*M->pgsz/sizeof(struct mesh_record));
-  held_pages+=map_pages;
   atomic_store(&M->map_nodes,0);
   atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
 }
@@ -125,7 +122,7 @@ struct mesh_record *record_held(uint32_t node){
   return NULL;
 }
 void record_changed(void){
-  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory};
+  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=pool_bytes(),.memory=memory};
   memcpy(own.model,model,sizeof own.model);
   own.reached=record_reach(own.reach,MESH_STREAMS);
   own.health=health;
@@ -185,25 +182,23 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
-/* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first
-   seen (its exit, the event loop's EVFILT_PROC, retires every slot it holds: a holder's death is that event, not a
-   poll), one already gone retired at once; the rows of a retired client released but those a request outstanding on a
-   lane names or a program not wholly done names (mesh-dataflow.c mesh_retired_release, mesh_pinned), and the units
-   outstanding told (busy_tell) */
+/* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first seen (its exit,
+   the event loop's EVFILT_PROC, makes every slot it holds leave: a holder's death is that event, not a poll), one
+   already gone made to leave at once (mesh.h mesh_leave: its indices freed and their pages dropped, the writes on
+   its ring left for the port children to carry); on a liveness turn, a slot whose leaving its process left half done as it died finished; and the frames
+   queued told (busy_tell) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
-  int changed=0;
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *client=(struct mesh_client *)((char *)M+M->client_off)+s;
     uint64_t owner=atomic_load(&client->owner);
     if(owner && (pid_t)(uint32_t)owner==self)continue;
-    if(owner && owner!=owners[s] && !(owner&MESH_RETIRING)){
+    if(owner && owner!=owners[s] && !(owner&MESH_LEAVING)){
       struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
-      if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_retire(M,owner);owner=atomic_load(&client->owner);}
+      if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
     }
-    changed|=owner!=owners[s];owners[s]=owner;
+    if(liveness && owner&MESH_LEAVING && !mesh_holds((pid_t)(uint32_t)owner,client->start)){mesh_leave(M,owner);owner=atomic_load(&client->owner);}
+    owners[s]=owner;
   }
-  unreleased|=changed;
-  if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
   busy_tell();
 }

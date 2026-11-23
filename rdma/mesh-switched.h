@@ -1,105 +1,104 @@
-/* Switched multipath DMA at run time (design/switched-multipath-dma.md, work items 2-4): what every node's bridge does
-   with a piece, as pure functions of its region.  The bridge's port children (mesh-link.c switch_pass), the bridge's
-   parent (its refresh thread) and the N-node simulator (tests/sim-switched.c) are its callers; none of it reads a clock,
-   does I/O or posts to hardware: the caller passes the time and posts what these functions hand it.
+/* The switch (design/PAGE-TABLE-SPEC-20261122.md section 5): what every node's bridge does with a page, as functions of
+   its region.  The bridge's port children (mesh-link.c port_pass) and its parent (the refresh thread, a child's
+   reclaim, a region's adoption) are its callers; none of it reads a clock, does I/O or posts to hardware: the caller
+   passes the time and posts what these functions hand it.
 
-   What the program declares and what is decided here.  A client declares a program toward a node (mesh.h struct
-   mesh_declaration, unchanged): tables of transfers, spans, gates and done words.  That is WHAT moves.  HOW each piece
-   moves is decided here, per piece, while it moves:
-   - Staging.  A send piece whose step is issued and whose gate holds is claimed by one compare-exchange on its
-     program's cursor (mesh_switch_stage) and copied with its name into a landing slot of the node's pool: the slot is
-     what crosses.  Its send-side done word rises as it is staged (the client's bytes are free once copied).
-   - The name.  A slot is one SEND: its first MESH_SWITCH_HEAD bytes the piece's name (its source node, its program's
-     key, execution, and for every destination still to be served through the node it lands on that destination's
-     transfer and span, the nodes it has visited, the lines of lane state it carries), then the page frame.  One SEND
-     into one preposted receive, of one fixed frame count (TN3205: sender and receiver post the same frame count), with
-     no second crossing and no reply.
-   - Switching.  At every node it is at, the piece's destinations are split over the node's out-neighbours by a draw
-     from the routing weights (mesh_switch_choose): one uniform u per piece, each destination's lane the inverse of its
-     weights' distribution at u (so destinations whose distributions agree share one SEND), masked to the neighbours
-     off the piece's path that reach the destination without coming back.  The cable to a neighbour is the one with the
-     least bytes queued.  Each group's slot is pushed onto its lane's outbox (a ring in the region any process pushes
-     and the lane's port child pops): the piece is switched across the node's ports, whichever process holds it.
-   - Relays forward by name.  A node a piece lands on delivers it where it is a destination and sends it on for the
-     rest, the first group in place, every further group in a copy of the slot.  No client takes part.
-   - Delivery.  No receive is tied to a page: a piece lands in the next free slot posted on its queue pair, and its
-     name resolves it to the receiving program's transfer and span (the receiving client declared the same program, its
-     directions swapped).  It is copied there once the receiving client issued that step and its gate holds
-     (mesh_switch_deliver); until then it waits in its slot.  The receive span is the program's contiguity claim, the
-     copy its defragmenter.  Every (execution, transfer) keeps a bitmap of its units, so each unit counts once whatever
-     path brought it; done words rise in each word's own order (a word several transfers count on rises as their
-     prefix), executions completing in any order within a window of MESH_SWITCH_WINDOW.
+   A page crosses as one SEND from its own memory (mesh.h struct mesh_pd): its first MESH_HEAD bytes the header the
+   bridge writes (struct mesh_head: the node that took the write, its destinations as nodes and indices of their page
+   tables, the nodes it visited), then its payload, then the lines of lane state it carries in its last frame's slack.
+   A SEND fills one receive posted into a page of the lane's class (TN3205: both ends post the same frame count), and
+   the lane's child posts that receive again at once (mesh-link.c link_receive: into a free page, else into the page
+   that landed, whose landing is then lost), so a lane's receives do not run out while every page of its class is held.
+   - Take.  A client's write (mesh.h struct mesh_write, from its ring) names its page and its destinations: the bridge
+     writes the page's header, sets the table entry of each destination on this node to the page, and forwards the page
+     toward the others (mesh_switch_carry).
+   - Switching.  At every node a page is at, the destinations it carries on are split over the node's out-neighbours by
+     a draw from the routing weights (mesh_switch_choose): one uniform u per page, each destination's lane the inverse of
+     its weights' distribution at u (so destinations whose distributions agree share one SEND), masked to the
+     neighbours off the page's path that reach the destination without coming back, over lanes whose frames hold the
+     page's payload.  The cable to a neighbour is the one with the least bytes queued.  The page is pushed onto each
+     group's lane's outbox (a ring in the region any port child pushes and the lane's port child posts), a use of it a
+     group: the page is switched across the node's ports, whichever child holds it.
+   - Landing.  A page landed sets the table entry of each destination here whose turn it is (mesh_switch_set: the
+     index's landed count one more, the page it named before dropped; an index no client owns is set nothing) and is
+     forwarded unchanged for the others it carries (mesh_switch_landed).  Nothing waits and nothing is reported: a
+     destination no allowed neighbour reaches, a header that is not one, a page a lost link took, a landing whose
+     receive went again into its own page are each counted (`unreachable`, `malformed`, `lost`: struct
+     mesh_switch_counters), never retried.
+   - Uses.  A page's uses (mesh.h) count its table words, its writes pending in a ring, its SENDs pushed or posted and a
+     landing being carried; its last use's drop gives it back to its class's free stack.
    - The weights.  A distribution, for each destination, over the node's out-neighbours, published double-buffered
      (seqlock) and read by every draw.  A refresh (mesh_switch_refresh) computes a target from the estimators and emits
      the residual between it and the current weights, applied at the rate eta; draws go on reading the last published
      weights while one is computed: a mild margin of staleness, never a wait.  The target is the policy's: by default
      Thompson sampling over paths (each hop's wait drawn from its line), or any struct mesh_switch_policy (the trained
-     recurrent policy, rdma/tests/route, plugs in there).
+     recurrent policy, rdma/route, plugs in there).
    - The estimators.  Diachronic and incremental: each lane's rate and wait from its SENDs' completions (mesh_switch_sent),
-     each remote link's wait from the lines names carry (mesh_switch_lines_take), each node's own lines stamped by its
+     each remote link's wait from the lines pages carry (mesh_switch_lines_take), each node's own lines stamped by its
      refreshes.  Nothing waits for any of it.
 
-   Every hop adds the node to the piece's visited set and a lane is taken only toward a neighbour off it that reaches
+   Every hop adds the node to the page's visited set and a lane is taken only toward a neighbour off it that reaches
    the destination avoiding it, so a path is simple and ends; each destination is in exactly one group at every hop.
 
-   The trainer's records.  Every draw can be logged, off the hot path, in rdma/tests/route's record format (split.h
-   struct route_draw: each (destination, out-lane)'s arrival estimate and validity, the allowed mask, the sampled split
-   as its token, and its behaviour log-probability, exact under the coupled draw), every delivered piece its latency
-   and queueing, every execution its local completion: a single-producer ring per process in the region
-   (mesh_switch_log_put drops and counts where it is full; it never waits), drained by mesh-switch-log. */
+   The trainer's records.  Every draw of a write's page can be logged, off the hot path, in rdma/route's record format
+   (split.h struct route_draw: each (destination, out-lane)'s arrival estimate and validity, the allowed mask, the
+   sampled split as its token, and its behaviour log-probability, exact under the coupled draw), and every page set at a
+   destination its latency and queueing: a single-producer ring per port child in the region (mesh_switch_log_put drops
+   and counts where it is full; it never waits). */
 #ifndef MESH_SWITCHED_H
 #define MESH_SWITCHED_H
 #include "mesh.h"
-#include "tests/route/route.h"
+#include "route/route.h"
 #include <errno.h>
 #include <math.h>
 #include <string.h>
 
-#define MESH_SWITCH_MAGIC 0x53574348u
+#define MESH_SWITCH_MAGIC 0x53574349u
+#define MESH_HEAD_MAGIC 0x50414745u                          /* a page's header */
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)   /* a port's data lanes, MESH_LANE_FIRST on */
 #define MESH_SWITCH_N 8u                                     /* nodes the view holds */
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view holds */
-#define MESH_SWITCH_HEAD 384u                                /* a slot's name, the piece's bytes after it, then its lines */
-#define MESH_SWITCH_UNITS 2u                                 /* a transfer's consecutive units a slot carries, at most */
-#define MESH_SWITCH_SHORT 2u                                 /* a short lane's frames (a link's first data lane, where it has two) */
-#define MESH_SWITCH_WINDOW 8u                                /* executions of a transfer in progress at once */
-#define MESH_SWITCH_RING 4096u                               /* a lane's outbox */
-#define MESH_SWITCH_SLOTS 4096u                              /* the pool's slots, at most */
-#define MESH_SWITCH_LINES 24u                                /* lines a name carries */
+#define MESH_SWITCH_RING 32768u                              /* a lane's outbox: every page of the pool once */
+#define MESH_SWITCH_LINES 24u                                /* lines a header carries */
 #define MESH_SWITCH_LOG 8192u                                /* records a process's log ring */
-#define MESH_SWITCH_LOGS (MESH_PORTS+2u)                     /* a ring a port child, the parent's, the simulator's */
-#define MESH_SWITCH_CONTEXTS 256u
-#define MESH_SWITCH_KIN 64u                                  /* programs whose kin (same key, other nodes) a thread keeps */
-#define MESH_SWITCH_SIBLING_USES 256u                        /* a program's kin looked for again after this many stagings */                            /* the policy's contexts at a node, at most */
-#define MESH_SWITCH_REFRESH_NS 50000.0                       /* the refresh's period (the bridge's thread, the simulator) */
+#define MESH_SWITCH_LOGS (MESH_PORTS+1u)                     /* counters a port child, then the parent's */
+#define MESH_SWITCH_PARENT MESH_PORTS                        /* the parent's counters */
+#define MESH_SWITCH_CONTEXTS 256u                            /* the policy's contexts at a node, at most */
+#define MESH_SWITCH_REFRESH_NS 50000.0                       /* the refresh's period (the bridge's thread) */
 #define MESH_SWITCH_DRAWS 32u                                /* Thompson sampling's draws a refresh */
 #define MESH_SWITCH_ETA 0.5f                                 /* the residual's rate a refresh */
+#define MESH_SWITCH_PAGE ((double)(MESH_CLASS_LONG*MESH_FRAME))   /* the refresh's page: a long page's frames */
 _Static_assert(MESH_SWITCH_N<=64 && MESH_SWITCH_N<=MESH_NODES,"a node a bit");
+_Static_assert(MESH_DESTS<=32,"a destination a bit");
+/* a page is in a lane's outbox at most once (its SEND's completion drops the use that blocks its next write or landing),
+   so an outbox of every pool page never fills */
+_Static_assert(MESH_SWITCH_RING>=MESH_POOL_PAGES && !(MESH_SWITCH_RING&(MESH_SWITCH_RING-1)),"an outbox holds every page once");
 
-/* ---- The name ------------------------------------------------------------------------------------------------- */
-/* a destination: its node, transfer and first span, the spans from it the piece carries (units, 0: one); the node whose
-   turn it is to carry it on (`next`: the node a hop sent it to, which alone switches it; the slot goes out unchanged on
-   every group's lane, each receiver reading only the destinations it is the next of); and the cost it carried so far
-   (ns: queueing at each hop, the wire's time) */
-struct mesh_switch_dest { uint32_t node,transfer,span; uint16_t units,unused; uint32_t next; float queued,transit; };
-
+/* ---- The header (a page's first MESH_HEAD bytes) ------------------------------------------------------------------- */
+/* a destination as a header carries it: its node and index of that node's table; the node whose turn it is to carry it
+   on (`next`: the node a hop sent it to, which alone switches it; a page goes out unchanged on every group's lane, each
+   receiver reading only the destinations it is the next of; UINT32_MAX no one's); and the cost it carried so far (ns:
+   queueing at each hop, the wire's time) */
+struct mesh_hop { uint32_t node,index,next; float queued,transit; };
 /* a line: a directed link's predicted wait (ns) and its spread, its rate (bytes a ns, every cable) and latency, as its
    sender (`from`) measured it at its refresh `stamp` */
 struct mesh_switch_line { uint32_t from,to; uint64_t stamp; float wait,spread,rate,latency; };
-struct mesh_switch_name {
-  uint32_t magic,source;            /* the producing node */
-  uint64_t key,execution;           /* the program's key (alike at both ends) and its execution */
-  uint32_t bytes,hops,dests,lines;
-  uint32_t from,kind;               /* the node that sent this SEND (its receiver appends itself to `path`); MESH_PIECE_DATA, or MESH_PIECE_CREDIT (mesh_switch_credit) */
-  uint32_t path[MESH_SWITCH_N];     /* the nodes visited, in order: `hops` + 1 of them */
-  struct mesh_switch_dest dest[MESH_SWITCH_N];
-  float floor,unused;               /* ns: the unloaded delay */
-  uint64_t piece;                   /* the piece's identity at its source: its program's claim index (unique a key) */
-  uint32_t wanted[MESH_SWITCH_N],nwanted;   /* the piece's destinations as staged: its pattern's (with `source`) */
-  /* the lines follow the payload, in its SEND's last frame's slack (mesh_switch_lines_at): `lines` of them */
+/* the header, written by the bridge (never the client): MESH_HEAD_MAGIC; the node that took the write (`source`); the
+   payload's bytes; the hops, destinations and lines; the node that sent this SEND (`from`: its receiver appends itself
+   to `path`); `unused`, unused; the nodes visited, `hops` + 1 of them; the destinations; the sequence of the headers
+   its first node made (`piece`: the draw's seed, the records' sampling and their join); and the write's destination
+   nodes as bits over the source's view (`wanted`: the policy's context).  The lines follow the payload in the last
+   frame's slack (mesh_switch_lines_at) */
+struct mesh_head {
+  uint32_t magic,source,bytes,hops,dests,lines,from,unused;
+  uint32_t path[MESH_SWITCH_N];
+  struct mesh_hop dest[MESH_DESTS];
+  uint64_t piece;
+  uint32_t wanted;
 };
-_Static_assert(sizeof(struct mesh_switch_name)<=MESH_SWITCH_HEAD && MESH_SWITCH_HEAD%64==0,"a name within its head");
-_Static_assert(sizeof(struct mesh_switch_name)>MESH_SWITCH_HEAD-64,"a head no longer than its name needs");
+_Static_assert(sizeof(struct mesh_head)<=MESH_HEAD && MESH_HEAD%64==0,"a header within its MESH_HEAD bytes");
+_Static_assert(sizeof(struct mesh_head)>MESH_HEAD-64,"MESH_HEAD no longer than the header needs");
+static inline struct mesh_head *mesh_head_of(struct hdr *m,uint32_t pd){ return (struct mesh_head *)mesh_pd_head(m,pd); }
 
 /* ---- The region's switch (struct hdr switch_off; MESH_SWITCH_BYTES, mesh.h) ------------------------------------- */
 /* a link of the view: a directed node pair, its cables, rate (all of them, bytes a ns), latency (ns), and its line's
@@ -126,9 +125,9 @@ struct mesh_switch_weights {
   uint64_t toward[MESH_SWITCH_N];   /* neighbour k's lanes live at the refresh, bits over the switch's lanes (a draw reads
                                        these lanes alone, each its `live` again) */
 };
-/* the policy's split tables (rdma/tests/route route.h): this node's contexts, each (its pattern's source, the
-   pattern's destinations, the destinations still owed: view indices, the last two as bits) in route_contexts' order
-   (mesh_switch_contexts), and each one's w [SPLIT_FS], published as the weights are (seqlock).  `active` set, a piece
+/* the policy's split tables (rdma/route route.h): this node's contexts, each (its pattern's source, the
+   pattern's destinations, the destinations still owed: view indices, the last two as bits) in mesh_switch_contexts'
+   order, and each one's w [SPLIT_FS], published as the weights are (seqlock).  `active` set, a page
    whose context is here draws its split from split.h's table under its w (mesh_switch_choose); else the weights draw.
    `unit`: the features' time unit (mesh_switch_state_make), `point`: the policy refresh the tables are from */
 struct mesh_switch_context { uint32_t source,wanted,owed,pattern; };
@@ -141,197 +140,181 @@ struct mesh_switch_splits {
   float w[MESH_SWITCH_CONTEXTS][SPLIT_FS];
 };
 /* a lane of this node (port p's data lane j: p 2 MESH_LINK_STREAMS + j): live, its peer node, the bytes queued on it
-   (pushed and not yet completed), its outbox's cursors, and its feedback: SENDs completed, their bytes, their service
-   and wait (ns, summed), and the estimate its child keeps (rate in bytes a ns and wait, two floats in one word) */
+   (pushed and not yet completed), its outbox's cursors (`tail` the next position pushed, by any port child; `head` the next
+   posted and `done` the next completed, by the lane's child), and its feedback: SENDs completed, their bytes, their
+   service and wait (ns, summed), pages landed, the estimate its child keeps (rate in bytes a ns and wait, two floats in
+   one word); and its frames (every SEND's and receive's on the lane, TN3205: the two ends alike; 0 while it never
+   opened) */
 struct mesh_switch_lane {
   _Alignas(64) _Atomic uint32_t live,peer;
-  _Atomic uint64_t queued,tail;     /* every pushing process's (mesh_switch_push) */
-  /* the lane's child's alone, on a line of its own: its outbox's head read every pass, never bounced by a push */
-  _Alignas(64) _Atomic uint64_t head;
+  _Atomic uint64_t queued,tail;     /* every pushing child's (mesh_switch_push) */
+  /* the lane's child's alone, on a line of its own: its outbox's head and done read every pass, never bounced by a push */
+  _Alignas(64) _Atomic uint64_t head,done;
   _Atomic uint64_t sends,bytes,service,wait,landed,estimate;
-  _Atomic uint64_t frames;          /* every SEND's and receive's frames on the lane (TN3205: the two ends alike); 0 a whole slot */
+  _Atomic uint64_t frames;
 };
-struct mesh_switch_cell { _Atomic uint64_t sequence,slot; };
-/* a slot of the pool: its free-stack link, its references (SENDs posted of it and a delivery pending), and its
-   state, with its last post and landing (ns, the caller's clock) */
-enum { SLOT_FREE, SLOT_RECEIVE, SLOT_HELD, SLOT_SENDING };
-struct mesh_switch_slot {
-  _Alignas(64) _Atomic uint64_t next;
-  _Atomic uint32_t refs,state;
-  uint32_t lane,owner;
-  uint64_t posted,landed,staged;
-  /* a held slot whose one destination here waits for its client: the word it waits on (region offset, 0 none) and the
-     value that word must reach; retried in full only once it has (mesh_switch_forward) */
-  uint64_t wait_word,wait_value;
-  /* the program that word is its (region offset of its mesh_declared, 0 none: the region's `control`, a declaration's):
-     a wait ends where that program is no longer the one of the piece's key (closed and vacated: the piece is dropped) */
-  uint64_t wait_program;
-  /* the name's destinations this node still owes (bits over dest[]), the holder's alone; and the SENDs of this slot
-     pushed and not yet completed, by lane (a lane lost: mesh_switch_again) */
-  uint32_t owed;
-  _Atomic uint8_t on[MESH_SWITCH_LANES];
-};
-/* the trainer's records (rdma/tests/route): a draw (split.h struct route_draw and its behaviour log-probability), a
-   piece delivered (its latency and queueing over its floor) or an execution completed at a node (its span of local
-   time over its floor) */
-enum { MESH_LOG_DRAW=1, MESH_LOG_PIECE, MESH_LOG_EXECUTION };
+/* an outbox cell, of position `at`: free for it while its sequence is `at`; holding page `pd`, pushed at `pushed` (the
+   pusher's clock) and posted at `posted` (its SEND's post, the lane child's clock), while it is at + 1, until the page's
+   SEND completes or its lane is emptied (mesh_switch_lane_drop), so the outbox is also the lane's record of its SENDs
+   posted and not completed; then free for at + MESH_SWITCH_RING.  `pd` MESH_ABSENT: a hole, no SEND, where a pusher
+   died holding the cell (mesh_switch_left_settle) */
+struct mesh_switch_cell { _Atomic uint64_t sequence; uint64_t pushed,posted; uint32_t pd; };
+/* the trainer's records (rdma/route): a draw (split.h struct route_draw and its behaviour log-probability) or a page
+   set at a destination (its latency and queueing), each with the node that made it, the page's piece and source, its
+   first destination's node and index (a draw's) or the destination's, its bytes, the draw's context at its node
+   (UINT32_MAX: none, the weights drew) and the policy refresh its split table is from, at the node's clock (ns) */
+enum { MESH_LOG_DRAW=1, MESH_LOG_PIECE };
 struct mesh_switch_record {
-  uint32_t kind,node;               /* the node that made it */
-  uint64_t key,execution,at;        /* the program, its execution, the node's clock (ns) */
+  uint32_t kind,node;
+  uint64_t piece,at;
   struct route_draw draw;           /* MESH_LOG_DRAW */
-  float logp,latency,queueing,floor;
-  uint32_t source,transfer,span,bytes;
-  uint32_t context,point,dest,padding;   /* the draw's context at its node (UINT32_MAX: none, the weights drew), the
-                                            policy refresh its split table is from, its first destination */
-  uint64_t piece;                   /* the piece's identity (its name's piece: with source and key, the same at every hop and
-                                       destination) */
+  float logp,latency,queueing;
+  uint32_t source,dest,index,bytes,context,point;
 };
 struct mesh_switch_log { _Alignas(64) _Atomic uint64_t head; _Alignas(64) _Atomic uint64_t tail,dropped; struct mesh_switch_record record[MESH_SWITCH_LOG]; };
-/* where a crossing's time goes, counted in memory (never storage) by each process of the switch, one writer a set (a
-   port child's at its port's index, the parent's at MESH_PORTS, the simulator's after), read by mesh-switch-stat:
-   - a progress pass: its count, its time, and each part's (receive completions, receives posted, staging and the held
-     retried, SENDs posted, SEND completions);
-   - staging: pieces staged and their destinations, the time staging and switching them took, and the stagings put off
-     by the credit window, by the transfer's window, or for want of a slot;
-   - switching (mesh_switch_forward): calls, their time, groups made, slot copies, calls that left a piece held;
-   - the wire: SENDs posted and their wait from the push onto the outbox to the post, SENDs completed and their time
-     from post to completion;
-   - receiving: pieces landed, destinations delivered here, their wait from landing to delivery, by hops (1, 2, 3+);
-   - credits made and taken, and the refreshes and their time */
+/* a port child's hand, which its parent reads once the child is gone and the next bridge reads as it adopts the region
+   (mesh_switch_left_settle): the ring position of the write it takes (`take`: (slot + 1) << 56 | the position,
+   MESH_HAND_HELD once its compare-exchange won, 0 none), and the outbox position it pushes page `page` to (`push`:
+   (lane + 1) << 56 | the position, MESH_HAND_HELD once won, 0 none) */
+#define MESH_HAND_HELD (UINT64_C(1)<<55)
+#define MESH_HAND_AT (MESH_HAND_HELD-1)
+struct mesh_switch_hand { _Alignas(64) _Atomic uint64_t take,push; _Atomic uint32_t page; };
+/* a hand as its child left it, the parent's copy */
+struct mesh_switch_left { uint64_t take,push; uint32_t page; };
+/* where a pass's time goes, counted in memory (never storage) by each process of the switch, a set a port child (at
+   its port's index) and the parent's (at MESH_SWITCH_PARENT), read by mesh-switch-stat:
+   - passes, and of one pass in 1024 its time (`pass_ns`: summed, and the passes timed) and each part's (`part_ns`:
+     receive completions, receives posted, writes taken, SENDs posted, SEND completions);
+   - writes taken, pages landed, table entries set here, forwards and the groups they made;
+   - SENDs posted and their wait from the push onto the outbox to the post, the posts' own time (the provider's
+     post_send), SENDs completed and their time from post to completion;
+   - receives a lane's fill wanted that its class's free stack had no page for (`starved`), refreshes;
+   - destinations no allowed neighbour reaches (`unreachable`), pages a lost lane, a gone child or a full outbox took
+     and landings whose receive was posted again into their own page, their class's free stack empty (`lost`: once a
+     page, not a destination), headers and ring cells that are not one and destination indices past
+     the table (`malformed`), and destinations here whose index no client owned, set nothing (`unowned`) */
 struct mesh_switch_counters {
-  _Alignas(64) _Atomic uint64_t passes,pass_ns,part_ns[5];
-  _Atomic uint64_t staged,staged_dests,stage_ns,credit_waits,window_waits,slot_waits;
-  _Atomic uint64_t forwards,forward_ns,groups,copies,kept;
-  _Atomic uint64_t posts,post_wait_ns,sent,send_ns;
-  _Atomic uint64_t landed,delivered,deliver_wait_ns,hops[4];
-  _Atomic uint64_t credits,credits_taken,refreshes,refresh_ns;
-  _Atomic uint64_t unplaced[8];     /* deliveries put off, by why (mesh_switch_unplaced) */
-  _Atomic uint64_t post_call_ns;    /* the posts' own time (the provider's post_send) */
-  _Atomic uint64_t orphans;         /* destinations here dropped: their program gone (vacated, or replaced in its slot), or closed before
-                                       the piece's execution (mesh_switch_gone) */
+  _Alignas(64) _Atomic uint64_t passes,pass_ns[2],part_ns[5];
+  _Atomic uint64_t taken,landed,set,forwards,groups;
+  _Atomic uint64_t posts,post_wait_ns,post_call_ns,sent,send_ns;
+  _Atomic uint64_t starved,refreshes;
+  _Atomic uint64_t unreachable,lost,malformed,unowned;
 };
+/* `writes`: the headers this node made (the writes it took), each one's piece; `weighted`: a draw from the weights
+   (else the earliest arrival, the design's rule) */
 struct mesh_switch {
-  uint32_t magic,slots;
-  uint64_t slot_bytes,slot_base;    /* a slot's bytes (MESH_SWITCH_HEAD and a piece, whole frames) and the pool's region offset */
-  _Alignas(64) _Atomic uint64_t free_head;
-  _Atomic uint64_t free_count,stamp,refreshing;
-  _Atomic uint32_t logging,weighted;   /* weighted: a draw from the weights (else the earliest arrival, the design's rule) */
+  uint32_t magic,padding;
+  _Atomic uint64_t stamp;
+  _Atomic uint32_t logging,weighted;
+  _Alignas(64) _Atomic uint64_t writes;
   struct mesh_switch_view view;
   struct mesh_switch_weights weights;
   struct mesh_switch_splits splits;
   struct mesh_switch_lane lane[MESH_SWITCH_LANES];
-  struct mesh_switch_slot slot[MESH_SWITCH_SLOTS];
+  struct mesh_switch_hand hand[MESH_PORTS];
   struct mesh_switch_cell ring[MESH_SWITCH_LANES][MESH_SWITCH_RING];
-  struct mesh_switch_log log[MESH_SWITCH_LOGS];
+  struct mesh_switch_log log[MESH_PORTS];
   struct mesh_switch_counters counters[MESH_SWITCH_LOGS];
 };
 _Static_assert(sizeof(struct mesh_switch)<=MESH_SWITCH_BYTES,"the switch within its region bytes");
-/* a counter of ring `ring`'s writer moved by v (one writer a ring: a load and a store, no read-modify-write) */
-#define MESH_SWITCH_COUNT(sw,ring,field,v) do{ if((ring)<MESH_SWITCH_LOGS){ _Atomic uint64_t *c_=&(sw)->counters[ring].field; \
+/* counter `field` of set `ring` moved by v by its one writer, a load and a store (no read-modify-write): a port child's
+   set its child's, the parent's `refreshes` its refresh thread's and its `lost` its event loop's */
+#define MESH_SWITCH_COUNT(sw,ring,field,v) do{ const uint32_t r_=(ring); if(r_<MESH_SWITCH_LOGS){ _Atomic uint64_t *c_=&(sw)->counters[r_].field; \
   atomic_store_explicit(c_,atomic_load_explicit(c_,memory_order_relaxed)+(uint64_t)(v),memory_order_relaxed);} }while(0)
 static inline struct mesh_switch *mesh_switch_of(struct hdr *m){ return (struct mesh_switch *)((char *)m+m->switch_off); }
-static inline unsigned char *mesh_switch_slot_at(struct hdr *m,const struct mesh_switch *sw,uint32_t s){
-  return (unsigned char *)m+sw->slot_base+(uint64_t)s*sw->slot_bytes;
-}
-static inline struct mesh_dma_span mesh_switch_slot_span(const struct mesh_switch *sw,uint32_t s){
-  return (struct mesh_dma_span){sw->slot_base+(uint64_t)s*sw->slot_bytes,sw->slot_bytes};
-}
-/* the word at region offset `at` raised to `value` where it is lower (release): a done word only rises */
-static inline void mesh_switch_raise(void *m,uint64_t at,uint64_t value){
-  if(!at)return;
-  _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+at);
-  uint64_t old=atomic_load_explicit(word,memory_order_relaxed);
-  while(old<value && !atomic_compare_exchange_weak_explicit(word,&old,value,memory_order_release,memory_order_relaxed)){}
-}
 static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x,&a,4);memcpy(&y,&b,4);return (uint64_t)x|(uint64_t)y<<32; }
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
-/* a piece's bytes at most (mesh-order.h's order_piece_bytes: one allocation block) and the slot that carries one */
-static inline uint64_t mesh_switch_piece(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
-static inline uint64_t mesh_switch_slot_bytes(const struct hdr *m){ return (MESH_SWITCH_HEAD+MESH_SWITCH_UNITS*mesh_switch_piece(m)+4095)/4096*4096; }   /* whole frames of 4096 (mesh-bridge.h MESH_FRAME) */
-/* the bytes every SEND on lane l carries (its frames: a short lane's MESH_SWITCH_SHORT, another's a whole slot) */
+/* the bytes every SEND and receive on lane l covers: its frames' */
 static inline uint64_t mesh_switch_lane_bytes(const struct mesh_switch *sw,uint32_t l){
-  const uint64_t f=atomic_load_explicit(&sw->lane[l].frames,memory_order_relaxed);
-  return f && f*4096<sw->slot_bytes?f*4096:sw->slot_bytes;
+  return atomic_load_explicit(&sw->lane[l].frames,memory_order_relaxed)*MESH_FRAME;
 }
 
-/* the switch made new over `slots` slots of the pool at region offset `base` (the bridge's own arena pages) */
-static inline void mesh_switch_init(struct mesh_switch *sw,uint32_t slots,uint64_t slot_bytes,uint64_t base){
+/* the switch made new at the bridge's start, every outbox empty: nothing of a bridge before survives its stop */
+static inline void mesh_switch_init(struct mesh_switch *sw){
   memset(sw,0,sizeof *sw);
-  sw->magic=MESH_SWITCH_MAGIC;sw->slots=slots<MESH_SWITCH_SLOTS?slots:MESH_SWITCH_SLOTS;sw->slot_bytes=slot_bytes;sw->slot_base=base;
   for(uint32_t l=0;l<MESH_SWITCH_LANES;l++)for(uint32_t i=0;i<MESH_SWITCH_RING;i++)atomic_store_explicit(&sw->ring[l][i].sequence,i,memory_order_relaxed);
-  for(uint32_t s=sw->slots;s-->0;){
-    sw->slot[s].next=atomic_load_explicit(&sw->free_head,memory_order_relaxed);
-    atomic_store_explicit(&sw->free_head,(uint64_t)(s+1),memory_order_relaxed);
-  }
-  atomic_store_explicit(&sw->free_count,sw->slots,memory_order_relaxed);
+  sw->magic=MESH_SWITCH_MAGIC;
   atomic_thread_fence(memory_order_release);
 }
 
-/* ---- The pool: a free stack any process takes from and gives to (a tag against ABA in the head's high half) ----- */
-static inline uint32_t mesh_switch_take(struct mesh_switch *sw){
-  uint64_t head=atomic_load_explicit(&sw->free_head,memory_order_acquire);
-  for(;;){
-    const uint32_t s=(uint32_t)head;
-    if(!s)return UINT32_MAX;
-    const uint64_t next=(atomic_load_explicit(&sw->slot[s-1].next,memory_order_acquire)&UINT32_MAX)|((head>>32)+1)<<32;
-    if(atomic_compare_exchange_weak_explicit(&sw->free_head,&head,next,memory_order_acq_rel,memory_order_acquire)){
-      atomic_fetch_sub_explicit(&sw->free_count,1,memory_order_relaxed);
-      atomic_store_explicit(&sw->slot[s-1].refs,0,memory_order_relaxed);sw->slot[s-1].owner=0;
-      return s-1;
-    }
-  }
-}
-static inline void mesh_switch_give(struct mesh_switch *sw,uint32_t s){
-  atomic_store_explicit(&sw->slot[s].state,SLOT_FREE,memory_order_relaxed);
-  uint64_t head=atomic_load_explicit(&sw->free_head,memory_order_acquire);
-  for(;;){
-    atomic_store_explicit(&sw->slot[s].next,head&UINT32_MAX,memory_order_relaxed);
-    const uint64_t next=(uint64_t)(s+1)|((head>>32)+1)<<32;
-    if(atomic_compare_exchange_weak_explicit(&sw->free_head,&head,next,memory_order_acq_rel,memory_order_acquire))break;
-  }
-  atomic_fetch_add_explicit(&sw->free_count,1,memory_order_relaxed);
-}
-/* one reference of slot s let go; the slot given back with its last */
-static inline void mesh_switch_release(struct mesh_switch *sw,uint32_t s){
-  if(atomic_fetch_sub_explicit(&sw->slot[s].refs,1,memory_order_acq_rel)==1)mesh_switch_give(sw,s);
-}
-
-/* ---- A lane's outbox: bounded, any process pushes, the lane's child pops ----------------------------------------- */
-static inline int mesh_switch_push(struct mesh_switch *sw,uint32_t lane,uint32_t slot){
-  struct mesh_switch_lane *x=sw->lane+lane;
+/* ---- A lane's outbox: bounded, any port child pushes, the lane's child posts and completes ----------------------- */
+/* page pd pushed onto lane l's outbox at the pusher's clock `now`, by any port child, naming its hand (each position in
+   it before its compare-exchange, held once won, cleared once the cell is filled, so its parent settles a push it died
+   in, mesh_switch_left_settle): 1, or 0 where the outbox is full (it holds every pool page once, so a push of a page
+   not already on it never finds it full), the hand cleared */
+static inline int mesh_switch_push(struct mesh_switch *sw,uint32_t l,uint32_t pd,uint64_t now,struct mesh_switch_hand *hand){
+  struct mesh_switch_lane *x=sw->lane+l;
   uint64_t at=atomic_load_explicit(&x->tail,memory_order_relaxed);
+  atomic_store_explicit(&hand->page,pd,memory_order_relaxed);
   for(;;){
-    struct mesh_switch_cell *c=sw->ring[lane]+at%MESH_SWITCH_RING;
+    struct mesh_switch_cell *c=sw->ring[l]+at%MESH_SWITCH_RING;
     const uint64_t seq=atomic_load_explicit(&c->sequence,memory_order_acquire);
-    if(seq==at){
-      if(atomic_compare_exchange_weak_explicit(&x->tail,&at,at+1,memory_order_relaxed,memory_order_relaxed)){
-        atomic_store_explicit(&c->slot,slot,memory_order_relaxed);
-        atomic_store_explicit(&c->sequence,at+1,memory_order_release);
-        return 1;
-      }
-    }else if(seq<at)return 0;   /* full */
-    else at=atomic_load_explicit(&x->tail,memory_order_relaxed);
+    if(seq<at){atomic_store_explicit(&hand->push,0,memory_order_release);return 0;}
+    if(seq>at){at=atomic_load_explicit(&x->tail,memory_order_relaxed);continue;}
+    const uint64_t named=((uint64_t)(l+1)<<56)|at;
+    atomic_store_explicit(&hand->push,named,memory_order_relaxed);
+    if(!atomic_compare_exchange_weak_explicit(&x->tail,&at,at+1,memory_order_acq_rel,memory_order_relaxed))continue;
+    atomic_store_explicit(&hand->push,named|MESH_HAND_HELD,memory_order_relaxed);
+    c->pd=pd;c->pushed=now;
+    atomic_store_explicit(&c->sequence,at+1,memory_order_release);
+    atomic_store_explicit(&hand->push,0,memory_order_release);
+    return 1;
   }
 }
-/* the next slot on the lane's outbox, UINT32_MAX none (one consumer: the lane's child) */
-static inline uint32_t mesh_switch_peek(struct mesh_switch *sw,uint32_t lane){
-  const uint64_t at=atomic_load_explicit(&sw->lane[lane].head,memory_order_relaxed);
-  struct mesh_switch_cell *c=sw->ring[lane]+at%MESH_SWITCH_RING;
-  return atomic_load_explicit(&c->sequence,memory_order_acquire)==at+1?(uint32_t)atomic_load_explicit(&c->slot,memory_order_relaxed):UINT32_MAX;
+/* lane l's outbox cell of position `at` read: 1 where a page is pushed there (*pd the page, MESH_ABSENT a hole, *pushed
+   its push's clock where asked), else 0 */
+static inline int mesh_switch_cell_at(const struct mesh_switch *sw,uint32_t l,uint64_t at,uint32_t *pd,uint64_t *pushed){
+  const struct mesh_switch_cell *c=sw->ring[l]+at%MESH_SWITCH_RING;
+  if(atomic_load_explicit(&c->sequence,memory_order_acquire)!=at+1)return 0;
+  *pd=c->pd;
+  if(pushed)*pushed=c->pushed;
+  return 1;
 }
-/* the slot k places behind the next on the lane's outbox, UINT32_MAX none (its consumer's) */
-static inline uint32_t mesh_switch_peek_at(struct mesh_switch *sw,uint32_t lane,uint32_t k){
-  const uint64_t at=atomic_load_explicit(&sw->lane[lane].head,memory_order_relaxed)+k;
-  struct mesh_switch_cell *c=sw->ring[lane]+at%MESH_SWITCH_RING;
-  return atomic_load_explicit(&c->sequence,memory_order_acquire)==at+1?(uint32_t)atomic_load_explicit(&c->slot,memory_order_relaxed):UINT32_MAX;
+/* lane l's outbox cell of position `at` given back, free for its next lap */
+static inline void mesh_switch_cell_free(struct mesh_switch *sw,uint32_t l,uint64_t at){
+  atomic_store_explicit(&sw->ring[l][at%MESH_SWITCH_RING].sequence,at+MESH_SWITCH_RING,memory_order_release);
 }
-static inline void mesh_switch_pop(struct mesh_switch *sw,uint32_t lane){
-  const uint64_t at=atomic_load_explicit(&sw->lane[lane].head,memory_order_relaxed);
-  atomic_store_explicit(&sw->ring[lane][at%MESH_SWITCH_RING].sequence,at+MESH_SWITCH_RING,memory_order_release);
-  atomic_store_explicit(&sw->lane[lane].head,at+1,memory_order_relaxed);
+/* lane l's outbox cell of position `at`, holding a page, posted at `posted` (its lane child's clock) */
+static inline void mesh_switch_cell_posted(struct mesh_switch *sw,uint32_t l,uint64_t at,uint64_t posted){
+  sw->ring[l][at%MESH_SWITCH_RING].posted=posted;
+}
+/* lane l's next SEND completed (its child's): the holes before it passed, its cell given back; its page, whose use the
+   caller drops (MESH_ABSENT: none posted), and *posted its post's clock (unchanged where none) */
+static inline uint32_t mesh_switch_completed(struct mesh_switch *sw,uint32_t l,uint64_t *posted){
+  struct mesh_switch_lane *x=sw->lane+l;
+  const uint64_t head=atomic_load_explicit(&x->head,memory_order_relaxed);
+  uint64_t done=atomic_load_explicit(&x->done,memory_order_relaxed);
+  uint32_t pd=MESH_ABSENT;
+  while(done<head && pd==MESH_ABSENT){
+    if(!mesh_switch_cell_at(sw,l,done,&pd,NULL))break;
+    if(pd!=MESH_ABSENT)*posted=sw->ring[l][done%MESH_SWITCH_RING].posted;
+    mesh_switch_cell_free(sw,l,done);done++;
+  }
+  atomic_store_explicit(&x->done,done,memory_order_relaxed);
+  return pd;
+}
+/* lane l's outbox emptied, its child gone or its lane opened anew: each SEND posted and not completed and each page
+   pushed and not posted given back, its bytes off the lane's queue, its use dropped and counted `lost` in set `ring`
+   (the caller's counters); the cursors past them.  The cells from the first a pusher holds unfilled stay (its push
+   ends, or its death is settled: mesh_switch_left_settle) */
+static inline void mesh_switch_lane_drop(struct hdr *m,struct mesh_switch *sw,uint32_t l,uint32_t ring){
+  struct mesh_switch_lane *x=sw->lane+l;
+  const uint64_t wire=mesh_switch_lane_bytes(sw,l);
+  uint64_t at=atomic_load_explicit(&x->done,memory_order_relaxed);
+  uint32_t pd;
+  while(mesh_switch_cell_at(sw,l,at,&pd,NULL)){
+    if(mesh_pd_valid(m,pd)){
+      atomic_fetch_sub_explicit(&x->queued,wire,memory_order_relaxed);
+      mesh_pd_drop(m,pd);
+      MESH_SWITCH_COUNT(sw,ring,lost,1);
+    }
+    mesh_switch_cell_free(sw,l,at);at++;
+  }
+  atomic_store_explicit(&x->head,at,memory_order_relaxed);
+  atomic_store_explicit(&x->done,at,memory_order_release);
 }
 
-/* ---- The view and the weights: written by one process (the parent's refresh, the simulator), read by all -------- */
+/* ---- The view and the weights: written by one process (the parent's refresh), read by all ----------------------- */
 static inline uint32_t mesh_switch_index(const struct mesh_switch_view *v,uint32_t node){
   for(uint32_t i=0;i<v->nodes;i++)if(v->node[i]==node)return i;
   return UINT32_MAX;
@@ -405,7 +388,7 @@ static inline void mesh_switch_weights_read(const struct mesh_switch *sw,struct 
    A lane's SEND completed: `bytes`, posted at `posted`, its service beginning at `start` (its post, or the lane's
    previous completion if later) and done at `done` (ns, the child's clock): the lane's queue less its bytes, its sums,
    and its estimate moved (an exponential average of the service rate, 1/8 a SEND, and of the wait) */
-static inline void mesh_switch_sent(struct mesh_switch *sw,uint32_t lane,uint32_t slot,uint64_t bytes,uint64_t posted,uint64_t start,uint64_t done){
+static inline void mesh_switch_sent(struct mesh_switch *sw,uint32_t lane,uint64_t bytes,uint64_t posted,uint64_t start,uint64_t done){
   struct mesh_switch_lane *x=sw->lane+lane;
   atomic_fetch_sub_explicit(&x->queued,bytes,memory_order_relaxed);
   atomic_fetch_add_explicit(&x->sends,1,memory_order_relaxed);atomic_fetch_add_explicit(&x->bytes,bytes,memory_order_relaxed);
@@ -415,23 +398,22 @@ static inline void mesh_switch_sent(struct mesh_switch *sw,uint32_t lane,uint32_
   const float r=(float)bytes/(float)service;
   rate=rate>0?rate+(r-rate)/8:r;waited+=((float)wait-waited)/8;
   atomic_store_explicit(&x->estimate,mesh_switch_pack(rate,waited),memory_order_relaxed);
-  if(slot!=UINT32_MAX){atomic_fetch_sub_explicit(&sw->slot[slot].on[lane],1,memory_order_relaxed);mesh_switch_release(sw,slot);}
 }
-/* where a name's lines lie: after its payload (8-aligned), within the SEND's whole frames, so they cost no wire; and how
-   many fit in `wire` bytes */
-static inline struct mesh_switch_line *mesh_switch_lines_at(struct mesh_switch_name *name){
-  return (struct mesh_switch_line *)((char *)name+MESH_SWITCH_HEAD+((uint64_t)name->bytes+7)/8*8);
+/* where a header's lines lie: after its payload (8-aligned), within the SEND's whole frames, so they cost no wire; and
+   how many fit in `wire` bytes */
+static inline struct mesh_switch_line *mesh_switch_lines_at(struct mesh_head *head){
+  return (struct mesh_switch_line *)((char *)head+MESH_HEAD+((uint64_t)head->bytes+7)/8*8);
 }
-static inline uint32_t mesh_switch_lines_fit(const struct mesh_switch_name *name,uint64_t wire){
-  const uint64_t at=MESH_SWITCH_HEAD+((uint64_t)name->bytes+7)/8*8,room=wire>at?(wire-at)/sizeof(struct mesh_switch_line):0;
+static inline uint32_t mesh_switch_lines_fit(const struct mesh_head *head,uint64_t wire){
+  const uint64_t at=MESH_HEAD+((uint64_t)head->bytes+7)/8*8,room=wire>at?(wire-at)/sizeof(struct mesh_switch_line):0;
   return room<MESH_SWITCH_LINES?(uint32_t)room:MESH_SWITCH_LINES;
 }
-/* the lines a name carries taken into the view where newer than its own (a node's lines about its own links are the
+/* the lines a header carries taken into the view where newer than its own (a node's lines about its own links are the
    ones it measured: a link's line is only ever made by its sender) */
-static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_switch_name *name,uint64_t wire){
+static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_head *head,uint64_t wire){
   struct mesh_switch_view *v=&sw->view;
-  const uint32_t lines=name->lines<mesh_switch_lines_fit(name,wire)?name->lines:mesh_switch_lines_fit(name,wire);
-  const struct mesh_switch_line *line=mesh_switch_lines_at(name);
+  const uint32_t lines=head->lines<mesh_switch_lines_fit(head,wire)?head->lines:mesh_switch_lines_fit(head,wire);
+  const struct mesh_switch_line *line=mesh_switch_lines_at(head);
   for(uint32_t i=0;i<lines;i++){
     const struct mesh_switch_line *a=line+i;
     if(a->from==v->self)continue;
@@ -444,7 +426,7 @@ static inline void mesh_switch_lines_take(struct mesh_switch *sw,struct mesh_swi
       }
   }
 }
-/* the lines a name sends: this node's own links first (their wait the least bytes queued over the rate of the
+/* the lines a header sends: this node's own links first (their wait the least bytes queued over the rate of the
    neighbour's lanes), then the view's others, newest first, as many as fit */
 static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,struct mesh_switch_line *line){
   struct mesh_switch_view *v=&sw->view;
@@ -462,7 +444,6 @@ static inline uint32_t mesh_switch_lines_give(struct mesh_switch *sw,struct mesh
     float wait,spread;mesh_switch_unpack(atomic_load_explicit(&x->line,memory_order_relaxed),&wait,&spread);
     line[n++]=(struct mesh_switch_line){x->from,x->to,s,wait,spread,(float)x->rate,(float)x->latency};
   }
-
   return n;
 }
 /* the wait now on this node's lanes toward `peer` (the least queued bytes over the lane's rate), its lane, and the
@@ -541,7 +522,8 @@ static inline int mesh_switch_reaches(const struct mesh_switch_view *v,uint32_t 
   if(from>=MESH_SWITCH_N || want>=MESH_SWITCH_N)return 0;
   return v->reach[avoid&((1u<<MESH_SWITCH_N)-1)][from]>>want&1;
 }
-/* The policy's contexts at this node (route.h route_contexts' order, restricted to it): for each rank a in view order
+/* The policy's contexts at this node (the order of a fabric's contexts the policy was trained in, restricted to this
+   node): for each rank a in view order
    its patterns, a -> {b} for each other rank b, then a -> every other rank; for each, every set S of the pattern's
    destinations without this node, ascending as bits.  Returns their count (at most MESH_SWITCH_CONTEXTS) */
 static inline uint32_t mesh_switch_ranks(const struct mesh_switch_view *v){ return v->ranks?v->ranks:(uint32_t)((UINT64_C(1)<<v->nodes)-1); }
@@ -603,47 +585,49 @@ static inline uint32_t mesh_switch_split_draw(const struct route_draw *d,const f
   *logp=(float)((double)split_logit(split_tanh(split_dot(&sp,w)))-most-log(total));
   return tok;
 }
-/* A piece at this node (its name: its destinations and path) split over the node's out-neighbours: each group's lane
-   (the neighbour's cable with the least bytes queued) and its destinations (bits over the name's dest entries).
-   The draw's record (split.h struct route_draw, as rdma/tests/route reads it): for each owed destination d and
-   neighbour k, the arrival through k (its lanes' wait now, the piece's time on them, the link's latency, then the
-   refresh's cost-to-go from k to d), whether k reaches d without coming back here (valid), and whether it is allowed
-   from the piece's path (off it, reaching d avoiding it: mask).
-   The draw, at u = the piece's swizzle at this node:
-   - where the policy's split tables are active and hold the piece's context (its source, its destinations as staged,
-     the ones owed: mesh_switch_split_w), the split is split.h's table under the context's w at u: exactly the
+/* A page at this node (its header: its destinations and path) split over the node's out-neighbours for the
+   destinations it carries on (`away`, `naway` of them: places in the header's dest[]): each group's lane (the
+   neighbour's cable with the least bytes queued, among lanes whose frames are at least `frames`, the class of the
+   page's payload) and its destinations (bits over `away`).
+   The draw's record (split.h struct route_draw, as rdma/route reads it): for each carried destination d and neighbour
+   k, the arrival through k (its lanes' wait now, the page's time on them, the link's latency, then the refresh's
+   cost-to-go from k to d), whether k reaches d without coming back here (valid), and whether it is allowed from the
+   page's path (off it, reaching d avoiding it: mask).
+   The draw, at u = the page's seed (its source, its piece, its first carried destination's index):
+   - where the policy's split tables are active and hold the page's context (its source, its wanted destinations, the
+     ones carried here: mesh_switch_split_w), the split is split.h's table under the context's w at u: exactly the
      trainer's action, *logp its log-probability;
    - else each destination i takes the neighbour k at which its masked, renormalised weights' distribution first passes
      u; where its weights give its allowed neighbours nothing, the allowed one of the least cost-to-go; *logp the
      length of u's interval that makes the split.
+   A destination no allowed neighbour reaches (or not in the view) is in no group: its bit set in *unreachable.
    `record` (NULL: none) receives the record, *context the context drawn from (UINT32_MAX: the weights), *point the
-   tables' refresh.  Returns the groups; UINT32_MAX where a destination is reached by no allowed neighbour (the piece
-   waits for the view to change). */
+   tables' refresh.  Returns the groups */
 static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct mesh_switch_view *v,const struct mesh_switch_weights *w,
-                                          const struct mesh_switch_name *name,uint64_t salt,uint32_t *lane,uint64_t *group,
+                                          const struct mesh_head *head,const uint32_t *away,uint32_t naway,uint32_t frames,
+                                          uint32_t *lane,uint64_t *group,uint32_t *unreachable,
                                           struct route_draw *record,float *logp,uint32_t *context,uint64_t *point){
   const uint32_t self=mesh_switch_index(v,v->self);
+  *unreachable=0;
   uint64_t visited=0;
-  for(uint32_t h=0;h<=name->hops && h<MESH_SWITCH_N;h++){const uint32_t i=mesh_switch_index(v,name->path[h]);if(i<64)visited|=UINT64_C(1)<<i;}
+  for(uint32_t h=0;h<=head->hops && h<MESH_SWITCH_N;h++){const uint32_t i=mesh_switch_index(v,head->path[h]);if(i<64)visited|=UINT64_C(1)<<i;}
   if(self<64)visited|=UINT64_C(1)<<self;
-  const double u=mesh_switch_uniform(name->key^name->execution*0x9e3779b97f4a7c15ULL^((uint64_t)name->dest[0].transfer<<32)^name->dest[0].span^
-                                     ((uint64_t)v->self<<48)^salt);
-  uint32_t deg=w->deg<MESH_SWITCH_N?w->deg:MESH_SWITCH_N,choice[MESH_SWITCH_N];
+  const double u=mesh_switch_uniform(((uint64_t)head->source<<32)^head->piece*0x9e3779b97f4a7c15ULL^(naway?head->dest[away[0]].index:0));
+  uint32_t deg=w->deg<MESH_SWITCH_N?w->deg:MESH_SWITCH_N,choice[MESH_DESTS],node[MESH_DESTS];
   uint32_t best_lane[MESH_SWITCH_N];double rate[MESH_SWITCH_N],wait[MESH_SWITCH_N],latency[MESH_SWITCH_N];
   for(uint32_t k=0;k<deg;k++){
     const uint32_t nb=w->neighbour[k];
     const struct mesh_switch_link *x=nb<v->nodes?mesh_switch_link_of((struct mesh_switch_view *)v,v->self,v->node[nb]):NULL;
-    /* the lane's wait with this piece's own bytes on it: its time to clear the lane (design: (backlog + bytes) / rate) */
-    wait[k]=nb<v->nodes?mesh_switch_lanes_among_for(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,-1,MESH_SWITCH_HEAD+(uint64_t)name->bytes):INFINITY;
+    /* the lane's wait with this page's own frames on it: its time to clear the lane (design: (backlog + bytes) / rate) */
+    wait[k]=nb<v->nodes?mesh_switch_lanes_among_for(sw,w->toward[k],v->node[nb],x?x->rate/x->cables:0,best_lane+k,rate+k,-1,(uint64_t)frames*MESH_FRAME):INFINITY;
     latency[k]=x?x->latency:0;
   }
-  /* the policy's context: the piece's source and destinations as staged, the owed ones (view indices) */
-  uint32_t owed=0,wanted=0;
-  for(uint32_t i=0;i<name->dests;i++){const uint32_t d=mesh_switch_index(v,name->dest[i].node);if(d<32)owed|=1u<<d;}
-  for(uint32_t i=0;i<name->nwanted && i<MESH_SWITCH_N;i++){const uint32_t d=mesh_switch_index(v,name->wanted[i]);if(d<32)wanted|=1u<<d;}
+  /* the policy's context: the page's source and wanted destinations, the carried ones (view indices) */
+  uint32_t owed=0;
+  for(uint32_t j=0;j<naway;j++){node[j]=mesh_switch_index(v,head->dest[away[j]].node);if(node[j]<32)owed|=1u<<node[j];}
   float cw[SPLIT_FS],unit=1;uint32_t ctx=UINT32_MAX,argmax=0;uint64_t at_point=0;
   const int split=v->nodes<=SPLIT_N && deg<=SPLIT_DEG &&
-                  mesh_switch_split_w(sw,mesh_switch_index(v,name->source),wanted,owed,cw,&ctx,&at_point,&argmax,&unit);
+                  mesh_switch_split_w(sw,mesh_switch_index(v,head->source),head->wanted,owed,cw,&ctx,&at_point,&argmax,&unit);
   if(!split)ctx=UINT32_MAX;
   if(context)*context=ctx;
   if(point)*point=at_point;
@@ -653,10 +637,10 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
   const int logged=record && v->nodes<=SPLIT_N && deg<=SPLIT_DEG;
   if(logged){memset(record,0,sizeof *record);record->deg=deg;record->unit=unit>0?unit:1;}
   uint32_t ntok=1;
-  for(uint32_t i=0;i<name->dests;i++){
-    const uint32_t d=mesh_switch_index(v,name->dest[i].node);
-    choice[i]=UINT32_MAX;
-    if(d>=v->nodes)return UINT32_MAX;
+  for(uint32_t j=0;j<naway;j++){
+    const uint32_t d=node[j];
+    choice[j]=UINT32_MAX;
+    if(d>=v->nodes){*unreachable|=1u<<j;continue;}
     double total=0,cost=INFINITY;uint32_t cheapest=UINT32_MAX,allowed=0;
     uint32_t ok[MESH_SWITCH_N];
     for(uint32_t k=0;k<deg;k++){
@@ -675,43 +659,43 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
       const double c=wait[k]+latency[k]+(nb==d?0:w->togo[nb][d]);
       if(c<cost){cost=c;cheapest=k;}
     }
-    if(!allowed)return UINT32_MAX;
+    if(!allowed){*unreachable|=1u<<j;continue;}
     ntok*=allowed;
     if(logged)record->S|=1u<<d;
     if(split)continue;
-    /* the design's rule: the allowed neighbour of the earliest arrival at d, its lane's backlog and this piece's
-       bytes on it, the link's latency, then the cost-to-go from it (the weights' draw where `weighted` is set) */
-    if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed)){choice[i]=cheapest;continue;}
+    /* the design's rule: the allowed neighbour of the earliest arrival at d, its lane's backlog and this page's
+       frames on it, the link's latency, then the cost-to-go from it (the weights' draw where `weighted` is set) */
+    if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed)){choice[j]=cheapest;continue;}
     if(total>0){
       double at=0;
-      for(uint32_t k=0;k<deg && choice[i]==UINT32_MAX;k++){
+      for(uint32_t k=0;k<deg && choice[j]==UINT32_MAX;k++){
         if(!ok[k])continue;
         const double p=w->w[d][k]/total;
-        if(u<at+p || at+p>=1-1e-12){choice[i]=k;if(at>lo)lo=at;if(at+p<hi)hi=at+p;}
+        if(u<at+p || at+p>=1-1e-12){choice[j]=k;if(at>lo)lo=at;if(at+p<hi)hi=at+p;}
         at+=p;
       }
-      if(choice[i]==UINT32_MAX){choice[i]=cheapest;}
-    }else choice[i]=cheapest;
+      if(choice[j]==UINT32_MAX){choice[j]=cheapest;}
+    }else choice[j]=cheapest;
   }
-  if(split){
-    /* split.h's table under the context's w: the token's digit for each owed destination, in S's order */
+  if(split && record->S){
+    /* split.h's table under the context's w (every destination of S has an allowed neighbour, so the table holds a
+       split): the token's digit for each carried destination, in S's order */
     float lp=0;
     const uint32_t tok=mesh_switch_split_draw(record,cw,u,(int)argmax,&lp);
-    if(tok==UINT32_MAX)return UINT32_MAX;
     uint32_t y=tok;
-    for(uint32_t dd=0;dd<SPLIT_N;dd++){
+    for(uint32_t dd=0;dd<SPLIT_N && tok!=UINT32_MAX;dd++){
       if(!(record->S>>dd&1))continue;
-      for(uint32_t i=0;i<name->dests;i++)if(mesh_switch_index(v,name->dest[i].node)==dd)choice[i]=y%deg;
+      for(uint32_t j=0;j<naway;j++)if(node[j]==dd && !(*unreachable>>j&1))choice[j]=y%deg;
       y/=deg;
     }
     record->token=tok;record->ntok=ntok;
     if(logp)*logp=lp;
-  }else{
+  }else if(!split){
     if(logged){
       uint32_t tok=0,place=1;
       for(uint32_t dd=0;dd<SPLIT_N;dd++){
         if(!(record->S>>dd&1))continue;
-        for(uint32_t i=0;i<name->dests;i++)if(mesh_switch_index(v,name->dest[i].node)==dd){tok+=choice[i]*place;break;}
+        for(uint32_t j=0;j<naway;j++)if(node[j]==dd && choice[j]!=UINT32_MAX){tok+=choice[j]*place;break;}
         place*=deg;
       }
       record->token=tok;record->ntok=ntok;
@@ -719,15 +703,15 @@ static inline uint32_t mesh_switch_choose(struct mesh_switch *sw,const struct me
     if(logp)*logp=hi>lo?(float)log(hi-lo):0;
   }
   uint32_t used=0;
-  for(uint32_t i=0;i<name->dests;i++){
-    const uint32_t k=choice[i],l=best_lane[k];
+  for(uint32_t j=0;j<naway;j++){
+    if(choice[j]==UINT32_MAX){*unreachable|=1u<<j;continue;}
+    const uint32_t l=best_lane[choice[j]];
     uint32_t g=0;while(g<used && lane[g]!=l)g++;
     if(g==used){lane[used]=l;group[used]=0;used++;}
-    group[g]|=UINT64_C(1)<<i;
+    group[g]|=UINT64_C(1)<<j;
   }
   return used;
 }
-
 /* ---- The refresh -------------------------------------------------------------------------------------------------
    The weights' target from what the node knows now: each hop's cost its wait (this node's own lanes' least queue over
    their rate, a remote link's line) plus a page's time on one cable plus its latency.  A policy (`policy` NULL: the
@@ -760,7 +744,7 @@ struct mesh_switch_policy {
   void *context;
   /* target[d][k]; 0, or -1: the default's target is taken instead */
   int (*target)(void *context,const struct mesh_switch_state *state,float target[MESH_SWITCH_N][MESH_SWITCH_N]);
-  /* the trained policy (rdma/tests/route): each of this node's contexts' w from its tokens (deployed: forward.c's
+  /* the trained policy (rdma/route): each of this node's contexts' w from its tokens (deployed: forward.c's
      route_forward_lanes over the lanes, then route_forward_context for each context, the state carried in `context`);
      0, or -1: the tables stay as they are.  Called by mesh_switch_policy_refresh */
   int (*splits)(void *context,const struct mesh_switch_tokens *tokens,float w[MESH_SWITCH_CONTEXTS][SPLIT_FS]);
@@ -819,21 +803,13 @@ static inline void mesh_switch_thompson(const struct mesh_switch_state *s,uint32
 }
 static inline double mesh_switch_unit(const struct mesh_switch_view *v,double page);
 /* one refresh: the state, the target (the policy's, else Thompson's), the residual (target less the weights now) applied
-   at the rate eta (1: the target itself), the weights published, this node's stamp moved.  `fixed` set: the target
-   is each destination's one cheapest neighbour on the unloaded fabric (every wait 0), the compiled routing's analog,
-   for comparison; the weights then never move after their first refresh */
+   at the rate eta (1: the target itself), the weights published, this node's stamp moved */
 static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_switch_policy *policy,uint32_t draws,float eta,uint64_t seed,
-                                       double page,int fixed){
+                                       double page){
   struct mesh_switch_view v;mesh_switch_view_read(sw,&v);
   struct mesh_switch_state s;mesh_switch_state_make(sw,&v,page,&s);
   float target[MESH_SWITCH_N][MESH_SWITCH_N];memset(target,0,sizeof target);
-  if(fixed){
-    for(uint32_t l=0;l<v.links;l++)s.hop[l]=page/(v.link[l].rate/v.link[l].cables)+v.link[l].latency;
-    for(uint32_t k=0;k<s.deg;k++)for(uint32_t l=0;l<v.links;l++)if(v.link[l].from==v.self && mesh_switch_index(&v,v.link[l].to)==s.neighbour[k])s.first[k]=s.hop[l];
-    for(uint32_t l=0;l<v.links;l++)s.spread[l]=0;
-    mesh_switch_thompson(&s,1,seed,target);
-    eta=1;
-  }else if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed) && !(policy && policy->target)){
+  if(!atomic_load_explicit(&sw->weighted,memory_order_relaxed) && !(policy && policy->target)){
     /* no draw reads the weights (the earliest arrival routes): they stand, and the refresh is the cost-to-go and the
        lines alone (Thompson's draws cost 10 us a refresh of the refresh thread's) */
     for(uint32_t d=0;d<MESH_SWITCH_N;d++)for(uint32_t k=0;k<MESH_SWITCH_N;k++)target[d][k]=sw->weights.w[d][k];
@@ -856,12 +832,12 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
   w->refreshes++;
   atomic_fetch_add_explicit(&w->serial,1,memory_order_release);
   if(sw->splits.unit_view!=v.serial+1){   /* the features' unit, as the view changes */
-    const float unit=(float)mesh_switch_unit(&v,page);
+    const float unit=(float)mesh_switch_unit(&v,ROUTE_PAGE);
     atomic_fetch_add_explicit(&sw->splits.serial,1,memory_order_acq_rel);
     sw->splits.unit=unit;sw->splits.unit_view=v.serial+1;
     atomic_fetch_add_explicit(&sw->splits.serial,1,memory_order_release);
   }
-  /* this node's own links' lines, for the names it sends: each one's wait now, its spread the wait's change */
+  /* this node's own links' lines, for the headers it sends: each one's wait now, its spread the wait's change */
   for(uint32_t l=0;l<v.links;l++){
     if(v.link[l].from!=v.self)continue;
     struct mesh_switch_link *x=mesh_switch_link_of(&sw->view,v.link[l].from,v.link[l].to);
@@ -877,20 +853,20 @@ static inline void mesh_switch_refresh(struct mesh_switch *sw,const struct mesh_
 
 /* ---- The trainer's records: one producer a ring, never a wait ---------------------------------------------------- */
 static inline void mesh_switch_log_put(struct mesh_switch *sw,uint32_t ring,const struct mesh_switch_record *r){
-  if(ring>=MESH_SWITCH_LOGS || !atomic_load_explicit(&sw->logging,memory_order_relaxed))return;
+  if(ring>=MESH_PORTS || !atomic_load_explicit(&sw->logging,memory_order_relaxed))return;
   struct mesh_switch_log *g=sw->log+ring;
   const uint64_t tail=atomic_load_explicit(&g->tail,memory_order_relaxed);
   if(tail-atomic_load_explicit(&g->head,memory_order_acquire)>=MESH_SWITCH_LOG){atomic_fetch_add_explicit(&g->dropped,1,memory_order_relaxed);return;}
   g->record[tail%MESH_SWITCH_LOG]=*r;
   atomic_store_explicit(&g->tail,tail+1,memory_order_release);
 }
-/* whether piece `name`'s records are made: `logging` 0 none, k one piece in k, chosen by the piece's identity (source,
-   key, piece), so every node records the same pieces and a recorded piece's draws at every hop join its landings */
-static inline int mesh_switch_sampled(const struct mesh_switch *sw,const struct mesh_switch_name *name){
+/* whether a page's records are made: `logging` 0 none, k one page in k, chosen by the page's identity (its source and
+   piece), so every node records the same pages and a recorded page's draws at every hop join its landings */
+static inline int mesh_switch_sampled(const struct mesh_switch *sw,const struct mesh_head *head){
   const uint32_t k=atomic_load_explicit(&sw->logging,memory_order_relaxed);
-  return k && (k==1 || mesh_switch_mix(name->piece^name->key*0x9e3779b97f4a7c15ULL^(uint64_t)name->source<<40)%k==0);
+  return k && (k==1 || mesh_switch_mix(head->piece^(uint64_t)head->source<<40)%k==0);
 }
-/* the next record of ring `ring`, 0 none (one consumer: mesh-switch-log, the simulator) */
+/* the next record of ring `ring`, 0 none (one consumer a ring) */
 static inline int mesh_switch_log_take(struct mesh_switch *sw,uint32_t ring,struct mesh_switch_record *r){
   struct mesh_switch_log *g=sw->log+ring;
   const uint64_t head=atomic_load_explicit(&g->head,memory_order_relaxed);
@@ -900,544 +876,63 @@ static inline int mesh_switch_log_take(struct mesh_switch *sw,uint32_t ring,stru
   return 1;
 }
 
-/* ---- Programs: what the clients declared (mesh.h struct mesh_declared), their progress -------------------------
-   A program's progress, each direction (bridge-held, at `progress[d]`, made as it is declared: mesh_switch_progress_init):
-   a transfer's executions done in order (`complete`), its done word's next transfer and first (a word's transfers in
-   their order), and MESH_SWITCH_WINDOW cells, each an execution's units, its tag that execution + 1, a bit a unit */
-struct mesh_switch_transfer { _Atomic uint64_t complete; uint32_t first_same,next_same,words,padding; uint64_t cells; };
-struct mesh_switch_cell_head { _Atomic uint64_t tag,count; };
-static inline uint64_t mesh_switch_cell_bytes(uint64_t units){ return sizeof(struct mesh_switch_cell_head)+(units+63)/64*8; }
-static inline uint64_t mesh_switch_progress_bytes(const struct mesh_crossing *t,uint64_t n){
-  uint64_t b=n*sizeof(struct mesh_switch_transfer);
-  for(uint64_t i=0;i<n;i++)b+=MESH_SWITCH_WINDOW*mesh_switch_cell_bytes(t[i].units);
-  return b;
+/* ---- The data path: take, forward, landing --------------------------------------------------------------------- */
+/* destination i of page pd's header, on this node: its table entry set to the page (mesh.h mesh_entry_put: its landed
+   one more, the page it named before dropped), the entry's use of the page counted first; 1 where it was set.  An index
+   past the table is set nothing and counted (`malformed`); one no client owns (its owner byte 0: its consumer left and
+   freed it) is set nothing and counted (`unowned`), so no page is left at an index nobody frees */
+static inline int mesh_switch_set(struct hdr *m,struct mesh_switch *sw,uint32_t pd,const struct mesh_head *head,uint32_t i,uint32_t ring){
+  const struct mesh_hop *d=head->dest+i;
+  if(d->index>=m->entries){MESH_SWITCH_COUNT(sw,ring,malformed,1);return 0;}
+  if(!atomic_load_explicit(&mesh_owners(m)[d->index],memory_order_acquire)){MESH_SWITCH_COUNT(sw,ring,unowned,1);return 0;}
+  mesh_pd_use(m,pd);
+  mesh_pd_drop(m,mesh_entry_put(m,d->index,pd,1));
+  MESH_SWITCH_COUNT(sw,ring,set,1);
+  return 1;
 }
-static inline struct mesh_switch_transfer *mesh_switch_progress(struct hdr *m,const struct mesh_declared *p,int d){
-  return p->progress[d]?(struct mesh_switch_transfer *)((char *)m+p->progress[d]):NULL;
-}
-static inline struct mesh_switch_cell_head *mesh_switch_cell(struct hdr *m,const struct mesh_declared *p,int d,uint32_t t,uint64_t e){
-  const struct mesh_switch_transfer *x=mesh_switch_progress(m,p,d)+t;
-  return (struct mesh_switch_cell_head *)((char *)m+p->progress[d]+x->cells+(e%MESH_SWITCH_WINDOW)*(sizeof(struct mesh_switch_cell_head)+x->words*8));
-}
-static inline void mesh_switch_progress_init(struct hdr *m,struct mesh_declared *p,int d,const struct mesh_crossing *t,uint64_t n){
-  struct mesh_switch_transfer *x=mesh_switch_progress(m,p,d);
-  if(!x)return;
-  uint64_t at=n*sizeof *x;
-  for(uint64_t i=0;i<n;i++){
-    x[i]=(struct mesh_switch_transfer){0,(uint32_t)i,UINT32_MAX,(uint32_t)((t[i].units+63)/64),0,at};
-    at+=MESH_SWITCH_WINDOW*mesh_switch_cell_bytes(t[i].units);
-  }
-  for(uint64_t i=0;i<n;i++){
-    if(!t[i].done)continue;
-    for(uint64_t j=i+1;j<n;j++)if(t[j].done==t[i].done){x[i].next_same=(uint32_t)j;break;}
-    for(uint64_t j=0;j<i;j++)if(t[j].done==t[i].done){x[i].first_same=(uint32_t)j;break;}
-  }
-  for(uint64_t i=0;i<n;i++)for(uint64_t e=0;e<MESH_SWITCH_WINDOW;e++){
-    struct mesh_switch_cell_head *c=mesh_switch_cell(m,p,d,(uint32_t)i,e);
-    memset(c,0,sizeof *c+x[i].words*8);
-    atomic_store_explicit(&c->tag,e+1,memory_order_relaxed);
-  }
-  atomic_thread_fence(memory_order_release);
-}
-static inline const struct mesh_crossing *mesh_switch_table(const struct hdr *m,const struct mesh_declared *p,int d){
-  const uint64_t at=p->program.table[d],n=p->program.transfers[d];
-  if(!at || !n || at%8 || at<m->data_off || at>m->length || n>(m->length-at)/sizeof(struct mesh_crossing))return NULL;
-  return (const struct mesh_crossing *)((const char *)m+at);
-}
-/* the done word of transfer t's word raised as far as its transfers' prefix is done: the executions done of each of
-   them, in the word's order, (execution, transfer) the order of the node's pieces */
-static inline void mesh_switch_word(struct hdr *m,const struct mesh_declared *p,int d,const struct mesh_crossing *table,uint32_t t){
-  const struct mesh_switch_transfer *x=mesh_switch_progress(m,p,d);
-  if(!table[t].done || table[t].done%8 || table[t].done+8>m->length)return;
-  const uint32_t first=x[t].first_same;
-  uint64_t least=UINT64_MAX;
-  for(uint32_t k=first;k!=UINT32_MAX;k=x[k].next_same){const uint64_t c=atomic_load_explicit(&x[k].complete,memory_order_acquire);if(c<least)least=c;}
-  uint32_t last=UINT32_MAX;uint64_t at=least;
-  for(uint32_t k=first;k!=UINT32_MAX;k=x[k].next_same){if(atomic_load_explicit(&x[k].complete,memory_order_acquire)==least)break;last=k;}
-  if(last==UINT32_MAX){
-    if(!least)return;
-    at=least-1;
-    for(uint32_t k=first;k!=UINT32_MAX;k=x[k].next_same)last=k;
-  }
-  mesh_switch_raise(m,table[last].done,table[last].done_value+at*table[last].done_step);
-}
-/* unit `span` of (execution e, transfer t) of direction d counted (once: its bit); 1 newly, 0 already, -1 not yet
-   placeable (e past the window, or its cell not yet made free).  An execution all of whose units are counted moves its
-   transfer's `complete` on (with every later one already whole), each move clearing the cell for its execution + W,
-   and raises the word */
-static inline int mesh_switch_count(struct hdr *m,const struct mesh_declared *p,int d,const struct mesh_crossing *table,uint32_t t,uint64_t e,uint64_t span){
-  struct mesh_switch_transfer *x=mesh_switch_progress(m,p,d)+t;
-  if(e>=atomic_load_explicit(&x->complete,memory_order_acquire)+MESH_SWITCH_WINDOW)return -1;
-  if(e<atomic_load_explicit(&x->complete,memory_order_acquire))return 0;
-  struct mesh_switch_cell_head *c=mesh_switch_cell(m,p,d,t,e);
-  if(atomic_load_explicit(&c->tag,memory_order_acquire)!=e+1)return -1;
-  _Atomic uint64_t *bits=(_Atomic uint64_t *)(c+1);
-  const uint64_t bit=UINT64_C(1)<<(span%64);
-  if(atomic_fetch_or_explicit(bits+span/64,bit,memory_order_acq_rel)&bit)return 0;
-  if(atomic_fetch_add_explicit(&c->count,1,memory_order_acq_rel)+1<table[t].units)return 1;
-  /* whole: `complete` moved past every whole execution from it, by whoever wins each move */
+/* a header's destinations' nodes as bits over this node's view, read consistently (seqlock) */
+static inline uint32_t mesh_switch_wanted(const struct mesh_switch *sw,const struct mesh_head *head){
   for(;;){
-    uint64_t done=atomic_load_explicit(&x->complete,memory_order_acquire);
-    struct mesh_switch_cell_head *h=mesh_switch_cell(m,p,d,t,done);
-    if(atomic_load_explicit(&h->tag,memory_order_acquire)!=done+1 || atomic_load_explicit(&h->count,memory_order_acquire)<table[t].units)break;
-    if(!atomic_compare_exchange_strong_explicit(&x->complete,&done,done+1,memory_order_acq_rel,memory_order_acquire))continue;
-    memset((void *)(h+1),0,x->words*8);
-    atomic_store_explicit(&h->count,0,memory_order_relaxed);
-    atomic_store_explicit(&h->tag,done+1+MESH_SWITCH_WINDOW,memory_order_release);
-  }
-  mesh_switch_word(m,p,d,table,t);
-  return 1;
-}
-/* where piece n of direction d of program p lies: its execution, transfer and span; 0 where its table holds none */
-static inline int mesh_switch_locate(const struct mesh_declared *p,const struct mesh_crossing *t,int d,uint64_t n,uint64_t *e,uint32_t *transfer,uint64_t *span){
-  const uint64_t pieces=p->program.pieces[d];
-  if(!pieces || !t)return 0;
-  *e=n/pieces;const uint64_t within=n%pieces;
-  uint32_t lo=0,hi=(uint32_t)p->program.transfers[d];
-  while(hi-lo>1){const uint32_t mid=lo+(hi-lo)/2;if(t[mid].first<=within)lo=mid;else hi=mid;}
-  if(within<t[lo].first || within-t[lo].first>=t[lo].units)return 0;
-  *transfer=lo;*span=within-t[lo].first;
-  return 1;
-}
-/* whether (execution e, transfer t, span s) of direction d of program p may move: its client issued its step, the
-   program has not closed before e, and its gate holds (mesh-order.h order_gate's words and thresholds) */
-static inline int mesh_switch_ready(const struct hdr *m,const struct mesh_declared *p,const struct mesh_crossing *t,int d,uint64_t e,uint64_t s){
-  if(e>=atomic_load_explicit(&p->closed,memory_order_acquire))return 0;
-  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=e*p->program.period+t->step)return 0;
-  if(!t->gate)return 1;
-  const uint64_t add=e*t->gate_step+(d || t->flags&MESH_GATE_WHOLE?0:s+1);
-  if(!t->gates){
-    const uint64_t value=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire);
-    return value!=UINT64_MAX && value>=t->gate_base+add;
-  }
-  const struct mesh_gate_term *g=(const void *)((const char *)m+t->gate);
-  for(uint32_t k=0;k<t->gates;k++){
-    const uint64_t value=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+g[k].word),memory_order_acquire);
-    if(value==UINT64_MAX || value<g[k].threshold+add)return 0;
-  }
-  return 1;
-}
-/* a program slot's owner as the bridge reads it: 0 vacant, UINT64_MAX while a declaration makes it (mesh-call.c) */
-static inline int mesh_switch_owned(const struct mesh_declared *p){
-  const uint64_t o=atomic_load_explicit(&p->owner,memory_order_acquire);
-  return o && o!=UINT64_MAX;
-}
-/* a bridge process's use of program p's progress (its arena pages), entered only while p is the program of `key`: its
-   `users` raised before the owner is read again, so a client's slot_vacate (mesh-call.c), which marks the slot closing
-   and then waits for `users` to be 0 before it frees those pages, never frees them under a use (a delivery that read
-   `progress` as its program was vacated faulted on 0, sim-wire under ASan; a reused page would have been counted into
-   another program's cells) */
-static inline int mesh_switch_enter(struct mesh_declared *p,uint64_t key){
-  atomic_fetch_add_explicit(&p->users,1,memory_order_seq_cst);
-  const uint64_t o=atomic_load_explicit(&p->owner,memory_order_seq_cst);
-  if(o && o!=UINT64_MAX && p->program.key==key)return 1;
-  atomic_fetch_sub_explicit(&p->users,1,memory_order_release);
-  return 0;
-}
-static inline void mesh_switch_leave(struct mesh_declared *p){ atomic_fetch_sub_explicit(&p->users,1,memory_order_release); }
-/* whether a closed program is wholly done: every transfer of both directions complete through its closing execution */
-static inline int mesh_switch_done(const struct hdr *m,const struct mesh_declared *p){
-  const uint64_t closed=atomic_load_explicit(&p->closed,memory_order_acquire);
-  if(closed==UINT64_MAX)return 0;
-  for(int d=0;d<2;d++){
-    if(!p->progress[d])continue;
-    const struct mesh_switch_transfer *x=(const struct mesh_switch_transfer *)((const char *)m+p->progress[d]);
-    for(uint64_t t=0;t<p->program.transfers[d];t++)if(atomic_load_explicit(&x[t].complete,memory_order_acquire)<closed)return 0;
-  }
-  return 1;
-}
-static inline struct mesh_node *mesh_switch_order(struct hdr *m,uint32_t node){
-  for(uint32_t n=0;n<MESH_NODES;n++){struct mesh_node *x=mesh_node_at(m,n);if(atomic_load_explicit(&x->node,memory_order_acquire)==node)return x;}
-  return NULL;
-}
-
-/* ---- The receive window (as multipath TCP's, at the data-sequence level) ---------------------------------------
-   A slot pool holds what lands until it is placed, so a sender must not run further ahead of its receiver than the
-   receiver's pool holds: a piece its receiver cannot place yet (its client has not issued that execution, or one of its
-   pieces is still on a slower path) waits in a slot there.  So each receiving end tells the sending end, in a credit (a
-   piece of kind MESH_PIECE_CREDIT, switched like any other, naming the program's key), the executions it has wholly
-   received; a sender stages an execution only within mesh_switch_ahead executions of the last credit it heard (at
-   most MESH_SWITCH_WINDOW, and no more than a quarter of the pool's slots of the program's pieces).  A receiver sends a
-   credit each time its wholly received executions pass the last it told by half that, so a sender at the window's edge
-   always hears one; the first MESH_SWITCH_WINDOW executions need none.  No queue pair waits on it */
-enum { MESH_PIECE_DATA, MESH_PIECE_CREDIT };
-static inline uint64_t mesh_switch_ahead(const struct mesh_switch *sw,const struct mesh_declared *p){
-  const uint64_t pieces=p->program.pieces[0]>p->program.pieces[1]?p->program.pieces[0]:p->program.pieces[1];
-  /* an execution's slots as staging packs them, a quarter of the pool a program; never fewer than two executions where
-     two fit in half the pool, so the next execution streams while the last completes (one: stop and wait, a bubble of
-     the target's last landing and the credit's way back an execution) */
-  const uint64_t per=(pieces+MESH_SWITCH_UNITS-1)/MESH_SWITCH_UNITS;
-  uint64_t room=per?sw->slots/4/per:MESH_SWITCH_WINDOW;
-  if(room<2 && per && 2*per<=sw->slots/2)room=2;
-  return room<1?1:room<MESH_SWITCH_WINDOW?room:MESH_SWITCH_WINDOW;
-}
-/* the executions wholly received of program p (every receive transfer's, the least); UINT64_MAX where it receives nothing */
-static inline uint64_t mesh_switch_received(struct hdr *m,const struct mesh_declared *p){
-  const struct mesh_switch_transfer *x=mesh_switch_progress(m,p,1);
-  if(!x)return UINT64_MAX;
-  uint64_t least=UINT64_MAX;
-  for(uint64_t t=0;t<p->program.transfers[1];t++){const uint64_t c=atomic_load_explicit(&x[t].complete,memory_order_acquire);if(c<least)least=c;}
-  return least;
-}
-/* program p toward node x: a credit due (its executions wholly received past the last told by half the window) made in
-   a free slot, one reference held, in *slot: 1, else 0 */
-static inline int mesh_switch_credit_in(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
-  const uint64_t received=mesh_switch_received(m,p);
-  uint64_t told=atomic_load_explicit(&p->credited,memory_order_acquire);
-  const uint64_t step=(mesh_switch_ahead(sw,p)+1)/2;
-  if(received==UINT64_MAX || received<told+step)return 0;
-  const uint32_t s=mesh_switch_take(sw);
-  if(s==UINT32_MAX)return 0;
-  if(!atomic_compare_exchange_strong_explicit(&p->credited,&told,received,memory_order_acq_rel,memory_order_acquire)){mesh_switch_give(sw,s);return 0;}
-  struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(m,sw,s);
-  memset(name,0,sizeof *name);
-  name->magic=MESH_SWITCH_MAGIC;name->source=m->node;name->key=p->program.key;name->execution=received;name->kind=MESH_PIECE_CREDIT;
-  name->dests=1;name->from=m->node;name->path[0]=m->node;
-  name->dest[0]=(struct mesh_switch_dest){.node=atomic_load_explicit(&x->node,memory_order_relaxed),.transfer=UINT32_MAX,.next=m->node};
-  sw->slot[s].owed=1;
-  atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
-  atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
-  sw->slot[s].staged=now;sw->slot[s].landed=now;sw->slot[s].wait_word=0;
-  *slot=s;
-  return 1;
-}
-static inline int mesh_switch_credit(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
-  /* no credit due, read without entering (as mesh_switch_stage) */
-  if(!mesh_switch_owned(p) || !p->progress[1])return 0;
-  {
-    const uint64_t received=mesh_switch_received(m,p),told=atomic_load_explicit(&p->credited,memory_order_acquire);
-    if(received==UINT64_MAX || received<told+(mesh_switch_ahead(sw,p)+1)/2)return 0;
-  }
-  if(!mesh_switch_enter(p,p->program.key))return 0;
-  const int r=mesh_switch_credit_in(m,sw,x,p,now,slot);
-  mesh_switch_leave(p);
-  return r;
-}
-/* a credit heard here from node `from`: the sending program toward it with the key told the executions received there */
-static inline void mesh_switch_credit_take(struct hdr *m,uint32_t from,uint64_t key,uint64_t execution){
-  struct mesh_node *x=mesh_switch_order(m,from);
-  for(uint32_t k=0;x && k<MESH_PROGRAMS;k++){
-    struct mesh_declared *p=x->program+k;
-    if(!mesh_switch_owned(p) || p->program.key!=key)continue;
-    uint64_t was=atomic_load_explicit(&p->credit,memory_order_relaxed);
-    while(was<execution && !atomic_compare_exchange_weak_explicit(&p->credit,&was,execution,memory_order_acq_rel,memory_order_relaxed)){}
+    const uint64_t a=atomic_load_explicit(&sw->view.serial,memory_order_acquire);
+    if(a&1)continue;
+    uint32_t bits=0;
+    for(uint32_t i=0;i<head->dests && i<MESH_DESTS;i++){const uint32_t d=mesh_switch_index(&sw->view,head->dest[i].node);if(d<32)bits|=1u<<d;}
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&sw->view.serial,memory_order_relaxed)==a)return bits;
   }
 }
-/* ---- Staging: a send piece claimed and copied into a slot with its name ----------------------------------------
-   Program p toward node x's next send piece, where it may move and its transfer's window holds it: claimed (its
-   cursor moved by one compare-exchange, so exactly one process stages it), copied into a free slot after its name,
-   its send-side unit counted (its done word rising).  The slot, one reference held, in *slot.  1 staged; 0 none; -1 no
-   free slot; -2 ready but past the credit window; -3 ready but past its transfer's window */
-static inline int mesh_switch_stage_in(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
-  const struct mesh_crossing *table=mesh_switch_table(m,p,0);
-  if(!table || !p->progress[0])return 0;
-  const uint64_t n=atomic_load_explicit(&p->claimed,memory_order_acquire);
-  uint64_t e,span;uint32_t t;
-  if(!mesh_switch_locate(p,table,0,n,&e,&t,&span) || !mesh_switch_ready(m,p,table+t,0,e,span))return 0;
-  if(e>=atomic_load_explicit(&mesh_switch_progress(m,p,0)[t].complete,memory_order_acquire)+MESH_SWITCH_WINDOW)return -3;
-  if(e>=atomic_load_explicit(&p->credit,memory_order_acquire)+mesh_switch_ahead(sw,p))return -2;
-  const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span];
-  const uint32_t s=mesh_switch_take(sw);
-  if(s==UINT32_MAX)return -1;
-  unsigned char *at=mesh_switch_slot_at(m,sw,s);
-  struct mesh_switch_name *name=(struct mesh_switch_name *)at;
-  const uint64_t piece=mesh_switch_piece(m);
-  const int valid=mesh_dma_span_valid(m,bytes) && bytes.bytes<=piece;
-  /* the transfer's next units, where ready and the slot holds them, claimed with it by one compare-exchange (one SEND
-     for them all; claimed one at a time, the port children racing on the cursor left three slots in four with one
-     unit: a 36 KB SEND carrying 16 KB) */
-  struct mesh_dma_span unit[MESH_SWITCH_UNITS];unit[0]=bytes;
-  uint32_t units=1;uint64_t total=valid?bytes.bytes:0;
-  while(valid && units<MESH_SWITCH_UNITS){
-    uint64_t e2,span2;uint32_t t2;
-    const struct mesh_dma_span next=span+units<table[t].units?((const struct mesh_dma_span *)((const char *)m+table[t].spans))[span+units]:(struct mesh_dma_span){0,0};
-    if(span+units>=table[t].units || !mesh_switch_locate(p,table,0,n+units,&e2,&t2,&span2) || e2!=e || t2!=t || span2!=span+units ||
-       !mesh_dma_span_valid(m,next) || next.bytes>piece || MESH_SWITCH_HEAD+total+next.bytes>sw->slot_bytes || !mesh_switch_ready(m,p,table+t,0,e,span2))break;
-    unit[units++]=next;total+=next.bytes;
+/* The forward: page pd's destinations that this node carries on (`away`: places in its header's dest[]) split
+   (mesh_switch_choose) into groups, a lane each, one group a peer, and the page itself pushed onto every group's lane:
+   one page and no copy, each group's destinations naming that lane's peer their `next` (a receiver reads only the
+   destinations it is the next of).  Before any push the header's shared parts are written: each destination no group
+   carries named no one's next (another hop's SEND carries it, it is set here, or nothing reaches it), the sender, and
+   the lines (as many as the frames of the payload's class hold).  Each group adds a use of the page and its frames to
+   its lane's queue; a push the outbox has no room for gives that use back, counted (`lost`).  A destination no allowed
+   neighbour reaches is not carried, counted (`unreachable`).  `ring` the caller's log ring and counters (its port's),
+   `now` its clock, `hand` its hand (a port child's) */
+static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint32_t pd,struct mesh_head *head,const uint32_t *away,uint32_t naway,
+                                       uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
+  const uint32_t self=m->node,frames=mesh_class_frames(head->bytes);
+  const int logging=mesh_switch_sampled(sw,head);
+  uint32_t groups=0,lane[MESH_DESTS],unreachable=0;uint64_t group[MESH_DESTS];
+  struct route_draw draw;float logp=0;uint32_t context=UINT32_MAX;uint64_t point=0;
+  if(logging)memset(&draw,0,sizeof draw);
+  /* the draw over the view and the weights where they lie, again where either was written meanwhile (seqlock): no copy
+     of either a page */
+  for(;;){
+    const uint64_t a=atomic_load_explicit(&sw->view.serial,memory_order_acquire),b=atomic_load_explicit(&sw->weights.serial,memory_order_acquire);
+    if((a|b)&1)continue;
+    groups=mesh_switch_choose(sw,&sw->view,&sw->weights,head,away,naway,frames,lane,group,&unreachable,logging?&draw:NULL,&logp,&context,&point);
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&sw->view.serial,memory_order_relaxed)==a && atomic_load_explicit(&sw->weights.serial,memory_order_relaxed)==b)break;
   }
-  uint64_t expect=n;
-  if(!atomic_compare_exchange_strong_explicit(&p->claimed,&expect,n+units,memory_order_acq_rel,memory_order_acquire)){mesh_switch_give(sw,s);return 0;}
-  memset(name,0,sizeof *name);
-  *name=(struct mesh_switch_name){.magic=MESH_SWITCH_MAGIC,.source=m->node,.key=p->program.key,.execution=e,
-    .bytes=(uint32_t)total,.hops=0,.dests=1,.from=m->node};
-  name->path[0]=m->node;name->piece=n;
-  name->dest[0]=(struct mesh_switch_dest){.node=atomic_load_explicit(&x->node,memory_order_relaxed),.transfer=t,.span=(uint32_t)span,.units=1};
-  for(uint32_t u=0,off=0;valid && u<units;off+=(uint32_t)unit[u].bytes,u++)memcpy(at+MESH_SWITCH_HEAD+off,(const char *)m+unit[u].offset,unit[u].bytes);
-  atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
-  atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
-  sw->slot[s].staged=now;sw->slot[s].landed=now;sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;
-  for(uint32_t u=0;u<units;u++)mesh_switch_count(m,p,0,table,t,e,span+u);
-  name->dest[0].units=units;
-  /* the same bytes released toward other nodes by programs of the same key (one declaration's: a collective's
-     all-gather or broadcast sends one span to several), in the same execution, as their next pieces: claimed with it,
-     each a destination of the one slot (multicast: the switch then shares SENDs while their paths agree) */
-  /* the programs of p's key toward other nodes, as this thread last found them (looked for again every
-     MESH_SWITCH_SIBLING_USES uses, or where p's key moved): each read again below, so a stale one is let be */
-  static __thread struct { const struct mesh_declared *p; uint64_t key; uint32_t uses,n; struct mesh_declared *q[MESH_SWITCH_N];struct mesh_node *y[MESH_SWITCH_N]; } kin[MESH_SWITCH_KIN];
-  __typeof__(kin[0]) *c=kin+((uintptr_t)p/sizeof *p)%MESH_SWITCH_KIN;
-  if(valid && (c->p!=p || c->key!=p->program.key || ++c->uses>=MESH_SWITCH_SIBLING_USES)){
-    c->p=p;c->key=p->program.key;c->uses=0;c->n=0;
-    for(uint32_t k=0;k<MESH_NODES;k++){
-      struct mesh_node *y=mesh_node_at(m,k);
-      if(y==x || !atomic_load_explicit(&y->node,memory_order_acquire))continue;
-      for(uint32_t j=0;j<MESH_PROGRAMS && c->n<MESH_SWITCH_N;j++){
-        struct mesh_declared *q=y->program+j;
-        if(mesh_switch_owned(q) && q->program.key==p->program.key){c->q[c->n]=q;c->y[c->n]=y;c->n++;}
-      }
-    }
+  if(logging && groups){
+    struct mesh_switch_record r;memset(&r,0,sizeof r);
+    r.kind=MESH_LOG_DRAW;r.node=self;r.piece=head->piece;r.at=now;r.draw=draw;r.logp=logp;r.source=head->source;
+    r.dest=head->dest[away[0]].node;r.index=head->dest[away[0]].index;r.bytes=head->bytes;r.context=context;r.point=(uint32_t)point;
+    mesh_switch_log_put(sw,ring,&r);
   }
-  for(uint32_t i=0;i<c->n && valid && name->dests<MESH_SWITCH_N;i++){
-    struct mesh_node *y=c->y[i];
-    {
-      struct mesh_declared *q=c->q[i];
-      if(!mesh_switch_enter(q,p->program.key))continue;
-      if(!q->progress[0]){mesh_switch_leave(q);continue;}
-      const struct mesh_crossing *qt=mesh_switch_table(m,q,0);
-      uint64_t qn=atomic_load_explicit(&q->claimed,memory_order_acquire),qe,qs;uint32_t qtr;
-      if(!qt || !mesh_switch_locate(q,qt,0,qn,&qe,&qtr,&qs) || qe!=e){mesh_switch_leave(q);continue;}
-      int same=qs+units<=qt[qtr].units;
-      for(uint32_t u=0;u<units && same;u++){
-        const struct mesh_dma_span other=((const struct mesh_dma_span *)((const char *)m+qt[qtr].spans))[qs+u];
-        uint64_t ue,us;uint32_t ut;
-        same=other.offset==unit[u].offset && other.bytes==unit[u].bytes && mesh_switch_locate(q,qt,0,qn+u,&ue,&ut,&us) && ue==qe && ut==qtr && us==qs+u &&
-             mesh_switch_ready(m,q,qt+qtr,0,qe,qs+u);
-      }
-      if(!same ||
-         qe>=atomic_load_explicit(&mesh_switch_progress(m,q,0)[qtr].complete,memory_order_acquire)+MESH_SWITCH_WINDOW ||
-         qe>=atomic_load_explicit(&q->credit,memory_order_acquire)+mesh_switch_ahead(sw,q)){mesh_switch_leave(q);continue;}
-      if(!atomic_compare_exchange_strong_explicit(&q->claimed,&qn,qn+units,memory_order_acq_rel,memory_order_acquire)){mesh_switch_leave(q);continue;}
-      name->dest[name->dests++]=(struct mesh_switch_dest){.node=atomic_load_explicit(&y->node,memory_order_relaxed),.transfer=qtr,.span=(uint32_t)qs,.units=(uint16_t)units};
-      for(uint32_t u=0;u<units;u++)mesh_switch_count(m,q,0,qt,qtr,qe,qs+u);
-      mesh_switch_leave(q);
-    }
-  }
-  name->nwanted=name->dests;
-  for(uint32_t i=0;i<name->dests;i++){name->wanted[i]=name->dest[i].node;name->dest[i].next=m->node;}
-  sw->slot[s].owed=(uint32_t)((UINT64_C(1)<<name->dests)-1);
-  *slot=s;
-  return 1;
-}
-
-static inline int mesh_switch_stage(struct hdr *m,struct mesh_switch *sw,struct mesh_node *x,struct mesh_declared *p,uint64_t now,uint32_t *slot){
-  /* nothing to stage, read without entering: every port child looks at every program every pass, and the entry's
-     read-modify-write on `users` bounced each program's line between them; a read made garbage by a vacate meanwhile
-     only sends this to the entered path, which reads again */
-  if(!mesh_switch_owned(p) || !p->progress[0])return 0;
-  {
-    const struct mesh_crossing *table=mesh_switch_table(m,p,0);
-    uint64_t e,span;uint32_t t;
-    if(!table || !mesh_switch_locate(p,table,0,atomic_load_explicit(&p->claimed,memory_order_acquire),&e,&t,&span) ||
-       !mesh_switch_ready(m,p,table+t,0,e,span))return 0;
-  }
-  if(!mesh_switch_enter(p,p->program.key))return 0;
-  const int r=mesh_switch_stage_in(m,sw,x,p,now,slot);
-  mesh_switch_leave(p);
-  return r;
-}
-
-/* ---- Delivery: a landed piece copied to the receiving program's span ---------------------------------------------
-   dest (one of the name's entries, this node's): the program toward the source with the piece's key, its transfer and
-   span; copied there once that program's client issued the step and its gate holds.  1 delivered (or already); 0 not
-   yet (no such program yet, or not ready, or past its window: it waits in its slot) */
-static inline int mesh_switch_deliver_at(struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest,const unsigned char *data,
-                                         struct mesh_declared *p);
-static inline int mesh_switch_deliver(struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest,const unsigned char *data,
-                                      struct mesh_declared **found){
-  struct mesh_node *x=mesh_switch_order(m,name->source);
-  if(!x)return 0;
-  struct mesh_declared *p=NULL;
-  for(uint32_t k=0;k<MESH_PROGRAMS && !p;k++)
-    if(mesh_switch_owned(x->program+k) && x->program[k].program.key==name->key && x->program[k].progress[1])p=x->program+k;
-  if(!p)return 0;
-  if(found)*found=p;
-  if(!mesh_switch_enter(p,name->key))return 0;
-  const int r=mesh_switch_deliver_at(m,name,dest,data,p);
-  mesh_switch_leave(p);
-  return r;
-}
-static inline int mesh_switch_deliver_at(struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest,const unsigned char *data,
-                                         struct mesh_declared *p){
-  const struct mesh_crossing *table=mesh_switch_table(m,p,1);
-  const uint32_t units=dest->units?dest->units:1;
-  if(!table || dest->transfer>=p->program.transfers[1] || (uint64_t)dest->span+units>table[dest->transfer].units)return 0;
-  const struct mesh_crossing *t=table+dest->transfer;
-  if(!mesh_switch_ready(m,p,t,1,name->execution,dest->span))return 0;
-  struct mesh_switch_transfer *progress=mesh_switch_progress(m,p,1)+dest->transfer;
-  const uint64_t complete=atomic_load_explicit(&progress->complete,memory_order_acquire);
-  if(name->execution<complete)return 1;
-  if(name->execution>=complete+MESH_SWITCH_WINDOW)return 0;
-  struct mesh_switch_cell_head *c=mesh_switch_cell(m,p,1,dest->transfer,name->execution);
-  if(atomic_load_explicit(&c->tag,memory_order_acquire)!=name->execution+1)return 0;
-  const _Atomic uint64_t *bits=(const _Atomic uint64_t *)(c+1);
-  /* each unit the piece carries at its place in the slot (the units' bytes in order), placed and counted once */
-  uint64_t off=0;int placed=1;
-  for(uint32_t u=0;u<units;u++){
-    const uint64_t sp=(uint64_t)dest->span+u;
-    const struct mesh_dma_span bytes=((const struct mesh_dma_span *)((const char *)m+t->spans))[sp];
-    const uint64_t here=off<name->bytes?name->bytes-off:0,len=bytes.bytes<here?bytes.bytes:here;
-    off+=bytes.bytes;
-    if(atomic_load_explicit(bits+sp/64,memory_order_acquire)>>(sp%64)&1)continue;
-    if(mesh_dma_span_valid(m,bytes) && bytes.bytes<=mesh_switch_piece(m))memcpy((char *)m+bytes.offset,data+off-bytes.bytes,len);
-    atomic_thread_fence(memory_order_release);
-    placed&=mesh_switch_count(m,p,1,table,dest->transfer,name->execution,sp)>=0;
-  }
-  return placed;
-}
-
-/* the word a destination here not yet deliverable waits on, and the value it must reach (mesh_switch_ready's first
-   unmet condition: the step's issue, else its gate's first word short); 0 where it waits on nothing such (no
-   program yet, or the window) */
-static inline uint64_t mesh_switch_waits_on(const struct hdr *m,const struct mesh_declared *p,const struct mesh_switch_name *name,
-                                           const struct mesh_switch_dest *dest,uint64_t *value){
-  if(!p)return 0;   /* no program yet: the caller waits on `control` as it read it before looking (mesh_switch_forward) */
-  const struct mesh_crossing *table=mesh_switch_table(m,p,1);
-  if(!table || dest->transfer>=p->program.transfers[1])return 0;
-  const struct mesh_crossing *t=table+dest->transfer;
-  const uint64_t e=name->execution,step=e*p->program.period+t->step;
-  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=step){*value=step+1;return (uint64_t)((const char *)&p->issued-(const char *)m);}
-  if(t->gate){
-    const uint64_t add=e*t->gate_step;   /* a receive's gate: mesh_switch_ready at d 1 */
-    if(!t->gates){
-      const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+t->gate),memory_order_acquire);
-      if(v!=UINT64_MAX && v<t->gate_base+add){*value=t->gate_base+add;return t->gate;}
-    }else{
-      const struct mesh_gate_term *g=(const void *)((const char *)m+t->gate);
-      for(uint32_t k=0;k<t->gates;k++){
-        const uint64_t v=atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+g[k].word),memory_order_acquire);
-        if(v!=UINT64_MAX && v<g[k].threshold+add){*value=g[k].threshold+add;return g[k].word;}
-      }
-    }
-  }
-  /* past the transfer's window: its executions done (`complete`) must reach e - W + 1 */
-  const struct mesh_switch_transfer *progress=mesh_switch_progress((struct hdr *)m,p,1)+dest->transfer;
-  if(e>=atomic_load_explicit(&progress->complete,memory_order_acquire)+MESH_SWITCH_WINDOW){
-    *value=e-MESH_SWITCH_WINDOW+1;return (uint64_t)((const char *)&progress->complete-(const char *)m);
-  }
-  return 0;
-}
-
-/* why a destination here was not placed: 0 no program of the key toward its source, 1 its table or bounds, 2 the
-   program closed before it, 3 the step not issued, 4 its gate short, 5 past the transfer's window, 6 its cell not
-   yet made free, 7 none of these (placed meanwhile) */
-static inline uint32_t mesh_switch_unplaced(const struct hdr *m,const struct mesh_switch_name *name,const struct mesh_switch_dest *dest){
-  struct mesh_node *x=mesh_switch_order((struct hdr *)m,name->source);
-  const struct mesh_declared *p=NULL;
-  for(uint32_t k=0;x && k<MESH_PROGRAMS && !p;k++)
-    if(mesh_switch_owned(x->program+k) && x->program[k].program.key==name->key && x->program[k].progress[1])p=x->program+k;
-  if(!p)return 0;
-  const struct mesh_crossing *table=mesh_switch_table(m,p,1);
-  if(!table || dest->transfer>=p->program.transfers[1])return 1;
-  const struct mesh_crossing *t=table+dest->transfer;
-  const uint64_t e=name->execution;
-  if(e>=atomic_load_explicit(&p->closed,memory_order_acquire))return 2;
-  if(atomic_load_explicit(&p->issued,memory_order_acquire)<=e*p->program.period+t->step)return 3;
-  if(!mesh_switch_ready(m,p,t,1,e,dest->span))return 4;
-  const struct mesh_switch_transfer *progress=mesh_switch_progress((struct hdr *)m,p,1)+dest->transfer;
-  if(e>=atomic_load_explicit(&progress->complete,memory_order_acquire)+MESH_SWITCH_WINDOW)return 5;
-  const struct mesh_switch_cell_head *c=mesh_switch_cell((struct hdr *)m,p,1,dest->transfer,e);
-  if(atomic_load_explicit(&c->tag,memory_order_acquire)!=e+1)return 6;
-  return 7;
-}
-
-/* whether a destination here can never be placed: its program, at the piece's source's node slot, was declared and has
-   gone (its slot vacated with the key still in it, or given to another program since: `prior`), or it closed before the
-   piece's execution.  A program not declared yet is not gone (a piece may land before its receiver declares), nor is a
-   key a program holds now.  nccl-mesh's keys are never reused (the communicator's name and the process's declaration
-   count); a client that reuses its keys (mesh-peer-client: the group) has a piece that lands before its program's
-   redeclaration taken as gone where the key's last program is vacated */
-static inline int mesh_switch_gone(const struct hdr *m,const struct mesh_switch_name *name){
-  const struct mesh_node *x=mesh_switch_order((struct hdr *)m,name->source);
-  if(!x)return 0;
-  /* a program of the key declared now (or being made) is the piece's: it is gone only past that program's close; a
-     key a client reuses (mesh-peer-client: its group) has a vacated program of the key beside a live one */
-  int was=0;
-  for(uint32_t k=0;k<MESH_PROGRAMS;k++){
-    const struct mesh_declared *p=x->program+k;
-    const uint64_t owner=atomic_load_explicit(&p->owner,memory_order_acquire);
-    if(owner==UINT64_MAX)return 0;
-    if(owner && p->program.key==name->key){
-      if(!p->progress[1])continue;   /* a send program of the key: not the one a landing is for */
-      const uint64_t closed=atomic_load_explicit(&p->closed,memory_order_acquire);
-      return closed!=UINT64_MAX && name->execution>=closed;
-    }
-    was|=p->prior==name->key || (!owner && p->program.key==name->key);
-  }
-  return was;
-}
-
-/* ---- The forward: a held slot's destinations here delivered, the rest switched onto lanes --------------------------
-   Slot s holds a piece (staged here, or landed); the destinations this node owes are the slot's `owed` (those whose
-   `next` is this node).  Those at this node are delivered; the others split (mesh_switch_choose) into groups, a lane
-   each, and the slot itself pushed onto every group's lane: one slot and no copy, each group's destinations naming
-   that lane's peer their `next` (a receiver reads only the destinations it is the next of, so what another group's
-   SEND carries for others is never its).  The name's shared parts (its sender, lines and credits) are written only
-   while no SEND of the slot is out, so a destination switched on a retry while one is waits for it to complete.  A
-   destination that cannot go now (its delivery not ready; its outbox full; no allowed neighbour) stays owed, the
-   caller retrying.  Returns 1 where nothing stays owed here (the hold released), 0 where the slot is still held.
-   `ring` the caller's log ring, `now` its clock */
-static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint32_t s,uint64_t now,uint32_t ring){
-  unsigned char *at=mesh_switch_slot_at(m,sw,s);
-  struct mesh_switch_name *name=(struct mesh_switch_name *)at;
-  const uint32_t self=m->node;
-  /* a slot held for its client's word: one load, until the word reaches its value */
-  if(sw->slot[s].wait_word){
-    const struct mesh_declared *wp=sw->slot[s].wait_program?(const struct mesh_declared *)((const char *)m+sw->slot[s].wait_program):NULL;
-    if(atomic_load_explicit((const _Atomic uint64_t *)((const char *)m+sw->slot[s].wait_word),memory_order_acquire)<sw->slot[s].wait_value &&
-       (!wp || (mesh_switch_owned(wp) && wp->program.key==name->key)))return 0;
-    sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;
-  }
-  const int logging=mesh_switch_sampled(sw,name);
-  const uint32_t owed=sw->slot[s].owed;
-  uint32_t kept=0,here=0,away[MESH_SWITCH_N],naway=0;   /* kept: the destinations still owed; here: those of them at this node */
-  uint64_t waits=0,wait_value=0,wait_program=0;
-  /* `control` read before any program is looked for, so a declaration after the look moves it past this value */
-  const uint64_t control=atomic_load_explicit(&m->control,memory_order_acquire);
-  for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++){
-    if(!(owed>>i&1))continue;
-    const struct mesh_switch_dest *dest=name->dest+i;
-    if(dest->node!=self){away[naway++]=i;continue;}
-    if(name->kind==MESH_PIECE_CREDIT){mesh_switch_credit_take(m,name->source,name->key,name->execution);MESH_SWITCH_COUNT(sw,ring,credits_taken,1);continue;}
-    struct mesh_declared *found=NULL;
-    if(mesh_switch_deliver(m,name,dest,at+MESH_SWITCH_HEAD,&found)){
-      MESH_SWITCH_COUNT(sw,ring,delivered,1);
-      MESH_SWITCH_COUNT(sw,ring,deliver_wait_ns,now>sw->slot[s].landed?now-sw->slot[s].landed:0);
-      MESH_SWITCH_COUNT(sw,ring,hops[name->hops<3?name->hops:3],1);
-    }else if(mesh_switch_gone(m,name)){
-      MESH_SWITCH_COUNT(sw,ring,orphans,1);
-    }else{
-      kept|=UINT32_C(1)<<i;here|=UINT32_C(1)<<i;
-      if(found && mesh_switch_enter(found,name->key)){waits=mesh_switch_waits_on(m,found,name,dest,&wait_value);mesh_switch_leave(found);}
-      else if(found)waits=0;
-      else{waits=(uint64_t)((const char *)&m->control-(const char *)m);wait_value=control+1;}
-      wait_program=found?(uint64_t)((const char *)found-(const char *)m):0;
-      if(!waits && found && mesh_switch_enter(found,name->key)){MESH_SWITCH_COUNT(sw,ring,unplaced[mesh_switch_unplaced(m,name,dest)],1);mesh_switch_leave(found);}
-    }
-  }
-  /* a SEND of the slot out (a reference beside the hold): the others wait for it */
-  if(naway && atomic_load_explicit(&sw->slot[s].refs,memory_order_acquire)>1){for(uint32_t j=0;j<naway;j++)kept|=UINT32_C(1)<<away[j];naway=0;}
-  uint32_t groups=0,lane[MESH_SWITCH_N];uint64_t group[MESH_SWITCH_N];
-  if(naway){
-    struct mesh_switch_name split=*name;split.dests=naway;
-    for(uint32_t j=0;j<naway;j++)split.dest[j]=name->dest[away[j]];
-    struct route_draw draw;float logp=0;uint32_t context=UINT32_MAX;uint64_t point=0;
-    /* the draw over the view and the weights where they lie, again where either was written meanwhile (seqlock): no
-       copy of either a piece */
-    for(;;){
-      const uint64_t a=atomic_load_explicit(&sw->view.serial,memory_order_acquire),b=atomic_load_explicit(&sw->weights.serial,memory_order_acquire);
-      if((a|b)&1)continue;
-      groups=mesh_switch_choose(sw,&sw->view,&sw->weights,&split,sw->slot[s].landed,lane,group,logging?&draw:NULL,&logp,&context,&point);
-      atomic_thread_fence(memory_order_acquire);
-      if(atomic_load_explicit(&sw->view.serial,memory_order_relaxed)==a && atomic_load_explicit(&sw->weights.serial,memory_order_relaxed)==b)break;
-    }
-    if(groups==UINT32_MAX){groups=0;for(uint32_t j=0;j<naway;j++)kept|=UINT32_C(1)<<away[j];}
-    else if(logging){
-      struct mesh_switch_record r;memset(&r,0,sizeof r);
-      r.kind=MESH_LOG_DRAW;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;r.draw=draw;r.logp=logp;
-      r.source=name->source;r.transfer=split.dest[0].transfer;r.span=split.dest[0].span;r.bytes=name->bytes;
-      r.context=context;r.point=(uint32_t)point;r.dest=split.dest[0].node;r.piece=name->piece;
-      mesh_switch_log_put(sw,ring,&r);
-    }
-  }
+  if(unreachable)MESH_SWITCH_COUNT(sw,ring,unreachable,__builtin_popcount(unreachable));
   /* one group a peer: a receiver owes every destination naming it, so two lanes toward one peer would each carry all of them */
   for(uint32_t g=0;g<groups;g++){
     const uint32_t peer=atomic_load_explicit(&sw->lane[lane[g]].peer,memory_order_relaxed);
@@ -1445,110 +940,222 @@ static inline int mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint3
       if(atomic_load_explicit(&sw->lane[lane[h]].peer,memory_order_relaxed)==peer){group[g]|=group[h];groups--;lane[h]=lane[groups];group[h]=group[groups];}
       else h++;
   }
-  if(groups){
-    /* the shared parts, no SEND of the slot out: its sender, the destinations it no longer owes named no one's (an
-       earlier SEND of the slot carried them) and the lines (as many as the least of its lanes' frames hold) */
-    for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(!(owed>>i&1))name->dest[i].next=UINT32_MAX;
-    name->from=self;
-    uint64_t least=sw->slot_bytes;
-    for(uint32_t g=0;g<groups;g++){const uint64_t w=mesh_switch_lane_bytes(sw,lane[g]);if(w<least)least=w;}
-    struct mesh_switch_line lines[MESH_SWITCH_LINES];
-    const uint32_t nlines=mesh_switch_lines_give(sw,lines),fit=mesh_switch_lines_fit(name,least);
-    name->lines=nlines<fit?nlines:fit;memcpy(mesh_switch_lines_at(name),lines,name->lines*sizeof *lines);
-  }
   MESH_SWITCH_COUNT(sw,ring,forwards,1);MESH_SWITCH_COUNT(sw,ring,groups,groups);
+  if(!groups)return;
+  uint32_t carried=0;
+  for(uint32_t g=0;g<groups;g++)for(uint32_t j=0;j<naway;j++)if(group[g]>>j&1)carried|=1u<<away[j];
+  for(uint32_t i=0;i<head->dests && i<MESH_DESTS;i++)if(!(carried>>i&1))head->dest[i].next=UINT32_MAX;
+  head->from=self;
+  struct mesh_switch_line lines[MESH_SWITCH_LINES];
+  const uint32_t nlines=mesh_switch_lines_give(sw,lines),fit=mesh_switch_lines_fit(head,(uint64_t)frames*MESH_FRAME);
+  head->lines=nlines<fit?nlines:fit;memcpy(mesh_switch_lines_at(head),lines,head->lines*sizeof *lines);
+  /* each group's destinations its peer's, with the cost they carry on (the lane's queue over its rate, its frames' time
+     on the wire), all before the first push makes the page another process's to post */
   for(uint32_t g=0;g<groups;g++){
     const uint32_t l=lane[g],peer=atomic_load_explicit(&sw->lane[l].peer,memory_order_relaxed);
     float rate,waited;mesh_switch_unpack(atomic_load_explicit(&sw->lane[l].estimate,memory_order_relaxed),&rate,&waited);
     const double each=rate>0?rate:1;
+    const float queued=(float)((double)atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)/each),
+                transit=(float)((double)mesh_switch_lane_bytes(sw,l)/each);
+    for(uint32_t j=0;j<naway;j++)if(group[g]>>j&1){struct mesh_hop *d=head->dest+away[j];d->next=peer;d->queued+=queued;d->transit+=transit;}
+  }
+  for(uint32_t g=0;g<groups;g++){
+    const uint32_t l=lane[g];
     const uint64_t wire=mesh_switch_lane_bytes(sw,l);
-    const float queued=(float)((double)atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed)/each)+(float)(now>sw->slot[s].landed?now-sw->slot[s].landed:0),
-                transit=(float)((double)wire/each);
-    for(uint32_t j=0;j<naway;j++)if(group[g]>>j&1){struct mesh_switch_dest *d=name->dest+away[j];d->next=peer;d->queued+=queued;d->transit+=transit;}
-    atomic_fetch_add_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
-    atomic_fetch_add_explicit(&sw->slot[s].on[l],1,memory_order_relaxed);
-    sw->slot[s].posted=now;sw->slot[s].lane=l;
+    mesh_pd_use(m,pd);
     atomic_fetch_add_explicit(&sw->lane[l].queued,wire,memory_order_relaxed);
-    if(mesh_switch_push(sw,l,s))continue;
+    if(mesh_switch_push(sw,l,pd,now,hand))continue;
     atomic_fetch_sub_explicit(&sw->lane[l].queued,wire,memory_order_relaxed);
-    atomic_fetch_sub_explicit(&sw->slot[s].on[l],1,memory_order_relaxed);
-    atomic_fetch_sub_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
-    for(uint32_t j=0;j<naway;j++)if(group[g]>>j&1){struct mesh_switch_dest *d=name->dest+away[j];d->next=self;d->queued-=queued;d->transit-=transit;kept|=UINT32_C(1)<<away[j];}
+    mesh_pd_drop(m,pd);
+    MESH_SWITCH_COUNT(sw,ring,lost,1);
   }
-  sw->slot[s].owed=kept;
-  if(!kept){atomic_store_explicit(&sw->slot[s].state,SLOT_SENDING,memory_order_relaxed);mesh_switch_release(sw,s);return 1;}
-  atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
-  /* still held; where its one destination left is here, waiting on its client's word, the word kept for the retries */
-  MESH_SWITCH_COUNT(sw,ring,kept,1);
-  if(kept==here && !(here&(here-1)) && waits){sw->slot[s].wait_word=waits;sw->slot[s].wait_value=wait_value;sw->slot[s].wait_program=wait_program;}
-  return 0;
 }
-/* a receive landed in slot s on lane `lane`: this node appended to its path, the destinations whose next it is owed
-   here, its lines taken, then forwarded (mesh_switch_forward) */
-static inline int mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32_t lane,uint32_t s,uint64_t now,uint32_t ring){
-  struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(m,sw,s);
-  atomic_fetch_add_explicit(&sw->lane[lane].landed,1,memory_order_relaxed);
+/* A client's write carried (the take): its page (`pd`, the page the write's ring use is on) given the write's bytes and
+   its header (MESH_HEAD_MAGIC, this node its source, its sender and its path's first node, the node's header counter
+   its piece, every destination's next this node, the destinations' nodes as view bits its `wanted`), each destination
+   on this node set in the table (mesh_switch_set), the others forwarded (mesh_switch_forward).  A cell naming no page
+   of the pool, no destination or more than MESH_DESTS, or more bytes than its page's payload is carried nowhere,
+   counted (`malformed`) */
+static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const struct mesh_write *w,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
+  const uint32_t self=m->node,pd=w->pd,dests=w->dests;
+  if(!mesh_pd_valid(m,pd) || !dests || dests>MESH_DESTS || w->bytes>MESH_PAYLOAD(mesh_pd_at(m,pd)->cls)){
+    MESH_SWITCH_COUNT(sw,ring,malformed,1);
+    return;
+  }
+  MESH_SWITCH_COUNT(sw,ring,taken,1);
+  atomic_store_explicit(&mesh_pd_at(m,pd)->bytes,w->bytes,memory_order_relaxed);
+  struct mesh_head *head=mesh_head_of(m,pd);
+  head->magic=MESH_HEAD_MAGIC;head->source=self;head->bytes=w->bytes;head->hops=0;head->dests=dests;head->lines=0;head->from=self;
+  memset(head->path,0,sizeof head->path);head->path[0]=self;
+  head->piece=atomic_fetch_add_explicit(&sw->writes,1,memory_order_relaxed);
+  for(uint32_t i=0;i<dests;i++)head->dest[i]=(struct mesh_hop){w->dest[i].node,w->dest[i].index,self,0,0};
+  head->wanted=mesh_switch_wanted(sw,head);
+  uint32_t away[MESH_DESTS],naway=0;
+  for(uint32_t i=0;i<dests;i++){
+    if(head->dest[i].node!=self)away[naway++]=i;
+    else mesh_switch_set(m,sw,pd,head,i,ring);
+  }
+  if(naway)mesh_switch_forward(m,sw,pd,head,away,naway,now,ring,hand);
+}
+/* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by the port child that
+   holds hand `hand`: each ring position named in the hand before its compare-exchange and held once won, the write
+   carried from its cell, which stays full meanwhile (so a child gone mid-write leaves the cell for its parent, or the
+   next bridge, to settle: mesh_switch_left_settle), then the cell
+   given back and the hand cleared, then the write's ring use dropped.  Taken alongside the other children's hands
+   (a position one compare-exchange's; the port children are a ring's only takers).  Returns the writes taken */
+static inline uint32_t mesh_switch_take_ring(struct hdr *m,struct mesh_switch *sw,uint32_t slot,uint32_t most,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
+  struct mesh_ring *r=mesh_ring_at(m,slot);
+  uint32_t taken=0;
+  uint64_t at=atomic_load_explicit(&r->take,memory_order_relaxed);
+  while(taken<most){
+    struct mesh_cell *cell=&r->cell[at%MESH_RING];
+    const uint64_t full=2*(at/MESH_RING)+1,seq=atomic_load_explicit(&cell->sequence,memory_order_acquire);
+    if(seq<full)break;
+    if(seq>full){at=atomic_load_explicit(&r->take,memory_order_relaxed);continue;}
+    const uint64_t named=((uint64_t)(slot+1)<<56)|at;
+    atomic_store_explicit(&hand->take,named,memory_order_relaxed);
+    if(!atomic_compare_exchange_weak_explicit(&r->take,&at,at+1,memory_order_acq_rel,memory_order_relaxed))continue;
+    atomic_store_explicit(&hand->take,named|MESH_HAND_HELD,memory_order_relaxed);
+    const struct mesh_write w=cell->w;
+    mesh_switch_carry(m,sw,&w,now,ring,hand);
+    atomic_store_explicit(&cell->sequence,full+1,memory_order_release);
+    atomic_store_explicit(&hand->take,0,memory_order_release);
+    mesh_pd_drop(m,w.pd);
+    taken++;
+    at=atomic_load_explicit(&r->take,memory_order_relaxed);
+  }
+  atomic_store_explicit(&hand->take,0,memory_order_release);
+  return taken;
+}
+/* A receive landed in page pd on lane l (the page of the lane's class): the page live, its one use the landing's.  A
+   header that is not one (its magic, its bytes past the page's payload, no destination or more than MESH_DESTS, a
+   path past MESH_SWITCH_N) is counted (`malformed`) and the page given back.  Else the page given the header's bytes,
+   this node appended to its path, its lines taken (as many as the lane's frames hold), each destination here whose
+   next this node is set in the table (mesh_switch_set) and its record made where the page is sampled, the
+   destinations elsewhere whose next this node is forwarded (mesh_switch_forward), and the landing's use dropped.
+   `now` the child's clock at the landing */
+static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32_t l,uint32_t pd,uint64_t now,uint32_t ring,struct mesh_switch_hand *hand){
+  struct mesh_pd *p=mesh_pd_at(m,pd);
+  atomic_store_explicit(&p->uses,1,memory_order_relaxed);
+  atomic_store_explicit(&p->state,MESH_PD_LIVE,memory_order_relaxed);
+  atomic_fetch_add_explicit(&sw->lane[l].landed,1,memory_order_relaxed);
   MESH_SWITCH_COUNT(sw,ring,landed,1);
-  sw->slot[s].landed=now;sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;sw->slot[s].owed=0;
-  atomic_store_explicit(&sw->slot[s].refs,1,memory_order_relaxed);
-  atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
-  if(name->magic!=MESH_SWITCH_MAGIC){mesh_switch_release(sw,s);return 1;}
+  struct mesh_head *head=mesh_head_of(m,pd);
   const uint32_t self=m->node;
-  if(name->hops+1<MESH_SWITCH_N)name->path[name->hops+1]=self;
-  name->hops++;
-  uint32_t owed=0;
-  for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(name->dest[i].next==self)owed|=UINT32_C(1)<<i;
-  sw->slot[s].owed=owed;
-  mesh_switch_lines_take(sw,name,mesh_switch_lane_bytes(sw,lane));
-  /* a piece's presence at each of its destinations here, recorded as it lands: the cost it carried in-band (each hop's
-     queueing and residence on that hop's own clock, the wire's time); its copy into the receiving program's span is
-     the consumer's, made once that program asks (mesh_switch_deliver), never part of the transfer */
-  if(name->kind==MESH_PIECE_DATA && mesh_switch_sampled(sw,name))
-    for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++){
-      if(name->dest[i].node!=self || !(owed>>i&1))continue;
-      struct mesh_switch_record r;memset(&r,0,sizeof r);
-      r.kind=MESH_LOG_PIECE;r.node=self;r.key=name->key;r.execution=name->execution;r.at=now;
-      r.latency=name->dest[i].queued+name->dest[i].transit;r.queueing=name->dest[i].queued;r.floor=name->floor;r.source=name->source;
-      const uint32_t units=name->dest[i].units?name->dest[i].units:1u;
-      r.transfer=name->dest[i].transfer;r.bytes=name->bytes/units;r.dest=self;r.context=UINT32_MAX;r.piece=name->piece;
-      for(uint32_t u=0;u<units;u++){r.span=name->dest[i].span+u;mesh_switch_log_put(sw,ring,&r);}   /* a record a unit it carries */
-    }
-  return mesh_switch_forward(m,sw,s,now,ring);
+  if(head->magic!=MESH_HEAD_MAGIC || head->bytes>MESH_PAYLOAD(p->cls) || !head->dests || head->dests>MESH_DESTS || head->hops>=MESH_SWITCH_N-1){
+    MESH_SWITCH_COUNT(sw,ring,malformed,1);
+    mesh_pd_drop(m,pd);
+    return;
+  }
+  atomic_store_explicit(&p->bytes,head->bytes,memory_order_relaxed);
+  head->path[++head->hops]=self;
+  mesh_switch_lines_take(sw,head,mesh_switch_lane_bytes(sw,l));
+  const int logging=mesh_switch_sampled(sw,head);
+  uint32_t away[MESH_DESTS],naway=0;
+  for(uint32_t i=0;i<head->dests;i++){
+    const struct mesh_hop *d=head->dest+i;
+    if(d->next!=self)continue;
+    if(d->node!=self){away[naway++]=i;continue;}
+    if(!mesh_switch_set(m,sw,pd,head,i,ring) || !logging)continue;
+    /* a page's presence at each destination here, recorded as it is set: the cost it carried in-band (each hop's
+       queueing on that hop's own clock, the wire's time) */
+    struct mesh_switch_record r;memset(&r,0,sizeof r);
+    r.kind=MESH_LOG_PIECE;r.node=self;r.piece=head->piece;r.at=now;r.latency=d->queued+d->transit;r.queueing=d->queued;
+    r.source=head->source;r.dest=self;r.index=d->index;r.bytes=head->bytes;r.context=UINT32_MAX;
+    mesh_switch_log_put(sw,ring,&r);
+  }
+  if(naway)mesh_switch_forward(m,sw,pd,head,away,naway,now,ring,hand);
+  mesh_pd_drop(m,pd);
 }
-/* one SEND of slot s on lane `lane` lost (pushed, or posted, and the lane gone before it completed): the destinations
-   it carried (those naming the lane's peer their next) owed here again, in a slot held for forwarding: s itself where
-   nothing else holds it, else a copy of it.  The slot the caller holds, or UINT32_MAX where none (another lost SEND of
-   s took them already, or no slot was free and s is held elsewhere: they are dropped and counted orphans) */
-static inline uint32_t mesh_switch_again(struct hdr *m,struct mesh_switch *sw,uint32_t s,uint32_t lane){
-  struct mesh_switch_name *name=(struct mesh_switch_name *)mesh_switch_slot_at(m,sw,s);
-  const uint32_t peer=atomic_load_explicit(&sw->lane[lane].peer,memory_order_relaxed),self=m->node;
-  atomic_fetch_sub_explicit(&sw->slot[s].on[lane],1,memory_order_relaxed);
-  uint32_t mask=0;
-  if(name->magic==MESH_SWITCH_MAGIC)for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(name->dest[i].next==peer)mask|=UINT32_C(1)<<i;
-  if(!mask){mesh_switch_release(sw,s);return UINT32_MAX;}
-  const uint32_t t=atomic_load_explicit(&sw->slot[s].refs,memory_order_acquire)==1?s:mesh_switch_take(sw);
-  if(t==s || (t==UINT32_MAX && !sw->slot[s].owed)){   /* the lost SEND's reference the hold */
-    for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(mask>>i&1)name->dest[i].next=self;
-    sw->slot[s].owed|=mask;sw->slot[s].wait_word=0;sw->slot[s].wait_program=0;
-    atomic_store_explicit(&sw->slot[s].state,SLOT_HELD,memory_order_relaxed);
-    return s;
+
+/* ---- A port child gone, a region adopted: what was held, given back (the parent's: mesh-link.c switch_reclaim,
+   region_adopt) ------------------------------------------------------------------------------------------------- */
+/* the pages posted as receives on the switch's lanes [first, first + count) given back (their child gone: nothing lands
+   in them again); how many.  A page's state is read (acquire) before its lane and again after, so a lane read from a
+   page's earlier receive is never taken with a later one's state: only a page still a receive on a lane of the range is
+   given back */
+static inline uint32_t mesh_switch_receives_drop(struct hdr *m,uint32_t first,uint32_t count){
+  const uint32_t pages=mesh_pool(m)->pages;
+  uint32_t n=0;
+  for(uint32_t pd=0;pd<pages;pd++){
+    struct mesh_pd *p=mesh_pd_at(m,pd);
+    if(atomic_load_explicit(&p->state,memory_order_acquire)!=MESH_PD_RECEIVE)continue;
+    const uint32_t lane=atomic_load_explicit(&p->lane,memory_order_relaxed);
+    if(lane<first || lane-first>=count || atomic_load_explicit(&p->state,memory_order_acquire)!=MESH_PD_RECEIVE)continue;
+    atomic_store_explicit(&p->uses,0,memory_order_relaxed);
+    mesh_pool_push(m,pd);n++;
   }
-  if(t==UINT32_MAX){
-    for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(mask>>i&1)name->dest[i].next=UINT32_MAX;
-    MESH_SWITCH_COUNT(sw,MESH_PORTS,orphans,__builtin_popcount(mask));mesh_switch_release(sw,s);return UINT32_MAX;
+  return n;
+}
+/* whether another child's hand names the position `named` (its MESH_HAND_HELD aside) in its take (`push` 0) or its
+   push (`push` 1): its holder may hold it */
+static inline int mesh_switch_hand_names(const struct mesh_switch *sw,uint64_t named,int push){
+  int any=0;
+  for(uint32_t p=0;p<MESH_PORTS;p++)
+    any|=(atomic_load_explicit(push?&sw->hand[p].push:&sw->hand[p].take,memory_order_acquire)&~MESH_HAND_HELD)==(named&~MESH_HAND_HELD);
+  return any;
+}
+/* A port child's hand as the child left it at its end (`h`), settled as far as it can be now, by the parent's event
+   loop (`ring` its counters); what is settled is cleared, and 1 returned once nothing of it is left.  `held` 1: only
+   what the child had won (MESH_HAND_HELD), so that a cell two dead children's hands name is settled first by its
+   winner's.
+   - Its take: where the cell is still full past the ring's take and the child had won it, or (its win not marked yet)
+     no other hand names that position, the write was carried no further than it got: its ring use dropped, counted
+     (`lost`), and its cell given back.  A cell given back, or one past the take that no one won: nothing.
+   - Its push of `page`: where the child holds its cell unfilled (won, or no other hand names it), the cell made a
+     hole; where it won no cell, nothing was pushed.  Either way the page's use for the push dropped, counted (`lost`),
+     and its frames off the lane's queue.  A cell it filled: the outbox's.
+   Where another hand names the position, it is looked at again later (the parent's next turn): the other child ends
+   its own step, or its own end is settled */
+static inline int mesh_switch_left_settle(struct hdr *m,struct mesh_switch *sw,struct mesh_switch_left *h,int held,uint32_t ring){
+  if(h->take && (!held || h->take&MESH_HAND_HELD)){
+    const uint32_t slot=(uint32_t)(h->take>>56)-1u;
+    const uint64_t at=h->take&MESH_HAND_AT,full=2*(at/MESH_RING)+1;
+    int later=0;
+    if(slot<MESH_CLIENTS){
+      struct mesh_ring *r=mesh_ring_at(m,slot);
+      struct mesh_cell *cell=&r->cell[at%MESH_RING];
+      /* read in this order: the ring's take, the other hands, the cell (a child names its position in its hand from
+         before its win until after its cell is given back, so a cell read full where no other hand names it is no
+         other taker's) */
+      if(atomic_load_explicit(&r->take,memory_order_acquire)>at){
+        const int other=mesh_switch_hand_names(sw,h->take,0);
+        if(atomic_load_explicit(&cell->sequence,memory_order_acquire)==full){
+          if(!(h->take&MESH_HAND_HELD) && other)later=1;
+          else{
+            mesh_pd_drop(m,cell->w.pd);
+            MESH_SWITCH_COUNT(sw,ring,lost,1);
+            atomic_store_explicit(&cell->sequence,full+1,memory_order_release);
+          }
+        }
+      }
+    }
+    if(!later)h->take=0;
   }
-  unsigned char *to=mesh_switch_slot_at(m,sw,t);
-  memcpy(to,name,MESH_SWITCH_HEAD+(name->bytes<sw->slot_bytes-MESH_SWITCH_HEAD?name->bytes:sw->slot_bytes-MESH_SWITCH_HEAD));
-  struct mesh_switch_name *n=(struct mesh_switch_name *)to;
-  n->dests=0;n->lines=0;
-  for(uint32_t i=0;i<name->dests && i<MESH_SWITCH_N;i++)if(mask>>i&1){n->dest[n->dests]=name->dest[i];n->dest[n->dests++].next=self;name->dest[i].next=UINT32_MAX;}
-  sw->slot[t].owed=(uint32_t)((UINT64_C(1)<<n->dests)-1);
-  sw->slot[t].landed=sw->slot[s].landed;sw->slot[t].staged=sw->slot[s].staged;sw->slot[t].wait_word=0;sw->slot[t].wait_program=0;
-  atomic_store_explicit(&sw->slot[t].refs,1,memory_order_relaxed);
-  atomic_store_explicit(&sw->slot[t].state,SLOT_HELD,memory_order_relaxed);
-  MESH_SWITCH_COUNT(sw,MESH_PORTS,copies,1);
-  mesh_switch_release(sw,s);
-  return t;
+  if(h->push && (!held || h->push&MESH_HAND_HELD)){
+    const uint32_t l=(uint32_t)(h->push>>56)-1u;
+    const uint64_t at=h->push&MESH_HAND_AT;
+    int later=0;
+    if(l<MESH_SWITCH_LANES){
+      struct mesh_switch_lane *x=sw->lane+l;
+      struct mesh_switch_cell *c=sw->ring[l]+at%MESH_SWITCH_RING;
+      const int claimed=atomic_load_explicit(&x->tail,memory_order_acquire)>at;
+      const int other=mesh_switch_hand_names(sw,h->push,1);
+      const int unfilled=claimed && atomic_load_explicit(&c->sequence,memory_order_acquire)==at;
+      int hole=0;
+      if(h->push&MESH_HAND_HELD)hole=unfilled;
+      else if(unfilled && other)later=1;
+      else hole=unfilled;
+      if(hole){c->pd=MESH_ABSENT;atomic_store_explicit(&c->sequence,at+1,memory_order_release);}
+      if(!later && (hole || !(h->push&MESH_HAND_HELD)) && mesh_pd_valid(m,h->page)){
+        atomic_fetch_sub_explicit(&x->queued,mesh_switch_lane_bytes(sw,l),memory_order_relaxed);
+        mesh_pd_drop(m,h->page);
+        MESH_SWITCH_COUNT(sw,ring,lost,1);
+      }
+    }
+    if(!later)h->push=0;
+  }
+  return !h->take && !h->push;
 }
 
 /* ---- The policy's refresh: its features from this node's state, its tables published ---------------------------
@@ -1565,18 +1172,18 @@ static inline double mesh_switch_unit(const struct mesh_switch_view *v,double pa
   return unit>0?unit:1;
 }
 /* route.h's tokens from what this node knows, at its clock `now`, for policy refresh `point`:
-   - the fabric is the view (its links route.h's lanes, view indices its nodes, the ranks its compute nodes);
+   - the fabric is the view (its links route.h's lanes, view indices its nodes, the ranks its compute nodes), its page
+     route.h's (ROUTE_PAGE);
    - each lane's wait: this node's own lanes' least queue over their rate, a remote link's its line's; duplex share 1
      (a bridge sees no other node's reverse traffic);
    - the cost-to-go the last refresh's (the weights'), the bytes in flight and posted this node's own lanes' queues;
-   - per pattern, from this node's programs: what is left to stage and its bytes (as a source), what each destination
-     has received (as one), the patterns' live bytes, and the programs live (distinct keys).
+   - the per-pattern features of what is left to send, waiting and received, and the live collectives, 0: the bridge
+     holds writes, not collectives.
    Every token is route.h's route_lane_token / route_context_token over that state. */
-static inline void mesh_switch_tokens_make(struct hdr *m,struct mesh_switch *sw,uint64_t now,uint64_t point,struct mesh_switch_tokens *out){
+static inline void mesh_switch_tokens_make(struct mesh_switch *sw,uint64_t now,uint64_t point,struct mesh_switch_tokens *out){
   struct mesh_switch_view v;mesh_switch_view_read(sw,&v);
   struct mesh_switch_weights w;mesh_switch_weights_read(sw,&w);
   const uint32_t self=mesh_switch_index(&v,v.self),ranks=mesh_switch_ranks(&v);
-  const double page=(double)mesh_switch_piece(m);
   static __thread struct route_stream s;static __thread struct route_state st;
   memset(&s,0,sizeof s);memset(&st,0,sizeof st);
   s.f.nodes=(int)(v.nodes<ROUTE_N?v.nodes:ROUTE_N);s.f.lanes=(int)(v.links<ROUTE_L?v.links:ROUTE_L);s.f.duplex=1;
@@ -1585,7 +1192,7 @@ static inline void mesh_switch_tokens_make(struct hdr *m,struct mesh_switch *sw,
     s.f.from[l]=(int)mesh_switch_index(&v,x->from);s.f.to[l]=(int)mesh_switch_index(&v,x->to);s.f.cables[l]=(int)x->cables;s.f.rate[l]=x->rate;s.f.latency[l]=x->latency;
   }
   for(uint32_t a=0;a<v.nodes && a<ROUTE_N;a++)if(ranks>>a&1)s.f.compute[s.f.ncompute++]=(int)a;
-  s.unit=mesh_switch_unit(&v,page);
+  s.unit=mesh_switch_unit(&v,ROUTE_PAGE);
   struct route_topology t;memset(&t,0,sizeof t);t.srcmask=ranks;
   /* the patterns, in mesh_switch_contexts' order */
   for(uint32_t a=0;a<v.nodes;a++){
@@ -1607,45 +1214,6 @@ static inline void mesh_switch_tokens_make(struct hdr *m,struct mesh_switch *sw,
   for(uint32_t l=0;l<MESH_SWITCH_LANES;l++)if(atomic_load_explicit(&sw->lane[l].live,memory_order_relaxed))queued+=(double)atomic_load_explicit(&sw->lane[l].queued,memory_order_relaxed);
   if(self<ROUTE_N)st.inflight[self]=queued;
   st.posted=queued;
-  /* this node's programs: as a source (left to stage, waiting, live bytes), as a destination (received) */
-  double total[ROUTE_J]={0},unstaged[ROUTE_J]={0},rtotal[ROUTE_J]={0},rgot[ROUTE_J]={0};
-  uint64_t keys[MESH_NODES*MESH_PROGRAMS];uint32_t nkeys=0;
-  for(uint32_t k=0;k<MESH_NODES;k++){
-    struct mesh_node *x=mesh_node_at(m,k);
-    const uint32_t peer=mesh_switch_index(&v,atomic_load_explicit(&x->node,memory_order_acquire));
-    if(peer>=v.nodes || peer>=ROUTE_N)continue;
-    for(uint32_t q=0;q<MESH_PROGRAMS;q++){
-      struct mesh_declared *p=x->program+q;
-      if(!mesh_switch_owned(p) || mesh_switch_done(m,p))continue;
-      uint32_t seen=0;for(uint32_t i=0;i<nkeys;i++)seen|=keys[i]==p->program.key;
-      if(!seen && nkeys<MESH_NODES*MESH_PROGRAMS)keys[nkeys++]=p->program.key;
-      const uint64_t issued=atomic_load_explicit(&p->issued,memory_order_acquire),closed=atomic_load_explicit(&p->closed,memory_order_acquire);
-      const uint64_t runs=issued<closed?issued:closed,period=p->program.period?p->program.period:1,execs=(runs+period-1)/period;
-      if(p->program.pieces[0] && self<ROUTE_N){
-        /* the unicast pattern self -> peer, and the multicast self -> every other rank where the key goes to several */
-        uint32_t peers=0;
-        for(uint32_t k2=0;k2<MESH_NODES;k2++){struct mesh_node *y=mesh_node_at(m,k2);for(uint32_t q2=0;q2<MESH_PROGRAMS;q2++){const struct mesh_declared *r=y->program+q2;
-          if(mesh_switch_owned(r) && r->program.key==p->program.key && r->program.pieces[0])peers++;}}
-        const double all=(double)p->program.pieces[0]*(double)(execs?execs:1),claimed=(double)atomic_load_explicit(&p->claimed,memory_order_relaxed);
-        for(int j=0;j<s.patterns;j++){
-          if(s.source[j]!=(int)self)continue;
-          if(!(s.dest[j]==1u<<peer || (peers>1 && __builtin_popcount(s.dest[j])>1)))continue;
-          total[j]+=all;unstaged[j]+=all>claimed?all-claimed:0;
-        }
-      }
-      if(p->program.pieces[1] && p->progress[1]){
-        const struct mesh_switch_transfer *x1=mesh_switch_progress(m,p,1);
-        double got=0;const double want=(double)p->program.transfers[1]*(double)(closed!=UINT64_MAX?closed:(execs?execs:1));
-        for(uint64_t tr=0;tr<p->program.transfers[1];tr++)got+=(double)atomic_load_explicit(&x1[tr].complete,memory_order_relaxed);
-        for(int j=0;j<s.patterns;j++)if(s.source[j]==(int)peer && self<ROUTE_N && s.dest[j]>>self&1){rtotal[j]+=want;rgot[j]+=got;}
-      }
-    }
-  }
-  st.ops=nkeys;
-  for(int j=0;j<s.patterns;j++){
-    st.left[j]=total[j]>0?unstaged[j]/total[j]:0;st.pending[j]=unstaged[j]*page;st.demand[j]=total[j]*page;
-    if(self<ROUTE_N)st.recv[j][self]=rtotal[j]>0?rgot[j]/rtotal[j]:0;
-  }
   out->point=point;out->at=now;out->unit=(float)s.unit;out->lanes=0;
   for(int l=0;l<s.f.lanes;l++){
     if(v.link[l].from!=v.self)continue;
@@ -1667,10 +1235,10 @@ static inline void mesh_switch_splits_publish(struct mesh_switch *sw,const struc
   atomic_fetch_add_explicit(&x->serial,1,memory_order_release);
 }
 /* one refresh of the trained policy: its tokens from this node's state, each context's w from the policy, published */
-static inline int mesh_switch_policy_refresh(struct hdr *m,struct mesh_switch *sw,const struct mesh_switch_policy *policy,uint64_t now,uint64_t point,int argmax,
+static inline int mesh_switch_policy_refresh(struct mesh_switch *sw,const struct mesh_switch_policy *policy,uint64_t now,uint64_t point,int argmax,
                                              struct mesh_switch_tokens *scratch){
   if(!policy || !policy->splits)return -1;
-  mesh_switch_tokens_make(m,sw,now,point,scratch);
+  mesh_switch_tokens_make(sw,now,point,scratch);
   static __thread float w[MESH_SWITCH_CONTEXTS][SPLIT_FS];
   if(policy->splits(policy->context,scratch,w))return -1;
   mesh_switch_splits_publish(sw,scratch->key,scratch->contexts,(const float (*)[SPLIT_FS])w,point,scratch->unit,argmax);

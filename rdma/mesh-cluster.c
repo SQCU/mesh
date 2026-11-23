@@ -5,8 +5,8 @@
    the same on every node once the floods settle: `records` (each node's boot, sequence, region, memory, model and
    cables) and `links` (every cable the two ends both report, each pair's count the fewer of the two ends' reports,
    its bandwidth the lesser, as mesh_map takes it; `one_sided` the reports the other end does not match).  The local
-   part is this node's own: its ports (peer, phase, bandwidth, pairings) and its program slots (toward each node: live,
-   generation, its own cables' bandwidth, its programs).  Run it on every node and compare `records` and `links`.
+   part is this node's own ports (peer, phase, bandwidth, pairings).  Run it on every node and compare `records` and
+   `links`.
    usage: mesh-cluster   (MESH_REGION names another region, as the clients' attach) */
 #include <errno.h>
 #include <fcntl.h>
@@ -72,18 +72,6 @@ int main(void){
     if(phase==MESH_UNKNOWN)break;
     printf("%s{\"port\":%u,\"peer\":%u,\"phase\":\"%s\",\"bandwidth\":%llu,\"pairings\":%llu}",p?",":"",p,atomic_load(&l->peer),
            phase<=MESH_STOPPED?phase_name[phase]:"?",u(atomic_load(&l->bandwidth)),u(atomic_load(&l->pairings)));
-  }
-  printf("],\"orders\":[");
-  first=1;
-  for(uint32_t k=0;k<MESH_NODES;k++){
-    const struct mesh_node *x=mesh_node_at(m,k);
-    const uint32_t node=atomic_load(&x->node);
-    if(!node)continue;
-    uint32_t programs=0;
-    for(uint32_t p=0;p<MESH_PROGRAMS;p++)programs+=atomic_load(&x->program[p].owner)!=0;
-    printf("%s{\"peer\":%u,\"live\":%u,\"generation\":%llu,\"bandwidth\":%llu,\"programs\":%u}",first?"":",",node,atomic_load(&x->live),
-           u(atomic_load(&x->generation)),u(atomic_load(&x->bandwidth)),programs);
-    first=0;
   }
   printf("]}\n");
   free(rec);munmap(m,(size_t)st.st_size);

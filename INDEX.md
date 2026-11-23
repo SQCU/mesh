@@ -73,17 +73,16 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 - [GOAL.md](GOAL.md): the collective goal: collective operations of the lowest attainable overhead for any program on
   Apple GPUs, on any number of Macs in any cabling. It quotes the operator's statements that set it.
-- [rdma/NCCL.md](rdma/NCCL.md): the contract of libnccl-mesh, NCCL's C API over the bridges. It covers building and
-  running, communicators, the host and Metal paths, plans, persistent exchanges, memory, routes between unlinked ranks,
-  failures and the planner in `mesh-plan.h`, then the NumPy binding (`mesh_mpi.py`) and what is not implemented.
+- [rdma/NCCL.md](rdma/NCCL.md): the contract of libnccl-mesh, NCCL's C API over the bridges' page tables (blocking
+  calls on host memory), then the NumPy binding (`mesh_mpi.py`) and what is not implemented.
 - [design/heterogeneity.md](design/heterogeneity.md): work split over nodes of different speeds and moved over links
   of different costs: torch-mesh's partition operand, the parts `allocate.Balancer` moves from each rank's measured
   stretches, and the literature's requirements R1-R14 beside what the code does for each.
 - [design/deliverables.md](design/deliverables.md): the streaming partial-tensor collective library: its definition,
   its invariants with the operator's statements behind them, its public surface and deliverables, and what is not part
   of the library, with the three program types of 2026-10-17.
-- [design/algorithm-sources.md](design/algorithm-sources.md): the published prior art behind each part of the Python
-  surface (`python/mesh`), its kernels and the transport, under the section names the source cites as anchors. It
+- [design/algorithm-sources.md](design/algorithm-sources.md): the published prior art behind each part of the
+  partial-tensor library's Python surface, its kernels and the transport, under the section names it cites. It
   opens with the operator's statements on prior literature and on deleted implementations.
 - [design/distributed-reduce.md](design/distributed-reduce.md): the September 2026 design of the reduce over page
   tables (reduce-scatter then all-gather, completion read from the page table, reuse proved by downstream pages), the

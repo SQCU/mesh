@@ -85,6 +85,14 @@ def loaded_program_arguments(service):
     return argv
 
 
+def images(source):
+    """The images `make install` puts in the source's rdma/: rdma/Makefile's IMAGES, in its order."""
+    found = re.search(r'^IMAGES\s*=\s*(.+)$', (Path(source) / 'rdma/Makefile').read_text(), re.M)
+    if not found:
+        raise RuntimeError('rdma/Makefile names no IMAGES')
+    return found.group(1).split()
+
+
 def verify_active(source, commit):
     source = Path(source).resolve()
     service = f'user/{os.getuid()}/io.mesh.bridge'
@@ -100,8 +108,7 @@ def verify_active(source, commit):
     actual = run('ps', '-o', 'comm=', '-p', pids[0]).stdout.strip()
     if actual != str(source / 'rdma/mesh-flow'):
         raise RuntimeError(f'active bridge runs {actual}, not {source}')
-    binaries = {name: hashlib.sha256((source / 'rdma' / name).read_bytes()).hexdigest()
-                for name in ('mesh-heartbeat', 'mesh-flow', 'libmesh.dylib', 'libnccl-mesh.dylib')}
+    binaries = {name: hashlib.sha256((source / 'rdma' / name).read_bytes()).hexdigest() for name in images(source)}
     check = json.loads(run(source / 'rdma/mesh-stat').stdout.splitlines()[-1])
     if not check.get('up'):
         raise RuntimeError(f'new bridge is not up: {check}')

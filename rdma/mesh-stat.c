@@ -1,5 +1,4 @@
 #include "mesh-observe.h"
-#include "mesh-dataflow.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -34,7 +33,7 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
 }
 /* design/transport.md: the node's bridge as it publishes itself, one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase and bandwidth) and the
-   mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
+   mesh's map (mesh_map: each node's bridge number, and each link by the two nodes'
    numbers with its bandwidth in bits a second, null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
    record as the bridge holds it: its node, its bridge's region, its memory and hardware model, its boot and its
    available memory (mesh_nodes_health, design/transport.md) */
@@ -50,7 +49,7 @@ int main(void){
     nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);bandwidth=realloc(bandwidth,(links+1)*sizeof *bandwidth);
     if(!nodes || !link || !bandwidth)return 1;
     map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.bandwidth=bandwidth};
-    count=mesh_map(NULL,0,nodes,&map);
+    count=mesh_map(nodes,&map);
     room=map.nodes;links=map.links;
   }
   uint64_t region=0,unleased=0,busy=0,idle_since=0;

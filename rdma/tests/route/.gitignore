@@ -1,7 +1,0 @@
-*.o
-*.air
-route.metallib
-train
-stages
-route-stat
-envcheck

@@ -80,20 +80,10 @@ static __attribute__((unused)) int device_gid(struct mesh_device *device,const c
   device->gid=table[chosen];device->gid_index=(uint8_t)chosen;device->gid_matched=(uint8_t)matched;
   return 0;
 }
-/* design/transport.md */
-/* design/transport.md */
-/* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, the region's registered
-   part, which begins at data_off; a span never crosses a block, so it never crosses an extent. */
-static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t payload,uint64_t offset,uint64_t remaining){
-  uint64_t capacity=payload-offset%payload;
-  return (struct ibv_sge){.addr=(uintptr_t)device->wire+offset,
-    .length=(uint32_t)(remaining<capacity?remaining:capacity),
-    .lkey=device->extent_mrs[offset/MESH_EXTENT]->lkey};
-}
 /* design/algorithm-sources.md#programcopy */
 /* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
    every SEND, IBV_SEND_SIGNALED or not (the bridge's census: send completions equal requests), so a
-   SEND's completion is its queue's retirement and lands where the send thread polls it. */
+   SEND's completion is the one its queue makes and lands where the send thread polls it. */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
   struct ibv_cq *completion,*sent;
@@ -103,7 +93,7 @@ struct mesh_queue {
   uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
-/* a program's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan
+/* a link's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan
    holding none) and their two completion queues, polled through `poll` */
 struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *); };

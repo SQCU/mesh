@@ -10,7 +10,7 @@
    - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
      image run again (a deploy's new binaries both), and the bridge opened again (once an expired region is unlinked);
    - SIGUSR1: release: the bridge closed by SIGTERM (its children end, so the kernel frees their devices' objects; its
-     region expired, so every client's next lease or communicator returns the expiry), the region unlinked once no
+     region expired, so every client's next attach or communicator returns the expiry), the region unlinked once no
      holder lives (its memory then the system's), and no bridge opened until SIGHUP;
    - SIGTERM, SIGINT (launchd's stop of the job, the system's shutdown): release, then this heartbeat ends (0, which
      launchd's KeepAlive {SuccessfulExit: false} does not restart).
@@ -19,7 +19,6 @@
    that ended finding its region expired (EX_TEMPFAIL, mesh-link.c region_open) is opened again once the heartbeat has
    unlinked that region. */
 #include "mesh.h"
-#include "mesh-dataflow.h"
 #include "mesh-observe.h"
 #include <errno.h>
 #include <fcntl.h>
