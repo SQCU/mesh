@@ -129,8 +129,9 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
    lane's SEND gate (`gate`: the frames posted and completed; its capacity, set as the lane connects), each lane's
-   progress (`lane`, struct lane_state).  The child's takes from the clients' write rings (mesh-link.c switch_takes):
-   the slot its next pass looks at first (`take_from`) */
+   progress (`lane`, struct lane_state), and the time of the link's last poll that completed a SEND (`completed_at`,
+   the child's clock: its cable's terms, mesh-link.c link_send).  The child's takes from the clients' write rings
+   (mesh-link.c switch_takes): the slot its next pass looks at first (`take_from`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
@@ -142,7 +143,7 @@ struct link {
   struct frames share;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t job_at;
+  uint64_t job_at,completed_at;
   uint64_t wire[MESH_LINK_STREAMS];
   uint32_t take_from;
 };

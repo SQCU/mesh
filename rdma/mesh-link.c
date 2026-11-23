@@ -236,14 +236,19 @@ static void switch_sends(struct port *port,uint32_t j){
 /* design/transport.md: the link's SEND completions (a lane no longer served drops its own; a failed one fails the
    link, link_failed): each one's outbox cell given back and its page's use dropped, through the switch's estimators
    (its post, as its cell stored it, its service from the later of its post and the lane's previous completion, its
-   completion), its frames completed through the gate */
+   completion), its frames completed through the gate; then the cable's terms from the poll (mesh-switched.h
+   mesh_switch_cable_sent: its bytes since the link's previous completing poll, `completed_at`, and the time of a SEND
+   that had the cable to itself, the only one outstanding as the poll began) */
 static void link_send(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
   struct ibv_wc done[16];
   const int count=l->provider.poll(l->provider.sent,16,done);
   if(count<0){link_failed(port,EIO,2);return;}
-  const uint64_t at=count?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
+  if(!count)return;
+  const uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  uint64_t outstanding=0,bytes=0,first=UINT64_MAX,alone_posted=0;uint32_t alone=UINT32_MAX;
+  for(uint32_t j=0;j<MESH_LINK_LANES;j++)if(served>>j&1)outstanding+=l->lane[j].sent-l->lane[j].done;
   for(int i=0;i<count;i++){
     const uint32_t j=link_lane(l,done[i].qp_num);
     if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
@@ -252,8 +257,10 @@ static void link_send(struct port *port,uint32_t served){
     struct lane_state *state=l->lane+j;
     uint64_t posted=at;
     const uint32_t pd=mesh_switch_completed(sw,switch_lane(port,j),&posted);
-    const uint64_t start=posted>state->last?posted:state->last;
-    mesh_switch_sent(sw,switch_lane(port,j),mesh_switch_lane_bytes(switch_lane(port,j)),posted,start,at);
+    const uint64_t start=posted>state->last?posted:state->last,wire=mesh_switch_lane_bytes(switch_lane(port,j));
+    mesh_switch_sent(sw,switch_lane(port,j),wire,posted,start,at);
+    bytes+=wire;first=MIN(first,posted);
+    if(outstanding==1 && posted>=l->completed_at){alone=mesh_switch_class(mesh_switch_lane_frames(j));alone_posted=posted;}
     mesh_pd_drop(M,pd);
     MESH_SWITCH_COUNT(sw,port->index,sent,1);MESH_SWITCH_COUNT(sw,port->index,send_ns,at-posted);
     state->last=at;state->done++;
@@ -262,6 +269,9 @@ static void link_send(struct port *port,uint32_t served){
     atomic_store_explicit(&x->sends,atomic_load_explicit(&x->sends,memory_order_relaxed)+1,memory_order_relaxed);
     atomic_store_explicit(&x->posts[0].done[j&1],state->done,memory_order_relaxed);
   }
+  if(!bytes)return;
+  mesh_switch_cable_sent(sw,port->index,bytes,first,l->completed_at,at,alone,alone_posted);
+  l->completed_at=at;
 }
 /* the link's receive completions, each lane's receive posted again at once, so a lane's posted receives stay as
    many as its fill made them whatever the pool has (TN3205: a receive for every SEND the peer posts): into a page
@@ -761,9 +771,9 @@ static void link_heard(struct port *port,const struct message *heard){
 /* ---- design/PAGE-TABLE-SPEC-20261122.md: the switch, the parent's part -----------------------------------------
    The parent carves the node's pool once and makes its switch at its start, keeps the switch's view of the fabric and
    the node table (a node the map has, live while it does) as its event loop writes the map (switch_view), and runs
-   the refresh: a thread of its own that recomputes the cost-to-go and its own links' lines from the estimators every
-   SWITCH_REFRESH_NS (mesh-switched.h mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it had is given back here (switch_child_free): nothing is sent again, and
-   each page it had is counted `lost` */
+   the refresh: a thread of its own that recomputes the cost-to-go from the estimators every SWITCH_REFRESH_NS
+   (mesh-switched.h mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it
+   had is given back here (switch_child_free): nothing is sent again, and each page it had is counted `lost` */
 #define SWITCH_REFRESH_NS ((uint64_t)MESH_SWITCH_REFRESH_NS)
 /* the node table's entry of `node`, made (generation 1) as the map first has the node; MESH_ABSENT where every entry
    has another node (the event loop's alone: switch_view) */
@@ -830,11 +840,24 @@ static void pool_make(void){
   say("bridge: pool carved: %u short pages (of %u frames) and %u long (of %u) in an arena of %llu bytes\n",pool->cls[0].pages,
       pool->cls[0].frames,pool->cls[1].pages,pool->cls[1].frames,(unsigned long long)arena);
 }
+/* design/PAGE-TABLE-SPEC-20261122.md section 5: the stamps' clock (mesh-switched.h mesh_switch_stamp), this node's boot
+   (M->boot, the wall clock as the bridge started) plus its uptime since on CLOCK_MONOTONIC, which keeps the wall
+   clock's frequency as NTP disciplines it (clock_gettime(3): CLOCK_MONOTONIC_RAW is the one unaffected by frequency
+   adjustments) but none of its steps, so every node's stamps are read on one clock: the uptime clock the children read
+   (CLOCK_UPTIME_RAW) drifts from another node's by tens of ppm, seconds a day.  Its offset from the uptime clock is
+   set at the start and at every turn of the event loop, at most MESH_PAUSE_NS apart, between which the uptime clock
+   drifts from it by microseconds */
+static uint64_t boot_monotonic;
+static void switch_clock(void){
+  const uint64_t uptime=clock_gettime_nsec_np(CLOCK_UPTIME_RAW),since=clock_gettime_nsec_np(CLOCK_MONOTONIC)-boot_monotonic;
+  atomic_store_explicit(&mesh_switch_of(M)->stamp_offset,(int64_t)(M->boot+since)-(int64_t)uptime,memory_order_relaxed);
+}
 /* the switch made new over the pool (no SEND, outbox or hand of a bridge before survives its stop: region_adopt gave
-   back what they had) */
+   back what they had), its stamps' clock set */
 static void switch_make(void){
   struct mesh_switch *sw=mesh_switch_of(M);
   mesh_switch_init(sw);
+  switch_clock();
   if(getenv("MESH_SWITCH_LOG"))atomic_store(&sw->logging,1);
   const struct mesh_pool *pool=mesh_pool(M);
   say("bridge: switch made over a pool of %u pages (%u free short, %u free long)\n",pool->pages,
@@ -842,16 +865,22 @@ static void switch_make(void){
 }
 /* the view as the records stand: every record's node, and each node pair the records join (each end's entries toward
    the other, the fewer of the two), its cables and their bandwidth summed (bytes a ns; 0 where neither end's record
-   reports one), at the hop latency the fabric's fits measure (6 us); every node of it an entry of the node table, live
-   (the bandwidth of this node's own cables toward it), every other entry not.  Made by the event loop each time it
+   reports one), at the hop latency the fabric's fits measure (6 us): each link's nominal terms, its cost until its
+   sender's measures of it are heard (mesh-switched.h struct mesh_switch_cable, struct mesh_switch_line); every node of
+   it an entry of the node table (the key its links' lines are kept under: struct mesh_switch_view `slot`), live (the
+   bandwidth of this node's own cables toward it), every other entry not.  Made by the event loop each time it
    writes the map, after the write (mesh-records.c map_make): the map's one writer, so it reads the records and the
    ports as they stand, with no serial to check and nothing read again, and a map's change is drawable at once */
 #define SWITCH_LATENCY_NS 6000.0
 void switch_view(void){
   const uint64_t count=atomic_load_explicit(&M->map_nodes,memory_order_relaxed);
   const struct mesh_record *r=mesh_records(M);
-  uint32_t nodes[MESH_SWITCH_N],n=0;struct mesh_switch_fabric_link links[MESH_SWITCH_LINKS];uint32_t k=0;
-  for(uint64_t i=0;i<count && n<MESH_SWITCH_N;i++)nodes[n++]=r[i].node;
+  uint32_t nodes[MESH_SWITCH_N],slots[MESH_SWITCH_N],n=0;struct mesh_switch_fabric_link links[MESH_SWITCH_LINKS];uint32_t k=0;
+  for(uint64_t i=0;i<count && n<MESH_SWITCH_N;i++){
+    nodes[n]=r[i].node;
+    slots[n]=r[i].node==M->node?MESH_NODES:node_slot(r[i].node);
+    n++;
+  }
   for(uint64_t a=0;a<count;a++)for(uint64_t b=0;b<count;b++){
     if(a==b || k==MESH_SWITCH_LINKS)continue;
     uint32_t ab=0,ba=0;uint64_t bandwidth=0;
@@ -861,12 +890,11 @@ void switch_view(void){
     if(!cables)continue;
     links[k++]=(struct mesh_switch_fabric_link){r[a].node,r[b].node,cables,(double)bandwidth/8e9*cables/ab,SWITCH_LATENCY_NS};
   }
-  mesh_switch_view_set(mesh_switch_of(M),M->node,nodes,n,links,k);
+  mesh_switch_view_set(mesh_switch_of(M),M->node,nodes,slots,n,links,k);
   uint32_t live=0;
   for(uint32_t i=0;i<n;i++){
-    if(nodes[i]==M->node)continue;
-    const uint32_t s=node_slot(nodes[i]);
-    if(s==MESH_ABSENT)continue;
+    const uint32_t s=slots[i];
+    if(s>=MESH_NODES)continue;
     struct mesh_node *x=mesh_node_at(M,s);
     uint64_t bandwidth=0;
     for(uint32_t p=0;p<port_count;p++){
@@ -956,8 +984,8 @@ static void switch_policy_load(void){
   switch_policy_on=1;
   say("bridge: the routing policy's theta %s in memory (%lld bytes): its tables route\n",SWITCH_THETA,(long long)st.st_size);
 }
-/* the refresh, on a thread of its own: the cost-to-go and lines recomputed over the published view, the policy's
-   tables published */
+/* the refresh, on a thread of its own: the cost-to-go recomputed over the published view, the policy's tables
+   published */
 static void *switch_watch(void *unused){
   (void)unused;
   pthread_setname_np("mesh.switch");
@@ -966,7 +994,7 @@ static void *switch_watch(void *unused){
   static struct mesh_switch_tokens tokens;
   const struct mesh_switch_policy policy={NULL,switch_policy_splits};
   while(!stop){
-    mesh_switch_refresh(sw,MESH_SWITCH_PAGE);
+    mesh_switch_refresh(sw,MESH_SWITCH_PAGE,clock_ns());
     if(switch_policy_on)mesh_switch_policy_refresh(sw,&policy,clock_ns(),++point,0,&tokens);
     MESH_SWITCH_COUNT(sw,MESH_SWITCH_PARENT,refreshes,1);
     struct timespec pause={0,(long)SWITCH_REFRESH_NS};
@@ -2070,7 +2098,7 @@ int main(int argc,char **argv){
   const int adopted=region_open(&geometry,&fd);
   if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
-  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
+  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;boot_monotonic=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   say("bridge node %u: region %s %s\n",node,MESH_NAME,adopted?"adopted from the bridge before this one (its clients' indices and pages stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
@@ -2114,6 +2142,7 @@ int main(int argc,char **argv){
   uint64_t liveness=0;
   while(!stop){
     now=clock_ns();
+    switch_clock();
     if(atomic_load_explicit(&found,memory_order_acquire))ports_found();
     terminations_turn();
     arrivals_turn();

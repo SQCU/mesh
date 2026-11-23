@@ -1,6 +1,7 @@
 /* mesh-switch-stat: the switch as the bridge keeps it in its region (mesh-switched.h): its pool's pages and their free
    counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), each
-   port's line (its child's state, its link's peer and plan) and cable's queue, its serving or used lanes' outboxes and
+   port's line (its child's state, its link's peer and plan) and cable's queue and measured terms (its rate, bytes a ns,
+   and a short and a long page's time alone, ns), its serving or used lanes' outboxes and
    feedback, and its published view, one JSON line to stdout.  It reads the region and writes nothing: two lines around
    a workload are its counts (their difference).
 
@@ -47,8 +48,11 @@ int main(void){
   uint64_t line[MESH_PORTS];
   for(uint32_t p=0;p<MESH_PORTS;p++){
     line[p]=atomic_load_explicit(&sw->port[p],memory_order_acquire);
-    printf("%s{\"port\":%u,\"state\":%u,\"peer\":%u,\"plan\":%u,\"queued\":%llu}",p?",":"",p,mesh_port_state(line[p]),
-           mesh_port_peer(line[p]),mesh_port_plan(line[p]),U(sw->cable[p].queued));
+    const struct mesh_switch_cable *x=sw->cable+p;
+    printf("%s{\"port\":%u,\"state\":%u,\"peer\":%u,\"plan\":%u,\"queued\":%llu,\"rate\":%g,\"page\":[%g,%g]}",p?",":"",p,
+           mesh_port_state(line[p]),mesh_port_peer(line[p]),mesh_port_plan(line[p]),U(x->queued),
+           (double)atomic_load_explicit(&x->rate,memory_order_relaxed),(double)atomic_load_explicit(&x->page[0],memory_order_relaxed),
+           (double)atomic_load_explicit(&x->page[1],memory_order_relaxed));
   }
   printf("],\"lanes\":[");
   int first=1;

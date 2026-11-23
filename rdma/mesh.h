@@ -20,22 +20,22 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  163:
+/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  164:
    every SEND is one page of the node's pool, MESH_HEAD bytes of header and then its payload, the header naming each
    destination as a node and an index of that node's page table (mesh-switched.h), a page sent on the lanes of its
-   payload's class alone, and a link's lane j its queue pair j (mesh-bridge.h link_plan).  Against 162: the header
-   has no `dest_nodes` (162's destinations as bits over its source's view; each node keys the policy's contexts by its
-   own view), a line's wait is INFINITY where its link is down (162's 0), a link makes no queue pairs 0 and 1 that carry
-   nothing (162's lanes from queue pair 2), a HELLO's `count` is its port's budget (162's 1 + the budget), and a LINK
-   names MESH_LINK_LANES lanes in `pair` (162's 10) */
-#define MESH_VERSION 163u
+   payload's class alone, and a link's lane j its queue pair j (mesh-bridge.h link_plan).  Against 163: a line
+   (mesh-switched.h struct mesh_switch_line, the same 32 bytes) carries for each page class its link's measured time now
+   and its idle time (163's one wait, spread, rate and latency, the last two nominal), stamped with its sender's boot
+   plus uptime (163's count of its sender's refreshes, which began again at 0 as the sender restarted) */
+#define MESH_VERSION 164u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  186: the page table and its owner bytes (`table_off`), the clients'
+   before it left where its layout is this one.  187: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   185, the header's `control`, a counter clients bumped for the bridge's watcher thread, is `attached` in place, a bit
-   a client slot whose ring the port children look at (mesh_ring_flag), and a ring's `put` is stored sequentially
-   consistent */
-#define MESH_LAYOUT 186u
+   186, the switch keeps the remote links' lines apart from the view, under their ends' node table entries
+   (mesh-switched.h struct mesh_switch `heard`, the view's `slot`), and none of its own links' (the view's links have
+   no line or stamp), each cable has its measured rate and a page's time alone for each class (struct
+   mesh_switch_cable), and the stamps' clock offset (`stamp_offset`) is where the refresh's count (`stamp`) was */
+#define MESH_LAYOUT 187u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
