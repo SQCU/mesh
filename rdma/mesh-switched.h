@@ -30,9 +30,12 @@
      mesh-link.c switch_sends): the page is switched across the node's ports, whichever child has it.
    - Landing.  A page landed sets the table entry of each destination here whose turn it is (mesh_switch_set: the
      index's landed count one more, the page it named before dropped) and is forwarded unchanged for the others it
-     carries (mesh_switch_landed).  Nothing waits and nothing is reported: a destination no allowed neighbour reaches,
-     a header that is not one, a page a lost link took, a landing whose receive went again into its own page are each
-     counted (`unreachable`, `malformed`, `lost`: struct mesh_switch_counters), never retried.
+     carries (mesh_switch_landed).  Nothing of what lands is tested: each field of its header that addresses memory is
+     clamped into what it addresses (its bytes to its page's payload, its destinations to MESH_DESTS, its hops to its
+     path, a destination's index to the table), so a header that is not one writes only within its page, its path and
+     the table.  Nothing waits and nothing is reported: a destination no allowed neighbour reaches, a page a lost link
+     took, a landing whose receive went again into its own page are each counted (`unreachable`, `lost`: struct
+     mesh_switch_counters), never retried.
    - Uses.  A page's uses (mesh.h) count its table words, its writes pending in a ring, its SENDs pushed (an inbound
      ring's entry) or posted (an in-flight ring's entry: struct mesh_switch_lane) and a landing being carried; its last
      use's drop gives it back to its class's free stack.
@@ -69,7 +72,6 @@
 #include <string.h>
 
 #define MESH_SWITCH_MAGIC 0x53574349u
-#define MESH_HEAD_MAGIC 0x50414745u                          /* a page's header */
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)   /* every port's lanes, its link's queue pairs */
 #define MESH_SWITCH_N 8u                                     /* nodes the view has */
 #define MESH_SWITCH_LINKS 64u                                /* directed node pairs the view has */
@@ -108,14 +110,14 @@ struct mesh_hop { uint32_t node,index,next; float queued,transit; };
    own cables (struct mesh_switch_cable) */
 struct mesh_switch_line { uint32_t from,to; uint64_t stamp; float cost[MESH_CLASSES],idle[MESH_CLASSES]; };
 _Static_assert(sizeof(struct mesh_switch_line)==32,"a line's 32 bytes");
-/* the header, written by the bridge (never the client): MESH_HEAD_MAGIC; the node that took the write (`source`); the
-   payload's bytes; the hops, destinations and lines; the node that sent this SEND (`from`: its receiver appends itself
-   to `path`); `unused`, unused; the nodes visited, `hops` + 1 of them; the destinations; and the sequence of the
+/* the header, written by the bridge (never the client): the node that took the write (`source`); the payload's bytes;
+   the hops, destinations and lines; the node that sent this SEND (`from`: its receiver appends itself to `path`);
+   `unused`, unused; the nodes visited, `hops` + 1 of them; the destinations; and the sequence of the
    headers its first node made (`seq`: the draw's seed, the records' sampling and their join).  Every field names nodes
    by their numbers, never by a view's indices (each node's view is its own).  The lines follow the payload in the last
    frame's slack (mesh_switch_lines_at) */
 struct mesh_head {
-  uint32_t magic,source,bytes,hops,dests,lines,from,unused;
+  uint32_t source,bytes,hops,dests,lines,from,unused;
   uint32_t path[MESH_SWITCH_N];
   struct mesh_hop dest[MESH_DESTS];
   uint64_t seq;
@@ -215,14 +217,13 @@ struct mesh_switch_log { _Alignas(64) _Atomic uint64_t head; _Alignas(64) _Atomi
    - receives a lane's fill asked for that its class's free stack had no page for (`starved`), the policy's refreshes;
    - destinations no allowed neighbour reaches (`unreachable`), pages an exited child's rings held or its next child
      found on its inbound rings, SENDs the provider did not take, and landings whose receive was posted again into their
-     own page, their class's free stack empty (`lost`: once a page, not a destination), and headers and ring cells that
-     are not one and destination indices past the table (`malformed`) */
+     own page, their class's free stack empty (`lost`: once a page, not a destination) */
 struct mesh_switch_counters {
   _Alignas(64) _Atomic uint64_t passes,pass_ns[2],part_ns[5];
   _Atomic uint64_t taken,landed,set,forwards,groups;
   _Atomic uint64_t posts,post_wait_ns,post_call_ns,sent,send_ns;
   _Atomic uint64_t starved,refreshes;
-  _Atomic uint64_t unreachable,lost,malformed;
+  _Atomic uint64_t unreachable,lost;
 };
 /* a port child's state (design/transport.md section 14, "A process a port"): started, its device not yet open; its
    device open; its link's lanes made; serving them, the one state in which a draw pushes onto its lanes or it takes
@@ -961,20 +962,19 @@ static inline int mesh_switch_log_take(struct mesh_switch *sw,uint32_t ring,stru
 
 /* ---- The data path: take, forward, landing --------------------------------------------------------------------- */
 /* destination i of page pd's header, on this node: its table entry set to the page (mesh.h mesh_entry_put: its landed
-   one more, the page it named before dropped), the entry's use of the page counted first; 1 where it was set.  An index
-   past the table is set nothing and counted (`malformed`: its word would lie outside the table).  An index no client
-   has now is set as any other: the page goes back as the index is next allocated (mesh-call.c mesh_pages makes its
+   one more, the page it named before dropped), the entry's use of the page counted first.  The index is clamped into
+   the table (its low bits, MESH_TABLE a power of two: a word outside the table is never written), never tested.  An
+   index no client has now is set as any other: the page goes back as the index is next allocated (mesh-call.c mesh_pages makes its
    word new and drops the page it named) or as a later landing there replaces it, and the lane it landed on keeps its
    receives meanwhile (mesh-link.c link_receive: a landing whose class has no free page posts the landed page again); a
    lane whose fill comes after its class's stack is empty starts with fewer receives than its share (mesh-link.c
-   switch_receives).  The index is read once: the one bounded is the one set */
-static inline int mesh_switch_set(struct hdr *m,struct mesh_switch *sw,uint32_t pd,const struct mesh_head *head,uint32_t i,uint32_t ring){
-  const uint32_t index=__atomic_load_n(&head->dest[i].index,__ATOMIC_RELAXED);
-  if(index>=m->entries){MESH_SWITCH_COUNT(sw,ring,malformed,1);return 0;}
+   switch_receives).  The index is read once: the one clamped is the one set */
+_Static_assert(!(MESH_TABLE&(MESH_TABLE-1)),"a table index clamped by its low bits");
+static inline void mesh_switch_set(struct hdr *m,struct mesh_switch *sw,uint32_t pd,const struct mesh_head *head,uint32_t i,uint32_t ring){
+  const uint32_t index=__atomic_load_n(&head->dest[i].index,__ATOMIC_RELAXED)&(MESH_TABLE-1);
   mesh_pd_use(m,pd);
   mesh_pd_drop(m,mesh_entry_put(m,index,pd,1));
   MESH_SWITCH_COUNT(sw,ring,set,1);
-  return 1;
 }
 /* The forward: page pd's destinations that this node carries on (`away`: places in its header's dest[]) split
    (mesh_switch_choose) into groups, a cable each, one group a neighbour (so a peer), and the page itself pushed onto
@@ -1038,27 +1038,26 @@ static inline void mesh_switch_forward(struct hdr *m,struct mesh_switch *sw,uint
   }
 }
 /* A client's write carried (the take): its page (`pd`, the page the write's ring use is on) given the write's bytes and
-   its header (MESH_HEAD_MAGIC, this node its source, its sender and its path's first node, the node's header counter
-   its `seq`, every destination's next this node), and forwarded toward every destination (mesh_switch_forward), each
-   on another node (its writer set those on this one: mesh-call.c mesh_write; one here on the ring is reached by no
-   neighbour, counted `unreachable`).  A cell naming no page of the pool, no destination or more than MESH_DESTS, or
-   more bytes than its page's payload is carried nowhere, counted (`malformed`) */
+   its header (this node its source, its sender and its path's first node, the node's header counter its `seq`, every
+   destination's next this node), and forwarded toward every destination (mesh_switch_forward), each on another node
+   (its writer set those on this one: mesh-call.c mesh_write; one here on the ring is reached by no neighbour, counted
+   `unreachable`).  Nothing of the cell is tested (its writer, mesh_write, made it of a page, destinations and bytes
+   it had bounded): each field that addresses memory is clamped into what it addresses, the page into the pool's
+   pages, the destinations to MESH_DESTS and the bytes to the page's payload, so a cell that is not one writes only
+   within a page of the pool.  The pool has a page wherever a cell is (mesh_write writes none of a pool of none) */
 static inline void mesh_switch_carry(struct hdr *m,struct mesh_switch *sw,const struct mesh_write *w,uint64_t now,uint32_t ring,
                                      const struct mesh_switch_togo *togo){
-  const uint32_t self=m->node,pd=w->pd,dests=w->dests;
-  if(!mesh_pd_valid(m,pd) || !dests || dests>MESH_DESTS || w->bytes>MESH_PAYLOAD(mesh_pd_at(m,pd)->cls)){
-    MESH_SWITCH_COUNT(sw,ring,malformed,1);
-    return;
-  }
+  const uint32_t self=m->node,pages=mesh_pool(m)->pages,pd=w->pd<pages?w->pd:pages-1,dests=w->dests<MESH_DESTS?w->dests:MESH_DESTS,
+                 payload=MESH_PAYLOAD(mesh_pd_at(m,pd)->cls),bytes=w->bytes<payload?w->bytes:payload;
   MESH_SWITCH_COUNT(sw,ring,taken,1);
-  atomic_store_explicit(&mesh_pd_at(m,pd)->bytes,w->bytes,memory_order_relaxed);
+  atomic_store_explicit(&mesh_pd_at(m,pd)->bytes,bytes,memory_order_relaxed);
   struct mesh_head *head=mesh_head_of(m,pd);
-  head->magic=MESH_HEAD_MAGIC;head->source=self;head->bytes=w->bytes;head->hops=0;head->dests=dests;head->lines=0;head->from=self;
+  head->source=self;head->bytes=bytes;head->hops=0;head->dests=dests;head->lines=0;head->from=self;
   memset(head->path,0,sizeof head->path);head->path[0]=self;
   head->seq=atomic_fetch_add_explicit(&sw->writes,1,memory_order_relaxed);
   uint32_t away[MESH_DESTS];
   for(uint32_t i=0;i<dests;i++){head->dest[i]=(struct mesh_hop){w->dest[i].node,w->dest[i].index,self,0,0};away[i]=i;}
-  mesh_switch_forward(m,sw,pd,head,w->bytes,away,dests,now,ring,togo);
+  mesh_switch_forward(m,sw,pd,head,bytes,away,dests,now,ring,togo);
 }
 /* Writes taken from client slot `slot`'s ring and carried (mesh_switch_carry), at most `most`, by a port child: each
    cell holding the write of its position (its sequence the position + 1) copied, then the ring's take moved past it by
@@ -1086,15 +1085,15 @@ static inline uint32_t mesh_switch_ring_dequeue(struct hdr *m,struct mesh_switch
   }
   return taken;
 }
-/* A receive landed in page pd on lane l (the page of the lane's class): the page live, its one use the landing's.  A
-   header that is not one (its magic, its bytes past the page's payload, no destination or more than MESH_DESTS, a
-   path past MESH_SWITCH_N) is counted (`malformed`) and the page given back.  Else the page given the header's bytes,
-   this node appended to its path, its lines taken (as many as the lane's frames fit), each destination here whose
-   next this node is set in the table (mesh_switch_set) and its record made where the page is sampled, the
-   destinations elsewhere whose next this node is forwarded (mesh_switch_forward), and the landing's use dropped.  The
-   header's bytes, destinations and hops are each read once, and the values bounded are the ones used (every client
-   maps the region writable, and a local reader has the page once a destination here is set).  `now` the child's clock
-   at the landing */
+/* A receive landed in page pd on lane l (the page of the lane's class): the page live, its one use the landing's, the
+   page given the header's bytes, this node appended to its path, its lines taken (as many as the lane's frames fit),
+   each destination here whose next this node is set in the table (mesh_switch_set) and its record made where the page
+   is sampled, the destinations elsewhere whose next this node is forwarded (mesh_switch_forward), and the landing's
+   use dropped.  Nothing of the header is tested: its bytes, destinations and hops are each read once and clamped (the
+   bytes to the page's payload, the destinations to MESH_DESTS, the hops to MESH_SWITCH_N - 2, so this node's place in
+   the path, hops + 1, is within it), and the values clamped are the ones used (every client maps the region writable,
+   and a local reader has the page once a destination here is set).  A header that is not one is carried as one, and
+   writes only within its page, its path and the table.  `now` the child's clock at the landing */
 static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint32_t l,uint32_t pd,uint64_t now,uint32_t ring,
                                       const struct mesh_switch_togo *togo){
   struct mesh_pd *p=mesh_pd_at(m,pd);
@@ -1103,13 +1102,10 @@ static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint3
   atomic_fetch_add_explicit(&sw->lane[l].landed,1,memory_order_relaxed);
   MESH_SWITCH_COUNT(sw,ring,landed,1);
   struct mesh_head *head=mesh_head_of(m,pd);
-  const uint32_t self=m->node,bytes=__atomic_load_n(&head->bytes,__ATOMIC_RELAXED),dests=__atomic_load_n(&head->dests,__ATOMIC_RELAXED),
-                 hops=__atomic_load_n(&head->hops,__ATOMIC_RELAXED);
-  if(head->magic!=MESH_HEAD_MAGIC || bytes>MESH_PAYLOAD(p->cls) || !dests || dests>MESH_DESTS || hops>=MESH_SWITCH_N-1){
-    MESH_SWITCH_COUNT(sw,ring,malformed,1);
-    mesh_pd_drop(m,pd);
-    return;
-  }
+  const uint32_t self=m->node,payload=MESH_PAYLOAD(p->cls),bytes_read=__atomic_load_n(&head->bytes,__ATOMIC_RELAXED),
+                 dests_read=__atomic_load_n(&head->dests,__ATOMIC_RELAXED),hops_read=__atomic_load_n(&head->hops,__ATOMIC_RELAXED);
+  const uint32_t bytes=bytes_read<payload?bytes_read:payload,dests=dests_read<MESH_DESTS?dests_read:MESH_DESTS,
+                 hops=hops_read<MESH_SWITCH_N-2?hops_read:MESH_SWITCH_N-2;
   atomic_store_explicit(&p->bytes,bytes,memory_order_relaxed);
   head->hops=hops+1;head->path[hops+1]=self;
   mesh_switch_lines_take(sw,head,bytes,mesh_switch_lane_bytes(l));
@@ -1119,7 +1115,8 @@ static inline void mesh_switch_landed(struct hdr *m,struct mesh_switch *sw,uint3
     const struct mesh_hop *d=head->dest+i;
     if(d->next!=self)continue;
     if(d->node!=self){away[naway++]=i;continue;}
-    if(!mesh_switch_set(m,sw,pd,head,i,ring) || !logging)continue;
+    mesh_switch_set(m,sw,pd,head,i,ring);
+    if(!logging)continue;
     /* a page's presence at each destination here, recorded as it is set: the cost it carried in-band (each hop's
        queueing on that hop's own clock, the wire's time) */
     struct mesh_switch_record r;memset(&r,0,sizeof r);

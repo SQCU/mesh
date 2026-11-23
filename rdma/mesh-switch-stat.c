@@ -42,7 +42,7 @@ int main(void){
     printf("\"posts\":%llu,\"post_wait_ns\":%llu,\"post_call_ns\":%llu,\"sent\":%llu,\"send_ns\":%llu,",U(c->posts),U(c->post_wait_ns),
            U(c->post_call_ns),U(c->sent),U(c->send_ns));
     printf("\"starved\":%llu,\"refreshes\":%llu,",U(c->starved),U(c->refreshes));
-    printf("\"unreachable\":%llu,\"lost\":%llu,\"malformed\":%llu}",U(c->unreachable),U(c->lost),U(c->malformed));
+    printf("\"unreachable\":%llu,\"lost\":%llu}",U(c->unreachable),U(c->lost));
   }
   printf("],\"ports\":[");
   uint64_t line[MESH_PORTS];
