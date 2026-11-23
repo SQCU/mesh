@@ -8,6 +8,7 @@ import sys
 
 import torch
 from schedule_emit.export import derived_graph
+from schedule_emit.placement import TransferPolicy, channel_nodes, placed_op, scatter_landing, wire_operand, wire_shape
 from torch._decomp.decompositions import addmm
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
@@ -1360,26 +1361,34 @@ def insert_send_recv(graph, node, first, instances, transfer=None):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
     made = {}
     for channel, (processor, users) in enumerate(away.items(), first):
-        with graph.inserting_after(node):
-            sent = graph.call_function(SEND, (node, channel))
-            sent.meta["processor"] = here
-        with graph.inserting_before(users[0]):
-            arrived = graph.call_function(RECV, (channel,))
-            with detect_fake_mode([value]):
-                storage = value.new_empty((value.untyped_storage().nbytes() // value.element_size(),))
-                landing = storage.as_strided(value.shape, value.stride(), value.storage_offset())
-            arrived.meta.update(processor=processor, val=landing)
         # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
         if transfer is None:
             kind, exchange, consumer = node.meta.get("collectives", {}).get(processor, ("broadcast", node, JOIN))
-            collective = kind, instances.setdefault((kind, exchange), len(instances))
+            policy = ((kind, instances.setdefault((kind, exchange), len(instances))), consumer)
         else:
-            collective, consumer = transfer(node, processor, users)
-        arrived.meta["consumer"] = consumer
+            policy = transfer(node, processor, users)
+            consumer = policy.consumer if isinstance(policy, TransferPolicy) else policy[1]
+        shape = wire_shape(value)
+        with detect_fake_mode([value]):
+            storage = value.new_empty((value.untyped_storage().nbytes() // value.element_size(),))
+            landing = storage.as_strided(value.shape, value.stride(), value.storage_offset())
+        wire, packed = node, False
+        if consumer == JOIN and not value.is_contiguous():
+            with graph.inserting_before(users[0]):
+                wire, packed = wire_operand(graph, node, here, value, shape, costs=getattr(policy, "wire_costs", None))
+            packed = packed or tuple(shape) != tuple(value.shape)
+        sent, arrived = channel_nodes(graph, wire, channel, processor, users[0], policy,
+                                      torch.empty_like(wire.meta["val"]) if packed else landing)
         for end in (sent, arrived):
             end.meta.update(zip(("dimension", "block", "counts", "displs", "strides"),
-                                node.meta.get("blocks", {}).get(processor, ())), collective=collective)
+                                node.meta.get("blocks", {}).get(processor, ())))
+        result = arrived
+        if packed:
+            with graph.inserting_before(users[0]):
+                backing = scatter_landing(graph, arrived, processor, landing, shape)
+                result = placed_op(graph, processor, AS_STRIDED, backing, tuple(value.shape),
+                                   tuple(value.stride()), value.storage_offset())
         for user in users:
-            user.replace_input_with(node, arrived)
+            user.replace_input_with(node, result)
         made[channel] = sent, arrived
     return made
