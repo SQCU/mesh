@@ -427,17 +427,7 @@ class ViewId(C.Structure):
 class PlanLinks(C.Structure):
     _fields_ = [('pairs', U), ('from', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
                 ('to', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
-                ('arc', (U * NODES_MOST) * NODES_MOST), ('capacity', D * (NODES_MOST * (NODES_MOST - 1))),
-                ('rate', D * (NODES_MOST * (NODES_MOST - 1))),
-                ('startup_ns', D * (NODES_MOST * (NODES_MOST - 1))), ('reference_bps', D)]
-
-
-class PlanPacking(C.Structure):
-    _fields_ = [('nodes', U), ('demands', U), ('trees', U), ('root', C.POINTER(U)),
-                ('demand', C.POINTER(U)), ('parent', C.POINTER(U)), ('leaves', C.POINTER(Q)),
-                ('first', C.POINTER(Z)), ('order', C.POINTER(Z)), ('capacity', C.POINTER(D)),
-                ('volume', C.POINTER(D)), ('share', C.POINTER(D)), ('rate', C.POINTER(D)),
-                ('startup', C.POINTER(D))]
+                ('arc', (U * NODES_MOST) * NODES_MOST), ('rate', D * (NODES_MOST * (NODES_MOST - 1)))]
 
 
 PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINTER(Declared)), ('transfers', U),
@@ -452,7 +442,7 @@ PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINT
                 ('weights', C.POINTER(Weight)), ('dependence', C.POINTER(Dependence)), ('dependences', U),
                 ('demand', C.POINTER(PlanDemand)), ('demands', U), ('n', U), ('self', U), ('copies', U),
                 ('start_lead', U), ('view', ViewId), ('of', C.POINTER(U)), ('own', Grouped), ('links', C.POINTER(PlanLinks)),
-                ('packing', C.POINTER(PlanPacking)), ('first_demand', U), ('run', C.POINTER(Q)), ('made', U),
+                ('parent', C.POINTER(U)), ('run', C.POINTER(Q)), ('made', U),
                 ('members', C.POINTER(Q)), ('span', C.POINTER(mesh_graph.Interval)),
                 ('releases', Q), ('blocks', Q), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
                 ('nroots', U), ('carried', C.POINTER(C.c_ubyte)), ('bound', C.POINTER(U)),
@@ -483,7 +473,7 @@ PlanAnalysis._fields_ = [
     ('carried', C.POINTER(C.c_ubyte)),
     ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p),
     ('occurrence', SourceOccurrences), ('later', C.POINTER(U)), ('lag', C.POINTER(Q)),
-    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence)), ('links', PlanLinks), ('packing', PlanPacking)]
+    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence)), ('links', PlanLinks)]
 
 
 class PlanSync(C.Structure):
@@ -690,24 +680,14 @@ for name, result, arguments in (
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 
-LIB.mesh_plan_program_analyze_routed.restype = C.c_int
 LIB.mesh_plan_schedule_graph.argtypes = LIB.mesh_plan_schedule.argtypes
 LIB.mesh_plan_schedule_graph.restype = C.c_int
 LIB.mesh_plan_schedule_project.argtypes = [C.POINTER(PlanScheduleResult), C.POINTER(D), C.POINTER(U), U]
 LIB.mesh_plan_schedule_project.restype = C.c_int
-LIB.mesh_plan_program_analyze_routed.argtypes = [*LIB.mesh_plan_program_analyze.argtypes[:-1],
-                                                C.POINTER(D), C.POINTER(C.POINTER(PlanAnalysis))]
-LIB.mesh_plan_program_analyze_chains.restype = C.c_int
-LIB.mesh_plan_program_analyze_chains.argtypes = [*LIB.mesh_plan_program_analyze_routed.argtypes[:-1],
-                                                C.POINTER(mesh_graph.ChainResult), C.POINTER(C.POINTER(PlanAnalysis))]
-if hasattr(LIB, 'mesh_plan_program_analyze_startup'):
-    LIB.mesh_plan_program_analyze_startup.restype = C.c_int
-    LIB.mesh_plan_program_analyze_startup.argtypes = [*LIB.mesh_plan_program_analyze_chains.argtypes[:-1],
-                                                    C.POINTER(D), C.POINTER(C.POINTER(PlanAnalysis))]
-if hasattr(LIB, 'mesh_plan_program_analyze_occurrences'):
-    LIB.mesh_plan_program_analyze_occurrences.restype = C.c_int
-    LIB.mesh_plan_program_analyze_occurrences.argtypes = [
-        *LIB.mesh_plan_program_analyze_startup.argtypes[:-1], C.POINTER(SourceOccurrences), C.POINTER(C.POINTER(PlanAnalysis))]
+LIB.mesh_plan_program_analyze_occurrences.restype = C.c_int
+LIB.mesh_plan_program_analyze_occurrences.argtypes = [
+    *LIB.mesh_plan_program_analyze.argtypes[:-1], C.POINTER(mesh_graph.ChainResult),
+    C.POINTER(SourceOccurrences), C.POINTER(C.POINTER(PlanAnalysis))]
 # mesh-collective.h mesh_strided_extents (design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3): a view's maximal
 # contiguous byte ranges, the owning module's traversal.  What must stay: the header's declaration
 EXTENT = C.CFUNCTYPE(None, C.c_void_p, Q, Q)
