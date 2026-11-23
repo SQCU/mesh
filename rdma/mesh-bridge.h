@@ -39,7 +39,7 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
 #define MESH_LINK_LANES (2u*MESH_LINK_STREAMS)
 /* TN3205 (README.md): a SEND and the receive it fills cover the same number of frames of MESH_FRAME bytes (mesh-call.h),
    a SEND stalled by the hardware until its receive is posted.  A count of frames: a queue's capacity, a lane's
-   share of its completion queues, a SEND's and the send gate's, a type of its own so no count of pages or bytes passes
+   share of its completion queues, a SEND's, a type of its own so no count of pages or bytes passes
    for one; a SEND of `bytes` covers frames_of(bytes) */
 struct frames { uint64_t n; };
 static inline struct frames frames_of(uint64_t bytes){ return (struct frames){(bytes+MESH_FRAME-1)/MESH_FRAME}; }
@@ -69,31 +69,12 @@ union mesh_network_event {
   unsigned char bytes[KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data)];
 };
 _Static_assert(sizeof(union mesh_network_event)==48,"M24");
-/* A queue pair's SEND gate, its queue's own capacity (a post past it fails the post): the progress thread's frames
-   posted and completed (each request carries its lane and the frames posted through it, mod 2^48, which its completion
-   returns), the queue's capacity in frames, and the census's requests and completions */
-#define MESH_GATE_MASK ((UINT64_C(1)<<48)-1)
-struct send_gate {
-  _Alignas(64) struct frames posted,completed;
-  uint64_t requests,completions;
-  struct frames capacity;
-};
-/* whether the gate takes `f` frames more than it has posted and not completed */
-static inline int gate_fits(const struct send_gate *gate,struct frames f){
-  return ((gate->posted.n-gate->completed.n)&MESH_GATE_MASK)+f.n<=gate->capacity.n;
-}
-/* `f` frames posted through the gate on lane k: the request's id */
-static inline uint64_t gate_post(struct send_gate *gate,uint32_t k,struct frames f){
-  gate->posted.n+=f.n;
-  return ((uint64_t)k<<48)|(gate->posted.n&MESH_GATE_MASK);
-}
-/* a request's completion: the frames posted through it completed */
-static inline void gate_complete(struct send_gate *gate,uint64_t id){ gate->completed.n=id&MESH_GATE_MASK;gate->completions++; }
-/* A lane's progress in its child: SENDs posted (`sent`) and completed (`done`), receives posted (`posted`) and
-   landed (`got`), the receives its queues take (`frame_capacity`, its share of them), and its previous SEND completion
-   (`last`: its next one's service begins no earlier); the SENDs' pages and post times are the lane's outbox's
-   (mesh-switched.h struct mesh_switch_cell: a queue pair completes its SENDs in their order, the outbox's) */
-struct lane_state { uint64_t sent,done,posted,got,frame_capacity,last; };
+/* A lane's progress in its child: receives posted (`posted`) and landed (`got`), the receives its queues take
+   (`frame_capacity`, its share of them), the SENDs it may have outstanding (`depth`: its queues' share of its send
+   capacity over its frames, a post past which would fail), and its previous SEND completion (`last`: its next one's
+   service begins no earlier); its SENDs posted and completed, their pages and post times are its in-flight ring's
+   (mesh-switched.h struct mesh_switch_lane: a queue pair completes its SENDs in their order, the ring's) */
+struct lane_state { uint64_t posted,got,frame_capacity,depth,last; };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
@@ -128,10 +109,11 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends have, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
-   lane's SEND gate (`gate`: the frames posted and completed; its capacity, set as the lane connects), each lane's
-   progress (`lane`, struct lane_state), and the time of the link's last poll that completed a SEND (`completed_at`,
-   the child's clock: its cable's terms, mesh-link.c link_send).  The child's takes from the clients' write rings
-   (mesh-link.c switch_takes): the slot its next pass looks at first (`take_from`) */
+   lane's progress (`lane`, struct lane_state, its depth set as the lane connects), and the time of the link's last
+   poll that completed a SEND (`completed_at`, the child's clock: its cable's terms, mesh-link.c link_send).  The
+   child's takes from the clients' write rings (mesh-link.c switch_takes): the slot its next pass looks at first
+   (`take_from`); and its posts from its port's inbound rings (mesh-link.c switch_sends): the pushing port whose ring its
+   next pass reads first (`send_from`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
@@ -141,11 +123,10 @@ struct link {
   _Atomic uint32_t served,broken,pairing;
   uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],job_pairing,psn;
   struct frames share;
-  struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at,completed_at;
   uint64_t wire[MESH_LINK_STREAMS];
-  uint32_t take_from;
+  uint32_t take_from,send_from;
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
@@ -165,9 +146,9 @@ struct link {
    operator, 2026-10-21).  9 (design/PAGE-TABLE-SPEC-20261122.md): a child makes a link's lanes as queue pairs from 0
    (lane j queue pair j and its port's switch lane j: mesh-bridge.h link_plan), posts its lanes' receives into free
    pages of the node's pool, lands pages into the page table and forwards them by their headers, takes its clients'
-   writes from its port's share of the rings (mesh-switched.h struct mesh_switch `port`, read every pass), posts its
-   lanes' outboxes (each SEND's post time in its outbox cell), counts what it cannot carry and reports nothing, and
-   names in its hand the outbox position it pushes.  Against 8, whose
+   writes from its port's share of the rings (mesh-switched.h struct mesh_switch `port`, read every pass), posts what
+   its port's inbound rings have, each SEND in its lane's in-flight ring, and counts what it cannot carry and reports
+   nothing (each of these the region's, of MESH_LAYOUT).  Against 8, whose
    links made queue pairs 0 and 1 for nothing and their data lanes from 2: CHILD_MAKE's plan, CHILD_MADE's `qpn`,
    CHILD_CONNECT's `peer` and CHILD_BROKEN's `broken` name lane j as queue pair j, MESH_LINK_LANES of them (8's 10) */
 #define MESH_CHILD_VERSION 9u

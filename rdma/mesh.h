@@ -29,12 +29,13 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
    plus uptime (163's count of its sender's refreshes, which began again at 0 as the sender restarted) */
 #define MESH_VERSION 164u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  189: the page table and its owner bytes (`table_off`), the clients'
-   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and a hand for each port child; against
-   188, a write ring's cell holds the write of position p while its sequence is p + 1 and is the producer's again once
-   the ring's take is past p (188's sequence 2 (p / MESH_RING) + 1 while full, made 2 (p / MESH_RING) + 2 by its taker
-   after the carry), and a port child's hand names no ring position (188's `take`) */
-#define MESH_LAYOUT 189u
+   before it left where its layout is this one.  190: the page table and its owner bytes (`table_off`), the clients'
+   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), and the switch's inbound and in-flight
+   rings; against 189, a page pushed toward a cable is an entry of the inbound ring of its pusher, that cable and its
+   class (mesh-switched.h struct mesh_switch_inbound), and a SEND posted an entry of its lane's in-flight ring (struct
+   mesh_switch_lane `flight`, between its `completed` and `posted`), where 189 had each lane's outbox of 32768 cells
+   (`tail`, `head`, `done`) and a hand for each port child */
+#define MESH_LAYOUT 190u
 #define MESH_ABSENT UINT32_MAX
 /* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
    node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
@@ -45,8 +46,8 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 #define MESH_NODES 8u
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
-/* the switch's bytes (`switch_off`, mesh-switched.h struct mesh_switch: the node's lanes and their outboxes, the view,
-   the weights and the trainer's log rings) */
+/* the switch's bytes (`switch_off`, mesh-switched.h struct mesh_switch: the port lines, the view and the split tables,
+   the cables, the lines heard, the lanes and their in-flight rings, the inbound rings, and the trainer's log rings) */
 #define MESH_SWITCH_BYTES (UINT64_C(128)<<20)
 #define MESH_LEAVING (UINT64_C(1)<<63)
 _Static_assert(38+25<=63,"an owner word");
