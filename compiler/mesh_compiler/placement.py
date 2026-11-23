@@ -331,9 +331,10 @@ def folded(graph, value, at, repeats, periods, dimension, sizes, processors, exa
 def interleaved(graph, pieces, dimension, processor):
     whole = list(shape(pieces[0]))
     whole[dimension] = sum(shape(piece)[dimension] for piece in pieces)
-    value = call(graph, ZEROS, (pieces[0], whole), processor)
+    value = constant(graph, ATEN.zeros.default, (whole,), pieces[0], processor, dtype=pieces[0].meta["val"].dtype)
     for residue, piece in enumerate(pieces):
-        value = call(graph, SLICE_SCATTER, (value, piece, dimension, residue, whole[dimension], len(pieces)), processor)
+        if shape(piece)[dimension]:
+            value = call(graph, SLICE_SCATTER, (value, piece, dimension, residue, whole[dimension], len(pieces)), processor)
     return value
 
 
@@ -378,6 +379,14 @@ def replicas(value):
 # there (ordered exact full cover), are that source (as cut returns a whole cut uncut), its view, alias and processor
 # kept; other pieces one new aten.cat
 def reassembled(graph, pieces, dimension, processor):
+    prototype = pieces[0]
+    pieces = [piece for piece in pieces if shape(piece)[dimension]]
+    if not pieces:
+        value = prototype.meta["val"]
+        return constant(graph, EMPTY_STRIDED, (list(value.shape), list(value.stride())), prototype, processor,
+                        dtype=value.dtype)
+    if len(pieces) == 1:
+        return pieces[0]
     at = 0
     for piece in pieces:
         if (piece.target is not SLICE or piece.args[0] is not pieces[0].args[0] or piece.args[1] != dimension or
