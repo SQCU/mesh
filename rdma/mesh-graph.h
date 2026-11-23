@@ -649,7 +649,7 @@ int mesh_graph_access_pages_cover(uint64_t page, uint64_t partitions,
                                   size_t covers, const struct mesh_graph_access_pages *cover,
                                   size_t wanted, const struct mesh_graph_access_pages *want, int *covered);
 /* isl's own text of the relation and its guard (isl_map_to_str, isl_set_to_str) with its domain, flags, guard
-   identity and span: mesh_graph_access_map_save into *bytes (malloc'd, the caller's); mesh_graph_access_map_load the
+   identity and span: mesh_graph_access_map_save into *bytes (malloc'd, the caller's), or only its length when bytes is NULL; mesh_graph_access_map_load the
    same relation, its domain and itself made in `context` */
 int mesh_graph_access_map_save(const struct mesh_graph_access_map *, void **bytes, size_t *length);
 int mesh_graph_access_map_load(struct mesh_graph_context *context, const void *bytes, size_t length,
@@ -886,6 +886,7 @@ int mesh_graph_relation_convex(const struct mesh_graph_relation *, size_t member
    own map and its deciders' maps (mesh_graph_relation_deciders);
    each relation's edges, members, outgoing and incoming rows and query; a derived relation's sources and operand
    (class_of, kept, or newest count and lag); and its synchronization mask and kept count where it was computed.
+   A NULL bytes argument to mesh_graph_relation_save measures the same layout in *length.
    mesh_graph_relation_load returns the same relations, the same references between them, with every array a borrowed
    span of `bytes` (8-byte aligned, EINVAL otherwise), the maps included, except each root's view headers (pairs
    relocated into `bytes`), origin records (relations relocated), deciders (retained) and the deciders' map pointers. On success every loaded root shares `owner`, adopted

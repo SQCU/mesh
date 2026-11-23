@@ -4205,14 +4205,17 @@ struct access_saved { uint64_t magic; uint32_t flags, dims; uint64_t guard_sourc
                       uint64_t relation, guard; };
 #define ACCESS_SAVED UINT64_C(0x3153454343414d47)
 int mesh_graph_access_map_save(const struct mesh_graph_access_map *a, void **bytes, size_t *length) {
-  *bytes = NULL; *length = 0;
+  if (bytes) *bytes = NULL;
+  *length = 0;
   struct mesh_graph_domain *d = a->domain;
   pthread_mutex_lock(&d->context->lock);
   char *relation = isl_map_to_str(a->relation), *guard = a->guard ? isl_set_to_str(a->guard) : NULL;
   pthread_mutex_unlock(&d->context->lock);
   const size_t r = relation ? strlen(relation) + 1 : 0, g = guard ? strlen(guard) + 1 : 0;
   const size_t total = sizeof(struct access_saved) + (size_t)d->dims * sizeof *d->dim + r + g;
-  char *out = relation && (!a->guard || guard) ? malloc(total) : NULL;
+  int status = relation && (!a->guard || guard) ? 0 : ENOMEM;
+  char *out = !status && bytes ? malloc(total) : NULL;
+  if (!status && bytes && !out) status = ENOMEM;
   if (out) {
     const struct access_saved head = {ACCESS_SAVED, a->flags, d->dims, a->guard_source, a->identity, a->least,
                                       a->greatest, r, g};
@@ -4222,10 +4225,11 @@ int mesh_graph_access_map_save(const struct mesh_graph_access_map *a, void **byt
     at += (size_t)d->dims * sizeof *d->dim;
     memcpy(at, relation, r); at += r;
     if (g) memcpy(at, guard, g);
-    *bytes = out; *length = total;
+    *bytes = out;
   }
+  if (!status) *length = total;
   free(relation); free(guard);
-  return out ? 0 : ENOMEM;
+  return status;
 }
 int mesh_graph_access_map_load(struct mesh_graph_context *context, const void *bytes, size_t length,
                            struct mesh_graph_access_map **out) {
@@ -5855,7 +5859,7 @@ static void relation_emit(struct relation_cursor *c, const struct mesh_graph_rel
         if (!d->view[v].access) continue;
         void *saved = NULL;
         size_t length = 0;
-        const int status = mesh_graph_access_map_save(d->view[v].access, &saved, &length);
+        const int status = mesh_graph_access_map_save(d->view[v].access, c->out ? &saved : NULL, &length);
         if (status && !c->status) c->status = status;
         const uint64_t bytes = length;
         relation_put(c, &bytes, sizeof bytes);
@@ -5902,7 +5906,8 @@ static void relation_emit(struct relation_cursor *c, const struct mesh_graph_rel
   if (written) written->bytes = c->at;
 }
 int mesh_graph_relation_save(const struct mesh_graph_relation *r, void **bytes, size_t *length) {
-  *bytes = NULL; *length = 0;
+  if (bytes) *bytes = NULL;
+  *length = 0;
   const struct mesh_graph_relation **chain = NULL;
   uint32_t n = 0;
   int status = relation_graph(r, &chain, &n);
@@ -5917,15 +5922,19 @@ int mesh_graph_relation_save(const struct mesh_graph_relation *r, void **bytes, 
   }
   struct relation_cursor c = {NULL, 0, 0};
   relation_emit(&c, chain, state, n);
-  char *out = c.status ? NULL : calloc(1, c.at);
-  if (out) {
-    c = (struct relation_cursor){out, 0, 0};
-    relation_emit(&c, chain, state, n);
-    if (c.status) { free(out); out = NULL; }
-    else { *bytes = out; *length = c.at; }
+  if (!c.status && bytes) {
+    char *out = calloc(1, c.at);
+    if (!out) c.status = ENOMEM;
+    else {
+      c = (struct relation_cursor){out, 0, 0};
+      relation_emit(&c, chain, state, n);
+      if (c.status) free(out);
+      else *bytes = out;
+    }
   }
+  if (!c.status) *length = c.at;
   free(chain); free(state);
-  return out ? 0 : c.status ? c.status : ENOMEM;
+  return c.status;
 }
 /* the caller's archive owner, shared by every loaded root (NULL release until success), and one root's own
    relocated headers: its views and its origin records */
