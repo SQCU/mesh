@@ -369,7 +369,8 @@ struct channel { _Alignas(128) struct mesh_ctx *context; uint32_t receives, sour
    (`channel`); the depth of each pair's receive ring (`depth`, comm_depth; 0 for one rank, which has no ring); the
    splits and shrinks made of it (`splits`, which name them); its bootstrap's sockets (`peers`: the root's to every
    rank, a rank's to the root) and its standing listener; the scratch a reduction's own contribution is made in; its
-   first failure (`failed`, `failure`), its revoke, and the calls and exchanges under way on it (`active`) */
+   life (`state`, enum comm_state: its failure, `failed` and `failure`, recorded with it, and `guard`, its moves') and
+   its `references` (comm_release) */
 struct ncclComm {
   int nranks, rank;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
@@ -384,10 +385,16 @@ struct ncclComm {
   size_t scratch_bytes;
   ncclResult_t failed;
   struct said failure;
-  pthread_mutex_t guard, exchanging;
-  int revoked;
-  _Atomic int active;
+  pthread_mutex_t guard;
+  _Atomic uint32_t state, references;
 };
+/* A communicator's life, its `state` word, moved by comm_turn alone, under its guard, and read by one acquire load:
+   LIVE from its init; FAILED once a call records its failure, from LIVE alone (its result and message, `failed` and
+   `failure`, written before the word and never again); REVOKED once revoked or destroyed, from LIVE or FAILED, which
+   ends each call and exchange under way on it at its next look and refuses every later one.  Its references: its
+   own, which ncclCommDestroy drops, and one for each call queued or under way on it and each split, shrink or grow of
+   it while it reads comm; whoever drops the last frees it (comm_release), so a destroy waits for nothing */
+enum comm_state { COMM_LIVE, COMM_FAILED, COMM_REVOKED };
 
 /* a communicator of `nranks` ranks named `name`, this process rank `rank`, with nothing of its bridge's yet; NULL where
    out of memory */
@@ -410,7 +417,8 @@ static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
   for (uint32_t c = 0; c < CHANNELS; c++)
     comm->channel[c] = (struct channel){NULL, MESH_ABSENT, {MESH_ABSENT, MESH_ABSENT}, {0, 0}};
   pthread_mutex_init(&comm->guard, NULL);
-  pthread_mutex_init(&comm->exchanging, NULL);
+  atomic_init(&comm->state, COMM_LIVE);
+  atomic_init(&comm->references, 1);
   snprintf(comm->name, sizeof comm->name, "%s", name);
   return comm;
 }
@@ -492,37 +500,62 @@ static void comm_free(struct ncclComm *comm) {
   if (comm->standing >= 0) close(comm->standing);
   comm_leave(comm);
   pthread_mutex_destroy(&comm->guard);
-  pthread_mutex_destroy(&comm->exchanging);
   free(comm->node); free(comm->base); free(comm->address); free(comm->sent); free(comm->received); free(comm->scratch);
   free(comm);
 }
 
-/* comm failed for good: its first failure's result and message recorded (comm_failure reads them), the message
-   formatted here once, and named (ncclGetLastError) */
-static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) __attribute__((format(printf, 3, 4)));
-static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) {
-  pthread_mutex_lock(&comm->guard);
-  if (!comm->failed) {
-    va_list arguments;
-    va_start(arguments, format);
-    vsnprintf(comm->failure.text, sizeof comm->failure.text, format, arguments);
-    va_end(arguments);
-    comm->failure.id = message_id();
-    comm->failed = result;
-  }
-  const struct said said = comm->failure;
-  const ncclResult_t failed = comm->failed;
-  pthread_mutex_unlock(&comm->guard);
-  return told(failed, &said);
+/* one reference to comm taken, or dropped (enum comm_state names the holders): the last drop frees it (comm_free) */
+static void comm_hold(struct ncclComm *comm) { atomic_fetch_add_explicit(&comm->references, 1, memory_order_relaxed); }
+static void comm_release(struct ncclComm *comm) {
+  if (atomic_fetch_sub_explicit(&comm->references, 1, memory_order_acq_rel) == 1) comm_free(comm);
 }
 
-/* comm's failure, the one it recorded (comm_fail), named again (ncclGetLastError); ncclSuccess where none */
-static ncclResult_t comm_failure(struct ncclComm *comm) {
+/* comm's state moved toward `to` (enum comm_state), under its guard: to FAILED from LIVE alone, `result` and the
+   message `said` recorded before the word; to REVOKED from LIVE or FAILED, every socket of its bootstrap shut down
+   after the word, so an exchange under way ends; any other move changes nothing */
+static void comm_turn(struct ncclComm *comm, enum comm_state to, ncclResult_t result, const struct said *said) {
   pthread_mutex_lock(&comm->guard);
-  const ncclResult_t failed = comm->failed;
-  const struct said said = comm->failure;
+  const uint32_t from = atomic_load_explicit(&comm->state, memory_order_relaxed);
+  if (to == COMM_FAILED && from == COMM_LIVE) {
+    comm->failed = result;
+    comm->failure = *said;
+    comm->failure.id = message_id();
+    atomic_store_explicit(&comm->state, COMM_FAILED, memory_order_release);
+  } else if (to == COMM_REVOKED && from != COMM_REVOKED) {
+    atomic_store_explicit(&comm->state, COMM_REVOKED, memory_order_seq_cst);
+    for (int r = 0; comm->peers && r < comm->nranks; r++)
+      if (comm->peers[r] >= 0) shutdown(comm->peers[r], SHUT_RDWR);
+  }
   pthread_mutex_unlock(&comm->guard);
-  return failed ? told(failed, &said) : ncclSuccess;
+}
+
+/* whether comm was revoked (one acquire load of its state) */
+static int revoked(ncclComm_t comm) { return atomic_load_explicit(&comm->state, memory_order_acquire) == COMM_REVOKED; }
+static ncclResult_t revoked_fail(ncclComm_t comm) {
+  return fail(ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): every call on it is refused until ncclCommDestroy", comm->name);
+}
+
+/* comm's state as a call reads it, one acquire load: ncclSuccess where LIVE; its failure, the one it recorded
+   (comm_fail), named again (ncclGetLastError) where FAILED; its revoke's where REVOKED */
+static ncclResult_t comm_failure(struct ncclComm *comm) {
+  switch (atomic_load_explicit(&comm->state, memory_order_acquire)) {
+  case COMM_LIVE: return ncclSuccess;
+  case COMM_FAILED: return told(comm->failed, &comm->failure);
+  default: return revoked_fail(comm);
+  }
+}
+
+/* comm failed for good (comm_turn to FAILED: its result and its message, formatted here, recorded where it is the
+   first), and the failure named that comm_failure then reads: the first one recorded, or its revoke's */
+static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) __attribute__((format(printf, 3, 4)));
+static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) {
+  struct said said = {0, ""};
+  va_list arguments;
+  va_start(arguments, format);
+  vsnprintf(said.text, sizeof said.text, format, arguments);
+  va_end(arguments);
+  comm_turn(comm, COMM_FAILED, result, &said);
+  return comm_failure(comm);
 }
 
 /* -- NCCL's bootstrap (NVIDIA/nccl src/bootstrap.cc) --------------------------------------------------------------------
@@ -620,12 +653,6 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
     return fail(ncclSystemError, "the bootstrap root's listener: %s", strerror(errno));
   memcpy(root.id, id->internal, sizeof root.id);
   return ncclSuccess;
-}
-
-/* whether comm was revoked */
-static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
-static ncclResult_t revoked_fail(ncclComm_t comm) {
-  return fail(ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): every call on it is refused until ncclCommDestroy", comm->name);
 }
 
 /* `size` bytes sent or received whole on comm's bootstrap socket `fd`, its waits in slices (the socket's SO_RCVTIMEO
@@ -744,10 +771,9 @@ static int gather(struct ncclComm *comm, void *table, size_t bytes, int sent) {
 }
 
 /* `bytes` of every rank's gathered over comm's bootstrap (rank r's at reports + r bytes, this rank's `local`): the
-   configuration a split or a grow exchanges before the communicator it makes exists */
+   configuration a split or a grow exchanges before the communicator it makes exists, under the split's or grow's
+   reference to comm, made by one thread at a time as comm's calls are (NCCL's rule), and ended by comm's revoke */
 static ncclResult_t exchange(struct ncclComm *comm, const void *local, size_t bytes, void *reports) {
-  pthread_mutex_lock(&comm->exchanging);
-  atomic_fetch_add(&comm->active, 1);
   memcpy((unsigned char *)reports + (size_t)comm->rank * bytes, local, bytes);
   int error = comm->nranks > 1 && !comm->peers ? ENOTCONN : 0;
   if (!error && comm->nranks > 1 && comm->rank) {
@@ -759,8 +785,6 @@ static ncclResult_t exchange(struct ncclComm *comm, const void *local, size_t by
       error = comm->peers[r] < 0 ? ENOTCONN : whole(comm, comm->peers[r], (unsigned char *)reports + (size_t)r * bytes, bytes, 0);
     for (int r = 1; r < comm->nranks && !error; r++) error = whole(comm, comm->peers[r], reports, (size_t)comm->nranks * bytes, 1);
   }
-  atomic_fetch_sub(&comm->active, 1);
-  pthread_mutex_unlock(&comm->exchanging);
   return error ? fail(ncclRemoteError, "communicator %s: an exchange over its bootstrap: %s", comm->name, strerror(error)) : ncclSuccess;
 }
 
@@ -839,20 +863,9 @@ ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId,
   if (!made) return fail(ncclSystemError, "out of memory");
   memcpy(made->id, id, sizeof made->id);
   const ncclResult_t result = comm_init(made, -1);
-  if (result) comm_free(made);
+  if (result) comm_release(made);
   else *comm = made;
   return result;
-}
-
-/* comm stopped for good (a revoke's and a destroy's): `revoked` set, failing every call after it and ending each wait
-   of one under way at its next look, and every socket of its bootstrap shut down, so an exchange under way ends; under
-   its guard */
-static void comm_stop(struct ncclComm *comm) {
-  pthread_mutex_lock(&comm->guard);
-  __atomic_store_n(&comm->revoked, 1, __ATOMIC_SEQ_CST);
-  for (int r = 0; comm->peers && r < comm->nranks; r++)
-    if (comm->peers[r] >= 0) shutdown(comm->peers[r], SHUT_RDWR);
-  pthread_mutex_unlock(&comm->guard);
 }
 
 /* NCCL's revoke: comm's calls under way end as a value at their next look and every later one is refused
@@ -861,26 +874,28 @@ static void comm_stop(struct ncclComm *comm) {
 ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
   (void)revokeFlags;
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
-  comm_stop(comm);
+  comm_turn(comm, COMM_REVOKED, ncclSuccess, NULL);
   return ncclSuccess;
 }
 
-/* comm stopped (comm_stop), the calls and exchanges under way on it returned (each at its next look), then its indices
-   freed and their pages dropped, its sockets released and comm freed */
+/* comm revoked (comm_turn) and its own reference dropped, returning at once: comm is freed (comm_free: its indices
+   freed and their pages dropped, its sockets released) here where nothing else holds it, else by the last call, split,
+   shrink or grow of it to end, each of which ends at its next look */
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
-  comm_stop(comm);
-  while (atomic_load(&comm->active)) usleep(20);
-  comm_free(comm);
+  comm_turn(comm, COMM_REVOKED, ncclSuccess, NULL);
+  comm_release(comm);
   return ncclSuccess;
 }
 
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
 
-/* ncclSuccess after a revoke; else comm's own failure (comm_failure: a call's), ncclSuccess where none */
+/* comm's own failure (a call's, comm_fail), named again, where one load of its state reads FAILED; else ncclSuccess
+   (none, or a revoke) */
 ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   if (!comm || !asyncError) return fail(ncclInvalidArgument, "comm or asyncError is NULL");
-  *asyncError = revoked(comm) ? ncclSuccess : comm_failure(comm);
+  const int failed = atomic_load_explicit(&comm->state, memory_order_acquire) == COMM_FAILED;
+  *asyncError = failed ? told(comm->failed, &comm->failure) : ncclSuccess;
   return ncclSuccess;
 }
 
@@ -1481,20 +1496,17 @@ static ncclResult_t call_move(struct call *c) {
 }
 
 /* a call moved on its communicator, there and then: refused where its communicator failed (its failure named again)
-   or was revoked */
+   or was revoked (comm_failure, one load of its state) */
 static ncclResult_t call_one(struct call *c) {
-  struct ncclComm *comm = c->comm;
-  atomic_fetch_add(&comm->active, 1);
-  ncclResult_t result = comm_failure(comm);
-  if (!result) result = revoked(comm) ? revoked_fail(comm) : call_move(c);
-  atomic_fetch_sub(&comm->active, 1);
-  return result;
+  const ncclResult_t result = comm_failure(c->comm);
+  return result ? result : call_move(c);
 }
 
 ncclResult_t ncclGroupStart(void) { nesting++; return ncclSuccess; }
 
 /* the group's calls made one after another, as they were queued, each to its end, every one made whatever another's
-   result; the first failure returned */
+   result, and each one's reference to its communicator dropped at its end (comm_release: the last frees a destroyed
+   one); the first failure returned */
 ncclResult_t ncclGroupEnd(void) {
   if (nesting <= 0) return fail(ncclInvalidUsage, "ncclGroupEnd without ncclGroupStart");
   if (--nesting) return ncclSuccess;
@@ -1506,6 +1518,7 @@ ncclResult_t ncclGroupEnd(void) {
   for (size_t i = 0; i < n; i++) {
     const ncclResult_t made = call_one(list + i);
     if (made && !result) { result = made; first = last; }
+    comm_release(list[i].comm);
   }
   free(list);
   if (result) last = first;
@@ -1520,8 +1533,9 @@ static int call_writes(const struct call *c) {
   return (c->what != CALL_REDUCE && c->what != CALL_GATHER) || c->comm->rank == c->root;
 }
 
-/* a call refused before it joins its group (its arguments), else its operator taken and the call queued and its group
-   ended (a call outside a group is a group of one) */
+/* a call refused before it joins its group (its arguments), else its operator taken and the call queued, holding a
+   reference to its communicator until its end (comm_hold), and its group ended (a call outside a group is a group of
+   one) */
 static ncclResult_t enqueue(struct call c, cudaStream_t stream) {
   const char *name = CALL_NAME[c.what];
   if (!c.comm) return fail(ncclInvalidArgument, "%s: comm is NULL", name);
@@ -1547,6 +1561,7 @@ static ncclResult_t enqueue(struct call c, cudaStream_t stream) {
     calls = grown; call_capacity = capacity;
   }
   calls[call_count++] = c;
+  comm_hold(c.comm);
   return ncclGroupEnd();
 }
 
@@ -1606,18 +1621,19 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
   if (!sub) return fail(ncclSystemError, "out of memory");
   memcpy(sub->id, comm->address[ranks[0]], sizeof comm->address[0]);
   const ncclResult_t result = comm_init(sub, rank ? -1 : comm->standing);
-  if (result) comm_free(sub);
+  if (result) comm_release(sub);
   else *made = sub;
   return result;
 }
 
 /* NCCL's split: every rank's (color, key) gathered over comm's bootstrap, then the ranks of this rank's color, sorted
-   by key and then rank, a communicator of their own (comm_sub; NCCL_SPLIT_NOCOLOR: none, *newcomm NULL).  config is
-   not read */
+   by key and then rank, a communicator of their own (comm_sub; NCCL_SPLIT_NOCOLOR: none, *newcomm NULL), all under a
+   reference to comm (comm_hold).  config is not read */
 ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config) {
   (void)config;
   if (!comm || !newcomm || (color < 0 && color != NCCL_SPLIT_NOCOLOR)) return fail(ncclInvalidArgument, "ncclCommSplit's arguments");
   *newcomm = NULL;
+  comm_hold(comm);
   const int n = comm->nranks;
   struct pick { int32_t color, key; } mine = {color, key}, *every = calloc((size_t)n, sizeof *every);
   int *ranks = calloc((size_t)n, sizeof *ranks), count = 0;
@@ -1629,12 +1645,14 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     for (int b = a; b > 0 && every[ranks[b]].key < every[ranks[b - 1]].key; b--) { const int t = ranks[b]; ranks[b] = ranks[b - 1]; ranks[b - 1] = t; }
   if (!result && count) result = comm_sub(comm, ranks, count, split, color, newcomm);
   free(every); free(ranks);
+  comm_release(comm);
   return result;
 }
 
 /* NCCL's shrink: comm's ranks but the excluded ones, by rank, a communicator of their own (comm_sub, which
    exchanges nothing over comm, so an excluded rank, alive or not, takes no part); a rank among those excluded is in
-   none (*newcomm NULL); with NCCL_SHRINK_ABORT, comm revoked first.  config is not read */
+   none (*newcomm NULL); with NCCL_SHRINK_ABORT, comm revoked first; all under a reference to comm (comm_hold).
+   config is not read */
 ncclResult_t ncclCommShrink(ncclComm_t comm, int *excludeRanksList, int excludeRanksCount, ncclComm_t *newcomm, ncclConfig_t *config,
                             int shrinkFlags) {
   (void)config;
@@ -1643,16 +1661,18 @@ ncclResult_t ncclCommShrink(ncclComm_t comm, int *excludeRanksList, int excludeR
   *newcomm = NULL;
   int *ranks = calloc((size_t)comm->nranks, sizeof *ranks), count = 0, member = 0;
   if (!ranks) return fail(ncclSystemError, "out of memory");
+  comm_hold(comm);
   for (int r = 0; r < comm->nranks; r++) {
     int excluded = 0;
     for (int e = 0; e < excludeRanksCount; e++) excluded |= excludeRanksList[e] == r;
     if (!excluded) ranks[count++] = r;
     member |= !excluded && r == comm->rank;
   }
-  if (shrinkFlags & NCCL_SHRINK_ABORT) comm_stop(comm);
+  if (shrinkFlags & NCCL_SHRINK_ABORT) comm_turn(comm, COMM_REVOKED, ncclSuccess, NULL);
   const uint32_t split = comm->splits++;
   const ncclResult_t result = member ? comm_sub(comm, ranks, count, split, -1, newcomm) : ncclSuccess;
   free(ranks);
+  comm_release(comm);
   return result;
 }
 
@@ -1662,17 +1682,20 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
 }
 
 /* NCCL's grow: an init at the id of comm's root (ncclCommGetUniqueId), which the root gives comm's other ranks over
-   comm's bootstrap; comm's ranks stay at their ranks (the `rank` they pass, NCCL's -1, not read) and a new one (comm NULL)
-   takes `rank`.  config is not read */
+   comm's bootstrap under a reference to comm (comm_hold); comm's ranks stay at their ranks (the `rank` they pass,
+   NCCL's -1, not read) and a new one (comm NULL) takes `rank`.  config is not read */
 ncclResult_t ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId *uniqueId, int rank, ncclComm_t *newcomm, ncclConfig_t *config) {
   (void)config;
   if (!newcomm || (comm ? nRanks < comm->nranks || (!comm->rank && !uniqueId) : !uniqueId))
     return fail(ncclInvalidArgument, "ncclCommGrow's arguments");
   if (!comm) return ncclCommInitRank(newcomm, nRanks, *uniqueId, rank);
-  const ncclUniqueId mine = comm->rank ? (ncclUniqueId){{0}} : *uniqueId;
+  comm_hold(comm);
+  const int me = comm->rank;
+  const ncclUniqueId mine = me ? (ncclUniqueId){{0}} : *uniqueId;
   ncclUniqueId *ids = calloc((size_t)comm->nranks, sizeof *ids);
   const ncclResult_t result = ids ? exchange(comm, &mine, sizeof mine, ids) : fail(ncclSystemError, "out of memory");
   const ncclUniqueId given = ids ? ids[0] : mine;
   free(ids);
-  return result ? result : ncclCommInitRank(newcomm, nRanks, given, comm->rank);
+  comm_release(comm);
+  return result ? result : ncclCommInitRank(newcomm, nRanks, given, me);
 }

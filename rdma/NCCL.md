@@ -194,8 +194,12 @@ may share a node; a page between them is set at the destination index on that no
 
 - `ncclCommRevoke` ends comm's calls under way as a value at their next look. Every later call on it is refused
   (`ncclInvalidUsage`), and `ncclCommGetAsyncError` reads `ncclSuccess` after it.
-- `ncclCommDestroy` (and `ncclCommAbort`) revokes comm and waits for its calls under way to return. It then frees its
-  indices, whose pages go back to the pool as their last uses end, releases its sockets and frees comm.
+- `ncclCommDestroy` (and `ncclCommAbort`) revokes comm and returns at once, waiting for nothing. comm is freed (its
+  indices, whose pages go back to the pool as their last uses end, its sockets and comm itself) by whoever lets it go
+  last: the destroy, where nothing else is under way on comm, else the last of its calls (queued or under way), splits,
+  shrinks and grows to end, each at its next look. comm is not named again after its destroy.
+- A communicator's life is one state word: live, failed (its first recorded failure kept with it) or revoked. A call
+  reads it with one load, and takes no lock.
 - The process detaches from its region once the region has expired and it has no communicator of it; its pool's
   workers end then.
 

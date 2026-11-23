@@ -100,10 +100,12 @@
    process passes NULL and the root's id.  Two ranks of a communicator may share a node.  ncclCommRevoke is NCCL's:
    comm's calls under way end as a value at their next look, every later call on it is refused (ncclInvalidUsage),
    and ncclCommGetAsyncError reads ncclSuccess after it; its revokeFlags is not read.  ncclCommDestroy (and
-   ncclCommAbort) revokes comm, waits for its calls under way to return, frees its indices (their pages drop as their
-   last uses end) and frees it.  A region its bridge's stop released, or a bridge of another layout replaced, is
-   expired: while the process has a communicator of it, a new one fails (ncclRemoteError), and once it has destroyed
-   them all its next one attaches the bridge's next region.
+   ncclCommAbort) revokes comm and returns at once, waiting for nothing: comm is freed, its indices with it (their
+   pages drop as their last uses end), there where nothing else is under way on it, else by the last of its calls
+   (queued or under way), splits, shrinks and grows to end, each at its next look; comm is not named again after it.
+   A region its bridge's stop released, or a bridge of another layout replaced, is expired: while the process has a
+   communicator of it, a new one fails (ncclRemoteError), and once it has destroyed them all its next one attaches the
+   bridge's next region.
 
    Failures are ncclResult_t values, ncclGetLastError naming what failed.  A call records two failures on its
    communicator: a write its node's table refuses and an index it cannot read; ncclCommGetAsyncError reads the first
