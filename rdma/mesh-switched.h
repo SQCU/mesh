@@ -154,11 +154,14 @@ struct mesh_switch_lane {
   _Atomic uint64_t frames;
 };
 /* an outbox cell, of position `at`: free for it while its sequence is `at`; holding page `pd`, pushed at `pushed` (the
-   pusher's clock) and posted at `posted` (its SEND's post, the lane child's clock), while it is at + 1, until the page's
-   SEND completes or its lane is emptied (mesh_switch_lane_drop), so the outbox is also the lane's record of its SENDs
-   posted and not completed; then free for at + MESH_SWITCH_RING.  `pd` MESH_ABSENT: a hole, no SEND, where a pusher
-   died holding the cell (mesh_switch_left_settle) */
-struct mesh_switch_cell { _Atomic uint64_t sequence; uint64_t pushed,posted; uint32_t pd; };
+   pusher's clock as its take pass began: the page's time on the outbox, for the lane's estimators, counts from there)
+   and posted at `posted` (its SEND's post, the lane child's clock), while it is at + 1, until the page's SEND completes
+   or its lane is emptied (mesh_switch_lane_drop), so the outbox is also the lane's record of its SENDs posted and not
+   completed; then free for at + MESH_SWITCH_RING.  `carried`: the nanoseconds from `pushed` to the push itself (the take,
+   the header, the route choice), for observation only; the cell's size and offsets are as before it was recorded.
+   `pd` MESH_ABSENT: a hole, no SEND, where a pusher died holding the cell (mesh_switch_left_settle) */
+struct mesh_switch_cell { _Atomic uint64_t sequence; uint64_t pushed,posted; uint32_t pd,carried; };
+_Static_assert(sizeof(struct mesh_switch_cell)==32,"mesh_switch_cell");
 /* the trainer's records (rdma/route): a draw (split.h struct route_draw and its behaviour log-probability) or a page
    set at a destination (its latency and queueing), each with the node that made it, the page's piece and source, its
    first destination's node and index (a draw's) or the destination's, its bytes, the draw's context at its node
@@ -255,7 +258,8 @@ static inline int mesh_switch_push(struct mesh_switch *sw,uint32_t l,uint32_t pd
     atomic_store_explicit(&hand->push,named,memory_order_relaxed);
     if(!atomic_compare_exchange_weak_explicit(&x->tail,&at,at+1,memory_order_acq_rel,memory_order_relaxed))continue;
     atomic_store_explicit(&hand->push,named|MESH_HAND_HELD,memory_order_relaxed);
-    c->pd=pd;c->pushed=now;
+    const uint64_t pushing=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    c->pd=pd;c->pushed=now;c->carried=pushing>now?(uint32_t)(pushing-now):0;
     atomic_store_explicit(&c->sequence,at+1,memory_order_release);
     atomic_store_explicit(&hand->push,0,memory_order_release);
     return 1;
