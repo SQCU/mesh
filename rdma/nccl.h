@@ -77,11 +77,12 @@
    destination the index its own pair's count names and each write from a source page of its own, and a source page
    is copied into again only once its uses are back to 1 (no write, SEND or landing of it under way).  A receiving
    rank reads the indices of each rank's next depth pages due and takes page k once its index's landed count reaches
-   k / depth + 1: where the index names a page, the bytes due are copied from it to their place, whatever its bytes
-   (a reduction page that lands before its rank's turn into the call's scratch, and combined from there rank by rank),
-   and the index is invalidated, so the rank has no page of the phase it is in while it waits for another; where it
-   names none (its page was taken under an earlier count), nothing is copied.  A page written depth pages or more
-   ahead of the page its receiver takes there replaces that page at the index, and is taken as it.
+   k / depth + 1: where the index names a page, the bytes due are copied from it to their place, whatever its bytes,
+   and the index is invalidated; where it names none (its page was taken under an earlier count), nothing is copied.
+   A reduction page that lands before its rank's turn is left at its index, which still names it and is read for no
+   later page, until that turn, when it is combined from there and the index invalidated.  A page written depth pages
+   or more ahead of the page its receiver takes there (a reduction page left for its turn among them) replaces that
+   page at the index, and is taken as it.
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
    listener ncclGetUniqueId opens, on the node's fabric address where it has one), the root listening on that host
@@ -104,16 +105,15 @@
    expired: while the process has a communicator of it, a new one fails (ncclRemoteError), and once it has destroyed
    them all its next one attaches the bridge's next region.
 
-   Failures are ncclResult_t values, ncclGetLastError naming what failed.  A call records three failures on its
-   communicator: a write its node's table refuses, an index it cannot read, and no memory for the pages that land
-   before their turn; ncclCommGetAsyncError reads the first one recorded, and a communicator that recorded one fails
-   its later calls alike, until it is destroyed and made again.  Every other failure (an invalid argument or usage,
-   other memory, the bootstrap) is the result of its call alone, and a revoked communicator's calls return
-   ncclInvalidUsage while ncclCommGetAsyncError reads ncclSuccess.  A call never fails on what lands: the library
-   checks nothing that lands, and each page's bytes are taken as they landed (a write may land wrong, or not at all:
-   mesh-call.h).  A call's wait ends once its pages have landed, or at ncclCommRevoke or ncclCommAbort: no timer
-   judges a peer lost, and a page that never lands leaves its call waiting until the application revokes or aborts
-   that communicator, as with NCCL's own.
+   Failures are ncclResult_t values, ncclGetLastError naming what failed.  A call records two failures on its
+   communicator: a write its node's table refuses and an index it cannot read; ncclCommGetAsyncError reads the first
+   one recorded, and a communicator that recorded one fails its later calls alike, until it is destroyed and made
+   again.  Every other failure (an invalid argument or usage, other memory, the bootstrap) is the result of its call
+   alone, and a revoked communicator's calls return ncclInvalidUsage while ncclCommGetAsyncError reads ncclSuccess.
+   A call never fails on what lands: the library checks nothing that lands, and each page's bytes are taken as they
+   landed (a write may land wrong, or not at all: mesh-call.h).  A call's wait ends once its pages have landed, or at
+   ncclCommRevoke or ncclCommAbort: no timer judges a peer lost, and a page that never lands leaves its call waiting
+   until the application revokes or aborts that communicator, as with NCCL's own.
 
    Not implemented (not exported): ncclCommInitRankConfig and the non-blocking init, ncclCommInitAll,
    ncclCommInitRankScalable, ncclCommFinalize, ncclCommSuspend, ncclCommResume, ncclCommMemStats, ncclCommCuDevice,

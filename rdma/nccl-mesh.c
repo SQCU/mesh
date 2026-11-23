@@ -967,14 +967,11 @@ static size_t page_at(size_t bytes, uint64_t j, size_t *offset) {
 /* A channel's progress through a phase under way, toward and from each rank r, every count in the channel's own pages
    (its q-th page of a message the message's page id + q CHANNELS, id the channel's number): its pair's first page of
    the channel in the phase toward it (`first_out[r]`) and from it (`first_in[r]`), the channel's pages due from it
-   (`due[r]`: those of its in-message, `from[r]`, or the reduction's positions), the first of them not yet taken
-   (`low[r]`) and each one's state (`taken`, from `at[r]`: WAITING, TAKEN, or PARKED in the parked scratch until its
-   turn); the page it sends next (out-message `o`, its page `j`, its destinations from the g-th of them) and the source
-   page that page's payload was copied into and not yet written (`copied`, MESH_ABSENT none); each of the channel's
-   reduction positions' next rank to combine (`next`) and the scratch a page that lands before its rank's turn is
-   copied into (`parked`, NULL until the first); the in-message pages still to take and the reduction's contributions
-   still to combine (`left`) */
-enum { WAITING, TAKEN, PARKED };
+   (`due[r]`: those of its in-message, `from[r]`, or the reduction's positions), the first of them not TAKEN
+   (`low[r]`) and each one's state (`state`, from `at[r]`: enum page_state); the page it sends next (out-message `o`,
+   its page `j`, its destinations from the g-th of them) and the source page that page's payload was copied into and
+   not yet written (`copied`, MESH_ABSENT none); each of the channel's reduction positions' next rank to combine
+   (`next`); the in-message pages still to take and the reduction's contributions still to combine (`left`) */
 struct channel_phase {
   struct call *call;
   const struct phase *p;
@@ -985,10 +982,16 @@ struct channel_phase {
   uint32_t o, g, copied;
   uint64_t j;
   size_t copied_bytes;
-  unsigned char *taken, *parked;
+  unsigned char *state;
   uint64_t positions, left;
   uint32_t *next;
 };
+/* A page due to a channel, moved by page_turn alone, on the thread that moves the channel: WAITING until its index
+   has counted its landing; then TAKEN, its bytes copied to their place in recvbuff, or combined into the result at its
+   rank's turn, and its index invalidated (nothing copied where the index names no page); or, a reduction page that
+   lands before its rank's turn, HELD: left at its index, which still names it, until that turn, when it is combined
+   from there and TAKEN */
+enum page_state { PAGE_WAITING, PAGE_TAKEN, PAGE_HELD };
 
 /* the pages of a message of `pages` pages that are channel id's */
 static uint64_t channel_pages(uint64_t pages, uint32_t id) { return pages > id ? (pages - id + CHANNELS - 1) / CHANNELS : 0; }
@@ -1061,108 +1064,107 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
   return 0;
 }
 
-/* the parked scratch's part for rank r's reduction pages: one p->bytes a rank, for each rank but rank 0 (whose page is
-   always in its turn) and this one (a channel touches only its own pages of it) */
-static unsigned char *parked_at(const struct channel_phase *m, int r) {
-  const int me = m->call->comm->rank;
-  return m->parked + (size_t)(r - 1 - (me && me < r)) * m->p->bytes;
+/* the index the channel's page q from rank r lands at: the pair's page k of the channel at k mod depth of r's ring of
+   the channel's receive indices (depth that of the pair's receive ring) */
+static uint32_t receive_index(const struct channel_phase *m, int r, uint64_t q) {
+  const struct ncclComm *comm = m->call->comm;
+  return m->channel->receives + (uint32_t)r * comm->depth + (uint32_t)((m->first_in[r] + q) % comm->depth);
 }
 
-/* the channel's reduction position q combined on, rank by rank, while the next rank's contribution is here: this
-   rank's own, or a page parked before its turn (rank 0's copied, each later one's combined); a page taken before its
-   turn from an index that named none adds nothing */
-static void advance(struct channel_phase *m, uint64_t q) {
-  struct call *c = m->call;
-  const struct phase *p = m->p;
-  const int n = c->comm->nranks, me = c->comm->rank;
-  size_t offset;
-  const size_t bytes = page_at(p->bytes, m->id + q * CHANNELS, &offset);
-  for (int r; (r = (int)m->next[q]) < n; m->next[q]++, m->left--) {
-    const unsigned char *from = p->own + offset;
-    if (r != me) {
-      const int state = m->taken[m->at[r] + q];
-      if (state == WAITING) return;
-      if (state == TAKEN) continue;
-      from = parked_at(m, r) + offset;
-    }
-    if (!r) memcpy(p->acc + offset, from, bytes);
-    else combine_into(c->type, c->combine, p->acc + offset, from, bytes / SIZE[c->type]);
-  }
-}
-
-/* the channel's page q of the phase's pages from rank r taken once its index has counted its landing (the pair's page
-   k of the channel is the (k / depth + 1)-th to land at its index, depth that of the pair's receive ring), whatever
-   landed.  Where the index names a page, the bytes due are copied from it as they are (a page of either class is
-   followed by a long page's frames of the region, mesh.h): an in-message's to its place in recvbuff
-   (design/DEFRAGMENT-pseudocode-20261122.md), a reduction page's combined straight into the result where its rank's
-   turn at its position has come (rank 0's copied; then the position's later ranks already here after it, advance),
-   else copied into the channel's parked scratch (allocated at the first page parked, sized from the phase); then the
-   index is invalidated.  Where it names none (its page was taken under an earlier count), nothing is copied.  0
-   (taken, or not landed yet), or -1 with the call's failure in *result */
-static int take(struct channel_phase *m, int r, uint64_t q, ncclResult_t *result) {
+/* the channel's page q of the phase's pages from rank r moved on (enum page_state), its index read: a WAITING page
+   once its index has counted its landing (the pair's page k of the channel is the (k / depth + 1)-th to land at its
+   index), whatever landed, and a HELD one at its rank's turn.  Where the index names a page, an in-message's bytes due
+   are copied from it as they are (a page of either class is followed by a long page's frames of the region, mesh.h)
+   to their place in recvbuff (design/DEFRAGMENT-pseudocode-20261122.md), and a reduction page's combined straight into
+   the result at its rank's turn at its position (rank 0's copied), then the index is invalidated: TAKEN; a reduction
+   page that lands before its rank's turn is left at its index: HELD.  Where the index names none (its page was taken
+   under an earlier count), nothing is copied: TAKEN.  0, or -1 with the call's failure in *result */
+static int page_turn(struct channel_phase *m, int r, uint64_t q, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
-  struct channel *channel = m->channel;
   const struct phase *p = m->p;
   const struct in *x = m->from[r];
-  const uint64_t k = m->first_in[r] + q;
-  const uint32_t index = channel->receives + (uint32_t)r * comm->depth + (uint32_t)(k % comm->depth);
+  unsigned char *state = m->state + m->at[r] + q;
+  const uint32_t index = receive_index(m, r, q);
   struct mesh_view_entry entry;
-  if (mesh_entry(channel->context, index, &entry)) {
+  if (mesh_entry(m->channel->context, index, &entry)) {
     *result = comm_fail(comm, ncclInternalError, "communicator %s: its index %u could not be read", comm->name, index);
     return -1;
   }
-  if (entry.landed < k / comm->depth + 1) return 0;
-  size_t offset;
-  const size_t bytes = page_at(x ? x->bytes : p->bytes, m->id + q * CHANNELS, &offset);
+  if (*state == PAGE_WAITING && entry.landed < (m->first_in[r] + q) / comm->depth + 1) return 0;
   const int turn = !x && m->next[q] == (uint32_t)r;
-  unsigned char state = TAKEN;
+  if (!x && !turn && entry.data) { *state = PAGE_HELD; return 0; }
   if (entry.data) {
+    size_t offset;
+    const size_t bytes = page_at(x ? x->bytes : p->bytes, m->id + q * CHANNELS, &offset);
     if (x) memcpy(x->to + offset, entry.data, bytes);
-    else if (turn && !r) memcpy(p->acc + offset, entry.data, bytes);
-    else if (turn) combine_into(c->type, c->combine, p->acc + offset, entry.data, bytes / SIZE[c->type]);
-    else {
-      if (!m->parked && !(m->parked = malloc((size_t)(comm->nranks - 1 - (comm->rank != 0)) * p->bytes))) {
-        *result = comm_fail(comm, ncclSystemError, "communicator %s: out of memory for the pages that land before their turn", comm->name);
-        return -1;
-      }
-      memcpy(parked_at(m, r) + offset, entry.data, bytes);
-      state = PARKED;
-    }
-    mesh_invalidate(channel->context, index, 1, 0);
+    else if (!r) memcpy(p->acc + offset, entry.data, bytes);
+    else combine_into(c->type, c->combine, p->acc + offset, entry.data, bytes / SIZE[c->type]);
+    mesh_invalidate(m->channel->context, index, 1, 0);
   }
-  m->taken[m->at[r] + q] = state;
-  if (x || turn) m->left--;
-  if (turn) { m->next[q]++; advance(m, q); }
+  *state = PAGE_TAKEN;
   return 0;
 }
 
+/* the channel's reduction position q combined on, rank by rank, while the next rank's contribution is here: this
+   rank's own, a page TAKEN at its turn or before it (one whose index named none adds nothing), or a HELD one, combined
+   from its index now (page_turn); rank 0's copied, each later one's combined.  0, or -1 with the call's failure in
+   *result */
+static int advance(struct channel_phase *m, uint64_t q, ncclResult_t *result) {
+  struct call *c = m->call;
+  const struct phase *p = m->p;
+  const int n = c->comm->nranks, me = c->comm->rank;
+  for (int r; (r = (int)m->next[q]) < n; m->next[q]++, m->left--) {
+    if (r == me) {
+      size_t offset;
+      const size_t bytes = page_at(p->bytes, m->id + q * CHANNELS, &offset);
+      if (!r) memcpy(p->acc + offset, p->own + offset, bytes);
+      else combine_into(c->type, c->combine, p->acc + offset, p->own + offset, bytes / SIZE[c->type]);
+      continue;
+    }
+    const unsigned char state = m->state[m->at[r] + q];
+    if (state == PAGE_WAITING) return 0;
+    if (state == PAGE_HELD && page_turn(m, r, q, result)) return -1;
+  }
+  return 0;
+}
+
+/* the channel's WAITING page q from rank r looked at (page_turn), and once TAKEN counted: an in-message's page off
+   `left`, a reduction page by its position's combine (advance: at its turn it goes on to the position's later ranks
+   already here).  0 (taken, held, or not landed yet), or -1 with the call's failure in *result */
+static int take(struct channel_phase *m, int r, uint64_t q, ncclResult_t *result) {
+  if (page_turn(m, r, q, result)) return -1;
+  if (m->state[m->at[r] + q] != PAGE_TAKEN) return 0;
+  if (m->from[r]) { m->left--; return 0; }
+  return advance(m, q, result);
+}
+
 /* the channel's landed pages of the phase taken (take), each in the pass that finds it, every page independent of the
-   others: from each rank, its pages from the first not yet taken through the depth of its receive ring, each at an
-   index of its own (a page further on lands at the index of one of these, and is looked for once that one is taken,
-   so no index is read for a later page while an earlier page there is due): 0, or -1 with the call's failure in
+   others: from each rank, its pages from the first not TAKEN through the depth of its receive ring, each at an index
+   of its own (a page further on lands at the index of one of these, and is looked for once that one is TAKEN, so no
+   index is read for a later page while an earlier page there is due or HELD): 0, or -1 with the call's failure in
    *result */
 static int take_some(struct channel_phase *m, ncclResult_t *result) {
   const int n = m->call->comm->nranks;
   const uint32_t depth = m->call->comm->depth;
   for (int r = 0; r < n; r++) {
-    const unsigned char *taken = m->taken + m->at[r];
-    while (m->low[r] < m->due[r] && taken[m->low[r]]) m->low[r]++;
+    const unsigned char *state = m->state + m->at[r];
+    while (m->low[r] < m->due[r] && state[m->low[r]] == PAGE_TAKEN) m->low[r]++;
     const uint64_t end = m->due[r] - m->low[r] > depth ? m->low[r] + depth : m->due[r];
     for (uint64_t q = m->low[r]; q < end; q++)
-      if (!taken[q] && take(m, r, q, result)) return -1;
+      if (state[q] == PAGE_WAITING && take(m, r, q, result)) return -1;
   }
   return 0;
 }
 
 static void channel_phase_end(struct channel_phase *m) {
-  free(m->first_out); free(m->from); free(m->next); free(m->taken); free(m->parked);
-  m->first_out = NULL; m->from = NULL; m->next = NULL; m->taken = NULL; m->parked = NULL;
+  free(m->first_out); free(m->from); free(m->next); free(m->state);
+  m->first_out = NULL; m->from = NULL; m->next = NULL; m->state = NULL;
 }
 /* channel id's progress through phase p begun: each pair's pages of the channel numbered on from its count (comm's
    `sent` to each rank, `received` from each, of the channel, the same at both ends, since every rank makes the same
    calls in the same sequence and cuts each message alike), and this rank's own contribution combined where it is rank
-   0; ncclSuccess, or the failure (out of memory) */
+   0 (advance, which reads no index while every page is WAITING); ncclSuccess, or the failure (out of memory) */
 static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c, const struct phase *p, uint32_t id) {
   struct ncclComm *comm = c->comm;
   const int n = comm->nranks, me = comm->rank;
@@ -1182,8 +1184,8 @@ static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c,
       if (r != me) m->due[r] = m->positions;
     for (int r = 0; r < n; r++) { m->at[r] = pages; pages += m->due[r]; }
   }
-  m->taken = calloc((size_t)pages + 1, 1);
-  if (!m->first_out || !m->from || !m->next || !m->taken) {
+  m->state = calloc((size_t)pages + 1, 1);
+  if (!m->first_out || !m->from || !m->next || !m->state) {
     channel_phase_end(m);
     return fail(ncclSystemError, "communicator %s: out of memory", comm->name);
   }
@@ -1193,8 +1195,10 @@ static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c,
   for (uint32_t o = 0; o < p->outs; o++)
     for (int d = 0; d < n; d++)
       if (d != me && (p->out[o].to < 0 || p->out[o].to == d)) sent[d] += channel_pages(pages_of(p->out[o].bytes), id);
-  for (uint64_t q = 0; q < m->positions; q++) advance(m, q);
-  return ncclSuccess;
+  ncclResult_t result = ncclSuccess;
+  for (uint64_t q = 0; q < m->positions && !advance(m, q, &result); q++) {}
+  if (result) channel_phase_end(m);
+  return result;
 }
 
 /* A call's work descriptor (call_move), which every thread that moves a channel of it reads: its phases (a second for

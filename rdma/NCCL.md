@@ -143,13 +143,13 @@ at the index, and is taken as it. This is the defragment of
 [design/DEFRAGMENT-pseudocode-20261122.md](../design/DEFRAGMENT-pseudocode-20261122.md): one local copy a page,
 charged to this consumer.
 
-A reduction combines each page position's contributions rank by rank. A page whose rank's turn has come is combined
-straight from the page. A page that lands before its turn is copied at once into the call's scratch (sized from the
-phase, allocated at the first such page), and its index is invalidated; it is combined from the scratch in its turn.
-So every landed page of the phase a rank is in leaves the pool as soon as the rank finds it. Pages its peers write
-for a later phase or call stay at their indices until it gets there, one an index, which is what the depth bounds
-within half of each node's pool. The reductions are this library's own code over the page table's calls: the bridge
-carries pages and knows nothing of what they contain.
+A reduction combines each page position's contributions rank by rank, each straight from its page. A page whose
+rank's turn has come is combined at once, and its index is invalidated. A page that lands before its turn is left at
+its index, which still names it, and the rank reads that index for no later page until the page's turn; then it is
+combined from there and the index is invalidated. So no landed page is copied anywhere but its place in `recvbuff`.
+Reduction pages left for their turn, and pages its peers write for a later phase or call, stay at their indices, one
+an index, which is what the depth bounds within half of each node's pool. The reductions are this library's own code
+over the page table's calls: the bridge carries pages and knows nothing of what they contain.
 
 The waits are the call's own. A call's wait ends once its pages have landed, or at the communicator's revoke, which
 each pass reads; nothing else bounds it. Nothing in the transport waits.
@@ -204,12 +204,12 @@ bridge's next region.
 
 ## Failures
 
-Failures are `ncclResult_t` values, and `ncclGetLastError` names what failed. A call records three failures on its
-communicator: a write its node's table refuses, an index it cannot read, and no memory for the pages that land before
-their turn. `ncclCommGetAsyncError` reads the first one recorded, and a communicator that recorded one fails its later
-calls alike, until it is destroyed and made again. Every other failure (an invalid argument or usage, other memory,
-the bootstrap) is the result of its call alone. A revoked communicator's calls return `ncclInvalidUsage`, and
-`ncclCommGetAsyncError` reads `ncclSuccess` after the revoke.
+Failures are `ncclResult_t` values, and `ncclGetLastError` names what failed. A call records two failures on its
+communicator: a write its node's table refuses and an index it cannot read. `ncclCommGetAsyncError` reads the first
+one recorded, and a communicator that recorded one fails its later calls alike, until it is destroyed and made again.
+Every other failure (an invalid argument or usage, other memory, the bootstrap) is the result of its call alone. A
+revoked communicator's calls return `ncclInvalidUsage`, and `ncclCommGetAsyncError` reads `ncclSuccess` after the
+revoke.
 
 A call never fails on what lands. The library checks nothing that lands, and a page's bytes are taken as they landed:
 a write may land wrong, or not at all (mesh-call.h). No timer judges a peer lost: a page that never lands leaves its
