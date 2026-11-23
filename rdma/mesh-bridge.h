@@ -257,6 +257,7 @@ void lanes_cancel(const struct port *port);
 uint64_t lanes_busy(void);
 uint64_t pool_bytes(void);
 void record_changed(void);
+void switch_view(void);
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room);
 void record_retell(void);
 void map_adopt(void);

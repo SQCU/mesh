@@ -112,7 +112,8 @@ static void health_put(struct mesh_record *stored,const struct mesh_record *reco
    nodes paired where each one's record names the other: mesh_joined), in the table's order, written only where it
    differs from the map as it stands (so a change no path reaches moves no serial).  A node the map loses or gains is
    logged, and each record it gains is sent where a peer lacks it (record_tell): a port paired while the map lacked
-   the record was never sent it (map_tell sends the map alone), and every other port's peer was told it or sent it */
+   the record was never sent it (map_tell sends the map alone), and every other port's peer was told it or sent it.
+   A map written has the switch's view and the node table made from it at once (mesh-link.c switch_view) */
 static void map_make(void){
   const uint64_t n=atomic_load(&M->map_nodes);
   const struct mesh_record *r=mesh_records(M);
@@ -151,6 +152,7 @@ static void map_make(void){
     memcpy(mesh_records(M),next,(size_t)count*sizeof *next);
     atomic_store(&M->map_nodes,count);
     mesh_notify(&M->map);
+    switch_view();
   }
   free(next);free(reached);free(order);
   /* each from its table entry (record_tell copies it): a port lost meanwhile makes the map again, and moves no entry */

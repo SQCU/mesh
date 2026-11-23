@@ -730,14 +730,15 @@ static void link_heard(struct port *port,const struct message *heard){
 
 
 /* ---- design/PAGE-TABLE-SPEC-20261122.md: the switch, the parent's part -----------------------------------------
-   The parent carves the node's pool once and makes its switch at its start, keeps the switch's view of the fabric as
-   the records give it, keeps the node table (a node the map has, live while it does), and runs the refresh: a thread
-   of its own that recomputes the node's out-neighbours, the cost-to-go and its own links' lines from the estimators
-   every SWITCH_REFRESH_NS (mesh-switched.h mesh_switch_refresh), so no page and no child ever waits on it.  A port's child exited, what it had is given back
-   here (switch_child_free): nothing is sent again, and each page it had is counted `lost` */
+   The parent carves the node's pool once and makes its switch at its start, keeps the switch's view of the fabric and
+   the node table (a node the map has, live while it does) as its event loop writes the map (switch_view), and runs
+   the refresh: a thread of its own that recomputes the node's out-neighbours, the cost-to-go and its own links' lines
+   from the estimators every SWITCH_REFRESH_NS (mesh-switched.h mesh_switch_refresh), so no page and no child ever
+   waits on it.  A port's child exited, what it had is given back here (switch_child_free): nothing is sent again, and
+   each page it had is counted `lost` */
 #define SWITCH_REFRESH_NS ((uint64_t)MESH_SWITCH_REFRESH_NS)
 /* the node table's entry of `node`, made (generation 1) as the map first has the node; MESH_ABSENT where every entry
-   has another node (the refresh thread's alone) */
+   has another node (the event loop's alone: switch_view) */
 static uint32_t node_slot(uint32_t node){
   uint32_t n=0,vacant=MESH_ABSENT;
   for(;n<MESH_NODES && atomic_load(&mesh_node_at(M,n)->node)!=node;n++)if(vacant==MESH_ABSENT && !atomic_load(&mesh_node_at(M,n)->node))vacant=n;
@@ -814,12 +815,11 @@ static void switch_make(void){
 /* the view as the records stand: every record's node, and each node pair the records join (each end's entries toward
    the other, the fewer of the two), its cables and their bandwidth summed (bytes a ns; 0 where neither end's record
    reports one), at the hop latency the fabric's fits measure (6 us); every node of it an entry of the node table, live
-   (the bandwidth of this node's own cables toward it), every other entry not */
+   (the bandwidth of this node's own cables toward it), every other entry not.  Made by the event loop each time it
+   writes the map, after the write (mesh-records.c map_make): the map's one writer, so it reads the records and the
+   ports as they stand, with no serial to check and nothing read again, and a map's change is drawable at once */
 #define SWITCH_LATENCY_NS 6000.0
-static uint64_t switch_serial;
-static void switch_view(void){
-  const uint64_t before=atomic_load_explicit(&M->map,memory_order_acquire);
-  if(before==switch_serial || (before&1))return;
+void switch_view(void){
   const uint64_t count=atomic_load_explicit(&M->map_nodes,memory_order_relaxed);
   const struct mesh_record *r=mesh_records(M);
   uint32_t nodes[MESH_SWITCH_N],n=0;struct mesh_switch_fabric_link links[MESH_SWITCH_LINKS];uint32_t k=0;
@@ -833,8 +833,6 @@ static void switch_view(void){
     if(!cables)continue;
     links[k++]=(struct mesh_switch_fabric_link){r[a].node,r[b].node,cables,(double)bandwidth/8e9*cables/ab,SWITCH_LATENCY_NS};
   }
-  if(!mesh_map_whole(M,before))return;
-  switch_serial=before;
   mesh_switch_view_set(mesh_switch_of(M),M->node,nodes,n,links,k);
   uint32_t live=0;
   for(uint32_t i=0;i<n;i++){
@@ -938,8 +936,8 @@ static void switch_policy_load(void){
   switch_policy_on=1;
   say("bridge: the routing policy's theta %s in memory (%lld bytes): its tables route\n",SWITCH_THETA,(long long)st.st_size);
 }
-/* the refresh, on a thread of its own: the view updated, the neighbours, cost-to-go and lines recomputed, the policy's
-   tables published */
+/* the refresh, on a thread of its own: the neighbours, cost-to-go and lines recomputed over the published view, the
+   policy's tables published */
 static void *switch_watch(void *unused){
   (void)unused;
   pthread_setname_np("mesh.switch");
@@ -948,7 +946,6 @@ static void *switch_watch(void *unused){
   static struct mesh_switch_tokens tokens;
   const struct mesh_switch_policy policy={NULL,switch_policy_splits};
   while(!stop){
-    switch_view();
     mesh_switch_refresh(sw,MESH_SWITCH_PAGE);
     if(switch_policy_on)mesh_switch_policy_refresh(sw,&policy,clock_ns(),++point,0,&tokens);
     MESH_SWITCH_COUNT(sw,MESH_SWITCH_PARENT,refreshes,1);

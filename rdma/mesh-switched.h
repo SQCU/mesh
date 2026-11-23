@@ -1,7 +1,8 @@
 /* The switch (design/PAGE-TABLE-SPEC-20261122.md section 5): what every node's bridge does with a page, as functions of
-   its region.  The bridge's port children (mesh-link.c port_pass) and its parent (the refresh thread, a child's end,
-   a region's adoption) are its callers; none of it does I/O or posts to hardware, and only mesh_switch_push reads a
-   clock (its cell's `carried`, for observation): the caller passes the time and posts what these functions hand it.
+   its region.  The bridge's port children (mesh-link.c port_pass) and its parent (its event loop as it writes the map,
+   the refresh thread, a child's end, a region's adoption) are its callers; none of it does I/O or posts to hardware,
+   and only mesh_switch_push reads a clock (its cell's `carried`, for observation): the caller passes the time and
+   posts what these functions hand it.
 
    A page crosses as one SEND from its own memory (mesh.h struct mesh_pd): its first MESH_HEAD bytes the header the
    bridge writes (struct mesh_head: the node that took the write, its destinations as nodes and indices of their page
@@ -31,12 +32,13 @@
    - Uses.  A page's uses (mesh.h) count its table words, its writes pending in a ring, its SENDs pushed or posted and a
      landing being carried; its last use's drop gives it back to its class's free stack.
    - The routing state.  The view, the refresh's state (the node's out-neighbours and their lanes, and the cost-to-go
-     between view nodes: struct mesh_switch_weights) and the policy's split tables are each in two copies: the parent's
-     refresh thread writes the copy not published, then publishes it (its version moved, one release store); a draw
-     reads the copy published as it began (its version, one acquire load) and retries nothing, so draws go on reading
-     the last published copies while one is computed: never a wait.  A draw that outlasts the next publish (the other
-     copy's) may read its own copy as the next refresh writes it again, and at worst chooses a wrong route; every index
-     it reads there addresses only within its array (mesh_switch_choose).  The trained recurrent policy (rdma/route)
+     between view nodes: struct mesh_switch_weights) and the policy's split tables are each in two copies, each with one
+     writer (the view the parent's event loop as it writes the map; the others its refresh thread), which writes the
+     copy not published, then publishes it (its version moved, one release store); a draw reads the copy published as it
+     began (its version, one acquire load) and retries nothing, so draws go on reading the last published copies while
+     one is computed: never a wait.  A draw that outlasts the next publish (the other copy's) may read its own copy as
+     its writer writes it again, and at worst chooses a wrong route; every index it reads there addresses only within
+     its array (mesh_switch_choose).  The trained recurrent policy (rdma/route)
      plugs in through struct mesh_switch_policy, as the split tables.
    - The estimators.  Diachronic and incremental: each lane's rate and wait from its SENDs' completions (mesh_switch_sent),
      each remote link's wait from the lines pages carry (mesh_switch_lines_take), each node's own lines stamped by its
@@ -348,10 +350,11 @@ static inline void mesh_switch_lane_drop(struct hdr *m,struct mesh_switch *sw,ui
 }
 
 /* ---- The view and the weights: two copies each, read by all -------------------------------------------------------
-   Every copy is written by the parent's refresh thread alone (mesh-link.c switch_watch: the view by
-   mesh_switch_view_set, the weights and the split tables by the refresh), so the copy it publishes stands until its
-   next write of that copy.  The view's lines are written in place in the published copy, by more than one process: each
-   of this node's own links' by the refresh, every other link's by each port child's landings (mesh_switch_lines_take) */
+   Each is written by one thread of the parent alone: the view by its event loop as it writes the map (mesh-link.c
+   switch_view: mesh_switch_view_set), the weights and the split tables by its refresh thread (switch_watch:
+   mesh_switch_refresh), so the copy each publishes stands until its next write of that copy.  The view's lines are
+   written in place in the published copy, by more than one process: each of this node's own links' by the refresh,
+   every other link's by each port child's landings (mesh_switch_lines_take) */
 /* node's view index: under v->nodes, so under MESH_SWITCH_N; UINT32_MAX where the view has no such node */
 static inline uint32_t mesh_switch_index(const struct mesh_switch_view *v,uint32_t node){
   for(uint32_t i=0;i<v->nodes;i++)if(v->node[i]==node)return i;
@@ -804,12 +807,13 @@ static inline void mesh_switch_state_make(struct mesh_switch *sw,const struct me
   for(uint32_t a=0;a<v->nodes;a++){mesh_switch_arrivals(v,a,0,0,s->hop,at);for(uint32_t b=0;b<v->nodes;b++)s->togo[a][b]=isfinite(at[b])?(float)at[b]:1e12f;}
 }
 static inline double mesh_switch_time_scale(const struct mesh_switch_view *v,double page);
-/* one refresh, on the refresh thread (the writer of the view, the refresh's state and the split tables, so their
-   published copies stand under it but for the view's lines): the state over the published view, written whole in the
-   copy not published and published, the split tables' time scale made again where the view changed, this node's own
-   links' lines from the state's waits, this node's stamp moved.  `frames`: the refresh's page's (MESH_SWITCH_PAGE) */
+/* one refresh, on the refresh thread (the writer of the refresh's state and the split tables, so their published
+   copies stand under it; the view the event loop's, read as published): the state over the published view, written
+   whole in the copy not published and published, the split tables' time scale made again where the view changed,
+   this node's own links' lines from the state's waits, this node's stamp moved.  `frames`: the refresh's page's
+   (MESH_SWITCH_PAGE) */
 static inline void mesh_switch_refresh(struct mesh_switch *sw,uint32_t frames){
-  const uint64_t view_ver=atomic_load_explicit(&sw->view_version,memory_order_relaxed),weights_ver=atomic_load_explicit(&sw->weights_version,memory_order_relaxed);
+  const uint64_t view_ver=atomic_load_explicit(&sw->view_version,memory_order_acquire),weights_ver=atomic_load_explicit(&sw->weights_version,memory_order_relaxed);
   struct mesh_switch_view *v=sw->view+(view_ver&1);
   const struct mesh_switch_weights *was=sw->weights+(weights_ver&1);
   struct mesh_switch_weights *w=sw->weights+((weights_ver+1)&1);
@@ -1169,7 +1173,7 @@ static inline double mesh_switch_time_scale(const struct mesh_switch_view *v,dou
    - the per-pattern features of what is left to send, waiting and received, and the live collectives, 0: the bridge
      carries writes, not collectives.
    Every token is route.h's route_lane_token / route_context_token over that state.  The refresh thread's (the writer of
-   the view and the weights): their published copies read in place */
+   the weights): the view's and the weights' published copies read in place */
 static inline void mesh_switch_tokens_make(struct mesh_switch *sw,uint64_t now,uint64_t point,struct mesh_switch_tokens *out){
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
   const struct mesh_switch_weights *w=sw->weights+mesh_switch_published(&sw->weights_version);
