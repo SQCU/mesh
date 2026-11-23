@@ -26,7 +26,6 @@
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #include <IOKit/IOKitLib.h>
-#include <poll.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 
@@ -73,15 +72,17 @@ _Static_assert(sizeof(union mesh_network_event)==48,"M24");
    service begins no earlier); its SENDs posted and completed, their pages and post times are its in-flight ring's
    (mesh-switched.h struct mesh_switch_lane: a queue pair completes its SENDs in their order, the ring's) */
 struct lane_state { uint64_t posted,got,frame_capacity,depth,last; };
-/* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
-   and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
-   a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
-   sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` the
-   queue pairs its port's device has for a link (its budget: design/HETEROGENEOUS-LINKS.md, link_plan).  `unused` is
-   unused */
-enum { HELLO=1, FAREWELL, RECORD, LINK };
-struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t unused,port,bytes;
+/* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, RECORD and LINK, nothing
+   else), `bytes` of what follows it: a RECORD's record.  A port's LINK tells its link lanes' queue pairs (#lanes:
+   `count` the lanes of its plan, each one's number and first sequence number in `pair`, 0 for a lane the plan leaves
+   out).  A HELLO on a control socket states in `count` the queue pairs its port's device has for a link (its budget:
+   design/HETEROGENEOUS-LINKS.md, link_plan).  `unused` is unused (a stopping bridge says nothing: its peer reads the
+   stop at the control socket's end), so every field after it lies where it lay in every version before */
+enum { HELLO=1, RECORD, LINK };
+struct message { uint32_t magic,kind,node,count; uint64_t boot; uint32_t unused[3],port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
+_Static_assert(offsetof(struct message,port)==36 && offsetof(struct message,version)==46 && sizeof(struct message)==128,
+               "a HELLO's fields at the offsets every version has them");
 /* the wire's magic: what marks a datagram or a control stream's header as the mesh's.  It is the value version 131
    sends, fixed: no version enters it, so a bridge hears a bridge of any version (the operator, 2026-10-21: "rejection
    filter removal. categorical. all of them without sanction in rubric"; "even this fake limit too must go away").  A
@@ -184,8 +185,7 @@ struct child_message {
    from its name as the port is named; another port's family 0, which no event carries: mesh-link.c addresses_heard) */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget,refusals,family,unit;
-  int64_t farewell;
+  uint32_t index,interface,peer,peer_port,greeted,connecting,writing,open,opening,stuck,budget,refusals,family,unit;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
   _Atomic int done,passing;
@@ -214,7 +214,6 @@ struct port {
   unsigned char child_in[sizeof(struct child_message)];
 };
 
-/* design/transport.md section 9: why this bridge stops, the code its FAREWELL carries (a signal's number) */
 /* design/transport.md: the most nanoseconds between two samples of this node's available memory, each sent
    with its record (mesh-records.c health_turn) */
 #define MESH_HEALTH_NS UINT64_C(10000000000)

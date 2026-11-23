@@ -20,17 +20,18 @@ static inline const char *mesh_name(void){ const char *name=getenv("MESH_REGION"
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  166:
+/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  167:
    every SEND is one page of the node's pool, MESH_HEAD bytes of header and then its payload, the header naming each
    destination as a node and an index of that node's page table (mesh-switched.h struct mesh_head), its receiver
    testing nothing of it and clamping each field that addresses memory (mesh-switched.h mesh_switch_landed), a page
    sent on the lanes of its payload's class alone, a link's lane j its queue pair j (mesh-bridge.h link_plan), and a
    line (mesh-switched.h struct mesh_switch_line) carrying for each page class its link's time and its idle time,
-   stamped with its sender's boot plus uptime.  Against 165: a line a node passes on carries its time as that node
-   counts it as it sends (the sender's backlog less the time the node has held the line, mesh_switch_lines_give), and
-   a stamp is only ever compared with its own sender's, so a line's age is counted on each node's own clock; 165 sent
-   the sender's time as it was and judged a line's age by its stamp against the receiver's clock */
-#define MESH_VERSION 166u
+   stamped with its sender's boot plus uptime, a line a node passes on carrying its time as that node counts it as it
+   sends (mesh_switch_lines_give); and a port's control socket carries HELLO, RECORD and LINK alone (mesh-bridge.h
+   struct message).  Against 166: there is no FAREWELL: a stopping bridge closes its control sockets and says nothing,
+   and its peer reads the stop as the socket's end; RECORD and LINK are kinds 2 and 3 (166's 3 and 4), and the bytes of
+   166's FAREWELL `code` are unused */
+#define MESH_VERSION 167u
 /* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one.  194: the page table and its owner bytes (`table_off`), the clients'
    write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), the lane records (`stream_off`), and the

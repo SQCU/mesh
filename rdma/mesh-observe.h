@@ -1,7 +1,7 @@
 /* design/transport.md: what the bridge publishes for its own observation tools (mesh-stat, the node services) in its
    own pages of the region (struct hdr `bridge_off`): a port of the node by the index the bridge gave it, its peer node
    while paired, its phase (MESH_UNKNOWN where the bridge has no such port), the code it last stopped with, its
-   bandwidth and the pairings it made; and the one wait on the exits of the region's processes (mesh_exits_wait).
+   bandwidth and the pairings it made; and the one watch on the exits of the region's processes (mesh_exits_watch).
    Mesh code alone includes this: no client header does, and no client reads these pages
    (design/rubrics.md, Three kinds of source) */
 #ifndef MESH_OBSERVE_H
@@ -33,10 +33,10 @@ static inline struct mesh_bridge_pages *mesh_bridge_pages(struct hdr *m){
   return (struct mesh_bridge_pages *)((char *)m+m->bridge_off+MESH_PORTS*sizeof(struct mesh_link_info));
 }
 
-/* design/transport.md section 2: the waits on the exits of the region's processes (the bridge, its children, the
+/* design/transport.md section 2: the watch on the exits of the region's processes (the bridge, its children, the
    clients), written once for every caller: the bridge for the children of the bridge before (mesh-link.c
-   region_children) and for its own children at its stop, a spawn for a child of its device from an earlier launch
-   (child_spawn), and the heartbeat for an expired region's processes (mesh-heartbeat.c replace_turn).
+   adopting_read, NODE_ADOPTING) and a spawn for a child of its device from an earlier launch (child_spawn), and the
+   heartbeat for an expired region's processes (mesh-heartbeat.c region_replace).
    Whether the process a struct mesh_process names is alive: a child of the caller until its exit is complete (waitid
    with WNOWAIT, which leaves it to be reaped; until it is reaped its pid names it alone), any other process until its
    exit begins (mesh_alive); pid 0 names none */
@@ -46,15 +46,13 @@ static inline int mesh_lives(struct mesh_process process){
   if(!waitid(P_PID,(id_t)process.pid,&info,WEXITED|WNOHANG|WNOWAIT))return !info.si_pid;
   return mesh_alive((pid_t)process.pid,process.start);
 }
-/* the exits of processes[0 .. count) waited for on kqueue `queue`.  Each live process's exit is watched there
-   (EVFILT_PROC NOTE_EXIT, one-shot, udata `tag`), and one whose watch finds it exited (ESRCH) is read again, so each
-   exit is either seen here or told on the queue.  Then, until none is alive or the uptime `until` (CLOCK_UPTIME_RAW
-   nanoseconds) has come, each exit is taken from the queue and every process read again; an `until` of 0, or one
-   already past, waits for none, and the caller's own loop hears the exits.  The live processes are moved to the
-   front of `processes`, as they were given, and their count returned.  A live process whose exit cannot be watched ends
-   the caller (EX_OSERR: an exit, never an abort, whose crash report would write to storage), so no caller waits on an
-   exit that no event will tell */
-static inline uint32_t mesh_exits_wait(int queue,struct mesh_process *processes,uint32_t count,uint64_t tag,uint64_t until){
+/* the exits of processes[0 .. count) watched on kqueue `queue`, never waited for here: each live process's exit is
+   watched there (EVFILT_PROC NOTE_EXIT, one-shot, udata `tag`), and one whose watch finds it exited (ESRCH) is read
+   again, so each exit is either seen here or told on the queue, which the caller's own loop reads.  The live processes
+   are moved to the front of `processes`, as they were given, and their count returned.  A live process whose exit
+   cannot be watched ends the caller (EX_OSERR: an exit, never an abort, whose crash report would write to storage), so
+   no caller waits on an exit that no event will tell */
+static inline uint32_t mesh_exits_watch(int queue,struct mesh_process *processes,uint32_t count,uint64_t tag){
   uint32_t alive=0;
   for(uint32_t k=0;k<count;k++){
     if(!mesh_lives(processes[k]))continue;
@@ -65,14 +63,6 @@ static inline uint32_t mesh_exits_wait(int queue,struct mesh_process *processes,
       if(!mesh_lives(processes[k]))continue;
     }
     processes[alive++]=processes[k];
-  }
-  for(uint64_t at;alive && (at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW))<until;){
-    struct kevent64_s heard;
-    const struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
-    kevent64(queue,NULL,0,&heard,1,0,&rest);
-    uint32_t still=0;
-    for(uint32_t k=0;k<alive;k++)if(mesh_lives(processes[k]))processes[still++]=processes[k];
-    alive=still;
   }
   return alive;
 }

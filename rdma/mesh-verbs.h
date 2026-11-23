@@ -114,8 +114,6 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-/* the stop flag, defined once in mesh-link.c (design/transport.md) */
-extern _Atomic sig_atomic_t stop;
 /* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
 static __attribute__((unused)) void say(const char *format,...){

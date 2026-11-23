@@ -139,7 +139,7 @@ static void reopen_later(void){
 /* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its processes
    lives: its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process
    (its owner's pid, `start`), each identified by its pid and start (mesh_alive, so a reused pid is none of them).
-   Until then their exits are watched on this heartbeat's queue (mesh-observe.h mesh_exits_wait, each exit a
+   Until then their exits are watched on this heartbeat's queue (mesh-observe.h mesh_exits_watch, each exit a
    HEARTBEAT_PROCESS event), and they are named as they change.  1 where no expired region is left (none is named, the
    region is live, or it is now unlinked), 0 where one of its processes lives, -1 where its unlink failed */
 static int region_replace(void){
@@ -160,7 +160,7 @@ static int region_replace(void){
     processes[count++]=(struct mesh_process){.pid=(uint32_t)atomic_load(&slot->owner),.start=slot->start};
   }
   munmap(m,size);
-  count=mesh_exits_wait(events,processes,count,TAG_PROCESS,0);
+  count=mesh_exits_watch(events,processes,count,TAG_PROCESS);
   if(!count){
     told_count=0;
     if(!shm_unlink(MESH_NAME) || errno==ENOENT){

@@ -7,9 +7,6 @@
 #include <sysexits.h>
 #include <mach/mach_time.h>
 
-/* mesh-verbs.h: the stop flag every loop reads */
-_Atomic sig_atomic_t stop;
-
 struct hdr *M;
 struct wire_mapping wire;
 struct port ports[MESH_PORTS];
@@ -41,6 +38,27 @@ static uint64_t windows_end(void){
   for(uint32_t p=0;p<port_count;p++){const uint64_t quiet=atomic_load(&ports[p].quiet_at);latest=MAX(latest,quiet);}
   return latest;
 }
+/* design/transport.md section 2: the node's start and stop, one state machine on the event loop (node_step, its one
+   transition function; the loop its one owner), each state's deadline `due`:
+   - ADOPTING: the region a bridge before this one left adopted once every child that bridge recorded has exited (their
+     exits on the loop's queue, TAG_ADOPT: until a child's exit has begun its progress thread may still post, take
+     and land on what the adoption gives back), at most 2 MESH_PLATFORM_NS on, child_leave's bound on a child whose
+     parent ended; one that lives past it ends this bridge, which its heartbeat opens again;
+   - SETTLING: the node started (node_start), its devices not yet read: IOKit's registry waited quiet (IOKitWaitQuiet,
+     at most MESH_PLATFORM_NS, before the first read), then their first read asked; RUNNING once it is in;
+   - RUNNING: ports opened, paired and served;
+   - STOPPING: a stop signal taken: every child halted, every control socket closed (its peer reads the stop at the
+     socket's end), every line leaving and `bridge_pid` 0; the loop goes on serving the children's sockets, the
+     clients' exits and the kernel's link events (a link going off moves its port's window) until every quiet window
+     has ended (B9, B9b), at most MESH_PLATFORM_NS after the stop;
+   - ENDING: each child asked to end, and the bridge ended once every one is reaped (child_reaped, its exit seen
+     through to its end), at most MESH_PLATFORM_NS on.
+   `adopting` of the bridge before's children (`children`) live, as ADOPTING last read them; `id` this node's */
+enum node_state { NODE_ADOPTING, NODE_SETTLING, NODE_RUNNING, NODE_STOPPING, NODE_ENDING };
+enum node_event { NODE_STOP, NODE_EXIT, NODE_FOUND, NODE_DUE };
+static struct { enum node_state state; uint32_t id,adopting; uint64_t due; struct mesh_process children[2*MESH_PORTS]; } node;
+#define TAG_ADOPT (UINT64_C(1)<<57)
+static int stopping(void){ return node.state>=NODE_STOPPING; }
 _Atomic int found;
 static char devices[MESH_PORTS][32];
 static uint32_t device_count;
@@ -48,8 +66,8 @@ static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}
 
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 uint64_t memory;
-static int64_t stop_reason;
-static void farewell_text(int64_t code,char *out,size_t room){
+/* why this bridge stops: the signal it took */
+static void stop_text(int64_t code,char *out,size_t room){
   if(code==SIGHUP)snprintf(out,room,"SIGHUP: its heartbeat restarts it");
   else if(code==SIGTERM)snprintf(out,room,"SIGTERM: its heartbeat's release or stop");
   else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
@@ -1054,22 +1072,20 @@ static void *switch_watch(void *unused){
   static struct mesh_switch_tokens tokens;
   static struct mesh_switch_togo policy_togo;
   const struct mesh_switch_policy policy={NULL,switch_policy_splits};
-  while(!stop){
+  for(;;){
     mesh_switch_togo_whole(sw,&policy_togo);
     mesh_switch_policy_refresh(sw,&policy_togo,&policy,clock_ns(),++point,0,&tokens);
     MESH_SWITCH_COUNT(sw,MESH_SWITCH_PARENT,refreshes,1);
     struct timespec pause={0,(long)SWITCH_REFRESH_NS};
     nanosleep(&pause,NULL);
   }
-  return NULL;
 }
 
-/* design/transport.md: the bridge's wire, a message a kind: a record, the peer's farewell (its "release
-   everything": the link lost at once, so nothing is posted toward it again, design/transport.md) or its
-   LINK; a message of any other kind is let be (AGENTS.md, "Fail toward access": unknown input, keep going) */
+/* design/transport.md: the bridge's wire, a message a kind: a record or the peer's LINK; a message of any other kind
+   is let be (AGENTS.md, "Fail toward access": unknown input, keep going).  A peer that stops closes the socket, and
+   its end is the link's loss (control_heard) */
 static void message_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
-  else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
 }
 /* a message heard on a port's control socket: before its peer's hello, that hello alone (any other let be); the hello
@@ -1116,20 +1132,17 @@ void port_lost(struct port *port,int64_t code){
   lanes_cancel(port);
   if(port->child){
     child_send(port,(struct child_message){.kind=CHILD_HALT,.pairing=atomic_load(&port->link.pairing)});
-    if(port->link.lanes && !stop){port->recycle=1;port->open=0;}
+    if(port->link.lanes && !stopping()){port->recycle=1;port->open=0;}
   }
   if(port->control>=0){close(port->control);port->control=-1;}
   if(port->greeted)port->next=now;
-  /* design/transport.md: the peer named, and a peer that said farewell told from one lost */
+  /* design/transport.md: the peer named */
   if(port->greeted||port->connecting){
-    char reason[96];farewell_text(port->farewell,reason,sizeof reason);
-    if(stop)say("link %u (%s): closed toward node %u: this bridge is stopping\n",port->index,port->name,port->peer);
-    else if(port->peer && port->parted)say("link %u (%s): node %u parted, its bridge stopping (%s): code %lld\n",port->index,port->name,
-                                            port->peer,reason,(long long)code);
+    if(stopping())say("link %u (%s): closed toward node %u: this bridge is stopping\n",port->index,port->name,port->peer);
     else if(port->peer)say("link %u (%s): node %u lost: code %lld\n",port->index,port->name,port->peer,(long long)code);
     else say("link %u (%s): lost: code %lld\n",port->index,port->name,(long long)code);
   }
-  port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->in_length=0;port->out_length=port->out_sent=0;
+  port->greeted=port->connecting=port->writing=0;port->peer=0;port->in_length=0;port->out_length=port->out_sent=0;
   link_set(port,0,port->open?MESH_PAIRING:MESH_STOPPED,code);
 }
 /* the control socket: non-blocking, its sends queued (port_say), its HELLO stating the queue pairs the port's device
@@ -1316,9 +1329,9 @@ static void ports_found(void){
    are, design/transport.md B6 (b), and the port down until its link comes on: its device opened then,
    port_open); an interface of any name that attached or whose link came on and is no port yet: the node's devices to
    be read again (a link's coming on stays a reading, for a device registered after its interface attached), the read
-   put off to the windows' end (find_wanted, left set while a read is out).  At the stop (`stopping`), a port's link
-   going off only extends its quiet window, which the exit waits out (B9) */
-static void network_heard(int stopping){
+   put off to the windows' end (find_wanted, left set while a read is out).  At the stop (NODE_STOPPING, NODE_ENDING),
+   a port's link going off only extends its quiet window, which the exit waits out (B9) */
+static void network_heard(void){
   union mesh_network_event event;
   int unknown=0;
   while(recv(network,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
@@ -1331,12 +1344,12 @@ static void network_heard(int stopping){
       known=1;
       if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED){ports[p].opening=1;ports[p].retry_at=0;}
       else if(code!=KEV_DL_LINK_OFF && code!=KEV_DL_IF_DETACHED){}
-      else if(stopping)quiet_until(&ports[p].quiet_at,now+MESH_PLATFORM_NS);
+      else if(stopping())quiet_until(&ports[p].quiet_at,now+MESH_PLATFORM_NS);
       else{ports[p].open=0;port_lost(ports+p,ENETDOWN);}
     }
     unknown|=!known && (code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED);
   }
-  if(unknown && !stopping)find_wanted=1;
+  if(unknown && !stopping())find_wanted=1;
 }
 /* design/transport.md: an IPv6 address of a port's interface added, changed or deleted (the kernel's KEV_INET6_SUBCLASS
    events on `addresses`: a link-local address bin/mesh-fabric-init.sh puts in place, or its duplicate address detection
@@ -1610,14 +1623,14 @@ static struct mesh_process child_elsewhere(const struct port *port){
 }
 /* the port's child spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
    port's next spawn put off MESH_PAUSE_NS.  A child of its device from an earlier launch (child_elsewhere) puts off
-   the spawn until its exit, which the event loop hears (mesh-observe.h mesh_exits_wait on the loop's queue, tagged by
+   the spawn until its exit, which the event loop hears (mesh-observe.h mesh_exits_watch on the loop's queue, tagged by
    the port: `elsewhere` cleared) and spawns at once; the processes are read again only then, not at every turn while
    it lives.  One exited or in its exit by the time its exit is watched is none, and the spawn goes on */
 static int child_spawn(struct port *port){
   int pair[2],on=1;
   if(port->elsewhere)return EBUSY;
   struct mesh_process elsewhere=child_elsewhere(port);
-  if(mesh_exits_wait(events,&elsewhere,1,TAG_CHILD|port->index,0)){
+  if(mesh_exits_watch(events,&elsewhere,1,TAG_CHILD|port->index)){
     say("link %u (%s): process %u, a child of its device from an earlier launch, has its queue pairs until its exit; its "
         "own child spawned after it\n",port->index,port->name,elsewhere.pid);
     port->elsewhere=(pid_t)elsewhere.pid;
@@ -2014,27 +2027,8 @@ static int region_open(const struct hdr *geometry,int *out){
   return 0;
 }
 
-/* the children of the bridge before (the region's processes, mesh-observe.h `child`) waited out, before anything they
-   had is given back: until a child's exit begins (from then on mesh_started reads 0 and none of its code runs), its
-   progress thread may be inside a provider call and go on to post, take and land on the lanes, rings and pages
-   an adoption gives back.  Their exits are waited on a queue of their own (mesh-observe.h mesh_exits_wait), for at most
-   2 MESH_PLATFORM_NS, child_leave's bound on a child whose parent ended; a child that lives past it ends this bridge,
-   which its heartbeat opens again */
-static void region_children(void){
-  struct mesh_process children[2*MESH_PORTS];
-  memcpy(children,mesh_bridge_pages(M)->child,sizeof children);
-  const int exits=kqueue();
-  if(exits<0)die("bridge: no queue for the exits of the children of the bridge before");
-  const uint32_t alive=mesh_exits_wait(exits,children,2*MESH_PORTS,0,clock_ns()+2*MESH_PLATFORM_NS);
-  close(exits);
-  if(alive){
-    say("bridge: %u children of the bridge before live %.0f s on: this bridge ends, and its heartbeat opens one again\n",
-        alive,(double)(2*MESH_PLATFORM_NS)/1e9);
-    exit(1);
-  }
-}
 /* the adopted region's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last) and
-   before any child is spawned, once the children of the bridge before have ended (region_children): every lane record
+   before any child is spawned, once the children of the bridge before have ended (NODE_ADOPTING): every lane record
    with no peer, the links' table cleared, a client slot whose leaving a process that died left half done
    finished (mesh.h mesh_leave, which any party can repeat to the same end), then what the bridge before had given
    back at once, as a child's end gives it back (switch_child_free): each lane's in-flight ring and each port's inbound
@@ -2043,10 +2037,10 @@ static void region_children(void){
    child's device may still land bytes into a page its receives were posted into until the kernel
    releases its objects in the child's exit, which another use may have by then: that is region memory, data, never
    firmware; the firmware rule, one process driving a device's queue pairs at a time, is met by the stop's wait on
-   its own children until their exits end or MESH_PLATFORM_NS passes (main), and, where a bridge ended without that
-   wait, by region_children above and by child_elsewhere, which puts off a new child's spawn on a device while an old
-   child of that device is found; neither finds a child whose exit has begun and not ended (the stop's comment in
-   main).  What is given back is
+   its own children until they are reaped or MESH_PLATFORM_NS passes (NODE_ENDING), and, where a bridge ended without
+   that wait, by NODE_ADOPTING and by child_elsewhere, which puts off a new child's spawn on a device while an old
+   child of that device is found; neither finds a child whose exit has begun and not ended (node_end).  What is given
+   back is
    what the bridge before had, each use by the ring or receive that had it, never a recount of each page's
    uses from the table: the clients attached across the restart change words, ring cells and uses as it runs (a
    write's use counted as it pushes its cell, an invalidation's dropped as it clears a word), so a count made from one
@@ -2055,7 +2049,6 @@ static void region_children(void){
    this bridge's to write again (map_adopt).  The pool's carve and the page table stand; the switch is made new after
    (switch_make), so what was given back is said here */
 static void region_adopt(void){
-  region_children();
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_lanes *x=mesh_lanes_at(M,s);
     atomic_store(&x->peer,0);atomic_store(&x->wire,0);
@@ -2085,16 +2078,26 @@ static void region_adopt(void){
   atomic_store(&M->busy,0);
 }
 
+/* the node state's deadline: ADOPTING's and ENDING's bound, STOPPING's the earlier of every quiet window's end and its
+   bound; none (UINT64_MAX) while SETTLING or RUNNING */
+static uint64_t node_due(void){
+  if(node.state==NODE_SETTLING || node.state==NODE_RUNNING)return UINT64_MAX;
+  return node.state==NODE_STOPPING?MIN(windows_end(),node.due):node.due;
+}
 /* design/transport.md: when the event loop's next turn is due if no event comes first: the earliest of the times its turn
-   waits for that are still ahead (the next liveness turn, `liveness`; the next health sample;
-   where the devices are to be read, the windows' end; the exit's window; each port's quiet window, spawn pause, open's
-   retry, next hello, and the bound of its open's or link's job out), and no later than MESH_PAUSE_NS on (design/rubrics.md M3: the wait ends in finite
-   time).  Every other change a turn takes wakes the loop where it happens (wake, a socket, a signal and an exit on the
-   queue), so a turn comes at the change or at the time it waits for, where a fixed tick (250 ms) took each such time
-   up to a tick late; a client slot taken or left is read at the next turn, whatever woke it (clients_turn) */
+   waits for that are still ahead (the node state's deadline, node_due; while it serves, the next liveness turn,
+   `liveness`; the next health sample; where the devices are to be read, the windows' end; the exit's window; each
+   port's quiet window, spawn pause, open's retry, next hello, and the bound of its open's or link's job out), and no
+   later than MESH_PAUSE_NS on (design/rubrics.md M3: the wait ends in finite time).  Every other change a turn takes
+   wakes the loop where it happens (wake, a socket, a signal and an exit on the queue), so a turn comes at the change
+   or at the time it waits for, where a fixed tick (250 ms) took each such time up to a tick late; a client slot taken
+   or left is read at the next turn, whatever woke it (clients_turn) */
 static inline void due_at(uint64_t *due,uint64_t at){ if(at>now && at<*due)*due=at; }
 static uint64_t turn_due(uint64_t liveness){
-  uint64_t due=MIN(liveness,now+MESH_PAUSE_NS);
+  uint64_t due=now+MESH_PAUSE_NS;
+  due_at(&due,node_due());
+  if(node.state!=NODE_SETTLING && node.state!=NODE_RUNNING)return due;
+  due=MIN(due,liveness);
   due_at(&due,health_due());
   if(find_wanted)due_at(&due,windows_end());
   due_at(&due,atomic_load(&exit_at));
@@ -2107,6 +2110,141 @@ static uint64_t turn_due(uint64_t liveness){
     if(port->link.job)due_at(&due,port->link.job_at+MESH_PLATFORM_NS);
   }
   return due;
+}
+
+/* the node started, SETTLING (an adopted region's at ADOPTING's end, one made new at once): an adopted region's bridge
+   state given back (region_adopt), then the node's record, its pool and switch, its sockets read on the loop and
+   `bridge_pid` set last, so no client reads it as live before; then SETTLING's IOKit read: the peer interfaces' terminations heard from here on (B9b), IOKit's
+   registry waited quiet before the devices' first read (no termination in its course, B9: XNU's waitForState, its
+   deadline MESH_PLATFORM_NS), else read as they stand at the bound */
+static void node_start(int adopted){
+  if(adopted)region_adopt();
+  /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
+  M->node=node.id;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
+  finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
+  /* the pool (its carve the record's region) and the switch before the record and the map's lease */
+  pool_make();
+  switch_make();
+  /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
+  size_t size=sizeof memory;
+  if(sysctlbyname("hw.memsize",&memory,&size,NULL,0))memory=0;
+  sysctl_text("hw.model",model,sizeof model);
+  health_init();
+  record_changed();
+  if(!atomic_load(&M->map_nodes))die("the map's lease");
+  switch_policy_load();
+  struct kevent64_s event;
+  int watched[4]={listener,hello,network,addresses};
+  for(int i=0;i<4 && watched[i]>=0;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
+  EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
+  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
+  mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
+  atomic_store(&M->bridge_pid,(uint64_t)getpid());
+  __sync_synchronize();M->magic=MESH_MAGIC;
+  /* the policy's refresh, where a theta is loaded, at the progress threads' class: its SWITCH_REFRESH_NS pause near
+     its length (at the default class the system's timer slack made 50 us about 460 us) */
+  if(switch_policy_on){
+    pthread_t refresher;
+    pthread_attr_t refreshing;pthread_attr_init(&refreshing);pthread_attr_set_qos_class_np(&refreshing,QOS_CLASS_USER_INTERACTIVE,0);
+    if(pthread_create(&refresher,&refreshing,switch_watch,NULL))die("the switch's policy refresh");
+    pthread_attr_destroy(&refreshing);
+  }
+  node.state=NODE_SETTLING;
+  terminations_watch(1);
+  mach_timespec_t quiet={(unsigned)(MESH_PLATFORM_NS/1000000000u),(clock_res_t)(MESH_PLATFORM_NS%1000000000u)};
+  const kern_return_t busy=IOKitWaitQuiet(kIOMainPortDefault,&quiet);
+  if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node.id,
+              (double)MESH_PLATFORM_NS/1e9,(unsigned)busy);
+  ports_find();
+}
+/* NODE_ADOPTING's read of the children of the bridge before (the region's processes, mesh-observe.h `child`): each live
+   one's exit watched on the loop's queue (mesh-observe.h mesh_exits_watch, TAG_ADOPT), each exit a read again, and the
+   node started once none lives; at the state's bound (`due`) one still alive ends this bridge, which its heartbeat
+   opens again */
+static void adopting_read(int due){
+  node.adopting=mesh_exits_watch(events,node.children,node.adopting,TAG_ADOPT);
+  if(!node.adopting){node_start(1);return;}
+  if(!due)return;
+  say("bridge: %u children of the bridge before live %.0f s on: this bridge ends, and its heartbeat opens one again\n",
+      node.adopting,(double)(2*MESH_PLATFORM_NS)/1e9);
+  exit(1);
+}
+/* design/transport.md: the stop (NODE_STOPPING), at stop signal `code`: every child halted (CHILD_HALT: no post on its
+   lanes once its peer can read the loss), every control socket closed (the kernel sends what it has after the close;
+   the peer reads the stop as the socket's end), every lane no draw's (lanes_cancel; what the lanes have the next
+   bridge's adoption gives back: region_adopt), `bridge_pid` 0 (every stop keeps the region for the next bridge to
+   adopt; a release is the heartbeat's, which expires the region once this bridge has ended: mesh-heartbeat.c
+   region_expire), and no peer heard or dialed again (the listener's, the hellos' and the addresses' filters deleted).
+   No queue, thread or verbs call is waited on, and every object is the kernel's to release at the children's exits
+   (design/RDMA-KERNEL-RECOVERY.md "October 18"), the first of them asked no sooner than every port's quiet window ends
+   (B9: its reclaim never inside the termination a conclusion may follow) and a peer interface's termination's
+   (`exit_at`, B9b), the loop serving the children's sockets, the clients' exits and the kernel's link events meanwhile
+   (a link going off extends its port's window, network_heard, as a termination extends them all, peer_terminated),
+   each no later than MESH_PLATFORM_NS past the stop's start (`due`: every window set before the stop ends by then, so
+   the wait is the one 5 s budget, well inside its heartbeat's bound of 3 MESH_PLATFORM_NS) */
+static void node_stop(int64_t code){
+  char why[96];stop_text(code,why,sizeof why);
+  say("bridge node %u: stopping (%s)\n",node.id,why);
+  for(uint32_t p=0;p<port_count;p++){
+    child_send(ports+p,(struct child_message){.kind=CHILD_HALT});
+    if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
+  }
+  lanes_cancel(NULL);
+  atomic_store(&M->bridge_pid,0);
+  const int unheard[]={listener,hello,addresses};
+  for(size_t i=0;i<sizeof unheard/sizeof *unheard;i++)if(unheard[i]>=0){
+    struct kevent64_s event;EV_SET64(&event,(uint64_t)unheard[i],EVFILT_READ,EV_DELETE,0,0,0,0,0);
+    kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+  }
+  node.state=NODE_STOPPING;node.due=clock_ns()+MESH_PLATFORM_NS;
+  const uint64_t at=clock_ns(),latest=MIN(windows_end(),node.due);
+  if(latest>at)say("bridge node %u: its exit put off %.1f s, to its quiet windows' end (design/transport.md)\n",node.id,
+                   (double)(latest-at)/1e9);
+}
+/* NODE_ENDING ended (`due`: at its bound): the bridge exits once no child of it is left, its children still alive at the
+   bound counted in the log (the next bridge's ADOPTING waits for those whose exit has not begun, and nothing waits for
+   one already in its exit) */
+static void node_ended(int due){
+  uint32_t alive=0;
+  for(uint32_t p=0;p<port_count;p++)alive+=ports[p].child!=0;
+  if(alive && !due)return;
+  if(alive)say("bridge node %u: %u of its children alive %.1f s after they were asked to end (the next bridge waits for "
+               "those not yet in their exit)\n",node.id,alive,(double)MESH_PLATFORM_NS/1e9);
+  exit(0);
+}
+/* design/transport.md section 14, "A process a port": the end (NODE_ENDING), once the stop's windows have ended: each
+   child asked to end (its own windows its own: child_leave), and the bridge ended once every one is reaped
+   (child_reaped, on the loop: its NOTE_EXIT, then its exit seen through to its end), at most MESH_PLATFORM_NS on, so
+   no child of this launch has its device's queue pairs as the next launch's children make theirs.  This end stays
+   beside the next bridge's ADOPTING and child_elsewhere because it alone sees an exit through to its end: a process in
+   its exit is no longer found by its pid, before the kernel releases its device's objects (design/transport.md section
+   2), so neither of those sees a child of this launch whose exit has begun and not ended */
+static void node_end(void){
+  node.state=NODE_ENDING;node.due=clock_ns()+MESH_PLATFORM_NS;
+  for(uint32_t p=0;p<port_count;p++)if(ports[p].child){ports[p].ending=1;child_send(ports+p,(struct child_message){.kind=CHILD_END});}
+  node_ended(0);
+}
+/* design/transport.md section 2: the node's one transition function (enum node_state), event `event` taken in the
+   current state: a stop signal (`code` its number), an exit the state waits on (ADOPTING: a child of the bridge
+   before; ENDING: a child of this one, reaped), the devices' first read in (SETTLING), the state's deadline (node_due) */
+static void node_step(enum node_event event,int64_t code){
+  switch(node.state){
+  case NODE_ADOPTING:
+    if(event==NODE_EXIT || event==NODE_DUE)adopting_read(event==NODE_DUE);
+    else if(event==NODE_STOP)node_stop(code);
+    return;
+  case NODE_SETTLING:
+  case NODE_RUNNING:
+    if(event==NODE_FOUND)node.state=NODE_RUNNING;
+    else if(event==NODE_STOP)node_stop(code);
+    return;
+  case NODE_STOPPING:
+    if(event==NODE_DUE)node_end();
+    return;
+  case NODE_ENDING:
+    if(event==NODE_EXIT || event==NODE_DUE)node_ended(event==NODE_DUE);
+    return;
+  }
 }
 
 /* design/transport.md: the node's resident bridge; its one operand the path of its configuration (no default); a port's
@@ -2125,19 +2263,18 @@ int main(int argc,char **argv){
      added before its default is ignored, so none is lost (one arriving before takes its default action, before anything
      shared is made) */
   struct kevent64_s event;
-  static const int stopping[]={SIGINT,SIGTERM,SIGHUP,SIGQUIT,SIGUSR1,SIGUSR2,SIGALRM,SIGVTALRM,SIGPROF,SIGXCPU,SIGXFSZ};
+  static const int stopping_signals[]={SIGINT,SIGTERM,SIGHUP,SIGQUIT,SIGUSR1,SIGUSR2,SIGALRM,SIGVTALRM,SIGPROF,SIGXCPU,SIGXFSZ};
   if((events=kqueue())<0)die("bridge events");
-  for(size_t i=0;i<sizeof stopping/sizeof *stopping;i++){
-    EV_SET64(&event,(uint64_t)stopping[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
+  for(size_t i=0;i<sizeof stopping_signals/sizeof *stopping_signals;i++){
+    EV_SET64(&event,(uint64_t)stopping_signals[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
     if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
-    signal(stopping[i],SIG_IGN);
+    signal(stopping_signals[i],SIG_IGN);
   }
   signal(SIGPIPE,SIG_IGN);
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
-  uint32_t node=0;
-  for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
-  node=(node&0x7fffffffu)?node&0x7fffffffu:1;
+  for(int i=0;i<16;i++)node.id=(node.id*0x01000193u)^uuid[i];
+  node.id=(node.id&0x7fffffffu)?node.id&0x7fffffffu:1;
   /* design/transport.md: the node's hello port, the mesh's */
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
   const uint32_t pg=(uint32_t)getpagesize();
@@ -2168,74 +2305,45 @@ int main(int argc,char **argv){
   }
   int fd=-1;
   const int adopted=region_open(&geometry,&fd);
-  if(adopted)region_adopt();
-  /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
-  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
-  say("bridge node %u: region %s %s\n",node,MESH_NAME,adopted?"adopted from the bridge before this one (its clients' indices and pages stand)":"made new");
+  say("bridge node %u: region %s %s\n",node.id,MESH_NAME,adopted?"adopted from the bridge before this one (its clients' indices and pages stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;
-  finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
-  /* the pool (its carve the record's region) and the switch before the record and the map's lease */
-  pool_make();
-  switch_make();
-  /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
-  size_t size=sizeof memory;
-  if(sysctlbyname("hw.memsize",&memory,&size,NULL,0))memory=0;
-  sysctl_text("hw.model",model,sizeof model);
-  health_init();
-  record_changed();
-  if(!atomic_load(&M->map_nodes))die("the map's lease");
-  switch_policy_load();
-  int watched[4]={listener,hello,network,addresses};
-  for(int i=0;i<4 && watched[i]>=0;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
-  EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
-  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
-  mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
-  atomic_store(&M->bridge_pid,(uint64_t)getpid());
-  __sync_synchronize();M->magic=MESH_MAGIC;
-  /* the policy's refresh, where a theta is loaded, at the progress threads' class: its SWITCH_REFRESH_NS pause near
-     its length (at the default class the system's timer slack made 50 us about 460 us) */
-  if(switch_policy_on){
-    pthread_t refresher;
-    pthread_attr_t refreshing;pthread_attr_init(&refreshing);pthread_attr_set_qos_class_np(&refreshing,QOS_CLASS_USER_INTERACTIVE,0);
-    if(pthread_create(&refresher,&refreshing,switch_watch,NULL))die("the switch's policy refresh");
-    pthread_attr_destroy(&refreshing);
-  }
-  /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
-     once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
-     else as they stand at the bound */
-  terminations_watch(1);
-  mach_timespec_t quiet={(unsigned)(MESH_PLATFORM_NS/1000000000u),(clock_res_t)(MESH_PLATFORM_NS%1000000000u)};
-  const kern_return_t busy=IOKitWaitQuiet(kIOMainPortDefault,&quiet);
-  if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node,
-              (double)MESH_PLATFORM_NS/1e9,(unsigned)busy);
-  ports_find();
-  say("bridge node %u: configuration %s, region %llu bytes, arena %llu pages, page table %u entries\n",node,name,
+  say("bridge node %u: configuration %s, region %llu bytes, arena %llu pages, page table %u entries\n",node.id,name,
       (unsigned long long)region_bytes,(unsigned long long)mesh_arena_pages(M),M->entries);
+  /* an adopted region's node starts once the children of the bridge before have exited (NODE_ADOPTING); a region made
+     new starts at once */
+  if(adopted){
+    memcpy(node.children,mesh_bridge_pages(M)->child,sizeof node.children);
+    node.adopting=2*MESH_PORTS;node.state=NODE_ADOPTING;node.due=clock_ns()+2*MESH_PLATFORM_NS;
+    adopting_read(0);
+  }
+  else node_start(0);
   uint64_t liveness=0;
-  while(!stop){
+  for(;;){
     now=clock_ns();
-    if(atomic_load_explicit(&found,memory_order_acquire))ports_found();
-    terminations_turn();
-    arrivals_turn();
-    ports_stalled();
-    if(find_wanted && !finding && !atomic_load_explicit(&stalled,memory_order_relaxed) && now>=windows_end()){find_wanted=0;ports_find();}
-    for(uint32_t p=0;p<port_count;p++){
-      struct port *port=ports+p;
-      if(port->job && atomic_load_explicit(&port->done,memory_order_acquire))port_opened(port);
-      port_open(port);
-      port_hello(port);
-      link_turn(port);
-      child_turn(port);
+    if(now>=node_due())node_step(NODE_DUE,0);
+    if(node.state==NODE_SETTLING || node.state==NODE_RUNNING){
+      if(atomic_load_explicit(&found,memory_order_acquire)){ports_found();node_step(NODE_FOUND,0);}
+      terminations_turn();
+      arrivals_turn();
+      ports_stalled();
+      if(find_wanted && !finding && !atomic_load_explicit(&stalled,memory_order_relaxed) && now>=windows_end()){find_wanted=0;ports_find();}
+      for(uint32_t p=0;p<port_count;p++){
+        struct port *port=ports+p;
+        if(port->job && atomic_load_explicit(&port->done,memory_order_acquire))port_opened(port);
+        port_open(port);
+        port_hello(port);
+        link_turn(port);
+        child_turn(port);
+      }
+      health_turn();
+      if(now>=liveness){
+        liveness=now+MESH_PAUSE_NS;
+        record_retell();
+      }
     }
-    health_turn();
-    int alive=now>=liveness;
-    if(alive){
-      liveness=now+MESH_PAUSE_NS;
-      record_retell();
-    }
-    clients_turn();
+    if(node.state!=NODE_ADOPTING)clients_turn();
     struct kevent64_s ready[16];
     const uint64_t due=turn_due(liveness),at=clock_ns(),rest=due>at?due-at:0;
     struct timespec tick={(time_t)(rest/1000000000u),(long)(rest%1000000000u)};
@@ -2243,11 +2351,12 @@ int main(int argc,char **argv){
     now=clock_ns();
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
-      if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
+      if(e->filter==EVFILT_SIGNAL)node_step(NODE_STOP,(int64_t)e->ident);
+      else if(e->filter==EVFILT_PROC && e->udata==TAG_ADOPT)node_step(NODE_EXIT,0);
       /* design/transport.md section 14, "A process a port": a port's child's message or exit */
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_CHILD)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
-        if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child)child_reaped(port);
+        if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child){child_reaped(port);node_step(NODE_EXIT,0);}
         else if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->elsewhere)port->elsewhere=0;
         else if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
       }
@@ -2257,6 +2366,10 @@ int main(int argc,char **argv){
           if(owner && (uint32_t)owner==(uint32_t)e->ident)mesh_leave(M,owner);
         }
       }
+      else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard();
+      /* peers heard and dialed while the node serves: from the stop on their filters are deleted (node_stop), and an
+         event of theirs taken in the stop's batch is let be */
+      else if(stopping()){}
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)listener){
         struct sockaddr_in6 from;socklen_t size=sizeof from;int accepted;
         while((accepted=accept(listener,(struct sockaddr *)&from,&size))>=0){
@@ -2267,7 +2380,6 @@ int main(int argc,char **argv){
         }
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
-      else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard(0);
       else if(e->filter==EVFILT_READ && addresses>=0 && e->ident==(uint64_t)addresses)addresses_heard();
       else if(e->udata<port_count && (int)e->ident==ports[e->udata].control){
         struct port *port=ports+e->udata;
@@ -2282,54 +2394,4 @@ int main(int argc,char **argv){
       }
     }
   }
-  char why[96];farewell_text(stop_reason,why,sizeof why);
-  say("bridge node %u: stopping (%s)\n",node,why);
-  /* design/transport.md: FAREWELL on every control socket (queued as the socket takes it; the kernel sends
-     what it has after the close), every lane no draw's, then the bridge ends (what its lanes have the next bridge's
-     adoption gives back: region_adopt); no queue, thread or verbs call waited on, and every object the kernel's to release at the exit
-     (design/RDMA-KERNEL-RECOVERY.md "October 18"), the exit no sooner than every port's quiet window ends
-     (design/transport.md B9: its reclaim never inside the termination a conclusion may follow) and a peer
-     interface's termination's (`exit_at`, B9b), the kernel's link events read meanwhile, so a link going off then
-     extends its port's (network_heard), as a termination then extends them all (peer_terminated), each no later than
-     MESH_PLATFORM_NS past the stop's start (`exit_by`: every window set before the stop ends by then, so the wait is
-     the one 5 s budget, well inside its heartbeat's bound of 3 MESH_PLATFORM_NS) */
-  for(uint32_t p=0;p<port_count;p++){
-    child_send(ports+p,(struct child_message){.kind=CHILD_HALT});
-    port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
-    if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
-  }
-  lanes_cancel(NULL);
-  /* design/transport.md section 2: every stop keeps the region for the next bridge to adopt; a release is the
-     heartbeat's, which expires the region once this bridge has ended (mesh-heartbeat.c region_expire) */
-  atomic_store(&M->bridge_pid,0);
-  const uint64_t exit_by=clock_ns()+MESH_PLATFORM_NS;
-  for(int told=0;;){
-    now=clock_ns();
-    const uint64_t windows=windows_end(),latest=MIN(windows,exit_by);
-    if(latest<=now)break;
-    if(!told++)say("bridge node %u: its exit put off %.1f s, to its quiet windows' end (design/transport.md)\n",node,
-                   (double)(latest-now)/1e9);
-    struct pollfd heard={.fd=network,.events=POLLIN};
-    if(poll(&heard,1,(int)((latest-now+999999)/1000000))>0){now=clock_ns();network_heard(1);}
-  }
-  /* design/transport.md section 14, "A process a port": each child asked to end, and its exit waited on, at most
-     MESH_PLATFORM_NS (its own windows its own: child_leave), so no child of this launch has its device's queue pairs
-     as the next launch's children make theirs: each exit heard on a queue of the children's exits alone, and a child
-     counted exited only once its exit is whole (mesh-observe.h mesh_exits_wait: this bridge is its parent).  This
-     wait stays beside the next bridge's region_children and child_elsewhere because it alone sees an exit through to
-     its end: a process in its exit is no longer found by its pid, before the kernel releases its device's objects
-     (design/transport.md section 2), so neither of those sees a child of this launch whose exit has begun and not
-     ended.  Children still alive at the bound are counted in the log; the next bridge waits only for those whose exit
-     has not begun (region_children, which ends that bridge where one outlives its own bound), and nothing waits for
-     one already in its exit */
-  for(uint32_t p=0;p<port_count;p++)child_send(ports+p,(struct child_message){.kind=CHILD_END});
-  struct mesh_process children[MESH_PORTS];
-  uint32_t count=0;
-  for(uint32_t p=0;p<port_count;p++)if(ports[p].child)children[count++]=mesh_bridge_pages(M)->child[ports[p].child_entry];
-  const int exits=kqueue();
-  if(exits<0)die("bridge: no queue for its children's exits");
-  const uint32_t alive=mesh_exits_wait(exits,children,count,0,clock_ns()+MESH_PLATFORM_NS);
-  if(alive)say("bridge node %u: %u of its children alive %.1f s after they were asked to end (the next bridge waits for "
-               "those not yet in their exit)\n",node,alive,(double)MESH_PLATFORM_NS/1e9);
-  return 0;
 }
