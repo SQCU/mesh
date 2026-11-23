@@ -981,14 +981,15 @@ static int destination(struct channel_phase *m, int rank, struct mesh_dest *out)
   return 0;
 }
 
-/* Allocate and advertise the next distinct extent as the reader advances. The current
-   extent stays owned until the reader has consumed every page in it. */
+/* Publish a new range only when this message has a page in it: observing its address
+   then precedes the sending rank's return. The prior range stays leased through its last read. */
 static int extend_receive(struct channel_phase *m, int r) {
   struct ncclComm *comm = m->call->comm;
   struct channel *ch = m->channel;
   struct peer_pages *peer = ch->peer + r;
   uint32_t count = comm->extent_pages;
-  if (peer->receive.used < (count + 1) / 2) return 0;
+  const uint32_t used = peer->receive.used;
+  if (used < (count + 1) / 2 || peer->due - peer->low <= count - used) return 0;
   if (peer->next_receive == MESH_ABSENT) {
     peer->next_receive = mesh_pages(ch->context, count, 0);
     if (peer->next_receive == MESH_ABSENT) return errno;
