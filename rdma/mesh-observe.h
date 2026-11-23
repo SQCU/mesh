@@ -10,6 +10,7 @@
 #include <time.h>
 #include <sys/event.h>
 #include <sys/wait.h>
+#include <sysexits.h>
 /* a port's lane records: port p's are the region's p MESH_LINK_STREAMS to p MESH_LINK_STREAMS + MESH_LINK_STREAMS - 1
    (mesh.h) */
 _Static_assert(MESH_PORTS*MESH_LINK_STREAMS==MESH_STREAMS,"a port's lane records");
@@ -51,7 +52,8 @@ static inline int mesh_lives(struct mesh_process process){
    nanoseconds) has come, each exit is taken from the queue and every process read again; an `until` of 0, or one
    already past, waits for none, and the caller's own loop hears the exits.  The live processes are moved to the
    front of `processes`, as they were given, and their count returned.  A live process whose exit cannot be watched ends
-   the caller (abort), so no caller waits on an exit that no event will tell */
+   the caller (EX_OSERR: an exit, never an abort, whose crash report would write to storage), so no caller waits on an
+   exit that no event will tell */
 static inline uint32_t mesh_exits_wait(int queue,struct mesh_process *processes,uint32_t count,uint64_t tag,uint64_t until){
   uint32_t alive=0;
   for(uint32_t k=0;k<count;k++){
@@ -59,7 +61,7 @@ static inline uint32_t mesh_exits_wait(int queue,struct mesh_process *processes,
     struct kevent64_s watch;
     EV_SET64(&watch,processes[k].pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,tag,0,0);
     if(kevent64(queue,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){
-      if(errno!=ESRCH)abort();
+      if(errno!=ESRCH)exit(EX_OSERR);
       if(!mesh_lives(processes[k]))continue;
     }
     processes[alive++]=processes[k];
