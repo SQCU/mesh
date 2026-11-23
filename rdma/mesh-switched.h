@@ -563,13 +563,21 @@ static inline void mesh_switch_ports_read(struct mesh_switch *sw,uint64_t *line)
   for(uint32_t p=0;p<MESH_PORTS;p++)line[p]=atomic_load_explicit(&sw->port[p],memory_order_acquire);
 }
 /* a serving cable's terms as a draw reads them (mesh_switch_terms_read): the time its bytes queued take to drain
-   (`backlog`, ns: over its measured rate) and, for each class, a page's own time on it (`own`, ns: its measured time
-   alone).  Where a measure is not made yet, its link's nominal ones in the view (a cable's share of the link's rate,
-   and its latency) stand in: the nominal rate for the rate; for a page's time, its frames over the measured rate where
-   there is one (a long page alone takes about that: 3.92-3.96 us against 36 KiB at 9.25 GB/s), else over the nominal
-   rate plus the nominal latency */
+   (`backlog`, ns: over its own measured rate) and, for each class, a page's own time on its link (`own`, ns): the
+   least measured time alone over the serving cables toward the same peer, every cable of a link the same one.  A
+   cable's time alone is measured only from a SEND it carried alone (mesh_switch_cable_sent), so a cable kept by its
+   own time is drawn by none and its measure never made again: B's port 3 toward A held 8958 ns for a short page against
+   2696-2970 ns on its two siblings, and B's ports 0 and 1 toward A, the same cable, differed by 10% (2970 against
+   2696), so every page went to the lesser one whichever child took it, each one through an inbound ring to another
+   child's pass (2-rank 6 KB calls 0.6-0.9 us slower, the post wait 0.47 to 0.91 us).  Of one link's cables the times
+   now differ by their backlogs alone, so at none the taking child's own port is drawn (mesh_switch_cables_toward) and
+   the page is posted in the pass that took it.  Where a measure is not made yet, its link's nominal ones in the view (a
+   cable's share of the link's rate, and its latency) stand in: the nominal rate for the rate; for a page's time, its
+   frames over the measured rate where there is one (a long page alone takes about that: 3.92-3.96 us against 36 KiB at
+   9.25 GB/s), else over the nominal rate plus the nominal latency */
 struct mesh_switch_terms { double backlog,own[MESH_CLASSES]; };
 static inline void mesh_switch_terms_read(struct mesh_switch *sw,const struct mesh_switch_view *v,const uint64_t *line,struct mesh_switch_terms *t){
+  double alone[MESH_PORTS][MESH_CLASSES];
   for(uint32_t p=0;p<MESH_PORTS;p++){
     if(mesh_port_state(line[p])!=CHILD_SERVING)continue;
     const struct mesh_switch_cable *x=sw->cable+p;
@@ -579,7 +587,18 @@ static inline void mesh_switch_terms_read(struct mesh_switch *sw,const struct me
     t[p].backlog=(double)atomic_load_explicit(&x->queued,memory_order_relaxed)/rate;
     for(uint32_t c=0;c<MESH_CLASSES;c++){
       const double page=atomic_load_explicit(&x->page[c],memory_order_relaxed),bytes=(double)mesh_switch_class_frames(c)*MESH_FRAME;
-      t[p].own[c]=page>0?page:measured>0?bytes/measured:bytes/rate+latency;
+      alone[p][c]=page>0?page:INFINITY;
+      t[p].own[c]=measured>0?bytes/measured:bytes/rate+latency;
+    }
+  }
+  /* each cable's own time its link's: the least measured over the serving cables toward its peer, else its stand-in */
+  for(uint32_t p=0;p<MESH_PORTS;p++){
+    if(mesh_port_state(line[p])!=CHILD_SERVING)continue;
+    for(uint32_t c=0;c<MESH_CLASSES;c++){
+      double least=INFINITY;
+      for(uint32_t q=0;q<MESH_PORTS;q++)
+        if(mesh_port_state(line[q])==CHILD_SERVING && mesh_port_peer(line[q])==mesh_port_peer(line[p]) && alone[q][c]<least)least=alone[q][c];
+      if(least<INFINITY)t[p].own[c]=least;
     }
   }
 }
