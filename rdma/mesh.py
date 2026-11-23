@@ -416,18 +416,11 @@ class PlanFlowGeometry(C.Structure):
                 ('local', C.POINTER(U)), ('lead', C.POINTER(Q)), ('comm', C.POINTER(Q)), ('comms', Q),
                 ('demand', C.POINTER(PlanDemandGeometry)), ('entry', C.POINTER(PlanEntry)),
                 ('entries', Q), ('receives', Q), ('toward', Q), ('group_bytes', Q), ('forwarded', Q),
-                ('ranges', U), ('consumed', U), ('sending', U), ('page', C.POINTER(D)),
-                ('time', D * NODES_MOST), ('mapped', C.c_void_p)]
+                ('ranges', U), ('consumed', U), ('sending', U), ('mapped', C.c_void_p)]
 
 
 class ViewId(C.Structure):
     _fields_ = [('id', Q), ('sequencer', U), ('padding', U), ('boot', Q)]
-
-
-class PlanLinks(C.Structure):
-    _fields_ = [('pairs', U), ('from', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
-                ('to', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
-                ('arc', (U * NODES_MOST) * NODES_MOST), ('rate', D * (NODES_MOST * (NODES_MOST - 1)))]
 
 
 PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINTER(Declared)), ('transfers', U),
@@ -441,7 +434,7 @@ PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINT
                 ('block_first', C.POINTER(U)), ('block_set', C.POINTER(U)), ('block_element', C.POINTER(U)),
                 ('weights', C.POINTER(Weight)), ('dependence', C.POINTER(Dependence)), ('dependences', U),
                 ('demand', C.POINTER(PlanDemand)), ('demands', U), ('n', U), ('self', U), ('copies', U),
-                ('start_lead', U), ('view', ViewId), ('of', C.POINTER(U)), ('own', Grouped), ('links', C.POINTER(PlanLinks)),
+                ('start_lead', U), ('view', ViewId), ('of', C.POINTER(U)), ('own', Grouped),
                 ('parent', C.POINTER(U)), ('run', C.POINTER(Q)), ('made', U),
                 ('members', C.POINTER(Q)), ('span', C.POINTER(mesh_graph.Interval)),
                 ('releases', Q), ('blocks', Q), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
@@ -473,7 +466,7 @@ PlanAnalysis._fields_ = [
     ('carried', C.POINTER(C.c_ubyte)),
     ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p),
     ('occurrence', SourceOccurrences), ('later', C.POINTER(U)), ('lag', C.POINTER(Q)),
-    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence)), ('links', PlanLinks)]
+    ('nsubmissions', Z), ('submissions', C.POINTER(mesh_graph.Dependence))]
 
 
 class PlanSync(C.Structure):
@@ -495,9 +488,9 @@ class PlanAccessQuery(C.Structure):
 PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlowGeometry)), ('function', C.POINTER(Function)),
                 ('first', U), ('tasks', U), ('instructions', U), ('edges', Z), ('entries', Z),
                 ('dependencies', Z), ('reader', C.POINTER(U)), ('consumer', C.POINTER(PlanSpan)),
-                ('w', C.POINTER(D)), ('cost', C.POINTER(D)), ('rate', C.POINTER(D)),
+                ('w', C.POINTER(D)), ('cost', C.POINTER(D)),
                 ('completion', C.POINTER(D)), ('completed', C.POINTER(D)), ('resource', C.POINTER(U)),
-                ('from', C.POINTER(U)), ('to', C.POINTER(U)), ('link', C.POINTER(U)),
+                ('from', C.POINTER(U)), ('to', C.POINTER(U)),
                 ('communication', C.POINTER(U)), ('before', C.POINTER(U)), ('after', C.POINTER(U)),
                 ('place', C.POINTER(U)), ('route', C.POINTER(Z)), ('owned', C.POINTER(PlanAnalysis)),
                 ('accesses', Z), ('access', C.POINTER(mesh_graph.Viewed)), ('access_relation', C.c_void_p),

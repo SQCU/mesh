@@ -298,7 +298,6 @@ struct mesh_plan_flow_geometry {
   struct mesh_plan_entry *entry;
   uint64_t entries,receives,toward,group_bytes,forwarded;
   uint32_t ranges,consumed,sending;
-  double *page,time[MESH_NODES_MOST];
   const void *mapped;
 };
 int mesh_plan_flow_geometry(const struct mesh_plan_flow *,const struct mesh_plan_cuts *const *,
@@ -306,11 +305,6 @@ int mesh_plan_flow_geometry(const struct mesh_plan_flow *,const struct mesh_plan
 void mesh_plan_flow_geometry_retain(struct mesh_plan_flow_geometry *);
 void mesh_plan_flow_geometry_free(struct mesh_plan_flow_geometry *);
 struct mesh_plan_slot { uint32_t root,local; };
-struct mesh_plan_links {
-  uint32_t pairs,from[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1],to[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
-  uint32_t arc[MESH_NODES_MOST][MESH_NODES_MOST];
-  double rate[MESH_NODES_MOST*(MESH_NODES_MOST-1)];
-};
 struct mesh_plan_flow {
   const struct mesh_plan_geometry *geometry;
   const struct mesh_declared *declared;
@@ -338,7 +332,6 @@ struct mesh_plan_flow {
      where the caller gave none, held until plan_free) */
   const uint32_t *of;
   struct mesh_grouped own;
-  const struct mesh_plan_links *links;
   uint32_t *parent;
   uint64_t *run;
   uint32_t made;
@@ -420,7 +413,6 @@ struct mesh_plan_analysis {
   uint64_t *lag;
   size_t nsubmissions;
   struct mesh_graph_dependence *submissions;
-  struct mesh_plan_links links;
 };
 
 void mesh_plan_analysis_retain(struct mesh_plan_analysis *);
@@ -452,8 +444,8 @@ struct plan_schedule_result {
   size_t edges,entries,dependencies;
   uint32_t *reader;
   struct plan_span *consumer;
-  double *w,*cost;const double *rate;double *completion,*completed;
-  uint32_t *resource,*from,*to,*link,*communication,*before,*after,*place;
+  double *w,*cost,*completion,*completed;
+  uint32_t *resource,*from,*to,*communication,*before,*after,*place;
   size_t *route;
   struct mesh_plan_analysis *owned;
   size_t accesses;
