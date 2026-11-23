@@ -1152,7 +1152,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None, *, fix
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
-def partition(graph_module: torch.fx.GraphModule, placement, *, fixed_sites=False) -> torch.fx.GraphModule:
+def partition(graph_module: torch.fx.GraphModule, placement, *, fixed_sites=False, input_sites=()) -> torch.fx.GraphModule:
     original = graph_module
     graph_module, copied = derived_graph(original)
     graph = graph_module.graph
@@ -1166,6 +1166,8 @@ def partition(graph_module: torch.fx.GraphModule, placement, *, fixed_sites=Fals
     for node in nodes:
         if node.op == "placeholder":
             node.meta["stated"] = stated[node]
+            if node.name in input_sites:
+                node.meta["processor"] = input_sites[node.name]
         elif "site" not in node.meta and isinstance(node.target, torch._ops.OpOverload) and (
                 torch.Tag.nondeterministic_seeded in node.target.tags or node.target.overloadpacket in drawing):
             node.meta["site"] = next(draw_sites)
@@ -1242,8 +1244,12 @@ def partition(graph_module: torch.fx.GraphModule, placement, *, fixed_sites=Fals
         if taken:
             replaced.append(node)
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
-            value = (held[0] if taken else (None, None, (None,), [node]) if node.op == "placeholder" else
-                     partitioned(graph, node, held, want, replaced, whole, statement, fixed_sites=fixed_sites))
+            if node.op == "placeholder":
+                site = input_sites[node.name] if node.name in input_sites else None
+                value = None, None, (site,), [node]
+            else:
+                value = held[0] if taken else partitioned(graph, node, held, want, replaced, whole, statement,
+                                                         fixed_sites=fixed_sites)
         if resharded is not None and not isinstance(resharded, str) and value[:3] != resharded:
             with graph.inserting_before(placed[0] if node.op == "placeholder" else node.next):
                 value = *resharded, reshard(graph, plainly(graph, value), *resharded)
@@ -1332,10 +1338,10 @@ def partition(graph_module: torch.fx.GraphModule, placement, *, fixed_sites=Fals
     return graph_module
 
 
-def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None, fixed_sites=False) -> torch.fx.GraphModule:
-    graph_module = partition(graph_module, placement, fixed_sites=fixed_sites)
+def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None, fixed_sites=False, input_sites=()) -> torch.fx.GraphModule:
+    graph_module = partition(graph_module, placement, fixed_sites=fixed_sites, input_sites=input_sites)
     graph = graph_module.graph
-    placed = [n for n in graph.nodes if n.op != "placeholder"]
+    placed = [n for n in graph.nodes if n.op != "placeholder" or n.name in input_sites]
     transfers, instances = {}, {}
     for node in placed:
         transfers.update(insert_send_recv(graph, node, len(transfers), instances, transfer))
