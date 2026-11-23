@@ -346,7 +346,7 @@ class UnitSlice(C.Structure):
 
 
 class Observed(C.Structure):
-    _fields_ = [('seconds', C.c_double), ('executions', mesh.Q), ('residue', mesh.Q)]
+    _fields_ = [('seconds', C.c_double), ('executions', mesh.Q), ('residue', mesh.Q), ('start_ns', mesh.Q)]
 
 
 # metal_recording.h struct MetalArgument (an invocation operand) and struct MetalExternalUse (an operand's uses)

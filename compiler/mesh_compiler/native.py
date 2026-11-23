@@ -42,6 +42,7 @@ class Observation:
     identities: tuple
     executions: int
     sample_seconds: float
+    start_ns: int
 
 
 def observations(lib, program):
@@ -60,7 +61,7 @@ def observations(lib, program):
                 made_.append(Observation(unit[u].kind, unit[u].call, unit[u].site, got.residue,
                                          tuple(members[part.member:part.member + part.count]),
                                          tuple(identities[part.identity:part.identity + part.identities]),
-                                         got.executions, got.seconds))
+                                         got.executions, got.seconds, got.start_ns))
     return made_
 
 
