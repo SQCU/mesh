@@ -127,7 +127,7 @@ struct link {
    of the plan in `lanes`), connect them to the peer's (CHILD_CONNECT: the peer's lanes, address, node and the link's
    bandwidth); and end (CHILD_HALT, the child's one end, its reason in `result`: 0 the bridge stopping, so the child
    exits once its own windows have ended; else the code its link was lost with, so it exits MESH_PLATFORM_NS on and
-   once its windows have ended: mesh-link.c child_end).  The child's: the device opened or not (CHILD_OPENED: its
+   once its windows have ended: mesh-link.c end_step).  The child's: the device opened or not (CHILD_OPENED: its
    address and bandwidth, and in `lanes` the queue pairs the device has for a link), the lanes made or not
    (CHILD_MADE: each lane's queue pair number, the first sequence number and each lane's share), connected or not
    (CHILD_CONNECTED); and its own halt (CHILD_BROKEN, once in its life, its reason in `result`: EIO a lane's or a

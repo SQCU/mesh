@@ -678,7 +678,7 @@ static int lanes_open(struct link *l,uint32_t node,uint64_t bandwidth){
    The line is raised here, before the poller exists and before the child answers its connect, so the parent's record
    of the link (record_reach) and its node table (switch_view), each made as it takes the answer, read it serving.  A
    plan of no lane has nothing to poll: its line serves and no poller is made.  `polling` 1 from the poller's making to
-   its return's event (child_main), the main thread's.  0, or why the link does not serve (ECANCELED: a halt came first) */
+   its return's event (END_POLLED), the main thread's.  0, or why the link does not serve (ECANCELED: a halt came first) */
 static int polling;
 static int link_serve(struct link *l,uint32_t node,uint64_t bandwidth){
   if(!lanes_open(l,node,bandwidth))return ECANCELED;
@@ -1398,7 +1398,7 @@ static void port_down(struct port *port,int64_t code){
    window from now, its line leaving (the clients' rings its port took are then the other serving ports' shares, and its
    lanes no draw's, from the next pass on, even while its poller is stuck in a provider call), its child halted naming
    the loss (CHILD_HALT: no pass of its poller begins after its line leaves, so no post on its lanes once the peer can
-   read the loss, and it exits MESH_PLATFORM_NS on and once its own windows have ended: child_end), its control socket
+   read the loss, and it exits MESH_PLATFORM_NS on and once its own windows have ended: end_step), its control socket
    closed, what its lanes carried counted `lost` as its end is freed (switch_child_free), no verbs call made
    (design/RDMA-KERNEL-RECOVERY.md "October 18"), and its exit awaited (EXITING): the kernel's release of the lanes, the
    port greeting no peer meanwhile, and paired again with the port's next child ("A process a port") */
@@ -1708,7 +1708,7 @@ static void port_step(struct port *port,enum port_event event,int64_t code,const
     }
   case PORT_STOP:
     /* design/transport.md: the bridge stops: its child halted (CHILD_HALT with no loss: it exits once its own windows
-       have ended: child_end), its line leaving, its control socket closed (the peer reads the stop as the socket's
+       have ended: end_step), its line leaving, its control socket closed (the peer reads the stop as the socket's
        end), and its exit awaited (EXITING); a port with no child CLOSED, opened no more */
     if(!port->child){port_parted(port,0);port_move(port,PORT_CLOSED,0,0);return;}
     child_send(port,(struct child_message){.kind=CHILD_HALT});
@@ -1756,48 +1756,80 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    its connect on, its poller (port_progress), the one thread that posts.  Its state is its port's line (mesh-switched.h
    enum child_state, one compare-exchange a move: mesh_port_move), which its main thread moves as its device opens, as
    its lanes are made and as they connect and serve, and which leaves at its end: its parent's halt (CHILD_HALT), its
-   own (child_halt: a lane's or a completion's failure on its poller, a termination heard, a doorbell fault absorbed, a
-   make or connect that failed, each told its parent once: CHILD_BROKEN), or its parent lost (the socket's end, or a
-   message to it the socket did not take whole: child_tell).  A command that does not fit the state is refused:
-   ECANCELED once the line leaves, EBUSY otherwise.  The child owns its exit (child_end): once its own windows have
-   ended, and, where its end is a loss (a halt naming one, its own halt, its parent lost), MESH_PLATFORM_NS after it;
-   and in either case once its poller has returned from its last pass: its exit, the kernel's release of its
-   device's objects, no verbs call made */
+   own (child_halt: a lane's or a completion's failure on its poller, a termination heard, a doorbell fault absorbed,
+   each told its parent once: CHILD_BROKEN; or a make or connect that failed, which its answer tells), or its parent
+   lost (the socket's end, or a message to it the socket did not take whole: child_tell).  A command that does not fit
+   the state is refused: ECANCELED once the line leaves, EBUSY otherwise.  The child owns its exit (its end, one state
+   machine: end_step): once its own windows have ended, and, where its end is a loss (a halt naming one, its own halt,
+   its parent lost), MESH_PLATFORM_NS after it; and in either case once its poller has returned from its last pass:
+   its exit, the kernel's release of its device's objects, no verbs call made */
 static unsigned char child_in[sizeof(struct child_message)];
 static uint32_t child_got;
-/* the child's end, its main thread's: none while `bound` is 0; else its
-   exit due at `due` once its windows have ended and its poller has returned, and at `bound` whatever its poller does.
-   A stop's (CHILD_HALT with no loss) is due as it comes, within MESH_PLATFORM_NS; a loss's (CHILD_HALT naming the
-   loss, its own halt, its parent lost) MESH_PLATFORM_NS on, within twice that, the floor a child whose link or parent
-   was lost keeps before its release (B9, B9b), as its parent's port window was.  A later end moves both later, never
-   earlier, so a loss heard after a stop takes the loss's time.  `lost`: its parent lost, its socket read and written
-   no more */
-static struct { int lost; uint64_t due,bound; } ending;
-static void child_end(struct link *l,int loss){
-  child_halt(l,0);
-  const uint64_t at=clock_ns();
-  ending.due=MAX(ending.due,loss?at+MESH_PLATFORM_NS:at);
-  ending.bound=MAX(ending.bound,at+(loss?2:1)*MESH_PLATFORM_NS);
+/* the child's end, one state machine on its main thread (end_step, its one transition function; the main thread its
+   one owner):
+   - END_NONE: its end not come; its parent's commands taken;
+   - END_ENDING: its end come, its line leaving (child_halt: no pass of its poller begins after it): its parent's halt
+     (CHILD_HALT), its own (a lane's or a completion's failure, a termination heard, a doorbell fault absorbed, each
+     told its parent once: child_report), or a make or connect that failed (its answer tells its parent).  Its
+     parent's socket is still read, so a later halt moves its end later;
+   - END_ALONE: as END_ENDING, its parent lost (the socket's end, or a message to it the socket did not take whole):
+     the socket read and written no more.
+   Each ending state's data: its exit due at `due` once its windows have ended (`exit_at`, B9b) and its poller has
+   returned from its last pass (`polling` 0), and at `bound` whatever its poller does (a poller inside a provider call
+   may never return: what it holds then is lost, as at a crash, O4).  A stop's halt (CHILD_HALT with no loss) is due
+   as it comes, within MESH_PLATFORM_NS; a loss's (CHILD_HALT naming the loss, its own halt, a failed make or connect,
+   its parent lost) MESH_PLATFORM_NS on, within twice that, the floor a child whose link or parent was lost keeps
+   before its release (B9, B9b), as its parent's port window was.  Each end moves both later, never earlier, so a loss
+   heard after a stop takes the loss's time.
+   Its events: its parent's halt (END_HALT, `loss` whether it names one), its own halt or a failed command
+   (END_SELF), its parent lost (END_LOST), its poller's return (END_POLLED), and its exit's time come (END_DUE, at
+   end_due: it exits) */
+enum end_state { END_NONE, END_ENDING, END_ALONE };
+enum end_event { END_HALT, END_SELF, END_LOST, END_POLLED, END_DUE };
+static struct { enum end_state state; uint64_t due,bound; } ending;
+static void end_step(struct link *l,enum end_event event,int loss){
+  switch(event){
+  case END_HALT:
+  case END_SELF:
+  case END_LOST:{
+    if(event==END_LOST){
+      if(ending.state==END_ALONE)return;
+      /* the parent's socket read no more: its end would end each wait at once */
+      struct kevent64_s parent;EV_SET64(&parent,3,EVFILT_READ,EV_DELETE,0,0,0,0,0);
+      kevent64(events,&parent,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+      ending.state=END_ALONE;
+    }
+    else if(ending.state==END_NONE)ending.state=END_ENDING;
+    child_halt(l,0);
+    const uint64_t at=clock_ns(),due=event==END_HALT && !loss?at:at+MESH_PLATFORM_NS;
+    ending.due=MAX(ending.due,due);
+    ending.bound=MAX(ending.bound,due+MESH_PLATFORM_NS);
+    return;
+  }
+  case END_POLLED:
+    polling=0;
+    return;
+  case END_DUE:
+    exit(0);
+  }
 }
-static void parent_lost(struct link *l){
-  if(ending.lost)return;
-  ending.lost=1;
-  /* the parent's socket read no more: its end would end each wait at once */
-  struct kevent64_s parent;EV_SET64(&parent,3,EVFILT_READ,EV_DELETE,0,0,0,0,0);
-  kevent64(events,&parent,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-  child_end(l,1);
+/* when the child's exit is due (END_DUE): never before its end; at its bound while its poller has not returned; else
+   once its due has come and its windows have ended, at its bound at the latest */
+static uint64_t end_due(void){
+  if(ending.state==END_NONE)return UINT64_MAX;
+  return polling?ending.bound:MIN(ending.bound,MAX(ending.due,exit_at));
 }
 /* a message to the parent, whole, in one send that never waits (child_send's rule, the other way: a child tells at
    most an answer to each command and one report); one not taken whole is its parent's loss */
 static void child_tell(struct link *l,struct child_message said){
-  if(!ending.lost && send(3,&said,sizeof said,MSG_DONTWAIT)!=(ssize_t)sizeof said)parent_lost(l);
+  if(ending.state!=END_ALONE && send(3,&said,sizeof said,MSG_DONTWAIT)!=(ssize_t)sizeof said)end_step(l,END_LOST,0);
 }
 /* the child's own halt told its parent, once (child_halt's reason, taken: CHILD_BROKEN), and its end a loss's */
 static void child_report(struct link *l){
   const uint32_t reason=atomic_exchange(&child_reason,0);
   if(!reason)return;
   child_tell(l,(struct child_message){.kind=CHILD_BROKEN,.result=(int32_t)reason});
-  child_end(l,1);
+  end_step(l,END_SELF,0);
 }
 /* why a command does not fit the line's state, 0 where it does (its state one of `fits`, bits over enum child_state) */
 static int32_t child_refused(const struct link *l,uint32_t fits){
@@ -1830,15 +1862,15 @@ static struct child_message device_open(struct link *l){
 }
 /* the lanes of the plan the command names made (CHILD_MAKE, from DEVICE_OPEN: link_make), the line moved to
    LANES_MADE; the answer each lane's queue pair number, the first sequence number, each lane's share and the port's
-   address.  A make that fails halts the child (child_halt): a queue pair it made is released at its exit, never made
-   again or reused */
+   address.  A make that fails ends the child (END_SELF: its line leaving, its end a loss's, as its parent's answer to
+   the failure asks): a queue pair it made is released at its exit, never made again or reused */
 static struct child_message lanes_make(struct link *l,const struct child_message *heard){
   struct child_message said={.kind=CHILD_MADE,.result=child_refused(l,1u<<CHILD_DEVICE_OPEN)};
   if(said.result)return said;
   l->plan=heard->lanes;
   said.result=link_make(l);
   if(!said.result && !mesh_port_move(switch_of(),l->index,1u<<CHILD_DEVICE_OPEN,CHILD_LANES_MADE,0,0))said.result=ECANCELED;
-  if(said.result){child_halt(l,0);return said;}
+  if(said.result){end_step(l,END_SELF,0);return said;}
   for(uint32_t k=0;k<MESH_LINK_LANES;k++)said.qpn[k]=l->plan>>k&1?l->provider.queues[k].pair->qp_num:UINT32_MAX;
   said.psn=l->provider.psn;said.share=(uint32_t)l->share.n;
   l->lid=l->device.port.lid;memcpy(l->gid,&l->device.gid,16);
@@ -1846,27 +1878,28 @@ static struct child_message lanes_make(struct link *l,const struct child_message
   return said;
 }
 /* the lanes connected to the peer's the command names (CHILD_CONNECT, from LANES_MADE: link_connect) and served
-   (link_serve: the line serving toward the command's node, the poller made); a connect that fails halts the child */
+   (link_serve: the line serving toward the command's node, the poller made); a connect that fails ends the child, as a
+   make does */
 static struct child_message lanes_connect(struct link *l,const struct child_message *heard){
   struct child_message said={.kind=CHILD_CONNECTED,.result=child_refused(l,1u<<CHILD_LANES_MADE)};
   if(said.result)return said;
   l->peer=heard->node;
   said.result=link_connect(l,heard);
   if(!said.result)said.result=link_serve(l,heard->node,heard->bandwidth);
-  if(said.result)child_halt(l,0);
+  if(said.result)end_step(l,END_SELF,0);
   return said;
 }
 static void child_command(struct link *l,const struct child_message *heard){
   if(heard->kind==CHILD_OPEN)child_tell(l,device_open(l));
   else if(heard->kind==CHILD_MAKE)child_tell(l,lanes_make(l,heard));
   else if(heard->kind==CHILD_CONNECT)child_tell(l,lanes_connect(l,heard));
-  else if(heard->kind==CHILD_HALT)child_end(l,heard->result!=0);
+  else if(heard->kind==CHILD_HALT)end_step(l,END_HALT,heard->result!=0);
 }
 static void child_read(struct link *l){
-  while(!ending.lost){
+  while(ending.state!=END_ALONE){
     const ssize_t got=recv(3,child_in+child_got,sizeof child_in-child_got,MSG_DONTWAIT);
     if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-    if(got<=0){parent_lost(l);return;}
+    if(got<=0){end_step(l,END_LOST,0);return;}
     if((child_got+=(uint32_t)got)<sizeof child_in)continue;
     child_got=0;
     struct child_message heard;
@@ -1875,11 +1908,10 @@ static void child_read(struct link *l){
   }
 }
 /* the child's loop: its main thread waits on its queue (the parent's socket, its IOKit notifications, its poller's
-   return and a fault absorbed), with no timeout until it ends; ending, until its exit is due: the windows read again at
-   each wake (a termination heard moves them), and the exit made once its end is due, its windows have ended and its
-   poller has returned from its last pass, or at the end's bound whatever its poller does (a poller inside a provider
-   call may never return: what it holds then is lost, as at a crash, O4).  It goes on reading its parent's socket while
-   it ends, so a loss told after a stop moves its end later (child_end) */
+   return and a fault absorbed), with no timeout until it ends; ending, until its exit is due (end_due, read again at
+   each wake: a termination heard moves its windows, its poller's return its due), and exits then (END_DUE).  It goes
+   on reading its parent's socket while it ends, so a loss told after a stop moves its end later (END_HALT); after
+   each wake its own halt, if it has halted itself, is told (child_report) */
 static int child_main(int argc,char **argv){
   signal(SIGPIPE,SIG_IGN);
   const unsigned long index=argc>=5?strtoul(argv[4],NULL,10):MESH_PORTS;
@@ -1909,10 +1941,10 @@ static int child_main(int argc,char **argv){
   child_iokit();
   for(;;){
     struct timespec rest,*wait=NULL;
-    if(ending.bound){
-      const uint64_t at=clock_ns(),until=MIN(ending.bound,MAX(ending.due,exit_at));
-      if(at>=ending.bound || (at>=until && !polling))exit(0);
-      const uint64_t left=(polling?ending.bound:until)-at;
+    const uint64_t due=end_due(),at=clock_ns();
+    if(at>=due)end_step(l,END_DUE,0);
+    if(due!=UINT64_MAX){
+      const uint64_t left=due-at;
       rest=(struct timespec){(time_t)(left/1000000000u),(long)(left%1000000000u)};wait=&rest;
     }
     struct kevent64_s ready[4];
@@ -1920,7 +1952,7 @@ static int child_main(int argc,char **argv){
     now=clock_ns();
     for(int i=0;i<count;i++){
       if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(l);
-      else if(ready[i].filter==EVFILT_USER && ready[i].ident==POLLER_RETURNED)polling=0;
+      else if(ready[i].filter==EVFILT_USER && ready[i].ident==POLLER_RETURNED)end_step(l,END_POLLED,0);
       else if(ready[i].filter==EVFILT_MACHPORT)iokit_heard();
     }
     child_report(l);
@@ -2110,7 +2142,7 @@ static void adopting_read(int due){
 }
 /* design/transport.md: the stop (NODE_STOPPING), at stop signal `code`: every child halted (CHILD_HALT with no loss:
    its line leaving, so no pass of its poller begins after it and no post is made once its peer can read the stop, and
-   its exit once its own windows have ended and its poller has returned, child_end), every control socket closed (the
+   its exit once its own windows have ended and its poller has returned, end_step), every control socket closed (the
    kernel sends what it has after the close; the peer reads the stop as the socket's end), every lane no draw's (each
    port's PORT_STOP; what the lanes have the next bridge's adoption gives back: region_adopt), `bridge_pid` 0 (every stop
    keeps the region for the next bridge to adopt; a release is the heartbeat's, which expires the region once this
@@ -2150,7 +2182,7 @@ static void node_ended(int due){
   exit(0);
 }
 /* design/transport.md section 14, "A process a port": the end (NODE_ENDING), once the stop's windows have ended: the
-   bridge ended once every child, each halted at the stop and ending by its own windows (child_end), is reaped
+   bridge ended once every child, each halted at the stop and ending by its own windows (end_step), is reaped
    (PORT_EXITED, on the loop: its exit seen through to its end, children_reaped), at most MESH_PLATFORM_NS on, so
    no child of this launch has its device's queue pairs as the next launch's children make theirs.  This end stays
    beside the next bridge's ADOPTING because it alone sees an exit through to its end: a process in its exit is no
