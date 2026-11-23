@@ -117,7 +117,7 @@ static int mask_same(const void *context,uint32_t k){
   const struct mask_rows *x=context;
   return !memcmp(x->bound+(size_t)k*x->width,x->probe,x->width*sizeof *x->probe);
 }
-static int mask_access(const uint32_t groups[3],const uint32_t threads[3],const struct mesh_metal_access *a,
+int mesh_metal_mask_access(const uint32_t groups[3],const uint32_t threads[3],const struct mesh_metal_access *a,
                        const struct mesh_graph_term *terms,const struct mesh_metal_range *r,uint32_t *bound,uint32_t width){
   const size_t G=(size_t)groups[0]*groups[1]*groups[2];
   const uint64_t origin=r->extent?0:r->at;
@@ -167,7 +167,7 @@ int mesh_metal_mask(const uint32_t groups[3],const uint32_t threads[3],size_t ac
     int named=0;
     for(size_t a=0;!whole[d] && a<accesses;a++)if(access[a].storage==storage[d]){
       named=1;
-      status=mask_access(groups,threads,access+a,term,r,bound+offset[d],width);
+      status=mesh_metal_mask_access(groups,threads,access+a,term,r,bound+offset[d],width);
       if(status)goto end;
     }
     if(!named)for(uint32_t w=0;w<G;w++)for(uint32_t f=0;f<r->input.pages;f++)

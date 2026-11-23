@@ -94,6 +94,8 @@ struct mesh_metal_readiness { uint32_t ranges,classes,groups,members; const stru
 /* A numerical read uses its storage's byte coordinates. A JOIN uses all of its declared fields. */
 struct mesh_metal_access { uint32_t storage; const struct mesh_graph_access_map *map;
                            const struct mesh_graph_footprint *footprint; uint64_t offset; };
+int mesh_metal_mask_access(const uint32_t groups[3],const uint32_t threads[3],const struct mesh_metal_access *,
+                           const struct mesh_graph_term *,const struct mesh_metal_range *,uint32_t *bound,uint32_t width);
 int mesh_metal_mask(const uint32_t groups[3],const uint32_t threads[3],size_t accesses,
                     const struct mesh_metal_access *access,const struct mesh_graph_term *terms,
                     const uint32_t *storage,const uint8_t *whole,struct mesh_metal_readiness *readiness);
