@@ -1004,7 +1004,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
    process a port"); a port lost before its lanes were asked for and still open says hello at once (port_hello: the
    records go on).  Its quiet window begins (B9: no port job on it, and no exit, for MESH_PLATFORM_NS, the operator's
    bound on the termination a loss may follow) */
-static void child_send(struct port *port,struct child_message said);
+static int child_send(struct port *port,struct child_message said);
 void port_lost(struct port *port,int64_t code){
   quiet_until(&port->quiet_at,now+MESH_PLATFORM_NS);
   link_lost(port);
@@ -1065,7 +1065,8 @@ static void port_open(struct port *port){
   struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=port->interface};
   if(port->interface)setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
   port->job=1;port->job_at=now;atomic_store_explicit(&port->done,0,memory_order_relaxed);
-  child_send(port,(struct child_message){.kind=CHILD_OPEN});
+  const int error=child_send(port,(struct child_message){.kind=CHILD_OPEN});
+  if(error){port->result=error;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);wake();}
 }
 /* the child's open of its port's device, on its port's queue (before its progress thread starts: port_progress); its
    end told the child's loop (child_main) */
@@ -1444,28 +1445,21 @@ static void arrivals_turn(void){
    its port's verbs objects (the kernel's), and a link once connected and then lost pairs again with the port's next
    child */
 static char self_path[PATH_MAX];
-/* a message whole on the socket between a port's child and its parent, within MESH_PLATFORM_NS of the call (the operator,
-   2026-10-23: no wait runs longer than a deadline presented when it is made, 5 s by default): a peer that exited drops
-   it, and one that takes no more by the deadline ends this process at once, the wait named (`what`) */
-static void message_send(int fd,const struct child_message *said,const char *what){
-  const char *at=(const char *)said;
-  size_t left=sizeof *said;
-  const uint64_t until=clock_ns()+MESH_PLATFORM_NS;
-  while(left){
-    const ssize_t sent=send(fd,at,left,MSG_DONTWAIT);
-    if(sent>0){at+=sent;left-=(size_t)sent;continue;}
-    if(sent<0 && errno==EINTR)continue;
-    if(sent==0 || errno!=EAGAIN)return;
-    const uint64_t t=clock_ns();
-    if(t>=until){say("%s: its peer took no message for %.0f s; this process exits\n",what,(double)MESH_PLATFORM_NS/1e9);exit(EX_SOFTWARE);}
-    struct pollfd room={.fd=fd,.events=POLLOUT};
-    poll(&room,1,(int)((until-t+999999)/1000000));
-  }
-}
-/* a message to the port's child, whole (message_send); one not taken (the child exited) is dropped, its end reaped
-   (child_reaped) */
-static void child_send(struct port *port,struct child_message said){
-  if(port->child_fd>=0)message_send(port->child_fd,&said,"bridge: child_send to a port's child");
+/* a message to the port's child, whole, in one send that never waits: 0, or why it was not taken.  Each end reads
+   the socket on its own event loop, and only a few messages are ever unread on it (a command goes only after the last
+   one's answer; halts and an end besides), far below its buffer, so a message is taken whole while the child lives.
+   One not taken whole (the child exited, or the socket full) is the child's loss: its socket closed (a part sent would
+   put the next message out of step), so the child reads its end and leaves as at its parent's loss (child_read), and
+   its exit is reaped (child_reaped).  A command so lost is its job's failure (port_open, child_job) */
+static int child_send(struct port *port,struct child_message said){
+  if(port->child_fd<0)return EPIPE;
+  const ssize_t sent=send(port->child_fd,&said,sizeof said,MSG_DONTWAIT);
+  if(sent==(ssize_t)sizeof said)return 0;
+  const int error=sent<0?errno:EIO;
+  say("link %u (%s): a message to its child %d not taken whole (%s): its socket closed, the child's end its own\n",
+      port->index,port->name,(int)port->child,strerror(error));
+  close(port->child_fd);port->child_fd=-1;
+  return error;
 }
 static void child_reaped(struct port *port);
 /* a process, not this bridge nor one of its children, that is a child of the port's device of any version (its argv
@@ -1577,7 +1571,8 @@ static int child_spawn(struct port *port){
 }
 /* a link job asked of the port's child: its lanes made (the plan's) or connected to the peer's
    (the peer's lanes as its LINK told them, its address as its hello did, its node and the link's bandwidth), under
-   the link's pairing as it is asked; its end the child's answer (child_heard), taken by link_turn */
+   the link's pairing as it is asked; its end the child's answer (child_heard), taken by link_turn, or, where the
+   child did not take it (child_send), its failure, which loses the link there */
 static void child_job(struct port *port,int job){
   struct link *l=&port->link;
   l->job=job;l->job_pairing=atomic_load_explicit(&l->pairing,memory_order_relaxed);l->job_at=now;
@@ -1587,7 +1582,8 @@ static void child_job(struct port *port,int job){
     memcpy(said.peer,l->peer,sizeof said.peer);said.lid=port->heard.lid;memcpy(said.gid,port->heard.gid,16);
     said.node=port->peer;said.bandwidth=port->bandwidth;
   }
-  child_send(port,said);
+  const int error=child_send(port,said);
+  if(error){l->result=error;atomic_store_explicit(&l->done,1,memory_order_release);wake();}
 }
 /* the child's messages, each whole one taken: an open's, a make's or a connect's end for the job out (a connect of a
    pairing since lost has its lanes cancelled again: the child may have opened them after the loss's cancel); the
@@ -1722,15 +1718,14 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    served, a job out lapsed), an end, and a message of any other kind let be; and tells each job's end, naming the
    pairing it was asked for.  A connect that ends while its pairing stands opens the link's lanes (lanes_open) and
    then serves every lane, its pairing read again (port_halt's sequence).  The child ends at its parent's word, once
-   its own windows have ended (at most MESH_PLATFORM_NS on), or at its parent's loss (the socket's end), its lanes
-   served no more, MESH_PLATFORM_NS and its windows on (at most twice that): its exit, the kernel's release of its
-   device's objects, no verbs call made */
+   its own windows have ended (at most MESH_PLATFORM_NS on), or at its parent's loss (the socket's end, or a message
+   to it the socket did not take whole: child_tell), its lanes served no more, MESH_PLATFORM_NS and its windows on (at
+   most twice that): its exit, the kernel's release of its device's objects, no verbs call made */
 static uint32_t child_asked;
 static uint64_t child_bandwidth;
 static int child_halted;
 static unsigned char child_in[sizeof(struct child_message)];
 static uint32_t child_got;
-static void child_tell(struct child_message said){ message_send(3,&said,"child: child_tell to its parent"); }
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
@@ -1745,6 +1740,11 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
     nanosleep(&rest,NULL);
   }
   exit(0);
+}
+/* a message to the parent, whole, in one send that never waits (child_send's rule, the other way: a child tells at
+   most an answer to each command and a few reports); one not taken whole is its parent's loss, and the child leaves */
+static void child_tell(struct port *port,struct child_message said){
+  if(send(3,&said,sizeof said,MSG_DONTWAIT)!=(ssize_t)sizeof said)child_leave(port,0);
 }
 static void child_command(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
@@ -1763,7 +1763,7 @@ static void child_command(struct port *port,const struct child_message *heard){
     port->peer=heard->node;child_bandwidth=heard->bandwidth;
   }
   if(refused){
-    child_tell((struct child_message){.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=heard->pairing,.result=refused});
+    child_tell(port,(struct child_message){.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=heard->pairing,.result=refused});
     return;
   }
   child_asked=heard->pairing;
@@ -1780,7 +1780,7 @@ static void child_jobs(struct port *port){
       said.lid=port->lid;memcpy(said.gid,port->gid,16);said.bandwidth=port_bandwidth(&port->device.port);
       said.lanes=port->device.max_pairs;
     }
-    child_tell(said);
+    child_tell(port,said);
   }
   if(!l->job || !atomic_load_explicit(&l->done,memory_order_acquire))return;
   const int job=l->job;
@@ -1799,13 +1799,13 @@ static void child_jobs(struct port *port){
     if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);said.result=ECANCELED;}
     progress_wake(port);
   }
-  child_tell(said);
+  child_tell(port,said);
 }
 static void child_reports(struct port *port){
   const uint32_t broken=atomic_exchange_explicit(&port->link.broken,0,memory_order_acq_rel);
-  if(broken)child_tell((struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken});
-  if(atomic_exchange(&faulted,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_FAULTED});}
-  if(atomic_exchange(&terminated,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_TERMINATED});}
+  if(broken)child_tell(port,(struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken});
+  if(atomic_exchange(&faulted,0)){child_halted=1;child_tell(port,(struct child_message){.kind=CHILD_FAULTED});}
+  if(atomic_exchange(&terminated,0)){child_halted=1;child_tell(port,(struct child_message){.kind=CHILD_TERMINATED});}
 }
 static void child_read(struct port *port){
   for(;;){
