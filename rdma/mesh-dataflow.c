@@ -159,17 +159,13 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   return count;
 }
 
-/* The map's serial waited on, with no clock, until it differs from *serial: each wake (the bridge's publish that
-   changes the mesh, its successor's first, or the region's expiry, each of which moves the serial: mesh.h
-   mesh_map_moved) reads the serial and the region's layout again; ESRCH where the region expired (the heartbeat's
-   release, or a bridge that could not adopt it: no bridge serves it again) */
-int mesh_map_wait(uint64_t *serial){
+/* The map's serial as the bridge last moved it (mesh.h mesh_map_moved), read once: ESRCH where the region expired (the
+   heartbeat's release, or a bridge that could not adopt it: no bridge serves it again) */
+int mesh_map_serial(uint64_t *serial){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return error;
-  uint64_t seen;
-  while((seen=atomic_load_explicit(&m->map,memory_order_acquire))==*serial && __atomic_load_n(&m->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT)
-    os_sync_wait_on_address(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+  const uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
   if(__atomic_load_n(&m->version,__ATOMIC_ACQUIRE)!=MESH_LAYOUT)error=ESRCH;
   else *serial=seen;
   munmap(m,length);

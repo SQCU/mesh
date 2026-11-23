@@ -1974,8 +1974,8 @@ static int child_main(int argc,char **argv){
    slots, indices and pages standing, its pages registered again by the port children (the same
    pages: nothing is wired twice, nothing reloaded).  A region a live bridge serves is never read: a second bridge of
    the node ends at its port's bind, before region_open.  A region of another layout, or one a stop released (layout version 0), is made
-   expired (its layout version 0: no client's attach takes it; its map's waiters woken to read that: mesh.h
-   mesh_expire) and left named, and this bridge ends with EX_TEMPFAIL:
+   expired (its layout version 0: no client's attach takes it, mesh.h mesh_expire) and left named, and this bridge
+   ends with EX_TEMPFAIL:
    its heartbeat unlinks it once no process maps it and opens a bridge again, so no second region is ever made beside
    a live client of the first (the 2026-10-20 watchdog panic, design/rubrics.md "Failure across interfaces"); a bridge
    unlinks only a shared memory object that never became a region (no magic: a bridge ended while making it).  A

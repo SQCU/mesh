@@ -1,7 +1,7 @@
 """The mesh from Python: mesh-view.h, mesh-call.h and nccl.h through _mesh_c (mesh_c_build.py compiles the headers'
 declarations against them, so no layout or prototype here is written by hand; `make mesh-c` builds it for this
-interpreter).  The read side is the node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's
-serial (mesh_map_wait); nodes() is every node's record it holds (mesh_nodes_health).
+interpreter).  The read side is the node's bridge's, and none of it waits: current() is the map it keeps (mesh_map) and
+serial() the map's serial (mesh_map_serial); nodes() is every node's record it holds (mesh_nodes_health).
 Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch) on ordinary host memory; lease() is its
 ncclMemAlloc."""
 import errno
@@ -68,30 +68,29 @@ def _map():
     return count, LinkMap(KINDS[made.kind], count, link[0:made.links], bandwidth[0:made.links]), list(node[0:count])
 
 
-def wait(serial=0):
-    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), waited
-    for on the serial's word with no clock, which the bridge wakes as it changes the map (a health sample is no change);
-    the wait is the caller's own.  OSError naming the bridge where it is unreachable, ESRCH where its region expires
-    while waited on."""
-    made = ffi.new('uint64_t *', serial)
-    status = lib.mesh_map_wait(made)
+def serial():
+    """mesh_map_serial: the serial of the map this node's bridge keeps, which moves where the mesh changes (a health
+    sample is no change), read once.  OSError naming the bridge where it is unreachable, ESRCH where its region
+    expired."""
+    made = ffi.new('uint64_t *')
+    status = lib.mesh_map_serial(made)
     if status:
         raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
     return made[0]
 
 
 def current():
-    """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s): `map` its LinkMap over every node its
+    """mesh_map: the map this node's bridge keeps as of `serial` (serial()'s): `map` its LinkMap over every node its
     records hold (a link where two nodes' bridges reach each other, at its bandwidth), `nodes` each map node's bridge
     node (a node is its number; a name a person reads is peers.label's, from the name table), `node` this node's
     bridge's (mesh_reached).  The map is the records as they are, joined or not.  OSError naming the bridge where it is
     unreachable."""
-    serial, own = wait(), ffi.new('uint32_t *')
+    made, own = serial(), ffi.new('uint32_t *')
     lib.mesh_reached(ffi.NULL, 0, own)
     count, lmap, nodes = _map()
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=serial)
+    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=made)
 
 
 def nodes():

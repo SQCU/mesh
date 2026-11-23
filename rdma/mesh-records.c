@@ -78,7 +78,7 @@ void records_forget(const struct port *port){
    in the table above (this node's own rebuilt from its port table when that changes, its sequence one more; every
    other node's the newest heard), written in the copy not published and then published (mesh.h struct
    mesh_map_copy): the copy published by one release store of `map_version`, and where the mesh changed (`mesh`), the
-   map's serial moved and its waiters woken (mesh.h mesh_map_moved).  An adopted region's published copy is the bridge
+   map's serial moved (mesh.h mesh_map_moved).  An adopted region's published copy is the bridge
    before's until this bridge's first publish, its own record (node_start), replaces it */
 static void map_publish(int mesh){
   atomic_store_explicit(&M->map_version,atomic_load_explicit(&M->map_version,memory_order_relaxed)+1,memory_order_release);

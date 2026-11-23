@@ -8,7 +8,6 @@
 #include <errno.h>
 #include <signal.h>
 #include <libproc.h>
-#include <os/os_sync_wait_on_address.h>
 #include "mesh-view.h"
 #include "mesh-call.h"
 /* design/PAGE-TABLE-SPEC-20261122.md: the node's region, which the bridge makes and every process of the node maps */
@@ -194,8 +193,9 @@ _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07
    acquire and copies the published copy, and never waits: a bridge that dies mid-write leaves the copy before it
    published, and its successor's first publish replaces it.  A copy stands until the second publish after it, when the
    bridge writes it again.  A health sample is a publish of its own; a publish that changes the mesh also moves the
-   map's serial (`map`) and wakes its waiters (mesh_map_moved).  The bridge's first record is published before the
-   region opens (`magic` set last), so a reader never reads an empty map, and the serial is never 0 */
+   map's serial (`map`, mesh_map_moved), which a reader reads and never waits on (mesh-dataflow.c mesh_map_serial).
+   The bridge's first record is published before the region opens (`magic` set last), so a reader never reads an empty
+   map, and the serial is never 0 */
 #define MESH_RECORDS 256u
 struct mesh_map_copy { uint64_t nodes; struct mesh_record record[MESH_RECORDS]; };
 static inline struct mesh_map_copy *mesh_map_copies(struct hdr *m){ return (struct mesh_map_copy *)((char *)m+m->map_off); }
@@ -204,18 +204,14 @@ static inline const struct mesh_map_copy *mesh_map_published(struct hdr *m){
 }
 /* a copy's records, at most its room */
 static inline uint32_t mesh_map_nodes(const struct mesh_map_copy *copy){ return copy->nodes<MESH_RECORDS?(uint32_t)copy->nodes:MESH_RECORDS; }
-/* the map's serial moved and its waiters woken (mesh-dataflow.c mesh_map_wait): by the bridge at each publish that
-   changes the mesh, and at the region's expiry (mesh_expire) */
+/* the map's serial moved: by the bridge at each publish that changes the mesh (mesh-records.c map_publish) */
 static inline void mesh_map_moved(struct hdr *m){
   atomic_fetch_add_explicit(&m->map,1,memory_order_release);
-  os_sync_wake_by_address_all(&m->map,sizeof m->map,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
-/* region m expired: its layout version 0, so no attach or read of it takes it again, then its map's waiters woken
-   (mesh_map_moved), each of which reads the expiry.  By the heartbeat's release (mesh-heartbeat.c region_expire) and by
-   a bridge that finds a region it cannot adopt (mesh-link.c region_open) */
+/* region m expired: its layout version 0, so no attach or read of it takes it again.  By the heartbeat's release
+   (mesh-heartbeat.c region_expire) and by a bridge that finds a region it cannot adopt (mesh-link.c region_open) */
 static inline void mesh_expire(struct hdr *m){
   __atomic_store_n(&m->version,0,__ATOMIC_SEQ_CST);
-  mesh_map_moved(m);
 }
 /* an owner word is its generation, slot and process: (generation << 38) | (slot << 32) | pid */
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}

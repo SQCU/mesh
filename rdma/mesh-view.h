@@ -44,11 +44,10 @@ int mesh_link_map_check(const struct mesh_link_map *);
    (ENOSPC: the room is short, map->nodes and map->links then the room needed; ENOMEM).  It never waits on the
    bridge. */
 int mesh_map(uint32_t *node,struct mesh_link_map *map);
-/* The bridge's map serial (never 0; it changes where the mesh does, not at a health sample): waits on it until it
-   differs from *serial and writes it there (*serial 0: at once); 0, or ESRCH where the region expires while it is
-   waited on (no bridge serves it again), else the errno of an unreachable bridge.  The wait is the caller's own and has
-   no clock: a bridge that ends without a successor or a release leaves it waiting until the next bridge's first map. */
-int mesh_map_wait(uint64_t *serial);
+/* The bridge's map serial (never 0; it changes where the mesh does, not at a health sample), written to *serial: 0, or
+   ESRCH where the region expired (no bridge serves it again), else the errno of an unreachable bridge.  It never waits
+   on the bridge: a caller that wants a change reads it again. */
+int mesh_map_serial(uint64_t *serial);
 
 /* What a node's record carries of its health: `booted`, the wall clock of the node's boot (ns since the epoch), and its
    `available` memory as its bridge last sampled it (the bytes the kernel can give without pressure). */
