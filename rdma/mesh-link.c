@@ -189,9 +189,12 @@ static void switch_receives(struct port *port,uint32_t j){
 /* lane j's SENDs request[0 .. n) posted as one list (the provider's call costs about 0.85 us whatever it carries: a
    request list a call, not a call a request), their entries already in the lane's in-flight ring from `first` on and
    its posted count past them (switch_sends): each one the provider took counted, its wait from its push to the post
-   counted and its entry given its post time; each one it did not take (those from `bad` on) not posted: its page's
-   use dropped and its frames off the cable's queue, counted `lost`, the lane's posted count moved back to the last
-   one posted, and the lane lost (lane_lost).  1, or 0 where the post failed */
+   counted and its entry given its post time; each one it did not take (those from `bad` on) not posted: the lane's
+   posted count moved back to the last one posted, then each such page's use dropped and its frames off the cable's
+   queue, counted `lost`, and the lane lost (lane_lost).  The count moves back before any of those uses is dropped, as
+   link_send moves `completed` before its page's drop: a child that ends between the two leaves those pages in use
+   (its parent's mesh_switch_flight_drop reads the count moved back), and never has a use dropped twice.  1, or 0
+   where the post failed */
 static int sends_post(struct port *port,uint32_t j,struct ibv_send_wr *request,uint32_t n,uint64_t first){
   struct mesh_switch *sw=switch_of();
   struct mesh_switch_lane *x=sw->lane+switch_lane(port,j);
@@ -202,20 +205,20 @@ static int sends_post(struct port *port,uint32_t j,struct ibv_send_wr *request,u
   const uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   /* the requests before `bad` posted (all of them without an error) */
   const uint32_t made=error?(bad>=request && bad<request+n?(uint32_t)(bad-request):0):n;
-  MESH_SWITCH_COUNT(sw,port->index,post_call_ns,posted-posting);
-  for(uint32_t k=0;k<n;k++){
-    struct mesh_switch_entry *e=x->flight+(first+k)%MESH_SWITCH_FLIGHT;
-    if(k<made){
-      MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posting>e->at?posting-e->at:0);
-      e->at=posted;
-      continue;
-    }
-    atomic_fetch_sub_explicit(&sw->cable[port->index].queued,mesh_switch_lane_bytes(switch_lane(port,j)),memory_order_relaxed);
-    mesh_pd_drop(M,e->pd);
-    MESH_SWITCH_COUNT(sw,port->index,lost,1);
-  }
   if(made<n)atomic_store_explicit(&x->posted,first+made,memory_order_relaxed);
   atomic_store_explicit(&lanes_of(port,j/2)->posts[0].posted[j&1],first+made,memory_order_relaxed);
+  MESH_SWITCH_COUNT(sw,port->index,post_call_ns,posted-posting);
+  for(uint32_t k=0;k<made;k++){
+    struct mesh_switch_entry *e=x->flight+(first+k)%MESH_SWITCH_FLIGHT;
+    MESH_SWITCH_COUNT(sw,port->index,posts,1);MESH_SWITCH_COUNT(sw,port->index,post_wait_ns,posting>e->at?posting-e->at:0);
+    e->at=posted;
+  }
+  /* each drop a release (mesh.h mesh_pd_drop's compare-exchange), so the count's store above is ordered before it */
+  for(uint32_t k=made;k<n;k++){
+    atomic_fetch_sub_explicit(&sw->cable[port->index].queued,mesh_switch_lane_bytes(switch_lane(port,j)),memory_order_relaxed);
+    mesh_pd_drop(M,x->flight[(first+k)%MESH_SWITCH_FLIGHT].pd);
+    MESH_SWITCH_COUNT(sw,port->index,lost,1);
+  }
   if(error)lane_lost(port,j,error<0?-error:error);
   return !error;
 }
