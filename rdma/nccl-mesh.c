@@ -347,22 +347,30 @@ static ncclResult_t attach_fail(int status, const char *name) {
 
 /* -- communicators ------------------------------------------------------------------------------------------------- */
 
+struct out { const unsigned char *data; size_t bytes; int to, pre; };
+struct in { int from; size_t bytes; unsigned char *to; };
 struct extent { uint32_t first, used; };
 struct peer_pages {
   struct extent send, receive;
   uint32_t next_receive;
   int advertised;
+  const struct in *message;
+  uint64_t due, low, at;
 };
 struct channel {
   _Alignas(128) struct mesh_ctx *context;
   struct peer_pages *peer;
   uint32_t source, mailbox, first_receive;
+  void *positions;
+  size_t capacity;
 };
 
 struct ncclComm {
   int nranks, rank;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
   uint32_t *node, *mailbox;
+  struct out *out;
+  struct in *in;
   char (*address)[NCCL_UNIQUE_ID_BYTES];
   struct channel channel[CHANNELS];
   uint32_t extent_pages, splits;
@@ -394,7 +402,10 @@ static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
   comm->address = calloc(n, sizeof *comm->address);
   struct peer_pages *peers = calloc(n * CHANNELS, sizeof *peers);
   comm->peers = malloc(n * sizeof *comm->peers);
-  if (!comm->node || !comm->mailbox || !comm->address || !peers || !comm->peers) {
+  comm->out = malloc(2 * n * sizeof *comm->out);
+  comm->in = malloc(2 * n * sizeof *comm->in);
+  if (!comm->node || !comm->mailbox || !comm->address || !peers || !comm->peers || !comm->out || !comm->in) {
+    free(comm->out); free(comm->in);
     free(comm->node); free(comm->mailbox); free(comm->address); free(peers); free(comm->peers);
     free(comm);
     return NULL;
@@ -402,9 +413,9 @@ static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
   for (size_t r = 0; r < n; r++) comm->peers[r] = -1;
   comm->nranks = nranks; comm->rank = rank; comm->standing = -1;
   for (uint32_t c = 0; c < CHANNELS; c++) {
-    comm->channel[c] = (struct channel){NULL, peers + c * n, MESH_ABSENT, MESH_ABSENT, MESH_ABSENT};
+    comm->channel[c] = (struct channel){.peer = peers + c * n, .source = MESH_ABSENT, .mailbox = MESH_ABSENT, .first_receive = MESH_ABSENT};
     for (size_t r = 0; r < n; r++)
-      comm->channel[c].peer[r] = (struct peer_pages){{MESH_ABSENT, 0}, {MESH_ABSENT, 0}, MESH_ABSENT, 0};
+      comm->channel[c].peer[r] = (struct peer_pages){.send.first = MESH_ABSENT, .receive.first = MESH_ABSENT, .next_receive = MESH_ABSENT};
   }
   pthread_mutex_init(&comm->guard, NULL);
   atomic_init(&comm->state, COMM_LIVE);
@@ -480,6 +491,8 @@ static void comm_free(struct ncclComm *comm) {
   if (comm->standing >= 0) close(comm->standing);
   comm_leave(comm);
   pthread_mutex_destroy(&comm->guard);
+  for (uint32_t c = 0; c < CHANNELS; c++) free(comm->channel[c].positions);
+  free(comm->out); free(comm->in);
   free(comm->node); free(comm->mailbox); free(comm->address); free(comm->channel[0].peer); free(comm->scratch);
   free(comm);
 }
@@ -917,8 +930,6 @@ static _Thread_local size_t call_count, call_capacity;
    copied to `to`), and, where `acc` is set, its reduction: `bytes` at `acc` made the combine, rank by rank, of every
    rank's, this rank's at `own` and every other's a message to it.  A pair of ranks carries at most one message in a
    phase, so a message's first page is its pair's count of pages as the phase begins */
-struct out { const unsigned char *data; size_t bytes; int to, pre; };
-struct in { int from; size_t bytes; unsigned char *to; };
 struct phase { struct out *out; struct in *in; uint32_t outs, ins; unsigned char *acc; const unsigned char *own; size_t bytes; };
 
 /* a message's pages, every rank cutting it alike (design/PAGE-TABLE-SPEC-20261122.md section 6): one short page where
@@ -939,8 +950,6 @@ struct channel_phase {
   const struct phase *p;
   struct channel *channel;
   uint32_t id;
-  uint64_t *due, *low, *at;
-  const struct in **from;
   uint32_t o, g, copied;
   uint64_t j;
   size_t copied_bytes;
@@ -1070,7 +1079,8 @@ static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, nccl
   struct ncclComm *comm = c->comm;
   struct channel *channel = m->channel;
   const struct phase *p = m->p;
-  const struct in *x = m->from[r];
+  const struct peer_pages *peer = channel->peer + r;
+  const struct in *x = peer->message;
   if (!x && m->next[q] != (uint32_t)r) return 0;
   struct mesh_view_entry entry;
   if (mesh_entry(channel->context, index, &entry)) {
@@ -1092,7 +1102,7 @@ static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, nccl
     own_contribution(m, q);
   }
   mesh_invalidate(channel->context, index, 1, 0);
-  m->taken[m->at[r] + q] = 1;
+  m->taken[peer->at + q] = 1;
   m->left--;
   return 0;
 }
@@ -1100,14 +1110,15 @@ static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, nccl
 static int take_some(struct channel_phase *m, ncclResult_t *result) {
   struct ncclComm *comm = m->call->comm;
   for (int r = 0; r < comm->nranks; r++) {
-    if (m->low[r] == m->due[r]) continue;
-    struct extent *recv = &m->channel->peer[r].receive;
+    struct peer_pages *peer = m->channel->peer + r;
+    if (peer->low == peer->due) continue;
+    struct extent *recv = &peer->receive;
     uint32_t room = comm->extent_pages - recv->used;
-    uint64_t low = m->low[r], end = m->due[r] - low > room ? low + room : m->due[r];
-    const unsigned char *taken = m->taken + m->at[r];
+    uint64_t low = peer->low, end = peer->due - low > room ? low + room : peer->due;
+    const unsigned char *taken = m->taken + peer->at;
     for (uint64_t q = low; q < end; q++)
       if (!taken[q] && take(m, r, q, recv->first + recv->used + (uint32_t)(q - low), result)) return -1;
-    while (m->low[r] < end && taken[m->low[r]]) { m->low[r]++; recv->used++; }
+    while (peer->low < end && taken[peer->low]) { peer->low++; recv->used++; }
     int rc = extend_receive(m, r);
     if (rc && rc != EAGAIN) {
       *result = comm_fail(comm, ncclSystemError, "receive extent for rank %d: %s", r, strerror(rc));
@@ -1117,33 +1128,30 @@ static int take_some(struct channel_phase *m, ncclResult_t *result) {
   return 0;
 }
 
-static void channel_phase_end(struct channel_phase *m) {
-  free(m->due); free(m->from); free(m->next); free(m->taken);
-  m->due = NULL; m->from = NULL; m->next = NULL; m->taken = NULL;
-}
 static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c, const struct phase *p, uint32_t id) {
   struct ncclComm *comm = c->comm;
   const int n = comm->nranks, me = comm->rank;
   *m = (struct channel_phase){.call = c, .p = p, .channel = comm->channel + id, .id = id, .copied = MESH_ABSENT, .j = id,
                               .positions = p->acc ? channel_pages(pages_of(p->bytes), id) : 0};
-  m->due = calloc(3 * (size_t)n, sizeof *m->due);
-  m->from = calloc((size_t)n, sizeof *m->from);
-  m->next = calloc((size_t)m->positions + 1, sizeof *m->next);
-  uint64_t pages = 0;
-  if (m->due && m->from) {
-    m->low = m->due + n; m->at = m->low + n;
-    for (uint32_t i = 0; i < p->ins; i++) {
-      m->from[p->in[i].from] = p->in + i;
-      m->due[p->in[i].from] = channel_pages(pages_of(p->in[i].bytes), id);
-    }
-    for (int r = 0; p->acc && r < n; r++)
-      if (r != me) m->due[r] = m->positions;
-    for (int r = 0; r < n; r++) { m->at[r] = pages; pages += m->due[r]; }
+  struct channel *ch = m->channel;
+  for (int r = 0; r < n; r++) ch->peer[r].message = NULL;
+  for (uint32_t i = 0; i < p->ins; i++) ch->peer[p->in[i].from].message = p->in + i;
+  size_t pages = 0;
+  for (int r = 0; r < n; r++) {
+    struct peer_pages *peer = ch->peer + r;
+    peer->due = peer->message ? channel_pages(pages_of(peer->message->bytes), id) : (r == me ? 0 : m->positions);
+    peer->low = 0; peer->at = pages; pages += peer->due;
   }
-  m->taken = calloc((size_t)pages + 1, 1);
-  if (!m->due || !m->from || !m->next || !m->taken) {
-    channel_phase_end(m);
-    return fail(ncclSystemError, "communicator %s: out of memory", comm->name);
+  size_t bytes = m->positions * sizeof *m->next + pages;
+  if (bytes > ch->capacity) {
+    void *grown = realloc(ch->positions, bytes);
+    if (!grown) return fail(ncclSystemError, "communicator %s: out of memory", comm->name);
+    ch->positions = grown; ch->capacity = bytes;
+  }
+  if (bytes) {
+    memset(ch->positions, 0, bytes);
+    m->next = ch->positions;
+    m->taken = (unsigned char *)(m->next + m->positions);
   }
   m->left = pages;
   for (uint64_t q = 0; q < m->positions; q++) own_contribution(m, q);
@@ -1226,7 +1234,6 @@ static void channels_progress(struct work *work, uint32_t t) {
       struct channel_phase *m = state + i;
       if (send_some(m, &result) || take_some(m, &result)) break;
       if (m->o < m->p->outs || m->left) continue;
-      channel_phase_end(m);
       if (!phase[i] && c->post && work->phase[0].acc) channel_divide(work, channels[i]);
       if (++phase[i] < work->phases) { if ((result = channel_phase_begin(m, c, work->phase + phase[i], channels[i]))) break; }
       else done++;
@@ -1235,8 +1242,6 @@ static void channels_progress(struct work *work, uint32_t t) {
     if (!local) { for (uint32_t i = 0; i < count; i++) channel_local(work, channels[i]); local = 1; }
     if (done < count && revoked(comm)) { result = revoked_fail(comm); break; }
   }
-  for (uint32_t i = 0; i < count; i++)
-    if (phase[i] < work->phases) channel_phase_end(state + i);
   work->result[t] = result;
   if (result) work->said[t] = last;
 }
@@ -1250,8 +1255,6 @@ static void channels_progress(struct work *work, uint32_t t) {
 static ncclResult_t work_launch(struct work *work) {
   struct ncclComm *comm = work->call->comm;
   struct attach *a = comm->attach;
-  while (pthread_mutex_trylock(&a->lock))
-    if (revoked(comm)) return revoked_fail(comm);
   if (work->threads > 1) {
     a->work = work;
     __atomic_store_n(&a->pending, work->threads - 1, __ATOMIC_RELAXED);
@@ -1260,7 +1263,6 @@ static ncclResult_t work_launch(struct work *work) {
   }
   channels_progress(work, 0);
   while (__atomic_load_n(&a->pending, __ATOMIC_ACQUIRE)) {}
-  pthread_mutex_unlock(&a->lock);
   for (uint32_t t = 0; t < work->threads; t++)
     if (work->result[t]) { last = work->said[t]; return work->result[t]; }
   return ncclSuccess;
@@ -1328,9 +1330,8 @@ static ncclResult_t call_move(struct call *c) {
   const unsigned char *send = c->send;
   unsigned char *recv = c->recv;
   if (!bytes) return ncclSuccess;
-  struct out *out = calloc(2 * (size_t)n, sizeof *out);
-  struct in *in = calloc(2 * (size_t)n, sizeof *in);
-  if (!out || !in) { free(out); free(in); return fail(ncclSystemError, "communicator %s: out of memory", comm->name); }
+  struct out *out = comm->out;
+  struct in *in = comm->in;
   struct work work = {.call = c, .phases = 1};
   struct phase *p = work.phase;
   *p = (struct phase){out, in, 0, 0, NULL, NULL, 0};
@@ -1414,15 +1415,19 @@ static ncclResult_t call_move(struct call *c) {
     work.threads = work.active < threads ? work.active : threads;
     if (work.active) result = work_launch(&work);
   }
-  free(out); free(in);
   return result;
 }
 
 /* a call moved on its communicator, there and then: refused where its communicator failed (its failure named again)
    or was revoked (comm_failure, one load of its state) */
 static ncclResult_t call_one(struct call *c) {
-  const ncclResult_t result = comm_failure(c->comm);
-  return result ? result : call_move(c);
+  struct ncclComm *comm = c->comm;
+  while (pthread_mutex_trylock(&comm->attach->lock))
+    if (revoked(comm)) return revoked_fail(comm);
+  ncclResult_t result = comm_failure(comm);
+  if (!result) result = call_move(c);
+  pthread_mutex_unlock(&comm->attach->lock);
+  return result;
 }
 
 ncclResult_t ncclGroupStart(void) { nesting++; return ncclSuccess; }
@@ -1476,16 +1481,21 @@ static ncclResult_t enqueue(struct call c, cudaStream_t stream) {
   c.combine = c.op == ncclAvg ? COMBINE_SUM : (int)c.op;
   if (reducing && c.op == ncclAvg && floating(c.type)) { store(c.type, c.pre, 1.0 / n); c.premultiplied = 1; }
   else if (reducing && c.op == ncclAvg) c.post = 1;
-  ncclGroupStart();
+  if (!nesting) {
+    comm_hold(c.comm);
+    ncclResult_t result = call_one(&c);
+    comm_release(c.comm);
+    return result;
+  }
   if (call_count == call_capacity) {
     const size_t capacity = call_capacity ? 2 * call_capacity : 16;
     struct call *grown = realloc(calls, capacity * sizeof *grown);
-    if (!grown) { nesting--; return fail(ncclSystemError, "%s: out of memory", name); }
+    if (!grown) return fail(ncclSystemError, "%s: out of memory", name);
     calls = grown; call_capacity = capacity;
   }
   calls[call_count++] = c;
   comm_hold(c.comm);
-  return ncclGroupEnd();
+  return ncclSuccess;
 }
 
 ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op,
