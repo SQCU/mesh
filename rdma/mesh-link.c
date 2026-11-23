@@ -347,7 +347,9 @@ static int link_send(struct port *port,uint32_t served){
    popped from the lane's class, and the page that landed landed (mesh-switched.h mesh_switch_landed: its lines taken,
    its destinations here set in the table, the rest switched on); where the class's free stack is empty, into the page
    that landed, which is then not landed, counted (`lost`).  The receives of a poll posted as one list a lane
-   (receives_post).  The completions polled, 0 none */
+   (receives_post).  Nothing of a completion is tested but its lane (one this pass serves) and its status (a failed one
+   fails the link: link_failed): its page is the one its request named, landed as it is.  The completions polled, 0
+   none */
 static int link_receive(struct port *port,uint32_t served){
   struct link *l=&port->link;
   struct mesh_switch *sw=switch_of();
@@ -360,15 +362,13 @@ static int link_receive(struct port *port,uint32_t served){
   for(int i=0;i<count;i++){
     const uint32_t j=link_lane(l,done[i].qp_num);
     if(j>=MESH_LINK_LANES || !(served>>j&1))continue;
-    uint64_t status_opcode;
-    memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
-    if((uint32_t)status_opcode){link_failed(port,(uint32_t)status_opcode,2);return count;}
-    if(!((status_opcode>>32)&IBV_WC_RECV))continue;
+    if(done[i].status){link_failed(port,(int64_t)done[i].status,2);return count;}
     struct lane_state *state=l->lane+j;
-    const uint32_t pd=(uint32_t)(done[i].wr_id&UINT32_MAX);
+    /* the page this child posted the receive into, its request's low 32 bits (receives_post), clamped into the pool's
+       pages: a receive's completion on its own queue (the receive completion queue has no other kind) names it */
+    const uint32_t pages=mesh_pool(M)->pages,named=(uint32_t)(done[i].wr_id&UINT32_MAX),pd=named<pages?named:pages-1;
     state->got++;
     atomic_store_explicit(&lanes_of(port,j/2)->posts[1].done[j&1],state->got,memory_order_relaxed);
-    if(!mesh_pd_valid(M,pd) || atomic_load_explicit(&mesh_pd_at(M,pd)->state,memory_order_relaxed)!=MESH_PD_RECEIVE)continue;
     const uint32_t fresh=mesh_pool_pop(M,mesh_switch_lane_frames(j));
     if(fresh==MESH_ABSENT){again[j][agains[j]++]=pd;MESH_SWITCH_COUNT(sw,port->index,lost,1);continue;}
     receive_page(port,j,fresh);

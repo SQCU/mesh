@@ -60,8 +60,6 @@ _Static_assert(sizeof(struct ibv_send_wr)==128,"M06");
 _Static_assert(sizeof(struct ibv_sge)==16,"M07 M09");
 _Static_assert(sizeof(struct ibv_recv_wr)==32,"M08");
 _Static_assert(sizeof(struct ibv_wc)==48,"M11");
-_Static_assert(offsetof(struct ibv_wc,status)==8 && offsetof(struct ibv_wc,opcode)==12 &&
-  sizeof(((struct ibv_wc *)0)->status)==4 && sizeof(((struct ibv_wc *)0)->opcode)==4,"M11");
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 /* design/transport.md */
 union mesh_network_event {
