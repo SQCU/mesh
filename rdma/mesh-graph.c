@@ -4112,6 +4112,23 @@ int mesh_graph_access_map_fields(const struct mesh_graph_access_map *a, const ui
   pthread_mutex_lock(&d->context->lock);
   isl_map *launch = access_launch(a, group, groups);
   isl_ctx *ctx = d->context->ctx;
+  /* Consecutive page-table fields form one affine byte-to-page relation. */
+  if (count && extents[0].end > extents[0].start && origin <= INT64_MAX &&
+      extents[0].start <= INT64_MAX - origin && extents[count - 1].end <= UINT64_MAX - origin) {
+    const uint64_t page = extents[0].end - extents[0].start;
+    size_t i = 0;
+    while (i < count && extents[i].vertex == i && (!i || extents[i].start == extents[i - 1].end) &&
+           extents[i].end > extents[i].start && (extents[i].end - extents[i].start == page ||
+           (i == count - 1 && extents[i].end - extents[i].start < page))) i++;
+    if (i == count) {
+      launch = isl_map_upper_bound_val(launch, isl_dim_out, 0, isl_val_int_from_ui(ctx, origin + extents[i - 1].end - 1));
+      isl_set *reached = access_pages(launch, (int64_t)(origin + extents[0].start), page, count);
+      first[0] = 0;
+      int status = access_group_fields(reached, groups, first, fields);
+      pthread_mutex_unlock(&d->context->lock);
+      return status;
+    }
+  }
   isl_space *space = isl_space_alloc(ctx, 0, 1, 1);
   isl_map *rows = isl_map_empty(isl_space_copy(space));
   for (size_t i = 0; i < count; i++) {
