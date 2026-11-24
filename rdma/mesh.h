@@ -574,6 +574,39 @@ static inline void mesh_table_land(struct hdr *m,uint32_t index,uint32_t page,ui
   if(old_p!=MESH_PAGE_NONE)mesh_page_release(m,old_p);
 }
 
+static inline uint32_t mesh_idx_alloc_batch(struct hdr *m,uint32_t *out,uint32_t max_n,uint32_t seed){
+  const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->indices;
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d);
+  _Atomic uint64_t *tab=mesh_table(m);
+  uint32_t got=0,cur=seed;
+  for(uint32_t tries=0;got<max_n && tries<64;tries++){
+    uint64_t v0=0;
+    const uint32_t w0=mesh_bmp_find_word(m,d,cur,&v0);
+    if(w0==MESH_ABSENT)break;
+    uint64_t want=0;
+    uint32_t need=max_n-got;
+    for(uint64_t tmp=v0;tmp && need;need--){
+      const uint64_t lsb=tmp&-tmp;
+      want|=lsb;
+      tmp^=lsb;
+    }
+    const uint64_t prev=atomic_fetch_and_explicit(&l0[w0],~want,memory_order_acq_rel);
+    if((prev&~want)==0)mesh_bmp_clear_empty(m,d,w0);
+    uint64_t claimed=prev&want;
+    while(claimed){
+      const uint32_t b=(uint32_t)__builtin_ctzll(claimed);
+      claimed&=claimed-1u;
+      const uint32_t idx=(w0<<6)+b;
+      if(idx>=d->items)continue;
+      uint64_t zero=0;
+      if(atomic_compare_exchange_strong_explicit(&tab[idx],&zero,(uint64_t)MESH_TABLE_EMPTY,memory_order_release,memory_order_relaxed))
+        out[got++]=idx;
+    }
+    cur=w0+1u;
+  }
+  return got;
+}
+
 static inline uint32_t mesh_idx_alloc_one(struct hdr *m,int back_page,uint32_t seed,uint32_t *out_page){
   const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->indices;
   _Atomic uint64_t *tab=mesh_table(m);

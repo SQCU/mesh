@@ -283,7 +283,9 @@ static inline int mesh_switch_reaches(const struct mesh_switch_view *v,uint32_t 
   return v->reach[avoid&((1u<<MESH_SWITCH_N)-1)][from]>>want&1;
 }
 
-/* Earliest-arrival next-hop port for destination `dst_node`, avoiding {self, origin_node, from_node}. */
+/* Earliest-arrival next-hop port for destination `dst_node`, avoiding {self, origin_node, from_node}.
+   On relay (origin != self), direct delivery to dst_node always wins over multi-hop detours.
+   At origin (origin == self), <= 2-hop paths always win over >= 3-hop paths when available. */
 static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,const struct mesh_switch_togo *togo,
                                               const uint64_t *line,const struct mesh_switch_terms *t,
                                               uint32_t dst_node,uint32_t origin_node,uint32_t from_node){
@@ -294,19 +296,30 @@ static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,c
   const uint32_t oi=mesh_switch_index(v,origin_node),fi=mesh_switch_index(v,from_node);
   if(oi<nodes && oi!=d)avoid|=UINT64_C(1)<<oi;
   if(fi<nodes && fi!=d)avoid|=UINT64_C(1)<<fi;
-  double best=INFINITY;uint32_t best_p=UINT32_MAX;
+  const int is_relay=(origin_node!=v->self);
+  double best_pref=INFINITY,best_any=INFINITY;
+  uint32_t best_pref_p=UINT32_MAX,best_any_p=UINT32_MAX;
   for(uint32_t p=0;p<MESH_PORTS;p++){
     if(mesh_port_state(line[p])!=CHILD_SERVING || !mesh_port_plan(line[p]))continue;
-    const uint32_t nb=mesh_switch_index(v,mesh_port_peer(line[p]));
+    const uint32_t peer=mesh_port_peer(line[p]);
+    const uint32_t nb=mesh_switch_index(v,peer);
     if(nb>=nodes || (avoid>>nb&1))continue;
     if(nb!=d && !mesh_switch_reaches(v,nb,avoid,d))continue;
     const double cost=t[p].backlog+t[p].own+(nb==d?0.0:(double)togo->to[nb][d]);
-    const int home=(p==mesh_switch_home),best_home=(best_p==mesh_switch_home);
-    if(cost<best || (cost==best && best_p!=UINT32_MAX && (home>best_home || (home==best_home && t[p].backlog<t[best_p].backlog)))){
-      best=cost;best_p=p;
+    const int pref=is_relay?(nb==d):(nb==d || mesh_switch_link_of((struct mesh_switch_view *)v,peer,dst_node)!=NULL);
+    const int home=(p==mesh_switch_home);
+    if(pref){
+      const int bh=(best_pref_p==mesh_switch_home);
+      if(cost<best_pref || (cost==best_pref && best_pref_p!=UINT32_MAX && (home>bh || (home==bh && t[p].backlog<t[best_pref_p].backlog)))){
+        best_pref=cost;best_pref_p=p;
+      }
+    }
+    const int bh=(best_any_p==mesh_switch_home);
+    if(cost<best_any || (cost==best_any && best_any_p!=UINT32_MAX && (home>bh || (home==bh && t[p].backlog<t[best_any_p].backlog)))){
+      best_any=cost;best_any_p=p;
     }
   }
-  return best_p;
+  return best_pref_p<MESH_PORTS?best_pref_p:best_any_p;
 }
 
 /* Count data WRs a DESC page requires on the wire for class `cls`. */

@@ -197,9 +197,10 @@ static void route_multicast_group(const struct mesh_switch_view *v,const uint64_
     double best=INFINITY;uint32_t best_p=UINT32_MAX;
     for(uint32_t m=used_mask;m;m&=m-1){
       const uint32_t p=(uint32_t)__builtin_ctz(m);
-      const uint32_t nb=mesh_switch_index(v,mesh_port_peer(line[p]));
+      const uint32_t peer=mesh_port_peer(line[p]);
+      const uint32_t nb=mesh_switch_index(v,peer);
       if(nb>=nodes || (av>>nb&1))continue;
-      if(nb!=d && !mesh_switch_reaches(v,nb,av,d))continue;
+      if(nb!=d && !mesh_switch_link_of((struct mesh_switch_view *)v,peer,dsts[i]))continue;
       const double cost=terms[p].backlog+terms[p].own+(nb==d?0.0:(double)togo.to[nb][d]);
       if(cost<best){best=cost;best_p=p;}
     }
@@ -407,7 +408,10 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
   const int count=l->provider.poll(l->provider.completion,RECEIVE_BATCH,done);
   if(count<0){link_failed(l,EIO,3);return 0;}
   if(!count){
-    for(uint32_t tp=0;tp<MESH_PORTS;tp++)relay_bulk_flush_port(l,sw,tp);
+    int active_batch=0;
+    for(uint32_t j=0;j<MESH_LINK_LANES;j++)
+      if((served>>j&1) && atomic_load_explicit(&sw->lane[switch_lane(l->index,j)].rx_rem,memory_order_relaxed)){active_batch=1;break;}
+    if(!active_batch)for(uint32_t tp=0;tp<MESH_PORTS;tp++)relay_bulk_flush_port(l,sw,tp);
     return 0;
   }
   atomic_thread_fence(memory_order_acquire);
@@ -560,7 +564,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
         }
         l->relay_bulk_n[tp]+=8u;
         MESH_SWITCH_COUNT(sw,l->index,forwards,8);
-        if(l->relay_bulk_n[tp]>=128u || l->relay_bulk_wrs[tp]>=16u)
+        if(l->relay_bulk_n[tp]>=128u || l->relay_bulk_wrs[tp]>=8u)
           relay_bulk_flush_port(l,sw,tp);
       }
       l->rx_pos[j]=pos;

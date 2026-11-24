@@ -43,6 +43,19 @@ int mesh_alloc(struct mesh_ctx *ctx,uint32_t count,int allocate_pages,
     }
     return 0;
   }
+  if(!allocate_pages){
+    uint32_t got=0;
+    while(got<count){
+      const uint32_t n=mesh_idx_alloc_batch(m,out_indices+got,count-got,thread_seed());
+      if(!n){
+        for(uint32_t r=0;r<got;r++)mesh_idx_free_one(m,out_indices[r]);
+        return ENOMEM;
+      }
+      got+=n;
+    }
+    if(out_pages)for(uint32_t i=0;i<count;i++)out_pages[i]=MESH_PAGE_NONE;
+    return 0;
+  }
   for(uint32_t i=0;i<count;i++){
     uint32_t p=MESH_PAGE_NONE;
     const uint32_t idx=mesh_idx_alloc_one(m,allocate_pages,thread_seed(),&p);

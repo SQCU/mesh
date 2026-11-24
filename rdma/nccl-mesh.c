@@ -31,7 +31,7 @@ enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
 /* Page j of each message runs on channel j % CHANNELS. Each writer addresses the receiver's allocated extent. */
 #define CHANNELS 4u
 #define BLOCK_PAGES 8u
-#define EXTENT_PAGES 512u
+#define EXTENT_PAGES 1024u
 #define SEND_BATCH 32u
 #define ALLREDUCE_SINGLE_PHASE_MAX 36864u
 
@@ -1079,7 +1079,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
             channel->peer[d].send.used += batch;
           }
           m->q += batch;
-          continue;
+          return 0;
         }
       }
 
