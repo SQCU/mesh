@@ -366,6 +366,7 @@ static inline void mesh_switch_togo_refresh(struct mesh_switch *sw,const struct 
 
 static inline int mesh_switch_togo_step(struct mesh_switch *sw,struct mesh_switch_togo *g){
   const uint64_t version=atomic_load_explicit(&sw->view_version,memory_order_acquire);
+  if(g->view==version+1)return 0;
   mesh_switch_togo_refresh(sw,sw->view+(version&1),g->updated_at+4000u,g);
   return 1;
 }
@@ -414,11 +415,12 @@ static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,c
   return best_pref_p<MESH_PORTS?best_pref_p:best_any_p;
 }
 
-/* Closed-form Garg-Konemann dual-priced exact directed Steiner arborescence oracle (Dreyfus-Wagner for |S| <= 3).
-   Uses live local cable backlog + async draining downstream backpressure (sw->bp) to jointly maximize fabric
-   utilization, conserve cut capacity (1 cut crossing per multicast), and minimize latency on small inline packets. */
-static inline void mesh_switch_route_split(const struct mesh_switch *sw,const struct mesh_switch_view *v,
-                                           const struct mesh_switch_togo *togo,uint64_t now_ns,
+/* Closed-form unified optimal routing:
+   1. Inline small (<= 8 KiB): direct neighbors first, free piggyback on chosen ports, zero Floyd-Warshall/clock overhead.
+   2. Bulk unicast (|S| == 1): earliest-arrival with live async draining backpressure (sw->bp -> togo).
+   3. Bulk multicast (|S| > 1): Garg-Konemann dual-priced exact directed Steiner arborescence (Dreyfus-Wagner, tau=12 us). */
+static inline void mesh_switch_route_split(struct mesh_switch *sw,const struct mesh_switch_view *v,
+                                           struct mesh_switch_togo *togo,uint64_t now_ns,
                                            const uint64_t *line,struct mesh_switch_terms *t,
                                            const uint32_t *dsts,uint32_t nd,uint32_t origin,uint32_t from,
                                            uint64_t unit_bytes,uint32_t *out_ports){
@@ -427,18 +429,43 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
   const uint32_t nodes_read=__atomic_load_n(&v->nodes,__ATOMIC_RELAXED),n=nodes_read<MESH_SWITCH_N?nodes_read:MESH_SWITCH_N;
   const uint32_t self=mesh_switch_index(v,v->self);
   if(self>=n)return;
-  const uint32_t oi=mesh_switch_index(v,origin),fi=mesh_switch_index(v,from);
-  const int is_relay=(origin!=v->self);
-  const int is_small=(unit_bytes<=2u*MESH_PAGE_BYTES);
-  if(is_small){
+  if(unit_bytes<=2u*MESH_PAGE_BYTES){
     uint32_t used=0;
     for(uint32_t i=0;i<nd;i++){
-      const uint32_t tp=mesh_switch_route_dest(v,togo,line,t,dsts[i],origin,from);
+      if(mesh_switch_link_of((struct mesh_switch_view *)v,v->self,dsts[i])){
+        const uint32_t tp=mesh_switch_route_dest(v,togo,line,t,dsts[i],origin,from);
+        out_ports[i]=tp;
+        if(tp<MESH_PORTS)used|=1u<<tp;
+      }
+    }
+    for(uint32_t i=0;i<nd;i++){
+      if(out_ports[i]<MESH_PORTS)continue;
+      uint32_t best_p=UINT32_MAX;double best_c=INFINITY;
+      for(uint32_t m=used;m;m&=m-1){
+        const uint32_t p=(uint32_t)__builtin_ctz(m);
+        const struct mesh_switch_link *lk=mesh_switch_link_of((struct mesh_switch_view *)v,mesh_port_peer(line[p]),dsts[i]);
+        if(!lk)continue;
+        const double c=t[p].backlog+t[p].own+lk->latency;
+        if(c<best_c){best_c=c;best_p=p;}
+      }
+      const uint32_t tp=best_p<MESH_PORTS?best_p:mesh_switch_route_dest(v,togo,line,t,dsts[i],origin,from);
       out_ports[i]=tp;
-      if(tp<MESH_PORTS && !(used&(1u<<tp))){used|=1u<<tp;t[tp].backlog+=(double)unit_bytes/t[tp].rate;}
+      if(tp<MESH_PORTS)used|=1u<<tp;
+    }
+    for(uint32_t m=used;m;m&=m-1){
+      const uint32_t p=(uint32_t)__builtin_ctz(m);
+      t[p].backlog+=(double)unit_bytes/t[p].rate;
     }
     return;
   }
+  if(nd==1u){
+    mesh_switch_togo_refresh(sw,v,now_ns,togo);
+    const uint32_t tp=mesh_switch_route_dest(v,togo,line,t,dsts[0],origin,from);
+    out_ports[0]=tp;
+    if(tp<MESH_PORTS)t[tp].backlog+=(double)unit_bytes/t[tp].rate;
+    return;
+  }
+  const uint32_t oi=mesh_switch_index(v,origin),fi=mesh_switch_index(v,from);
   uint32_t avoid_mid=(1u<<self);
   if(oi<n)avoid_mid|=1u<<oi;
   if(fi<n)avoid_mid|=1u<<fi;
@@ -472,7 +499,7 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
     const double R=nb_rsum[nb]>0.0?nb_rsum[nb]:t[p].rate;
     const double W=t[p].backlog,L=t[p].own;
     const double tx=(double)unit_bytes/R;
-    const double cost=tx*(1.0+W/3500.0)+0.15*L;
+    const double cost=tx*(1.0+W/12000.0)+0.15*L;
     sp[self][nb]=(float)cost;
     nh[self][nb]=(uint8_t)nb;
   }
@@ -484,7 +511,7 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
     const double W=mesh_switch_bp_wait(sw,a,b,now_ns);
     const double L=x->latency>0?x->latency:1500.0;
     const double tx=(double)unit_bytes/R;
-    const double cost=tx*(1.0+W/3500.0)+0.15*L;
+    const double cost=tx*(1.0+W/12000.0)+0.15*L;
     if((float)cost<sp[a][b]){sp[a][b]=(float)cost;nh[a][b]=(uint8_t)b;}
   }
   for(uint32_t via=0;via<n;via++){
@@ -499,24 +526,19 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
     }
   }
 
-  /* Map valid destinations; on inline small packets or direct single-dest relays, take direct/min-latency path. */
+  /* Map valid destinations for exact Dreyfus-Wagner (m <= 3) or shortest dual-price fallback (m > 3). */
   uint32_t dt[MESH_SWITCH_N],di[MESH_SWITCH_N],m=0;
   for(uint32_t i=0;i<nd;i++){
     const uint32_t d=mesh_switch_index(v,dsts[i]);
     if(d>=n || d==self)continue;
-    if(is_relay && nb_port[d]<MESH_PORTS && nd==1u){
-      out_ports[i]=nb_port[d];
-      t[nb_port[d]].backlog+=(double)unit_bytes/t[nb_port[d]].rate;
-      return;
-    }
-    if(is_small || nd>3u){
+    if(nd>3u){
       const uint32_t hop=nh[self][d];
       if(hop<n && nb_port[hop]<MESH_PORTS)out_ports[i]=nb_port[hop];
       continue;
     }
     dt[m]=d;di[m]=i;m++;
   }
-  if(is_small || nd>3u){
+  if(nd>3u){
     uint32_t used=0;
     for(uint32_t i=0;i<nd;i++){
       const uint32_t tp=out_ports[i];

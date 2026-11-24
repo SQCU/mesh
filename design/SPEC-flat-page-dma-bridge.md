@@ -48,12 +48,21 @@ There is **no `mesh_pd` pool**, **no owner byte array**, **no client write ring*
 
 Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each serving stream pair (`j = 0, 1` per port under `plan = 3`) uses two fixed-frame queue pair classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
 
-- **Class 0 (even `j = 0`, `f = 2`, 8 KiB):** Carries both:
-  1. **1-WR inline small packets (`tl->count` in `1..16`, `MESH_WIRE_INLINE`):** Up to 2 raw 4 KiB pages (`h+0` up to 4096 B, `h+1` up to 3824 B) plus a 272-byte `struct mesh_wire_tail` at bytes `[3824..4095]` of `h+1`. Fits 6 KiB (`4096 + 2048 B`) in one single 8 KiB WR with zero-copy landing via `XCHG(W[dst_idx], pack(h + slot, b))`.
-  2. **Bulk descriptors (`tl->count == MESH_TAIL_BULK_DESC` = `0xffffffff`):** `h+0` holds a `struct mesh_wire_desc` (up to 255 entries = 31 eight-page blocks = 992 KiB of Class 1 payload per 8 KiB descriptor; `h+1` is released immediately on arrival).
+- **Class 0 (even `j = 0`, `f = 2`, 8 KiB):** Carries three frame types identified by `tl->count` in the 272-byte `struct mesh_wire_tail` at bytes `[3824..4095]` of `h+1`:
+  1. **1-WR inline small packets (`tl->count` in `1..16`, `MESH_WIRE_INLINE`):** Up to 2 raw 4 KiB pages (`h+0` up to 4096 B, `h+1` up to 3824 B). Fits 6 KiB (`4096 + 2048 B`) in one single 8 KiB WR with zero-copy landing via `XCHG(W[dst_idx], pack(h + slot, b))`.
+  2. **Bulk descriptors (`tl->count == MESH_TAIL_BULK_DESC` = `0xffffffff`):** `h+0` holds a `struct mesh_wire_desc` (up to 255 entries = 31 eight-page blocks = 992 KiB of Class 1 payload per 8 KiB descriptor). Bytes `[0..391]` of the otherwise unused page `h+1` carry a zero-overhead asynchronous `struct mesh_bp_frame` snapshot of the sender's per-neighbor egress queueing waits (`wait_ns = sum_queued / sum_rate`) plus gossiped non-local waits (`>= 1 us`); `h+1` is ingested into `sw->bp` and released immediately on arrival.
+  3. **Standalone async backpressure pulse (`tl->count == MESH_TAIL_BP` = `0xfffffffe`):** Sent on quiet reverse `j = 0` lanes only when a local port holds `>= 128 KiB` queued (`wait_ns >= 25 us`, cadence `>= 40 us`), delivering `struct mesh_bp_frame` without blocking one-sided forward writes.
 - **Class 1 (odd `j = 1`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Pure raw 32 KiB client data WRs (8 contiguous raw 4 KiB pages `h..h+7`, zero metadata on `j = 1`). Because both `j = 0` and `j = 1` are strict FIFO queue pairs and one port poller posts `(DESC_k on j = 0, DATA_{k,0..m-1} on j = 1)` sequentially, the receiver pairs `rx_desc_q` (from `j = 0`) and `rx_data_q` (from `j = 1`) in exact 1-to-1 FIFO order, landing 8 raw pages zero-copy into `W[dst_idx_0..7]` or relaying zero-copy at 32 KiB granularity (`~1.6%` wire overhead at bulk sizes).
 
-Multicast groups sharing a `src_page` (or 8-page contiguous run) route direct neighbors first, then multi-hop destinations piggyback for free (`MESH_WIRE_SAME_DATA`) on any already-chosen port whose peer directly connects to them.
+### 4.1 Asynchronous Backpressure and Closed-Form Routing
+
+Every node maintains `sw->bp[a][b] = (wait_ns, at_ns)` for all directed graph edges `(a, b)`. Because backpressure travels asynchronously (piggybacked on `j = 0` bulk `DESC`s and quiet-link `MESH_TAIL_BP` pulses), each reader evaluates exact drain physics at read time: `W(a, b, now) = max(0, wait_ns - (now - at_ns))`.
+
+Next-hop selection (`mesh_switch_route_split`) separates the three physical regimes in closed form:
+
+1. **Inline small (`unit_bytes <= 8 KiB`):** Direct neighbors route first; non-direct destinations piggyback for free (`MESH_WIRE_SAME_DATA`) onto any already-chosen port whose peer connects directly to the destination. Zero Floyd–Warshall, zero clock read.
+2. **Bulk unicast (`|S| = 1`, `unit_bytes > 8 KiB`):** Earliest-arrival path `W_local + L_local + togo[peer][d]` using dynamically refreshed `togo` with live draining `sw->bp`. Balances across parallel direct cables and multi-hop detours proportionally to capacity (`3:1:1` on `A -> B`).
+3. **Bulk multicast (`|S| > 1`, `unit_bytes > 8 KiB`):** Exact **Dreyfus–Wagner directed Steiner arborescence** (`|S| <= 3`) over Garg–Könemann dual-priced edges `price(e) = (unit_bytes / R_e) * (1 + W_e / tau) + 0.15 * L_e` (`tau = 12 us`), with grouped multicast relaying in `link_receive`. Conserves bottleneck graph cuts (1 cut crossing per source instead of 2) while equalizing utilization across heterogeneous 1/2/3/4-cable bundles.
 
 ```c
 #define MESH_WIRE_SAME_DATA 1u

@@ -244,10 +244,10 @@ static int sends_post(struct link *l,uint32_t j,struct ibv_send_wr *request,uint
 
 static void switch_sends(struct link *l,uint32_t served,const uint64_t *line){
   struct mesh_switch *sw=switch_of();
-  const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
+  const struct mesh_switch_view *v=NULL;
   static _Thread_local struct ibv_send_wr request[MESH_WIRE_BATCH+1u];
   static _Thread_local struct ibv_sge span[MESH_WIRE_BATCH+1u];
-  const uint64_t now_at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  uint64_t now_at=0;
   for(uint32_t cls=0;cls<MESH_SWITCH_CLASSES;cls++){
     if(atomic_load_explicit(&sw->port_q[l->index][cls],memory_order_relaxed)){
       const uint32_t rev=mesh_llist_reverse_cls(M,cls,mesh_llist_del_all(M,&sw->port_q[l->index][cls]));
@@ -276,6 +276,8 @@ static void switch_sends(struct link *l,uint32_t served,const uint64_t *line){
           mesh_page_release_run(M,dp,2u);
           continue;
         }
+        if(!now_at)now_at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if(!v)v=sw->view+mesh_switch_published(&sw->view_version);
         mesh_tail_at(M,dp)->count=MESH_TAIL_BULK_DESC;
         mesh_switch_bp_pack(sw,v,line,now_at,mesh_bp_at(M,dp));
         l->bp_sent_at=now_at;
@@ -330,6 +332,7 @@ static void switch_sends(struct link *l,uint32_t served,const uint64_t *line){
       const uint32_t nxt=atomic_load_explicit(mesh_class_next(M,cls,dp),memory_order_relaxed);
       atomic_store_explicit(&sw->tx_head[l->index][cls],nxt,memory_order_release);
       if(!nxt)l->tx_tail[cls]=0;
+      if(!now_at)now_at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       struct mesh_switch_lane *x=sw->lane+switch_lane(l->index,j);
       const uint64_t first=atomic_load_explicit(&x->posted,memory_order_relaxed);
       x->flight[first%MESH_SWITCH_FLIGHT]=(struct mesh_switch_entry){now_at,dp,0};
@@ -340,27 +343,37 @@ static void switch_sends(struct link *l,uint32_t served,const uint64_t *line){
       if(!sends_post(l,j,request,1u,first))return;
     }
   }
-  /* Async standalone backpressure pulse on quiet reverse j=0 ONLY when local egress queue >= 12 us. */
-  if(now_at>l->bp_sent_at && now_at-l->bp_sent_at>=25000u && (served&0x55u)){
-    const uint32_t max_w=mesh_switch_bp_pack(sw,v,line,now_at,NULL);
-    if(max_w>=12000u){
-      const uint32_t j0=(uint32_t)__builtin_ctz(served&0x55u);
-      struct mesh_switch_lane *x0=sw->lane+switch_lane(l->index,j0);
-      const uint64_t out0=atomic_load_explicit(&x0->posted,memory_order_relaxed)-atomic_load_explicit(&x0->completed,memory_order_relaxed);
-      if(out0+1u<=l->lane[j0].depth){
-        const uint32_t dp=mesh_page_alloc_run(M,2u,poller_seed(l));
-        if(dp!=MESH_PAGE_NONE){
-          mesh_tail_at(M,dp)->count=MESH_TAIL_BP;
-          mesh_switch_bp_pack(sw,v,line,now_at,mesh_bp_at(M,dp));
-          l->bp_sent_at=now_at;
-          atomic_fetch_add_explicit(&sw->cable[l->index].queued,(uint64_t)2u*MESH_PAGE_BYTES,memory_order_relaxed);
-          const uint64_t first0=atomic_load_explicit(&x0->posted,memory_order_relaxed);
-          x0->flight[first0%MESH_SWITCH_FLIGHT]=(struct mesh_switch_entry){now_at,dp,0};
-          struct ibv_sge span0=dma_span(l,(struct mesh_dma_span){mesh_page_offset(M,dp),(uint64_t)2u*MESH_PAGE_BYTES});
-          struct ibv_send_wr req0=(struct ibv_send_wr){.wr_id=((uint64_t)j0<<48)|(first0&((UINT64_C(1)<<48)-1)),.sg_list=&span0,.num_sge=1,
-                                                       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
-          atomic_store_explicit(&x0->posted,first0+1u,memory_order_release);
-          sends_post(l,j0,&req0,1u,first0);
+  /* Async standalone backpressure pulse on quiet reverse j=0 ONLY when some local port has >= 128 KiB queued. */
+  if(served&0x55u){
+    int any_q=0;
+    for(uint32_t p=0;p<MESH_PORTS;p++){
+      if(atomic_load_explicit(&sw->cable[p].queued,memory_order_relaxed)>=131072u){any_q=1;break;}
+    }
+    if(any_q){
+      if(!now_at)now_at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      if(now_at>l->bp_sent_at && now_at-l->bp_sent_at>=40000u){
+        if(!v)v=sw->view+mesh_switch_published(&sw->view_version);
+        const uint32_t max_w=mesh_switch_bp_pack(sw,v,line,now_at,NULL);
+        if(max_w>=25000u){
+          const uint32_t j0=(uint32_t)__builtin_ctz(served&0x55u);
+          struct mesh_switch_lane *x0=sw->lane+switch_lane(l->index,j0);
+          const uint64_t out0=atomic_load_explicit(&x0->posted,memory_order_relaxed)-atomic_load_explicit(&x0->completed,memory_order_relaxed);
+          if(out0+1u<=l->lane[j0].depth){
+            const uint32_t dp=mesh_page_alloc_run(M,2u,poller_seed(l));
+            if(dp!=MESH_PAGE_NONE){
+              mesh_tail_at(M,dp)->count=MESH_TAIL_BP;
+              mesh_switch_bp_pack(sw,v,line,now_at,mesh_bp_at(M,dp));
+              l->bp_sent_at=now_at;
+              atomic_fetch_add_explicit(&sw->cable[l->index].queued,(uint64_t)2u*MESH_PAGE_BYTES,memory_order_relaxed);
+              const uint64_t first0=atomic_load_explicit(&x0->posted,memory_order_relaxed);
+              x0->flight[first0%MESH_SWITCH_FLIGHT]=(struct mesh_switch_entry){now_at,dp,0};
+              struct ibv_sge span0=dma_span(l,(struct mesh_dma_span){mesh_page_offset(M,dp),(uint64_t)2u*MESH_PAGE_BYTES});
+              struct ibv_send_wr req0=(struct ibv_send_wr){.wr_id=((uint64_t)j0<<48)|(first0&((UINT64_C(1)<<48)-1)),.sg_list=&span0,.num_sge=1,
+                                                           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+              atomic_store_explicit(&x0->posted,first0+1u,memory_order_release);
+              sends_post(l,j0,&req0,1u,first0);
+            }
+          }
         }
       }
     }
@@ -426,7 +439,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
     return 0;
   }
   atomic_thread_fence(memory_order_acquire);
-  const uint64_t now_rx=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  uint64_t now_rx=0;
   const struct mesh_switch_view *v=NULL;
   struct mesh_switch_terms terms[MESH_PORTS];
   int terms_ready=0;
@@ -455,6 +468,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
       const struct mesh_wire_tail *tl=mesh_tail_at(M,h);
       if(tl->count==MESH_TAIL_BULK_DESC){
         if(!v)v=sw->view+mesh_switch_published(&sw->view_version);
+        if(!now_rx)now_rx=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         mesh_switch_bp_ingest(sw,v,now_rx,mesh_bp_at(M,h));
         mesh_page_release(M,h+1u);
         l->rx_desc_q[l->rx_desc_t++%MESH_SWITCH_FLIGHT]=h;
@@ -462,6 +476,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
       }
       if(tl->count==MESH_TAIL_BP){
         if(!v)v=sw->view+mesh_switch_published(&sw->view_version);
+        if(!now_rx)now_rx=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         mesh_switch_bp_ingest(sw,v,now_rx,mesh_bp_at(M,h));
         mesh_page_release_run(M,h,2u);
         continue;
@@ -484,7 +499,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
           MESH_SWITCH_COUNT(sw,l->index,set,1);
           continue;
         }
-        if(!terms_ready){if(!v)v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_togo_refresh(sw,v,now_rx,&togo);mesh_switch_terms_read(sw,v,line,terms);terms_ready=1;}
+        if(!terms_ready){if(!v)v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_terms_read(sw,v,line,terms);terms_ready=1;}
         const uint32_t tp=ent.hops+1<MESH_SWITCH_N?mesh_switch_route_dest(v,&togo,line,terms,ent.dst_node,origin,from):UINT32_MAX;
         if(tp>=MESH_PORTS){mesh_page_release(M,hp);MESH_SWITCH_COUNT(sw,l->index,unreachable,1);continue;}
         if(relay_inl_dp[tp]!=MESH_PAGE_NONE){
@@ -566,6 +581,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
     }
     if(rn){
       if(!terms_ready){if(!v)v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_terms_read(sw,v,line,terms);terms_ready=1;}
+      if(!now_rx)now_rx=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       route_multicast_group(sw,v,now_rx,line,terms,rdst,rn,d->origin_node,d->from_node,(uint64_t)8u*MESH_PAGE_BYTES,rport);
       for(uint32_t r=0;r<rn;r++){
         const struct mesh_wire_entry *ge=d->e+pos+ridx[r]*8u;
@@ -636,7 +652,7 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
   if(!head)return 0;
   struct mesh_switch *sw=switch_of();
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
-  const uint64_t now_tk=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  uint64_t now_tk=0;
   struct mesh_switch_terms terms[MESH_PORTS];
   mesh_switch_terms_read(sw,v,line,terms);
   uint32_t inl_dp[MESH_PORTS],inl_n[MESH_PORTS]={0},inl_src[MESH_PORTS][2];
@@ -728,6 +744,7 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
     /* Walk entries: 8-page contiguous bulk blocks -> cls 1 (32 KiB); all else -> cls 0 (12 KiB inline) */
     for(uint32_t i=0;i<cnt;){
       if(i+8u<=cnt && is_bulk8_run(d->e+i,pages)){
+        if(!now_tk)now_tk=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         const uint32_t s=d->e[i].src_page;
         uint32_t g=1u;
         while(i+(g+1u)*8u<=cnt && g<MESH_DESTS && d->e[i+g*8u].src_page==s && is_bulk8_run(d->e+i+g*8u,pages))g++;
