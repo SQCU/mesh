@@ -123,10 +123,9 @@ static inline uint32_t switch_lane(uint32_t p,uint32_t j){ return p*2*MESH_LINK_
 static struct mesh_switch_togo togo;
 
 static inline uint32_t poller_seed(const struct link *l){
-  static _Thread_local uint32_t s;
-  if(!s)s=((l->index+1u)*2654435761u)|1u;
-  s=s*1664525u+1013904223u;
-  return s>>16;
+  static _Thread_local uint32_t cursor;
+  const uint32_t base=36864u+l->index*2048u;
+  return base+(cursor++&1023u);
 }
 
 static inline void tx_append_local(struct link *l,struct mesh_switch *sw,uint32_t head){
@@ -349,12 +348,12 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
     const uint32_t dp=atomic_load_explicit(&x->rx_desc,memory_order_relaxed);
     const struct mesh_wire_desc *d=mesh_desc_at(M,dp);
     uint32_t pos=l->rx_pos[j];
-    int first_use=1;
-    while(rem && pos<MESH_WIRE_BATCH){
-      const struct mesh_wire_entry ent=d->e[pos];
-      if(!first_use && !(ent.flags&MESH_WIRE_SAME_DATA))break;
-      if(!first_use)mesh_page_hold(M,h);
-      first_use=0;pos++;rem--;
+    uint32_t uses=1u;
+    while(uses<rem && pos+uses<MESH_WIRE_BATCH && (d->e[pos+uses].flags&MESH_WIRE_SAME_DATA))uses++;
+    for(uint32_t k=1u;k<uses;k++)mesh_page_hold(M,h);
+    for(uint32_t k=0;k<uses;k++){
+      const struct mesh_wire_entry ent=d->e[pos++];
+      rem--;
       const uint32_t b=ent.bytes<=MESH_PAGE_BYTES?ent.bytes:MESH_PAGE_BYTES;
       if(ent.dst_node==M->node){
         mesh_table_land(M,ent.dst_index,h,b);
@@ -367,6 +366,13 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
         mesh_page_release(M,h);
         MESH_SWITCH_COUNT(sw,l->index,unreachable,1);
         continue;
+      }
+      if(relay_dp[tp]!=MESH_PAGE_NONE && mesh_desc_at(M,relay_dp[tp])->origin_node!=d->origin_node){
+        struct mesh_wire_desc *prev_rd=mesh_desc_at(M,relay_dp[tp]);
+        prev_rd->count=relay_n[tp];
+        port_enqueue_desc(l,sw,tp,relay_dp[tp],relay_df[tp]);
+        MESH_SWITCH_COUNT(sw,l->index,groups,1);
+        relay_dp[tp]=MESH_PAGE_NONE;relay_n[tp]=0;relay_df[tp]=0;
       }
       if(relay_dp[tp]==MESH_PAGE_NONE){
         relay_dp[tp]=mesh_page_alloc(M,poller_seed(l));

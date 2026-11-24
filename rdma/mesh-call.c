@@ -2,14 +2,17 @@
 #include <pthread.h>
 
 static inline uint32_t thread_seed(void){
-  static _Thread_local uint32_t s;
-  if(!s){
+  static _Thread_local uint32_t base,cursor;
+  if(!base){
     uint64_t tid=0;
     pthread_threadid_np(NULL,&tid);
-    s=(uint32_t)(tid^(tid>>32)^(uint64_t)getpid())|1u;
+    const uint32_t h=(uint32_t)((tid^(tid>>32)^(uint64_t)getpid())*2654435761u);
+    base=1u+((h>>16)&1023u)*32u;
+    cursor=base;
   }
-  s=s*1664525u+1013904223u;
-  return s>>16;
+  const uint32_t w=cursor;
+  cursor=base+((cursor-base+1u)&31u);
+  return w;
 }
 
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
