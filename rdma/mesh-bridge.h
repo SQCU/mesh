@@ -107,9 +107,9 @@ _Static_assert(offsetof(struct message,port)==36 && offsetof(struct message,vers
    write rings (mesh-link.c switch_takes): the slot its next pass looks at first (`take_from`); and its posts from its
    port's inbound rings (mesh-link.c switch_sends): the pushing port whose ring its next pass reads first
    (`send_from`) */
-#define RED_HT_SIZE 2048u
+#define RED_HT_SIZE 4096u
 #define RED_HT_MASK (RED_HT_SIZE-1u)
-#define RED_SQ_CAP  8u
+#define RED_SQ_CAP  4u
 struct red_slot {
   uint32_t dp;
   uint16_t off;

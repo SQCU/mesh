@@ -169,7 +169,7 @@ static inline void mesh_red_apply_run(struct hdr *m,uint8_t op,uint32_t dst_p0,u
 }
 
 /* Lock-free reduction landing into W[index] for C0/C1, with per-bucket interval stash for out-of-order C2. */
-#define MESH_C2_BUCKETS 64u
+#define MESH_C2_BUCKETS 512u
 #define MESH_C2_SLOTS   32u
 struct mesh_c2_slot {
   uint32_t idx,page;
