@@ -4,166 +4,92 @@
 #include <stddef.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
 #include <libproc.h>
 #include "mesh-view.h"
 #include "mesh-call.h"
-/* design/PAGE-TABLE-SPEC-20261122.md: the node's region, which the bridge makes and every process of the node maps */
+
+/* design/SPEC-flat-page-dma-bridge.md */
 #define MESH_MAGIC 0x4d455348u
-/* the region's name, the one every process of the node opens: its bridge, the bridge's children, its heartbeat, its
-   clients and its observers */
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
-/* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* The wire's contract between bridges: a bridge of another version is not paired with (mesh-link.c port_heard).  167:
-   every SEND is one page of the node's pool, MESH_HEAD bytes of header and then its payload, the header naming each
-   destination as a node and an index of that node's page table (mesh-switched.h struct mesh_head), its receiver
-   testing nothing of it and clamping each field that addresses memory (mesh-switched.h mesh_switch_landed), a page
-   sent on the lanes of its payload's class alone, a link's lane j its queue pair j (mesh-bridge.h link_plan), and a
-   line (mesh-switched.h struct mesh_switch_line) carrying for each page class its link's time and its idle time,
-   stamped with its sender's boot plus uptime, a line a node passes on carrying its time as that node counts it as it
-   sends (mesh_switch_lines_give); and a port's control socket carries HELLO, RECORD and LINK alone (mesh-bridge.h
-   struct message).  Against 166: there is no FAREWELL: a stopping bridge closes its control sockets and says nothing,
-   and its peer reads the stop as the socket's end; RECORD and LINK are kinds 2 and 3 (166's 3 and 4), and the bytes of
-   166's FAREWELL `code` are unused */
-#define MESH_VERSION 167u
-/* The region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one.  195: the page table and its owner bytes (`table_off`), the clients'
-   write rings (`ring_off`), the pool (`pool_off`), the node table (`node_off`), the map's two copies (`map_off`,
-   struct mesh_map_copy, published by `map_version`), the lane records (`stream_off`, 192 bytes a record), and the
-   switch's inbound and in-flight rings (mesh-switched.h struct mesh_switch_inbound, struct mesh_switch_lane
-   `flight`), each inbound ring of MESH_POOL_PAGES entries; against 194, the map's records are two copies of
-   MESH_RECORDS records each in the region's own bytes (194's: one copy in arena pages the bridge leased, under a
-   seqlock), `map` is the map's serial alone (never odd), the word at 152 is `map_version` (194's `map_nodes`: each
-   copy has its count), the word at 160 is unused (194's `health` serial: a health sample is a publish), and the
-   bridge's pages record no map lease (mesh-observe.h struct mesh_bridge_pages: 194's `map` and `map_pages` unused) */
-#define MESH_LAYOUT 195u
+#define MESH_VERSION 168u
+#define MESH_LAYOUT 200u
 #define MESH_ABSENT UINT32_MAX
-/* the region's lane records (struct mesh_lanes: the bridge's, MESH_LINK_STREAMS a port), the most ports, the nodes the
-   node table has (struct mesh_node) and the client slots; and the bytes of the bridge's own pages, which it publishes
-   for its own observation tools and no client reads (`bridge_off`, mesh-observe.h) */
+
 #define MESH_STREAMS 32
 #define MESH_LINK_STREAMS 4u
 #define MESH_PORTS (MESH_STREAMS/MESH_LINK_STREAMS)
 #define MESH_NODES 8u
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
-/* the switch's bytes (`switch_off`, mesh-switched.h struct mesh_switch: the port lines, the view and the split tables,
-   the cables, the lines heard, the lanes and their in-flight rings, the inbound rings, and the trainer's log rings) */
-#define MESH_SWITCH_BYTES (UINT64_C(128)<<20)
-#define MESH_LEAVING (UINT64_C(1)<<63)
-_Static_assert(38+25<=63,"an owner word");
-/* the pause between a port's hellos and between the bridge's liveness turns */
+#define MESH_SWITCH_BYTES (UINT64_C(8)<<20)
 #define MESH_PAUSE_NS UINT64_C(3000000000)
-/* the operator's bound (2026-10-18): no DMA or network send/receive channel of the mesh is used longer than this
-   without something happening on it or its scope concluding */
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
-/* The pool: the pages of each class the bridge carves at its start (fewer, in proportion, where the arena has
-   fewer), MESH_CLASSES classes (mesh-call.h MESH_CLASS_SHORT, MESH_CLASS_LONG); and a client slot's write ring's
-   cells */
-#define MESH_POOL_SHORT 16384u
-#define MESH_POOL_LONG 16384u
-#define MESH_POOL_PAGES (MESH_POOL_SHORT+MESH_POOL_LONG)
-#define MESH_CLASSES 2u
-#define MESH_RING 1024u
-_Static_assert(!(MESH_RING&(MESH_RING-1)),"a ring a power of two");
-_Static_assert(MESH_TABLE<=UINT32_MAX/2 && MESH_POOL_PAGES<UINT32_MAX,"an index and a page id in 32 bits");
-/* the payload bytes of a page of `frames` frames */
-#define MESH_PAYLOAD(frames) ((frames)*MESH_FRAME-MESH_HEAD)
-
-/* An exact byte extent of the region (offset from its base, bytes); one never crosses a registration extent */
 #define MESH_DMA_EXTENT (UINT64_C(1)<<30)
+
+#define MESH_TABLE_EMPTY UINT32_MAX
+#define MESH_REF_CONTIG (UINT32_C(1)<<31)
+#define MESH_REF_MASK (MESH_REF_CONTIG-1u)
+#define MESH_WIRE_BATCH 255u
+#define MESH_DESC_FLUSH 63u
+
 struct mesh_dma_span { uint64_t offset,bytes; };
 _Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");
 
-/* A page of the pool (`pool_off`), its id its descriptor's index: its region offset (`offset`, where its header is;
-   its payload MESH_HEAD after it), its class (`cls`, its frames: MESH_CLASS_SHORT or MESH_CLASS_LONG), its payload's
-   bytes, its uses (a table word naming it, a SEND pushed or posted of it, a write of it pending in a ring, a landing
-   being processed: at 0 it goes back to its class's free stack), its state, the lane a receive of it is posted on, and
-   `next`, its link on the free stack (the next page's id + 1, 0 none).  The bridge carves the pages from the arena
-   once, at its start, each run of them within one MESH_DMA_EXTENT; a SEND of a page covers its payload's class's
-   frames (mesh-switched.h mesh_switch_forward), never more than its own */
-enum { MESH_PD_FREE, MESH_PD_RECEIVE, MESH_PD_LIVE };
-struct mesh_pd { _Atomic uint64_t next; uint64_t offset; _Atomic uint32_t uses,bytes; uint16_t cls; _Atomic uint16_t state;
-  _Atomic uint32_t lane; };
-_Static_assert(sizeof(struct mesh_pd)==32 && offsetof(struct mesh_pd,uses)==16 && offsetof(struct mesh_pd,lane)==28,"mesh_pd");
-/* The pool's header: a class's free stack (`head`: the top page's id + 1 in its low 32 bits, 0 empty, and a tag in its
-   high 32 that every change moves), its free pages (never fewer than the stack has), its frames and its pages; and
-   the pages the bridge carved (`pages`, the descriptors that name pages).  The descriptors follow it */
-struct mesh_pool_class { _Alignas(64) _Atomic uint64_t head; _Atomic uint32_t free; uint32_t frames,pages; };
-struct mesh_pool { struct mesh_pool_class cls[MESH_CLASSES]; _Alignas(64) uint32_t pages; };
+/* design/SPEC-flat-page-dma-bridge.md section 4: uniform 4096-byte DESC wire frame */
+struct mesh_wire_entry {
+  uint32_t dst_node;
+  uint32_t dst_index;
+  uint16_t bytes;
+  uint8_t flags;
+  uint8_t hops;
+  uint32_t src_page;
+};
+_Static_assert(sizeof(struct mesh_wire_entry)==16,"mesh_wire_entry");
 
-/* A write as a client's ring cell has it: the page the index named when it was written (`pd`: the write's use is on
-   it until the bridge takes it; the take reads the page, never the index), its payload bytes and its destinations on
-   other nodes (those on this node its writer sets itself: mesh-call.c mesh_write) */
-struct mesh_write { uint32_t pd,bytes,dests,unused; struct mesh_dest dest[MESH_DESTS]; };
-_Static_assert(sizeof(struct mesh_write)==16+8*MESH_DESTS,"mesh_write");
-/* A client slot's write ring (`ring_off`, one a slot): one producer, the slot's client, and one taker, the port child
-   whose share it is (ring s the (s mod n)-th of the n serving ports, by the port lines: mesh-switched.h struct
-   mesh_switch `port`; as the serving ports change, two may take a moment, each position one compare-exchange's).
-   `put` is the next position written and `take` the next taken.  Cell c (c = p mod MESH_RING) holds the write of
-   position p from the producer's store of its sequence, p + 1, so a zeroed ring is empty; a taker copies the cell, then
-   moves `take` past p by a compare-exchange, and carries its copy where that won; the cell is the producer's again
-   once `take` is past p, which the producer tests against before it writes (mesh_ring_push).  A copy whose
-   compare-exchange lost may be torn by the producer's next lap, and is never carried */
-struct mesh_cell { _Atomic uint64_t sequence; struct mesh_write w; };
-struct mesh_ring { _Alignas(64) _Atomic uint64_t put; _Alignas(64) _Atomic uint64_t take; _Alignas(64) struct mesh_cell cell[MESH_RING]; };
+struct mesh_wire_desc {
+  _Atomic uint32_t next;
+  uint32_t count;
+  uint32_t origin_node;
+  uint32_t from_node;
+  struct mesh_wire_entry e[MESH_WIRE_BATCH];
+};
+_Static_assert(sizeof(struct mesh_wire_desc)==MESH_PAGE_BYTES,"mesh_wire_desc is one 4096 B page");
 
-/* A node this node's bridge reaches (`node_off`, MESH_NODES of them; node 0: the entry unused), written by the bridge:
-   `live` while the map reaches it, `generation` the entry's, and the bandwidth of this node's own cables toward it (0:
-   reached through relays) */
 struct mesh_node { _Alignas(64) _Atomic uint32_t node; _Atomic uint32_t live; _Atomic uint64_t generation,bandwidth; };
 _Static_assert(sizeof(struct mesh_node)==64,"mesh_node");
 
-/* The bridge's lane records (never a client's): a port's lane pair s, its peer and the port child that posts its lanes
-   (`child`, `child_start`) and its bandwidth and identity as its lanes last opened (whether they serve is its port's
-   line: mesh-switched.h struct mesh_switch `port`), its passes and SEND times, and each lane's requests posted and
-   completed each way, each way's on a cache line of its own.  The bridge and its children write them and the bridge's
-   own observation tools read them; the heartbeat reads none (only the header's), so a field whose role ends goes, with
-   a MESH_LAYOUT of its own */
 struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 _Static_assert(sizeof(struct mesh_posts)==64 && offsetof(struct mesh_posts,done)==16,"mesh_posts ABI");
 struct mesh_lanes {
   _Alignas(64) _Atomic uint32_t peer;
   _Atomic uint32_t child;
   _Atomic uint64_t bandwidth,wire;
-  /* the passes its port's progress thread made (mesh-link.c port_pass) */
   _Atomic uint64_t passes;
-  /* its SENDs' post -> completion (the NIC's, the wire's and the peer NIC's acknowledgement, no pass of either bridge):
-     the nanoseconds summed and the SENDs timed, both lanes of the record, by its port's progress thread */
   _Atomic uint64_t send_ns,sends;
   uint64_t child_start;
   struct mesh_posts posts[2];
 };
 _Static_assert(sizeof(struct mesh_lanes)==192 && offsetof(struct mesh_lanes,posts)==64,"mesh_lanes");
-/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
-   record's sequence in that boot, the bytes its clients' pages may fill (`region`: the payload bytes of its bridge's
-   pool, every class's pages), the node's memory in bytes and hardware model (hw.model, mesh-view.h MESH_MODEL_BYTES with its
-   NUL), and the `reached` nodes its bridge reaches (mesh-view.h struct mesh_reach).  No host name: a name a person reads
-   is a label the readers take from the name table by node number (etc/mesh-nodes.json, rdma/peers.py label) */
+
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
-/* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
-   that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The
-   slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a region's
-   processes at these offsets */
+
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   uint64_t start,padding[6];
 };
-/* The region's header.  Every field keeps its offset in every layout (the install observer and an earlier build's
-   heartbeat read them); a field whose role ends is renamed in place.  `entries` the page table's indices; `table_off`
-   the page table's words and owner bytes, `arena_off` the arena's bitmap (a bit an arena page of `pgsz` bytes, `block`
-   pages a block), `ring_off` the clients' write rings, `pool_off` the pool, `bridge_off` the bridge's own pages,
-   `stream_off` the lane records, `client_off` the client slots, `data_off` the arena, `node_off` the node table and
-   `switch_off` the switch; `attached` the client slots whose rings the bridge's port children look at, a bit a slot
-   (mesh_ring_flag); `map` the map's serial, `map_off` the map's two copies and `map_version` their publishes
-   (mesh_map_published); `busy` the frames the bridge's lanes have queued (0 while none) and `idle_since` the wall clock
-   in ns at which they last had none (0 while they have any); `unused` and `spare` are unused */
+
+/* Every field keeps its offset for mesh-heartbeat and mesh-install-state ABI compatibility.
+   table_off -> W[0..entries-1], arena_off -> u[0..flat_pages-1], ring_off -> struct mesh_bitmaps,
+   attached -> pending llist head, unused -> flat_pages, spare -> contig_pages. */
 struct hdr {
   uint32_t magic,version,pgsz,block,entries,node,streams,clients;
   uint64_t table_off,arena_off,ring_off,pool_off,bridge_off,stream_off,client_off,data_off,length,boot;
@@ -172,7 +98,7 @@ struct hdr {
   _Atomic uint64_t map_version;
   uint64_t unused;
   _Atomic uint64_t busy,idle_since;
-  uint64_t spare;
+  _Atomic uint64_t spare;
   uint64_t node_off,switch_off;
 };
 _Static_assert(offsetof(struct hdr,version)==4 && offsetof(struct hdr,pgsz)==8 && offsetof(struct hdr,block)==12 &&
@@ -186,248 +112,392 @@ _Static_assert(offsetof(struct hdr,version)==4 && offsetof(struct hdr,pgsz)==8 &
                offsetof(struct hdr,node_off)==192 && offsetof(struct hdr,switch_off)==200 && sizeof(struct hdr)==208,
                "struct hdr: every field at its offset");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
-/* design/transport.md: the map, the records of the nodes a paired path from this node reaches (struct mesh_record),
-   in two copies at `map_off` (mesh_layout), each with its count, written by the bridge's event loop alone
-   (mesh-records.c map_publish): it writes the copy not published whole, then publishes it by a release store of
-   `map_version` (its publishes so far; the published copy is [map_version & 1]).  A reader loads `map_version` with
-   acquire and copies the published copy, and never waits: a bridge that dies mid-write leaves the copy before it
-   published, and its successor's first publish replaces it.  A copy stands until the second publish after it, when the
-   bridge writes it again.  A health sample is a publish of its own; a publish that changes the mesh also moves the
-   map's serial (`map`, mesh_map_moved), which a reader reads and never waits on (mesh-dataflow.c mesh_map_serial).
-   The bridge's first record is published before the region opens (`magic` set last), so a reader never reads an empty
-   map, and the serial is never 0 */
+
 #define MESH_RECORDS 256u
 struct mesh_map_copy { uint64_t nodes; struct mesh_record record[MESH_RECORDS]; };
 static inline struct mesh_map_copy *mesh_map_copies(struct hdr *m){ return (struct mesh_map_copy *)((char *)m+m->map_off); }
 static inline const struct mesh_map_copy *mesh_map_published(struct hdr *m){
   return mesh_map_copies(m)+(atomic_load_explicit(&m->map_version,memory_order_acquire)&1);
 }
-/* a copy's records, at most its room */
 static inline uint32_t mesh_map_nodes(const struct mesh_map_copy *copy){ return copy->nodes<MESH_RECORDS?(uint32_t)copy->nodes:MESH_RECORDS; }
-/* the map's serial moved: by the bridge at each publish that changes the mesh (mesh-records.c map_publish) */
-static inline void mesh_map_moved(struct hdr *m){
-  atomic_fetch_add_explicit(&m->map,1,memory_order_release);
-}
-/* region m expired: its layout version 0, so no attach or read of it takes it again.  By the heartbeat's release
-   (mesh-heartbeat.c region_expire) and by a bridge that finds a region it cannot adopt (mesh-link.c region_open) */
-static inline void mesh_expire(struct hdr *m){
-  __atomic_store_n(&m->version,0,__ATOMIC_SEQ_CST);
-}
-/* an owner word is its generation, slot and process: (generation << 38) | (slot << 32) | pid */
-static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
-/* the bridge's lane records of port p's lane pair s: record p MESH_LINK_STREAMS + s */
-static inline struct mesh_lanes *mesh_lanes_at(struct hdr *m,uint32_t p){return (struct mesh_lanes *)((char *)m+m->stream_off)+p;}
-/* the node table's entry n */
-static inline struct mesh_node *mesh_node_at(struct hdr *m,uint32_t n){return (struct mesh_node *)((char *)m+m->node_off)+n;}
-/* the arena's pages of pgsz bytes, and its bitmap (a bit a page, set while a lease of the bridge has it) */
+static inline void mesh_map_moved(struct hdr *m){ atomic_fetch_add_explicit(&m->map,1,memory_order_release); }
+static inline void mesh_expire(struct hdr *m){ __atomic_store_n(&m->version,0,__ATOMIC_SEQ_CST); }
+static inline struct mesh_lanes *mesh_lanes_at(struct hdr *m,uint32_t p){ return (struct mesh_lanes *)((char *)m+m->stream_off)+p; }
+static inline struct mesh_node *mesh_node_at(struct hdr *m,uint32_t n){ return (struct mesh_node *)((char *)m+m->node_off)+n; }
 static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
-static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
+static inline uint32_t mesh_flat_pages(const struct hdr *m){ return (uint32_t)m->unused; }
+static inline _Atomic uint64_t *mesh_pending_head(struct hdr *m){ return &m->attached; }
+static inline _Atomic uint64_t *mesh_contig_pages(struct hdr *m){ return &m->spare; }
 
-/* ---- The page table (`table_off`) ------------------------------------------------------------------------------
-   A word an index, (landed << 32) | (pd + 1), where pd + 1 == 0 names no page and `landed` counts the landings at the
-   index; a word is only ever replaced whole, by compare-exchange (release), and read by an acquire load.  After the
-   words, an owner byte an index: its client's slot + 1 (mesh_owner_byte), 0 while the index is free */
+/* ---- Flat page array P[0..N-1], page table W[0..entries-1], refcounts u[0..N-1] ---- */
+static inline unsigned char *mesh_page_at(struct hdr *m,uint32_t p){ return (unsigned char *)m+m->data_off+(uint64_t)p*MESH_PAGE_BYTES; }
+static inline uint64_t mesh_page_offset(const struct hdr *m,uint32_t p){ return m->data_off+(uint64_t)p*MESH_PAGE_BYTES; }
+static inline struct mesh_wire_desc *mesh_desc_at(struct hdr *m,uint32_t p){ return (struct mesh_wire_desc *)mesh_page_at(m,p); }
 static inline _Atomic uint64_t *mesh_table(struct hdr *m){ return (_Atomic uint64_t *)((char *)m+m->table_off); }
-static inline _Atomic uint8_t *mesh_owners(struct hdr *m){ return (_Atomic uint8_t *)((char *)m+m->table_off+(uint64_t)m->entries*sizeof(uint64_t)); }
-static inline uint32_t mesh_word_pd(uint64_t word){ return (uint32_t)word-1u; }
-static inline uint32_t mesh_word_landed(uint64_t word){ return (uint32_t)(word>>32); }
-static inline uint64_t mesh_entry_load(struct hdr *m,uint32_t index){ return atomic_load_explicit(&mesh_table(m)[index],memory_order_acquire); }
-/* index's word set to name page pd (MESH_ABSENT: none), its landed raised by `landing` (1: a landing; 0: an
-   invalidation): the page the word named before (MESH_ABSENT: none), whose use the caller drops (mesh_pd_drop); pd's
-   use for the word the caller has counted (mesh_pd_use) */
-static inline uint32_t mesh_entry_put(struct hdr *m,uint32_t index,uint32_t pd,uint32_t landing){
-  _Atomic uint64_t *word=&mesh_table(m)[index];
-  uint64_t old=atomic_load_explicit(word,memory_order_acquire);
-  while(!atomic_compare_exchange_weak_explicit(word,&old,((uint64_t)(mesh_word_landed(old)+landing)<<32)|(uint32_t)(pd+1u),
-                                                memory_order_acq_rel,memory_order_acquire));
-  return mesh_word_pd(old);
-}
-/* index's word made anew, as its allocation makes it: naming pd (MESH_ABSENT: none), landed 0; the page it named
-   before, as mesh_entry_put's */
-static inline uint32_t mesh_entry_reset(struct hdr *m,uint32_t index,uint32_t pd){
-  return mesh_word_pd(atomic_exchange_explicit(&mesh_table(m)[index],(uint32_t)(pd+1u),memory_order_acq_rel));
-}
+static inline _Atomic uint32_t *mesh_refs(struct hdr *m){ return (_Atomic uint32_t *)((char *)m+m->arena_off); }
 
-/* ---- The pool (`pool_off`) ---------------------------------------------------------------------------------------- */
-static inline struct mesh_pool *mesh_pool(struct hdr *m){ return (struct mesh_pool *)((char *)m+m->pool_off); }
-static inline struct mesh_pd *mesh_pd_at(struct hdr *m,uint32_t pd){ return (struct mesh_pd *)((char *)m+m->pool_off+sizeof(struct mesh_pool))+pd; }
-/* whether pd names a page the bridge carved (MESH_ABSENT names none) */
-static inline int mesh_pd_valid(struct hdr *m,uint32_t pd){ return pd<mesh_pool(m)->pages; }
-/* the class of pages of `frames` frames; NULL where no class has them */
-static inline struct mesh_pool_class *mesh_pool_class(struct hdr *m,uint32_t frames){
-  return frames==MESH_CLASS_SHORT?&mesh_pool(m)->cls[0]:frames==MESH_CLASS_LONG?&mesh_pool(m)->cls[1]:NULL;
+static inline uint64_t mesh_word_pack(uint32_t p,uint32_t bytes){
+  return p==MESH_PAGE_NONE?(uint64_t)MESH_TABLE_EMPTY:(((uint64_t)bytes<<32)|(uint64_t)(p+1u));
 }
-/* the frames of the least class whose payload fits `bytes`; 0 where none does */
-static inline uint32_t mesh_class_frames(uint32_t bytes){ return bytes<=MESH_SHORT_PAYLOAD?MESH_CLASS_SHORT:bytes<=MESH_LONG_PAYLOAD?MESH_CLASS_LONG:0; }
-/* page pd's header (its first byte, where a SEND of it starts) and its payload */
-static inline unsigned char *mesh_pd_head(struct hdr *m,uint32_t pd){ return (unsigned char *)m+mesh_pd_at(m,pd)->offset; }
-static inline unsigned char *mesh_pd_data(struct hdr *m,uint32_t pd){ return mesh_pd_head(m,pd)+MESH_HEAD; }
-/* page pd, its uses 0, made FREE and pushed onto its class's free stack */
-static inline void mesh_pool_push(struct hdr *m,uint32_t pd){
-  struct mesh_pd *p=mesh_pd_at(m,pd);
-  struct mesh_pool_class *c=mesh_pool_class(m,p->cls);
-  if(!c)return;
-  atomic_store_explicit(&p->state,MESH_PD_FREE,memory_order_relaxed);
-  atomic_store_explicit(&p->bytes,0,memory_order_relaxed);
-  atomic_fetch_add_explicit(&c->free,1,memory_order_relaxed);
-  uint64_t head=atomic_load_explicit(&c->head,memory_order_relaxed);
-  do atomic_store_explicit(&p->next,(uint32_t)head,memory_order_relaxed);
-  while(!atomic_compare_exchange_weak_explicit(&c->head,&head,(((head>>32)+1)<<32)|(uint64_t)(pd+1u),memory_order_release,
-                                               memory_order_relaxed));
-}
-/* a page popped from the free stack of the class of `frames` frames: its id, or MESH_ABSENT where the stack is empty or
-   no class has such pages; its state, uses and lane are the caller's to set */
-static inline uint32_t mesh_pool_pop(struct hdr *m,uint32_t frames){
-  struct mesh_pool_class *c=mesh_pool_class(m,frames);
-  if(!c)return MESH_ABSENT;
-  uint64_t head=atomic_load_explicit(&c->head,memory_order_acquire);
-  for(;;){
-    const uint32_t top=(uint32_t)head;
-    if(!top)return MESH_ABSENT;
-    const uint64_t next=atomic_load_explicit(&mesh_pd_at(m,top-1)->next,memory_order_relaxed);
-    if(atomic_compare_exchange_weak_explicit(&c->head,&head,(((head>>32)+1)<<32)|(uint32_t)next,memory_order_acquire,
-                                             memory_order_acquire)){
-      atomic_fetch_sub_explicit(&c->free,1,memory_order_relaxed);
-      return top-1;
-    }
+static inline uint32_t mesh_word_page(uint64_t w){ const uint32_t lo=(uint32_t)w; return (!lo || lo==MESH_TABLE_EMPTY)?MESH_PAGE_NONE:lo-1u; }
+static inline uint32_t mesh_word_bytes(uint64_t w){ return (uint32_t)(w>>32); }
+
+/* ---- 3-level lock-free free bitmap (design/SPEC-flat-page-dma-bridge.md section 2, 5.1) ---- */
+struct mesh_bmp_desc {
+  uint32_t items,l0_words,l1_words,l2_words;
+  uint64_t l0_off,l1_off,l2_off;
+};
+struct mesh_bitmaps {
+  struct mesh_bmp_desc pages,indices;
+  _Atomic uint32_t initialized;
+  uint32_t pad;
+};
+static inline struct mesh_bitmaps *mesh_bitmaps_of(struct hdr *m){ return (struct mesh_bitmaps *)((char *)m+m->ring_off); }
+static inline _Atomic uint64_t *mesh_bmp_l0(struct hdr *m,const struct mesh_bmp_desc *d){ return (_Atomic uint64_t *)((char *)m+d->l0_off); }
+static inline _Atomic uint64_t *mesh_bmp_l1(struct hdr *m,const struct mesh_bmp_desc *d){ return (_Atomic uint64_t *)((char *)m+d->l1_off); }
+static inline _Atomic uint64_t *mesh_bmp_l2(struct hdr *m,const struct mesh_bmp_desc *d){ return (_Atomic uint64_t *)((char *)m+d->l2_off); }
+
+static inline uint64_t mesh_bmp_tail_mask(uint32_t count){ return count>=64?~UINT64_C(0):((UINT64_C(1)<<count)-1u); }
+
+static inline void mesh_bmp_fill(struct hdr *m,const struct mesh_bmp_desc *d){
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d),*l1=mesh_bmp_l1(m,d),*l2=mesh_bmp_l2(m,d);
+  for(uint32_t w=0;w<d->l0_words;w++){
+    const uint32_t rem=d->items-w*64u;
+    atomic_store_explicit(&l0[w],mesh_bmp_tail_mask(rem),memory_order_relaxed);
+  }
+  for(uint32_t w=0;w<d->l1_words;w++){
+    const uint32_t rem=d->l0_words-w*64u;
+    atomic_store_explicit(&l1[w],mesh_bmp_tail_mask(rem),memory_order_relaxed);
+  }
+  for(uint32_t w=0;w<d->l2_words;w++){
+    const uint32_t rem=d->l1_words-w*64u;
+    atomic_store_explicit(&l2[w],mesh_bmp_tail_mask(rem),memory_order_relaxed);
   }
 }
-/* a use of page pd counted */
-static inline void mesh_pd_use(struct hdr *m,uint32_t pd){ atomic_fetch_add_explicit(&mesh_pd_at(m,pd)->uses,1,memory_order_relaxed); }
-/* a use of page pd dropped (MESH_ABSENT, a page not carved, or one of no uses: nothing); the last use's drop puts it
-   back on its class's free stack */
-static inline void mesh_pd_drop(struct hdr *m,uint32_t pd){
-  if(!mesh_pd_valid(m,pd))return;
-  _Atomic uint32_t *uses=&mesh_pd_at(m,pd)->uses;
-  uint32_t count=atomic_load_explicit(uses,memory_order_relaxed);
-  while(count && !atomic_compare_exchange_weak_explicit(uses,&count,count-1,memory_order_acq_rel,memory_order_relaxed));
-  if(count==1)mesh_pool_push(m,pd);
+
+static inline void mesh_bmp_set(struct hdr *m,const struct mesh_bmp_desc *d,uint32_t idx){
+  if(idx>=d->items)return;
+  const uint32_t w0=idx>>6,w1=w0>>6,w2=w1>>6;
+  const uint64_t m0=UINT64_C(1)<<(idx&63u),m1=UINT64_C(1)<<(w0&63u),m2=UINT64_C(1)<<(w1&63u);
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d),*l1=mesh_bmp_l1(m,d),*l2=mesh_bmp_l2(m,d);
+  if(atomic_fetch_or_explicit(&l0[w0],m0,memory_order_release)==0){
+    atomic_thread_fence(memory_order_seq_cst);
+    if(atomic_fetch_or_explicit(&l1[w1],m1,memory_order_seq_cst)==0)
+      atomic_fetch_or_explicit(&l2[w2],m2,memory_order_seq_cst);
+  }
 }
 
-/* ---- The write rings (`ring_off`) --------------------------------------------------------------------------------- */
-static inline struct mesh_ring *mesh_ring_at(struct hdr *m,uint32_t slot){ return (struct mesh_ring *)((char *)m+m->ring_off)+slot; }
-/* write w put on the ring by its one producer: 1, or 0 where the ring is full (MESH_RING positions past `take`).  The
-   take is read with acquire, so the taker's copy of the cell's last lap is done before this write's stores; the put's
-   store is sequentially consistent, ordered before the writer's read of its flag (mesh_ring_flag) */
-static inline int mesh_ring_push(struct mesh_ring *r,const struct mesh_write *w){
-  const uint64_t at=atomic_load_explicit(&r->put,memory_order_relaxed);
-  if(at-atomic_load_explicit(&r->take,memory_order_acquire)>=MESH_RING)return 0;
-  struct mesh_cell *cell=&r->cell[at%MESH_RING];
-  cell->w=*w;
-  atomic_store_explicit(&cell->sequence,at+1,memory_order_release);
-  atomic_store(&r->put,at+1);
-  return 1;
-}
-/* client slot `slot`'s ring flagged for the bridge's port children (struct hdr `attached`, a bit a slot), which look
-   at the flagged rings alone: by its writer after each write, where the flag is not set yet (one load a write, and an
-   or at its first), and by a slot's take that finds a write left at put (mesh-dataflow.c mesh_slot_take).  The port
-   child that takes the ring clears the flag where it finds the slot vacant and the ring empty, then reads the owner
-   and the put again and flags the ring again where either moved (mesh-link.c switch_takes).  Each of the four is
-   sequentially consistent, so a write is never left on a ring not flagged: a writer that reads its flag set before the
-   clear stored its put before the clear, and the child's read after the clear sees that put */
-static inline void mesh_ring_flag(struct hdr *m,uint32_t slot){
-  const uint64_t bit=UINT64_C(1)<<(slot&(MESH_CLIENTS-1));
-  if(!(atomic_load(&m->attached)&bit))atomic_fetch_or(&m->attached,bit);
-}
-_Static_assert(MESH_CLIENTS==64,"a client slot a bit of `attached`");
-/* the writes on the ring as its counters read now (0: none to take) */
-static inline uint64_t mesh_ring_pending(struct mesh_ring *r){
-  const uint64_t put=atomic_load_explicit(&r->put,memory_order_acquire),take=atomic_load_explicit(&r->take,memory_order_relaxed);
-  return put>take?put-take:0;
+static inline void mesh_bmp_clear_mask(struct hdr *m,const struct mesh_bmp_desc *d,uint32_t w0,uint64_t mask){
+  const uint32_t w1=w0>>6,w2=w1>>6;
+  const uint64_t m1=UINT64_C(1)<<(w0&63u),m2=UINT64_C(1)<<(w1&63u);
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d),*l1=mesh_bmp_l1(m,d),*l2=mesh_bmp_l2(m,d);
+  const uint64_t prev0=atomic_fetch_and_explicit(&l0[w0],~mask,memory_order_seq_cst);
+  if((prev0&~mask)!=0)return;
+  const uint64_t prev1=atomic_fetch_and_explicit(&l1[w1],~m1,memory_order_seq_cst);
+  if(atomic_load_explicit(&l0[w0],memory_order_seq_cst)!=0){
+    if(atomic_fetch_or_explicit(&l1[w1],m1,memory_order_seq_cst)==0)
+      atomic_fetch_or_explicit(&l2[w2],m2,memory_order_seq_cst);
+    return;
+  }
+  if((prev1&~m1)!=0)return;
+  atomic_fetch_and_explicit(&l2[w2],~m2,memory_order_seq_cst);
+  if(atomic_load_explicit(&l1[w1],memory_order_seq_cst)!=0)
+    atomic_fetch_or_explicit(&l2[w2],m2,memory_order_seq_cst);
 }
 
-/* ---- Index allocation (the owner bytes) ------------------------------------------------------------------------ */
-/* client `client`'s owner byte: its slot + 1 */
-static inline uint8_t mesh_owner_byte(uint64_t client){ return (uint8_t)(((client>>32)&(MESH_CLIENTS-1))+1); }
-/* the first `count` consecutive free indices in [begin, end) taken for `owner`, first fit: each byte taken by a
-   compare-exchange that expects it free, and a stretch that meets one another took first given back and the scan
-   continued past it; the first index, or MESH_ABSENT */
-static inline uint32_t mesh_index_scan(_Atomic uint8_t *owners,uint8_t owner,uint32_t count,uint32_t begin,uint32_t end){
-  for(uint32_t first=begin;first<end && count<=end-first;){
-    uint32_t i=0;
-    while(i<count && !atomic_load_explicit(&owners[first+i],memory_order_relaxed))i++;
-    if(i==count){
-      for(i=0;i<count;i++){
-        uint8_t free=0;
-        if(!atomic_compare_exchange_strong_explicit(&owners[first+i],&free,owner,memory_order_acq_rel,memory_order_relaxed))break;
+static inline uint32_t mesh_bmp_find_word(struct hdr *m,const struct mesh_bmp_desc *d,uint32_t seed,uint64_t *word_out){
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d),*l1=mesh_bmp_l1(m,d),*l2=mesh_bmp_l2(m,d);
+  const uint32_t n2=d->l2_words;
+  if(!n2)return MESH_ABSENT;
+  const uint32_t start2=seed%n2;
+  for(uint32_t i=0;i<n2;i++){
+    const uint32_t w2=(start2+i)%n2;
+    uint64_t v2=atomic_load_explicit(&l2[w2],memory_order_relaxed);
+    while(v2){
+      const uint32_t b2=(uint32_t)__builtin_ctzll(v2);
+      v2&=v2-1u;
+      const uint32_t w1=(w2<<6)+b2;
+      if(w1>=d->l1_words)break;
+      uint64_t v1=atomic_load_explicit(&l1[w1],memory_order_relaxed);
+      while(v1){
+        const uint32_t b1=(uint32_t)__builtin_ctzll(v1);
+        v1&=v1-1u;
+        const uint32_t w0=(w1<<6)+b1;
+        if(w0>=d->l0_words)break;
+        const uint64_t v0=atomic_load_explicit(&l0[w0],memory_order_relaxed);
+        if(v0){*word_out=v0;return w0;}
       }
-      if(i==count)return first;
-      for(uint32_t k=0;k<i;k++)atomic_store_explicit(&owners[first+k],0,memory_order_release);
     }
-    first+=i+1;
   }
   return MESH_ABSENT;
 }
-/* `count` consecutive free indices taken for `owner`, the lowest such (first fit from index 0), so indices just freed
-   are the next ones given and their words are made new (mesh-call.c mesh_pages drops a page a landing left there): the
-   first, or MESH_ABSENT */
-static inline uint32_t mesh_index_take(struct hdr *m,uint8_t owner,uint32_t count){
-  if(!count || count>m->entries)return MESH_ABSENT;
-  return mesh_index_scan(mesh_owners(m),owner,count,0,m->entries);
-}
-/* indices [first, first + count) freed */
-static inline void mesh_index_release(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t i=0;i<count;i++)atomic_store_explicit(&mesh_owners(m)[first+i],0,memory_order_release);
+
+/* ---- Physical page allocator and elective refcounts (kref_get_unless_zero) ---- */
+static inline int mesh_page_hold(struct hdr *m,uint32_t p){
+  if(p>=mesh_flat_pages(m))return 0;
+  _Atomic uint32_t *u=mesh_refs(m)+p;
+  uint32_t v=atomic_load_explicit(u,memory_order_relaxed);
+  for(;;){
+    if((v&MESH_REF_MASK)==0)return 0;
+    if(atomic_compare_exchange_weak_explicit(u,&v,v+1u,memory_order_relaxed,memory_order_relaxed))return 1;
+  }
 }
 
-/* ---- Processes of the region -------------------------------------------------------------------------------------- */
-/* a process exited (its slot's or the bridge's pid; 0: none) */
+static inline void mesh_page_release(struct hdr *m,uint32_t p){
+  if(p>=mesh_flat_pages(m))return;
+  _Atomic uint32_t *u=mesh_refs(m)+p;
+  uint32_t v=atomic_load_explicit(u,memory_order_relaxed);
+  for(;;){
+    const uint32_t c=v&MESH_REF_MASK;
+    if(c==0)return;
+    const uint32_t nv=c==1u?0u:(v-1u);
+    if(atomic_compare_exchange_weak_explicit(u,&v,nv,memory_order_acq_rel,memory_order_relaxed)){
+      if(c==1u){
+        if(v&MESH_REF_CONTIG)atomic_fetch_sub_explicit(mesh_contig_pages(m),1,memory_order_relaxed);
+        mesh_bmp_set(m,&mesh_bitmaps_of(m)->pages,p);
+      }
+      return;
+    }
+  }
+}
+
+static inline uint32_t mesh_page_alloc_batch(struct hdr *m,uint32_t *out,uint32_t max_n,uint32_t seed){
+  const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->pages;
+  _Atomic uint32_t *refs=mesh_refs(m);
+  uint32_t got=0;
+  for(uint32_t tries=0;got<max_n && tries<16;tries++){
+    uint64_t v0=0;
+    const uint32_t w0=mesh_bmp_find_word(m,d,seed+tries,&v0);
+    if(w0==MESH_ABSENT)break;
+    uint64_t clear=0;
+    while(v0 && got<max_n){
+      const uint32_t b=(uint32_t)__builtin_ctzll(v0);
+      v0&=v0-1u;
+      const uint32_t p=(w0<<6)+b;
+      if(p>=d->items){clear|=UINT64_C(1)<<b;continue;}
+      uint32_t zero=0;
+      if(atomic_compare_exchange_strong_explicit(&refs[p],&zero,1u,memory_order_acq_rel,memory_order_relaxed)){
+        out[got++]=p;
+      }
+      clear|=UINT64_C(1)<<b;
+    }
+    if(clear)mesh_bmp_clear_mask(m,d,w0,clear);
+  }
+  return got;
+}
+
+static inline uint32_t mesh_page_alloc(struct hdr *m,uint32_t seed){
+  uint32_t p=MESH_PAGE_NONE;
+  return mesh_page_alloc_batch(m,&p,1,seed)?p:MESH_PAGE_NONE;
+}
+
+static inline uint32_t mesh_page_alloc_contiguous(struct hdr *m,uint32_t count){
+  const uint32_t pages=mesh_flat_pages(m);
+  if(!count || count>pages){errno=EINVAL;return MESH_PAGE_NONE;}
+  const uint64_t limit=(uint64_t)pages*9u/20u;
+  uint64_t cur=atomic_load_explicit(mesh_contig_pages(m),memory_order_relaxed);
+  for(;;){
+    if(cur+count>limit){
+      fputs("ERR:NPHARD: contiguous allocations exceed 45% of memory space\n",stderr);
+      abort();
+    }
+    if(atomic_compare_exchange_weak_explicit(mesh_contig_pages(m),&cur,cur+count,memory_order_acq_rel,memory_order_relaxed))break;
+  }
+  const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->pages;
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d);
+  _Atomic uint32_t *refs=mesh_refs(m);
+  uint32_t run_start=0,run_len=0;
+  for(uint32_t w=0;w<d->l0_words;w++){
+    const uint64_t v=atomic_load_explicit(&l0[w],memory_order_relaxed);
+    if(v==~UINT64_C(0)){
+      if(!run_len)run_start=w<<6;
+      run_len+=64u;
+      if(run_start+run_len>pages)run_len=pages-run_start;
+    }else if(v==0){
+      run_len=0;continue;
+    }else{
+      for(uint32_t b=0;b<64u && (w<<6)+b<pages;b++){
+        if((v>>b)&1u){
+          if(!run_len)run_start=(w<<6)+b;
+          run_len++;
+          if(run_len>=count)goto try_claim;
+        }else run_len=0;
+      }
+      continue;
+    }
+    if(run_len>=count){
+try_claim:;
+      const uint32_t base=run_start;
+      uint32_t k=0;
+      for(;k<count;k++){
+        uint32_t zero=0;
+        if(!atomic_compare_exchange_strong_explicit(&refs[base+k],&zero,MESH_REF_CONTIG|1u,memory_order_acq_rel,memory_order_relaxed))break;
+      }
+      if(k==count){
+        for(uint32_t p=base;p<base+count;){
+          const uint32_t w0=p>>6,off=p&63u,take=count-(p-base)<64u-off?count-(p-base):64u-off;
+          mesh_bmp_clear_mask(m,d,w0,mesh_bmp_tail_mask(take)<<off);
+          p+=take;
+        }
+        return base;
+      }
+      for(uint32_t r=0;r<k;r++){
+        atomic_store_explicit(&refs[base+r],0u,memory_order_release);
+        mesh_bmp_set(m,d,base+r);
+      }
+      run_start=base+k+1u;
+      run_len=0;
+      w=run_start>>6;
+      if(w<d->l0_words && (run_start&63u)){
+        const uint64_t vw=atomic_load_explicit(&l0[w],memory_order_relaxed);
+        for(uint32_t b=run_start&63u;b<64u && (w<<6)+b<pages;b++){
+          if((vw>>b)&1u){if(!run_len)run_start=(w<<6)+b;run_len++;if(run_len>=count)goto try_claim;}
+          else run_len=0;
+        }
+      }
+    }
+  }
+  atomic_fetch_sub_explicit(mesh_contig_pages(m),count,memory_order_relaxed);
+  errno=ENOMEM;
+  return MESH_PAGE_NONE;
+}
+
+/* ---- Page-table index allocator and atomic exchange ---- */
+static inline uint64_t mesh_table_load(struct hdr *m,uint32_t index){
+  return atomic_load_explicit(&mesh_table(m)[index],memory_order_acquire);
+}
+
+static inline void mesh_table_land(struct hdr *m,uint32_t index,uint32_t page,uint32_t bytes){
+  const uint64_t old=atomic_exchange_explicit(&mesh_table(m)[index&(MESH_TABLE-1u)],mesh_word_pack(page,bytes),memory_order_acq_rel);
+  const uint32_t old_p=mesh_word_page(old);
+  if(old_p!=MESH_PAGE_NONE)mesh_page_release(m,old_p);
+}
+
+static inline uint32_t mesh_idx_alloc_one(struct hdr *m,int back_page,uint32_t seed,uint32_t *out_page){
+  const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->indices;
+  _Atomic uint64_t *tab=mesh_table(m);
+  uint32_t p=MESH_PAGE_NONE;
+  if(back_page){
+    p=mesh_page_alloc(m,seed);
+    if(p==MESH_PAGE_NONE)return MESH_ABSENT;
+  }
+  const uint64_t val=back_page?mesh_word_pack(p,0):MESH_TABLE_EMPTY;
+  for(uint32_t tries=0;tries<32;tries++){
+    uint64_t v0=0;
+    const uint32_t w0=mesh_bmp_find_word(m,d,seed+tries,&v0);
+    if(w0==MESH_ABSENT)break;
+    uint64_t clear=0;
+    while(v0){
+      const uint32_t b=(uint32_t)__builtin_ctzll(v0);
+      v0&=v0-1u;
+      const uint32_t idx=(w0<<6)+b;
+      clear|=UINT64_C(1)<<b;
+      if(idx>=d->items)continue;
+      uint64_t zero=0;
+      if(atomic_compare_exchange_strong_explicit(&tab[idx],&zero,val,memory_order_release,memory_order_relaxed)){
+        mesh_bmp_clear_mask(m,d,w0,clear);
+        if(out_page)*out_page=p;
+        return idx;
+      }
+    }
+    if(clear)mesh_bmp_clear_mask(m,d,w0,clear);
+  }
+  if(p!=MESH_PAGE_NONE)mesh_page_release(m,p);
+  return MESH_ABSENT;
+}
+
+static inline void mesh_idx_free_one(struct hdr *m,uint32_t index){
+  if(index>=m->entries)return;
+  const uint64_t old=atomic_exchange_explicit(&mesh_table(m)[index],0,memory_order_acq_rel);
+  const uint32_t p=mesh_word_page(old);
+  if(p!=MESH_PAGE_NONE)mesh_page_release(m,p);
+  if(old!=0)mesh_bmp_set(m,&mesh_bitmaps_of(m)->indices,index);
+}
+
+/* ---- Linux llist.h lock-free singly linked list over DESC pages (next in P[q].next) ---- */
+static inline void mesh_llist_add(struct hdr *m,_Atomic uint64_t *head,uint32_t q){
+  _Atomic uint32_t *next=&mesh_desc_at(m,q)->next;
+  uint64_t first=atomic_load_explicit(head,memory_order_relaxed);
+  do {
+    atomic_store_explicit(next,(uint32_t)first,memory_order_relaxed);
+  } while(!atomic_compare_exchange_weak_explicit(head,&first,(uint64_t)(q+1u),memory_order_seq_cst,memory_order_relaxed));
+}
+
+static inline uint32_t mesh_llist_del_all(struct hdr *m,_Atomic uint64_t *head){
+  (void)m;
+  return (uint32_t)atomic_exchange_explicit(head,0,memory_order_seq_cst);
+}
+
+static inline uint32_t mesh_llist_reverse(struct hdr *m,uint32_t head){
+  const uint32_t pages=mesh_flat_pages(m);
+  uint32_t rev=0;
+  while(head){
+    const uint32_t q=head-1u;
+    if(q>=pages)break;
+    const uint32_t nxt=atomic_load_explicit(&mesh_desc_at(m,q)->next,memory_order_relaxed);
+    atomic_store_explicit(&mesh_desc_at(m,q)->next,rev,memory_order_relaxed);
+    rev=head;
+    head=nxt;
+  }
+  return rev;
+}
+
+/* ---- Processes of the region ---- */
 static inline int mesh_exited(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
-/* a process's start in microseconds of the wall clock (libproc PROC_PIDTBSDINFO), 0 where it has exited or is in its
-   exit (XNU takes a process from every lookup by pid as its exit begins, before the kernel releases its device
-   objects); with its pid, the identity of a process of the region, which a later process given the same pid does not
-   share */
 static inline uint64_t mesh_started(pid_t process){
   struct proc_bsdinfo info;
   return process && proc_pidinfo(process,PROC_PIDTBSDINFO,0,&info,(int)sizeof info)==(int)sizeof info?
          (uint64_t)info.pbi_start_tvsec*UINT64_C(1000000)+info.pbi_start_tvusec:0;
 }
-/* the process `pid` of start `start` alive (a start of 0, which a region an earlier bridge or library wrote has: the
-   pid alone) */
 static inline int mesh_alive(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_exited(pid); }
 
-/* ---- libmesh (mesh-dataflow.c, mesh-call.c) ----------------------------------------------------------------------- */
-/* a vacant client slot of region m taken for this process by one compare-exchange (its generation from the header's
-   `serial`), stamped with its start; the bridge watches its exit from its event loop's next turn.  0, or EBUSY where
-   none is vacant */
-int mesh_slot_take(struct mesh_ctx *,struct hdr *);
-/* client `client`'s slot left, by its detach or by the bridge where its process has exited: the owner word marked
-   MESH_LEAVING (an owner word already marked: its leaving finished), each index it owns left naming no page and
-   freed, then the slot vacant; the writes on its ring stay there, each on its own use, for the port children to carry
-   (mesh-switched.h mesh_switch_ring_dequeue), its flag kept until they have (mesh_ring_flag) */
-void mesh_leave(struct hdr *,uint64_t client);
-/* the one join of two nodes' records: the cables each one's bridge reaches the other over, the fewer of the two ends'
-   counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where neither reports one) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
-/* `pages` arena pages leased (the bridge's own: the pool's carve), the first a multiple of `align`, all within one
-   MESH_DMA_EXTENT, taken first fit by compare-exchange from the context's rover (`arena_rover`): the first, or
-   MESH_ABSENT with errno EINVAL or ENOMEM */
-uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
-/* the arena pages no lease has */
-uint32_t mesh_arena_free(struct hdr *);
 
-/* The node's region as the bridge makes it: `pages` arena pages of `pgsz` bytes, `block` pages a block (the bridge's
-   registered memory), after the header and, each at a multiple of pgsz, the page table's words and owner bytes, the
-   arena's bitmap, the clients' write rings, the pool's header and descriptors, the bridge's own pages, the lane
-   records, the node table, the map's two copies, the switch and the client slots; the arena at a multiple of a block.
-   Its length */
+static inline uint64_t mesh_bmp_size(uint32_t items,struct mesh_bmp_desc *d,uint64_t base){
+  const uint32_t w0=(items+63u)/64u,w1=(w0+63u)/64u,w2=(w1+63u)/64u;
+  uint64_t at=base;
+  d->items=items;d->l0_words=w0;d->l1_words=w1;d->l2_words=w2;
+  d->l0_off=at;at+=(uint64_t)w0*sizeof(uint64_t);at=(at+63u)&~UINT64_C(63);
+  d->l1_off=at;at+=(uint64_t)w1*sizeof(uint64_t);at=(at+63u)&~UINT64_C(63);
+  d->l2_off=at;at+=(uint64_t)w2*sizeof(uint64_t);at=(at+63u)&~UINT64_C(63);
+  return at;
+}
+
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   const uint32_t arena=pages/block*block;
   const uint64_t page=pgsz,bytes=(uint64_t)block*pgsz;
+  const uint32_t flat=(uint32_t)(((uint64_t)arena*pgsz)/MESH_PAGE_BYTES);
   uint64_t at=(sizeof *h+page-1)/page*page;
-  h->pgsz=pgsz; h->block=block; h->entries=MESH_TABLE; h->streams=MESH_STREAMS; h->clients=MESH_CLIENTS;
-  h->table_off=at; at+=(uint64_t)MESH_TABLE*(sizeof(uint64_t)+sizeof(uint8_t)); at=(at+page-1)/page*page;
-  h->arena_off=at; at+=(((uint64_t)arena+63)/64)*sizeof(uint64_t); at=(at+page-1)/page*page;
-  h->ring_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_ring); at=(at+page-1)/page*page;
-  h->pool_off=at; at+=sizeof(struct mesh_pool)+(uint64_t)MESH_POOL_PAGES*sizeof(struct mesh_pd); at=(at+page-1)/page*page;
-  h->bridge_off=at; at+=MESH_BRIDGE_BYTES; at=(at+page-1)/page*page;
-  h->stream_off=at; at+=(uint64_t)MESH_STREAMS*sizeof(struct mesh_lanes); at=(at+page-1)/page*page;
-  h->node_off=at; at+=(uint64_t)MESH_NODES*sizeof(struct mesh_node); at=(at+page-1)/page*page;
-  h->map_off=at; at+=2*sizeof(struct mesh_map_copy); at=(at+page-1)/page*page;
-  h->switch_off=at; at+=MESH_SWITCH_BYTES; at=(at+page-1)/page*page;
-  h->client_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client);
+  h->pgsz=pgsz;h->block=block;h->entries=MESH_TABLE;h->streams=MESH_STREAMS;h->clients=MESH_CLIENTS;
+  h->unused=flat;
+  h->table_off=at;at+=(uint64_t)MESH_TABLE*sizeof(uint64_t);at=(at+page-1)/page*page;
+  h->arena_off=at;at+=(uint64_t)flat*sizeof(uint32_t);at=(at+page-1)/page*page;
+  h->ring_off=at;
+  at+=sizeof(struct mesh_bitmaps);at=(at+63u)&~UINT64_C(63);
+  struct mesh_bmp_desc tmp;
+  at=mesh_bmp_size(flat,&tmp,at);
+  at=mesh_bmp_size(MESH_TABLE,&tmp,at);
+  at=(at+page-1)/page*page;
+  h->pool_off=0;
+  h->bridge_off=at;at+=MESH_BRIDGE_BYTES;at=(at+page-1)/page*page;
+  h->stream_off=at;at+=(uint64_t)MESH_STREAMS*sizeof(struct mesh_lanes);at=(at+page-1)/page*page;
+  h->node_off=at;at+=(uint64_t)MESH_NODES*sizeof(struct mesh_node);at=(at+page-1)/page*page;
+  h->map_off=at;at+=2*sizeof(struct mesh_map_copy);at=(at+page-1)/page*page;
+  h->switch_off=at;at+=MESH_SWITCH_BYTES;at=(at+page-1)/page*page;
+  h->client_off=at;at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client);
   at=(at+bytes-1)/bytes*bytes;
-  h->data_off=at; at+=(uint64_t)arena*pgsz;
-  h->length=at; return at;
+  h->data_off=at;at+=(uint64_t)arena*pgsz;
+  h->length=at;return at;
+}
+
+static inline void mesh_bitmaps_init(struct hdr *m){
+  struct mesh_bitmaps *b=mesh_bitmaps_of(m);
+  if(atomic_load_explicit(&b->initialized,memory_order_acquire))return;
+  uint64_t at=m->ring_off+sizeof(struct mesh_bitmaps);at=(at+63u)&~UINT64_C(63);
+  at=mesh_bmp_size(mesh_flat_pages(m),&b->pages,at);
+  mesh_bmp_size(m->entries,&b->indices,at);
+  mesh_bmp_fill(m,&b->pages);
+  mesh_bmp_fill(m,&b->indices);
+  atomic_store_explicit(&b->initialized,1,memory_order_release);
 }
 #endif

@@ -118,7 +118,7 @@ struct link {
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t completed_at;
   uint64_t wire[MESH_LINK_STREAMS];
-  uint32_t take_from,send_from;
+  uint32_t rx_pos[MESH_LINK_LANES],tx_tail;
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message), each
@@ -159,7 +159,7 @@ struct link {
    keeps its exit out of the window that loss opened (B9), as the parent's CHILD_END, held until the window had ended,
    did before 10; 10's stop let it exit at once.  A halt at a loss names the window the loss has just moved
    MESH_PLATFORM_NS on, 10's floor for a halt naming a loss */
-#define MESH_CHILD_VERSION 11u
+#define MESH_CHILD_VERSION 12u
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN };
 struct child_message {
   uint32_t kind;
@@ -242,11 +242,7 @@ extern int events,listener,hello,network,addresses;
 extern uint64_t now,sequence;
 extern struct mesh_ctx bridge;
 extern uint64_t memory;
-extern uint64_t owners[MESH_CLIENTS];
 extern char model[MESH_MODEL_BYTES];
-
-/* whether a client's slot is still `owner`'s */
-static inline int owned(uint64_t owner){ return owner && atomic_load(&mesh_client_at(M,owner)->owner)==owner; }
 
 /* the functions each translation unit calls of the other's */
 void sysctl_text(const char *name,char *out,size_t room);

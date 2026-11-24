@@ -13,14 +13,10 @@ all: $(IMAGES:%=.build/%) .build/mesh-install-state
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
-.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh-observe.h mesh-switched.h $(MESH_H) $(ROUTE_H) \
-  .build/libmesh.dylib .build/route-forward.o Makefile
-	cc $(CPPFLAGS) -O2 $(WARN) -o $@ mesh-link.c mesh-records.c .build/route-forward.o $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit -framework Accelerate
-# the routing policy's forward on the CPU (route/forward.c: no contraction, act.h's bits), which the bridge's refresh
-# runs where a theta is given (mesh-link.c switch_policy)
-.build/route-forward.o: route/forward.c route/scan.h route/int8mm.h route/act.h $(ROUTE_H) Makefile
+.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh-observe.h mesh-switched.h $(MESH_H) \
+  .build/libmesh.dylib Makefile
 	mkdir -p .build
-	cc -std=c11 -O2 $(WARN) -DACCELERATE_NEW_LAPACK -ffp-contract=off -c route/forward.c -o $@
+	cc $(CPPFLAGS) -O2 $(WARN) -o $@ mesh-link.c mesh-records.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit -framework Accelerate
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 # design/transport.md section 2: the heartbeat, the job launchd keeps alive, which opens and closes the bridge
 .build/mesh-heartbeat: mesh-heartbeat.c mesh-observe.h $(MESH_H) Makefile
@@ -30,7 +26,7 @@ LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdm
 .build/mesh-stat: mesh-stat.c mesh-observe.h $(MESH_H) .build/libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
 # the switch's counters, lanes and view read from the region, one JSON line
-.build/mesh-switch-stat: mesh-switch-stat.c mesh-switched.h $(MESH_H) $(ROUTE_H) Makefile
+.build/mesh-switch-stat: mesh-switch-stat.c mesh-switched.h $(MESH_H) Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-switch-stat.c
 .build/mesh-cluster: mesh-cluster.c mesh-observe.h $(MESH_H) Makefile

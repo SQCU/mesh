@@ -1,11 +1,3 @@
-/* mesh-switch-stat: the switch as the bridge keeps it in its region (mesh-switched.h): its pool's pages and their free
-   counts, the counters (struct mesh_switch_counters: where a pass's time goes and what could not be carried), each
-   port's line (its child's state, its link's peer and plan) and cable's queue and measured terms (its rate, bytes a ns,
-   and a short and a long page's time alone, ns) and the pages on its inbound rings, its serving or used lanes'
-   in-flight positions and feedback, and its published view, one JSON line to stdout.  It reads the region and writes nothing: two lines around
-   a workload are its counts (their difference).
-
-   usage: mesh-switch-stat */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -27,12 +19,13 @@ int main(void){
   if(m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"layout\":%u}\n",m->version);return 0;}
   const struct mesh_switch *sw=(const struct mesh_switch *)((const char *)m+m->switch_off);
   if(sw->magic!=MESH_SWITCH_MAGIC){printf("{\"up\":true,\"node\":%u,\"switch\":false}\n",m->node);return 0;}
-  const struct mesh_pool *pool=(const struct mesh_pool *)((const char *)m+m->pool_off);
-  printf("{\"up\":true,\"node\":%u,\"clock\":%llu,\"pool\":{\"pages\":%u,\"classes\":[",m->node,
-         (unsigned long long)clock_gettime_nsec_np(CLOCK_UPTIME_RAW),pool->pages);
-  for(uint32_t c=0;c<MESH_CLASSES;c++)
-    printf("%s{\"frames\":%u,\"pages\":%u,\"free\":%llu}",c?",":"",pool->cls[c].frames,pool->cls[c].pages,U(pool->cls[c].free));
-  printf("]},\"counters\":[");
+  const struct mesh_bmp_desc *pd=&mesh_bitmaps_of(m)->pages;
+  const _Atomic uint64_t *l0=mesh_bmp_l0(m,pd);
+  uint64_t free_pages=0;
+  for(uint32_t w=0;w<pd->l0_words;w++)free_pages+=(uint64_t)__builtin_popcountll(atomic_load_explicit(&l0[w],memory_order_relaxed));
+  printf("{\"up\":true,\"node\":%u,\"clock\":%llu,\"pages\":{\"total\":%u,\"free\":%llu,\"contig\":%llu},\"counters\":[",
+         m->node,(unsigned long long)clock_gettime_nsec_np(CLOCK_UPTIME_RAW),
+         mesh_flat_pages(m),(unsigned long long)free_pages,U(*mesh_contig_pages(m)));
   for(uint32_t r=0;r<MESH_SWITCH_LOGS;r++){
     const struct mesh_switch_counters *c=sw->counters+r;
     printf("%s{\"ring\":%u,\"passes\":%llu,\"pass_ns\":[%llu,%llu],\"part_ns\":[%llu,%llu,%llu,%llu,%llu],",r?",":"",r,U(c->passes),
@@ -49,17 +42,9 @@ int main(void){
   for(uint32_t p=0;p<MESH_PORTS;p++){
     line[p]=atomic_load_explicit(&sw->port[p],memory_order_acquire);
     const struct mesh_switch_cable *x=sw->cable+p;
-    uint64_t inbound[MESH_CLASSES]={0};
-    for(uint32_t q=0;q<MESH_PORTS;q++)for(uint32_t c=0;c<MESH_CLASSES;c++){
-      const struct mesh_switch_inbound *r=&sw->inbound[q][p][c];
-      const uint64_t head=U(r->head);   /* the head first: the tail read after it is never below it */
-      inbound[c]+=U(r->tail)-head;
-    }
-    printf("%s{\"port\":%u,\"state\":%u,\"peer\":%u,\"plan\":%u,\"queued\":%llu,\"inbound\":[%llu,%llu],\"rate\":%g,\"page\":[%g,%g]}",
+    printf("%s{\"port\":%u,\"state\":%u,\"peer\":%u,\"plan\":%u,\"queued\":%llu,\"rate\":%g,\"page\":%g}",
            p?",":"",p,mesh_port_state(line[p]),mesh_port_peer(line[p]),mesh_port_plan(line[p]),U(x->queued),
-           (unsigned long long)inbound[0],(unsigned long long)inbound[1],
-           (double)atomic_load_explicit(&x->rate,memory_order_relaxed),(double)atomic_load_explicit(&x->page[0],memory_order_relaxed),
-           (double)atomic_load_explicit(&x->page[1],memory_order_relaxed));
+           (double)atomic_load_explicit(&x->rate,memory_order_relaxed),(double)atomic_load_explicit(&x->page,memory_order_relaxed));
   }
   printf("],\"lanes\":[");
   int first=1;
@@ -75,7 +60,6 @@ int main(void){
            U(x->service),U(x->wait),U(x->landed),rate,wait);
     first=0;
   }
-  /* the view as published (its copy as its version names it) */
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
   printf("],\"view\":[");
   for(uint32_t i=0;i<v->nodes && i<MESH_SWITCH_N;i++)printf("%s%u",i?",":"",v->node[i]);

@@ -31,13 +31,13 @@
      ncclBroadcast      the root's B to every other rank
      ncclReduce         every other rank's B to the root, which reduces them with its own
      ncclReduceScatter  segment d of every rank's sendbuff to rank d, which reduces them with its own
-     ncclAllReduce      where B fits one page (mesh-call.h MESH_LONG_PAYLOAD), each rank's B to every other rank, each
+     ncclAllReduce      where B is at most the single-phase threshold (36864 bytes), each rank's B to every other rank, each
                         reducing them all (one round of pages); else a reduce-scatter of the count split as evenly as the
                         ranks allow, then an all-gather of the reduced segments
      ncclAlltoAll       segment d of each rank's sendbuff to rank d, landing at recvbuff + rank B
      ncclGather         every other rank's B to the root, landing at its recvbuff + rank B
      ncclScatter        the root's segment d to rank d
-   A message of at most MESH_SHORT_PAYLOAD bytes is one short page, a longer one long pages, every rank cutting it
+   Every message is cut into 4096-byte raw flat pages (mesh-call.h MESH_PAGE_BYTES), every rank cutting it
    alike.  A reduction combines rank by rank (rank 0's, then rank 1's, ...), so every rank computes the same bits, on
    the host, for all twelve types and ncclSum, ncclProd, ncclMax, ncclMin and ncclAvg (a floating average premultiplies
    every contribution by 1 / nranks, an integer one divides the sum by nranks); the in-place forms are NCCL's.  A group
