@@ -44,6 +44,9 @@
 #define MESH_TAIL_MAX 16u
 #define MESH_TAIL_SLOT1_MAX (MESH_PAGE_BYTES-(16u+MESH_TAIL_MAX*16u))
 #define MESH_TAIL_BULK_DESC 0xFFFFFFFFu
+#define MESH_TAIL_BP        0xFFFFFFFEu
+#define MESH_BP_MAGIC       0x42503031u
+#define MESH_BP_MAX         32u
 
 struct mesh_dma_span { uint64_t offset,bytes; };
 _Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");
@@ -77,6 +80,11 @@ struct mesh_wire_tail {
   struct mesh_wire_entry e[MESH_TAIL_MAX];
 };
 _Static_assert(sizeof(struct mesh_wire_tail)==272u,"mesh_wire_tail");
+
+/* Async backpressure payload carried in bytes [0..3823] of page h+1 on j=0 bulk DESC / BP frames (0 extra WRs). */
+struct mesh_bp_edge { uint32_t from,to,wait_ns; };
+struct mesh_bp_frame { uint32_t magic,count; struct mesh_bp_edge e[MESH_BP_MAX]; };
+_Static_assert(sizeof(struct mesh_bp_frame)<=MESH_TAIL_SLOT1_MAX,"mesh_bp_frame fits before mesh_wire_tail");
 
 struct mesh_node { _Alignas(64) _Atomic uint32_t node; _Atomic uint32_t live; _Atomic uint64_t generation,bandwidth; };
 _Static_assert(sizeof(struct mesh_node)==64,"mesh_node");
@@ -150,6 +158,9 @@ static inline uint64_t mesh_page_offset(const struct hdr *m,uint32_t p){ return 
 static inline struct mesh_wire_desc *mesh_desc_at(struct hdr *m,uint32_t p){ return (struct mesh_wire_desc *)mesh_page_at(m,p); }
 static inline struct mesh_wire_tail *mesh_tail_at(struct hdr *m,uint32_t p){
   return (struct mesh_wire_tail *)(mesh_page_at(m,p+1u)+MESH_PAGE_BYTES-sizeof(struct mesh_wire_tail));
+}
+static inline struct mesh_bp_frame *mesh_bp_at(struct hdr *m,uint32_t p){
+  return (struct mesh_bp_frame *)mesh_page_at(m,p+1u);
 }
 static inline _Atomic uint64_t *mesh_table(struct hdr *m){ return (_Atomic uint64_t *)((char *)m+m->table_off); }
 static inline _Atomic uint32_t *mesh_refs(struct hdr *m){ return (_Atomic uint32_t *)((char *)m+m->arena_off); }

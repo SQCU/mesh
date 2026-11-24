@@ -116,7 +116,7 @@ struct link {
   uint8_t gid[16];
   struct frames share;
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t completed_at;
+  uint64_t completed_at,bp_sent_at;
   uint64_t wire[MESH_LINK_STREAMS];
   uint32_t tx_tail[2];
   uint32_t rx_desc_q[MESH_SWITCH_FLIGHT],rx_desc_h,rx_desc_t;

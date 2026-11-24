@@ -156,65 +156,11 @@ static inline void port_enqueue_desc(struct link *l,struct mesh_switch *sw,uint3
   else mesh_llist_add_cls(M,&sw->port_q[target][cls],cls,dp);
 }
 
-/* Earliest-arrival routing for unicast (all cables + 2-hop overflow), and direct-first
-   multicast piggybacking (SAME_DATA) for multi-destination groups. */
+/* Closed-form joint congestion + latency + multicast-sharing routing via rdma/route/split.h. */
 static void route_multicast_group(const struct mesh_switch_view *v,const uint64_t *line,struct mesh_switch_terms *terms,
                                   const uint32_t *dsts,uint32_t nd,uint32_t origin,uint32_t from,uint64_t unit_bytes,
                                   uint32_t *out_ports){
-  if(nd==1u){
-    const uint32_t tp=mesh_switch_route_dest(v,&togo,line,terms,dsts[0],origin,from);
-    out_ports[0]=tp;
-    if(tp<MESH_PORTS)terms[tp].backlog+=(double)unit_bytes/terms[tp].rate;
-    return;
-  }
-  const uint32_t nodes_read=__atomic_load_n(&v->nodes,__ATOMIC_RELAXED),nodes=nodes_read<MESH_SWITCH_N?nodes_read:MESH_SWITCH_N;
-  const uint32_t self=mesh_switch_index(v,v->self);
-  uint64_t avoid=self<64?(UINT64_C(1)<<self):0;
-  const uint32_t oi=mesh_switch_index(v,origin),fi=mesh_switch_index(v,from);
-  uint32_t used_mask=0;
-  for(uint32_t i=0;i<nd;i++)out_ports[i]=UINT32_MAX;
-  /* Pass 1: route direct neighbors via earliest-arrival (allowing 2-hop overflow when congested) */
-  for(uint32_t i=0;i<nd;i++){
-    int is_direct=0;
-    for(uint32_t p=0;p<MESH_PORTS;p++)
-      if(mesh_port_state(line[p])==CHILD_SERVING && mesh_port_plan(line[p]) && mesh_port_peer(line[p])==dsts[i]){is_direct=1;break;}
-    if(!is_direct)continue;
-    const uint32_t best_p=mesh_switch_route_dest(v,&togo,line,terms,dsts[i],origin,from);
-    out_ports[i]=best_p;
-    if(best_p<MESH_PORTS && !(used_mask&(1u<<best_p))){
-      used_mask|=1u<<best_p;
-      terms[best_p].backlog+=(double)unit_bytes/terms[best_p].rate;
-    }
-  }
-  /* Pass 2: multi-hop destinations piggyback for free on already-chosen ports when reachable */
-  for(uint32_t i=0;i<nd;i++){
-    if(out_ports[i]<MESH_PORTS)continue;
-    const uint32_t d=mesh_switch_index(v,dsts[i]);
-    if(d>=nodes)continue;
-    uint64_t av=avoid;
-    if(oi<nodes && oi!=d)av|=UINT64_C(1)<<oi;
-    if(fi<nodes && fi!=d)av|=UINT64_C(1)<<fi;
-    double best=INFINITY;uint32_t best_p=UINT32_MAX;
-    for(uint32_t m=used_mask;m;m&=m-1){
-      const uint32_t p=(uint32_t)__builtin_ctz(m);
-      const uint32_t peer=mesh_port_peer(line[p]);
-      const uint32_t nb=mesh_switch_index(v,peer);
-      if(nb>=nodes || (av>>nb&1))continue;
-      if(nb!=d && !mesh_switch_link_of((struct mesh_switch_view *)v,peer,dsts[i]))continue;
-      const double cost=terms[p].backlog+terms[p].own+(nb==d?0.0:(double)togo.to[nb][d]);
-      if(cost<best){best=cost;best_p=p;}
-    }
-    if(best_p<MESH_PORTS){
-      out_ports[i]=best_p;
-      continue;
-    }
-    best_p=mesh_switch_route_dest(v,&togo,line,terms,dsts[i],origin,from);
-    out_ports[i]=best_p;
-    if(best_p<MESH_PORTS && !(used_mask&(1u<<best_p))){
-      used_mask|=1u<<best_p;
-      terms[best_p].backlog+=(double)unit_bytes/terms[best_p].rate;
-    }
-  }
+  mesh_switch_route_split(v,&togo,line,terms,dsts,nd,origin,from,unit_bytes,out_ports);
 }
 
 #define RECEIVE_BATCH 64u
@@ -295,8 +241,9 @@ static int sends_post(struct link *l,uint32_t j,struct ibv_send_wr *request,uint
   return !error;
 }
 
-static void switch_sends(struct link *l,uint32_t served){
+static void switch_sends(struct link *l,uint32_t served,const uint64_t *line){
   struct mesh_switch *sw=switch_of();
+  const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
   static _Thread_local struct ibv_send_wr request[MESH_WIRE_BATCH+1u];
   static _Thread_local struct ibv_sge span[MESH_WIRE_BATCH+1u];
   const uint64_t now_at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -329,6 +276,8 @@ static void switch_sends(struct link *l,uint32_t served){
           continue;
         }
         mesh_tail_at(M,dp)->count=MESH_TAIL_BULK_DESC;
+        mesh_switch_bp_pack(sw,v,line,now_at,mesh_bp_at(M,dp));
+        l->bp_sent_at=now_at;
         const uint64_t first0=atomic_load_explicit(&x0->posted,memory_order_relaxed);
         x0->flight[first0%MESH_SWITCH_FLIGHT]=(struct mesh_switch_entry){now_at,dp,0};
         struct ibv_sge span0=dma_span(l,(struct mesh_dma_span){mesh_page_offset(M,dp),(uint64_t)2u*MESH_PAGE_BYTES});
@@ -388,6 +337,31 @@ static void switch_sends(struct link *l,uint32_t served){
                                       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
       atomic_store_explicit(&x->posted,first+1u,memory_order_release);
       if(!sends_post(l,j,request,1u,first))return;
+    }
+  }
+  /* Async standalone backpressure pulse on quiet reverse j=0 ONLY when local egress queue >= 25 us. */
+  if(now_at>l->bp_sent_at && now_at-l->bp_sent_at>=40000u && (served&0x55u)){
+    const uint32_t max_w=mesh_switch_bp_pack(sw,v,line,now_at,NULL);
+    if(max_w>=25000u){
+      const uint32_t j0=(uint32_t)__builtin_ctz(served&0x55u);
+      struct mesh_switch_lane *x0=sw->lane+switch_lane(l->index,j0);
+      const uint64_t out0=atomic_load_explicit(&x0->posted,memory_order_relaxed)-atomic_load_explicit(&x0->completed,memory_order_relaxed);
+      if(out0+1u<=l->lane[j0].depth){
+        const uint32_t dp=mesh_page_alloc_run(M,2u,poller_seed(l));
+        if(dp!=MESH_PAGE_NONE){
+          mesh_tail_at(M,dp)->count=MESH_TAIL_BP;
+          mesh_switch_bp_pack(sw,v,line,now_at,mesh_bp_at(M,dp));
+          l->bp_sent_at=now_at;
+          atomic_fetch_add_explicit(&sw->cable[l->index].queued,(uint64_t)2u*MESH_PAGE_BYTES,memory_order_relaxed);
+          const uint64_t first0=atomic_load_explicit(&x0->posted,memory_order_relaxed);
+          x0->flight[first0%MESH_SWITCH_FLIGHT]=(struct mesh_switch_entry){now_at,dp,0};
+          struct ibv_sge span0=dma_span(l,(struct mesh_dma_span){mesh_page_offset(M,dp),(uint64_t)2u*MESH_PAGE_BYTES});
+          struct ibv_send_wr req0=(struct ibv_send_wr){.wr_id=((uint64_t)j0<<48)|(first0&((UINT64_C(1)<<48)-1)),.sg_list=&span0,.num_sge=1,
+                                                       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+          atomic_store_explicit(&x0->posted,first0+1u,memory_order_release);
+          sends_post(l,j0,&req0,1u,first0);
+        }
+      }
     }
   }
 }
@@ -451,8 +425,10 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
     return 0;
   }
   atomic_thread_fence(memory_order_acquire);
+  const uint64_t now_rx=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   const struct mesh_switch_view *v=NULL;
   struct mesh_switch_terms terms[MESH_PORTS];
+  int terms_ready=0;
   uint32_t relay_inl_dp[MESH_PORTS],relay_inl_n[MESH_PORTS]={0},relay_inl_src[MESH_PORTS][2];
   for(uint32_t p=0;p<MESH_PORTS;p++){
     relay_inl_dp[p]=MESH_PAGE_NONE;
@@ -473,12 +449,20 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
     atomic_fetch_add_explicit(&x->landed,1,memory_order_relaxed);
     MESH_SWITCH_COUNT(sw,l->index,landed,1);
 
-    /* Class 0: 2-frame (8 KiB) lane carries either 1-WR inline packets or bulk DESCs for Class 1 */
+    /* Class 0: 2-frame (8 KiB) lane carries inline packets, bulk DESCs (+ async BP), or standalone async BP */
     if(f==2u){
       const struct mesh_wire_tail *tl=mesh_tail_at(M,h);
       if(tl->count==MESH_TAIL_BULK_DESC){
+        if(!v)v=sw->view+mesh_switch_published(&sw->view_version);
+        mesh_switch_bp_ingest(sw,v,now_rx,mesh_bp_at(M,h));
         mesh_page_release(M,h+1u);
         l->rx_desc_q[l->rx_desc_t++%MESH_SWITCH_FLIGHT]=h;
+        continue;
+      }
+      if(tl->count==MESH_TAIL_BP){
+        if(!v)v=sw->view+mesh_switch_published(&sw->view_version);
+        mesh_switch_bp_ingest(sw,v,now_rx,mesh_bp_at(M,h));
+        mesh_page_release_run(M,h,2u);
         continue;
       }
       const uint32_t cnt=tl->count<MESH_TAIL_MAX?tl->count:MESH_TAIL_MAX;
@@ -499,7 +483,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
           MESH_SWITCH_COUNT(sw,l->index,set,1);
           continue;
         }
-        if(!v){v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_terms_read(sw,v,line,terms);}
+        if(!terms_ready){if(!v)v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_togo_refresh(sw,v,now_rx,&togo);mesh_switch_terms_read(sw,v,line,terms);terms_ready=1;}
         const uint32_t tp=ent.hops+1<MESH_SWITCH_N?mesh_switch_route_dest(v,&togo,line,terms,ent.dst_node,origin,from):UINT32_MAX;
         if(tp>=MESH_PORTS){mesh_page_release(M,hp);MESH_SWITCH_COUNT(sw,l->index,unreachable,1);continue;}
         if(relay_inl_dp[tp]!=MESH_PAGE_NONE){
@@ -575,7 +559,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
         MESH_SWITCH_COUNT(sw,l->index,set,8);
         continue;
       }
-      if(!v){v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_terms_read(sw,v,line,terms);}
+      if(!terms_ready){if(!v)v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_togo_refresh(sw,v,now_rx,&togo);mesh_switch_terms_read(sw,v,line,terms);terms_ready=1;}
       const uint32_t tp=ge[0].hops+1<MESH_SWITCH_N?mesh_switch_route_dest(v,&togo,line,terms,ge[0].dst_node,d->origin_node,d->from_node):UINT32_MAX;
       if(tp>=MESH_PORTS){mesh_page_release_run(M,h,8u);MESH_SWITCH_COUNT(sw,l->index,unreachable,8);continue;}
       if(l->relay_bulk_dp[tp]!=MESH_PAGE_NONE && mesh_desc_at(M,l->relay_bulk_dp[tp])->origin_node!=d->origin_node)
@@ -640,6 +624,7 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
   if(!head)return 0;
   struct mesh_switch *sw=switch_of();
   const struct mesh_switch_view *v=sw->view+mesh_switch_published(&sw->view_version);
+  mesh_switch_togo_refresh(sw,v,clock_gettime_nsec_np(CLOCK_UPTIME_RAW),&togo);
   struct mesh_switch_terms terms[MESH_PORTS];
   mesh_switch_terms_read(sw,v,line,terms);
   uint32_t inl_dp[MESH_PORTS],inl_n[MESH_PORTS]={0},inl_src[MESH_PORTS][2];
@@ -857,7 +842,7 @@ static int port_pass(struct link *l){
   if(timed)t[2]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   worked|=switch_takes(l,line);
   if(timed)t[3]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  switch_sends(l,served);
+  switch_sends(l,served,line);
   if(timed)t[4]=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   worked|=(uint32_t)link_send(l,served);
   if(!worked)mesh_switch_togo_step(sw,&togo);
