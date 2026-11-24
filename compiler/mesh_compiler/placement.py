@@ -1392,6 +1392,8 @@ def insert_send_recv(graph, node, first, instances, transfer=None):
         # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
         if transfer is None:
             kind, exchange, consumer = node.meta.get("collectives", {}).get(processor, ("broadcast", node, JOIN))
+            if all(user.target is CAT for user in users):
+                consumer = PAGES
             policy = ((kind, instances.setdefault((kind, exchange), len(instances))), consumer)
         else:
             policy = transfer(node, processor, users)
