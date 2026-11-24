@@ -15,6 +15,8 @@ def body_guard(name, probe):
 
 def probes(contract):
     lines = []
+    bound = contract.get('bound_arguments')
+    submit = 'pid$target::MetalProgramRunBound:' if bound else 'pid$target::MetalProgramRunArguments:'
 
     def probe(where, name, values=(), when=''):
         fmt = 'mesh-public %d ' + name + ' %d' * len(values) + r'\n'
@@ -27,7 +29,7 @@ def probes(contract):
     for where, flag in (
         ('pid$target::*WaitForMPSStream*:', 'handoff'),
         ('pid$target::MetalExternalRelease:', 'release'),
-        ('pid$target::MetalProgramRunArguments:', 'issuing'),
+        (submit, 'issuing'),
         ('pid$target::MetalProgramEnd:', 'ending'),
     ):
         lines.extend(
@@ -54,9 +56,9 @@ def probes(contract):
         'self->handoff && !self->inapi',
     )
     probe(
-        'pid$target::MetalProgramRunArguments:entry',
+        submit + 'entry',
         'issue',
-        ('arg0', 'arg2', 'arg3', 'arg4', 'arg7', '(uint32_t)arg8'),
+        ('arg0', 'arg2', 'arg3') if bound else ('arg0', 'arg2', 'arg3', 'arg4', 'arg7', '(uint32_t)arg8'),
     )
     probe(
         'objc$target::-signalEvent?value?:entry',
@@ -70,7 +72,7 @@ def probes(contract):
         ('arg0', 'arg2'),
         f'!self->inapi && arg0 == {int(contract["ended"])}',
     )
-    probe('pid$target::MetalProgramRunArguments:return', 'issued', ('arg1',))
+    probe(submit + 'return', 'issued', ('arg1',))
     probe(
         'objc$target::-notifyListener?atValue?block?:entry',
         'residency',
@@ -156,9 +158,9 @@ def compare(contract, lines, submits):
             checkouts()
             take('mps_commit', (command,))
             take('ingress', (contract['queue'], event, value))
-        take(
-            'issue', (contract['program'], first, 1, ended, contract['argument_table'], len(contract['arguments']))
-        )
+        bound = contract.get('bound_arguments')
+        take('issue', (bound, first, 1) if bound else (
+            contract['program'], first, 1, ended, contract['argument_table'], len(contract['arguments'])))
         if current and current[1] == 'completion_store':
             take('completion_store', (ended, target))
         else:
