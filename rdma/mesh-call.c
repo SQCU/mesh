@@ -1,14 +1,20 @@
-#include "mesh-call.h"
-#include "mesh-order.h"
-#include "mesh-observe.h"
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
+#include "mesh.h"
+#include <pthread.h>
 
-/* design/algorithm-sources.md#programtensor */
-static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
+static inline uint32_t thread_seed(void){
+  static _Thread_local uint32_t base,cursor;
+  if(!base){
+    uint64_t tid=0;
+    pthread_threadid_np(NULL,&tid);
+    const uint32_t h=(uint32_t)((tid^(tid>>32)^(uint64_t)getpid())*2654435761u);
+    base=1u+((h>>16)&1023u)*32u;
+    cursor=base;
+  }
+  const uint32_t w=cursor;
+  cursor=base+((cursor-base+1u)&31u);
+  return w;
+}
 
-/* ---- The orders toward nodes (mesh-call.h; design/declared-programs.md) ----------------------------- */
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
   for(uint32_t n=0;m && n<MESH_NODES && count<room;n++){
@@ -19,216 +25,225 @@ uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room
   }
   return count;
 }
-int mesh_order_open(struct mesh_ctx *context,uint32_t node,struct mesh_order *order){
-  if(!context || !context->M || !order || !node)return EINVAL;
-  for(uint32_t n=0;n<MESH_NODES;n++){
-    struct mesh_node *x=mesh_node_at(context->M,n);
-    if(atomic_load_explicit(&x->node,memory_order_acquire)!=node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
-    *order=(struct mesh_order){.slot=n,.node=node,.generation=(uint32_t)atomic_load_explicit(&x->generation,memory_order_acquire)};
-    return mesh_order_live(context,order)?0:ENOLINK;
-  }
-  return ENOLINK;
-}
-int mesh_order_live(struct mesh_ctx *context,const struct mesh_order *order){
-  if(!context || !context->M || !order || order->slot>=MESH_NODES)return 0;
-  const struct mesh_node *x=mesh_node_at(context->M,order->slot);
-  return atomic_load_explicit(&x->node,memory_order_acquire)==order->node && atomic_load_explicit(&x->live,memory_order_acquire) &&
-         (uint32_t)atomic_load_explicit(&x->generation,memory_order_acquire)==order->generation;
-}
-/* whether client `owner` still holds its slot */
-static int client_live(struct hdr *m,uint64_t owner){
-  return owner && atomic_load_explicit(&mesh_client_at(m,owner)->owner,memory_order_acquire)==owner;
-}
-/* whether the region holds `bytes` at `at`, 8-byte aligned */
-static int words_held(const struct hdr *m,uint64_t at,uint64_t bytes){ return mesh_region_holds(m,at,bytes,8); }
-/* a program's tables as the region holds them: each direction's transfers in the arena, each one's `first` the pieces
-   before it, its spans valid and each at most one piece, its step within the period, its gate and done words words of
-   the region; the pieces an execution its units' sum */
-static int program_valid(const struct hdr *m,const struct mesh_declaration *p){
-  if(!p->period || !p->count)return 0;
-  const uint64_t piece=order_piece_bytes(m);
-  for(int d=0;d<2;d++){
-    const uint64_t n=p->transfers[d];
-    if(!n){if(p->pieces[d] || p->table[d])return 0;continue;}
-    if(n>UINT32_MAX || p->table[d]<m->data_off || !words_held(m,p->table[d],n*sizeof(struct mesh_crossing)))return 0;
-    const struct mesh_crossing *t=(const struct mesh_crossing *)((const char *)m+p->table[d]);
-    uint64_t pieces=0;
-    for(uint64_t i=0;i<n;i++){
-      if(t[i].first!=pieces || !t[i].units || t[i].step>=p->period || t[i].spans<m->data_off ||
-         t[i].units>(m->length-m->data_off)/sizeof(struct mesh_dma_span) ||
-         !words_held(m,t[i].spans,t[i].units*sizeof(struct mesh_dma_span)) ||
-         ((t[i].gates || t[i].gate) && !words_held(m,t[i].gate,t[i].gates?t[i].gates*sizeof(struct mesh_gate_term):8)) ||
-         (t[i].done && !words_held(m,t[i].done,8)))return 0;
-      const struct mesh_gate_term *gate=(const void *)((const char *)m+t[i].gate);
-      for(uint32_t k=0;k<t[i].gates;k++)if(!words_held(m,gate[k].word,8) || gate[k].threshold==UINT64_MAX)return 0;
-      const struct mesh_dma_span *spans=(const struct mesh_dma_span *)((const char *)m+t[i].spans);
-      for(uint64_t k=0;k<t[i].units;k++)if(!mesh_dma_span_valid(m,spans[k]) || spans[k].bytes>piece)return 0;
-      pieces+=t[i].units;
-    }
-    if(pieces!=p->pieces[d])return 0;
-  }
-  return 1;
-}
-/* the node's declaring word taken for `client` (from a client gone, where one holds it); 0, or EBUSY */
-static int declaring_take(struct hdr *m,struct mesh_node *x,uint64_t client){
-  uint64_t held=0;
-  if(atomic_compare_exchange_strong_explicit(&x->declaring,&held,client,memory_order_acq_rel,memory_order_acquire))return 0;
-  if(!client_live(m,held) && atomic_compare_exchange_strong_explicit(&x->declaring,&held,client,memory_order_acq_rel,memory_order_acquire))return 0;
-  return EBUSY;
-}
-/* The one declaration step (mesh_declare, mesh_close), under the node's declaring word: the programs of the node's
-   last segment that close (this client's own, `only` that slot of them where it is one, and every one of a client gone), a restart asked where one of a client
-   gone holds pieces outstanding or ended mid-execution (its peer's count may differ: only a restart realigns the two
-   ends), program slots of programs closed and wholly done made vacant, the declared one (`program`, NULL none) given a
-   slot, and the next segment published (mesh-order.h order_compose, order_publish_segment) */
-static int declare_held(struct mesh_ctx *context,const struct mesh_order *order,struct mesh_node *x,const struct mesh_declaration *program,
-                        uint32_t only,struct mesh_run *run){
-  struct hdr *m=context->M;
-  if(!mesh_order_live(context,order))return ENOLINK;
-  const uint64_t segments=atomic_load_explicit(&x->segments,memory_order_acquire);
-  uint32_t closing=0,gone=0;
-  if(segments){
-    const struct mesh_segment *g=x->segment+(segments-1)%MESH_SEGMENTS;
-    for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-      const uint64_t owner=atomic_load_explicit(&x->program[g->slot[k]].owner,memory_order_acquire);
-      if(owner==context->client){if(only==MESH_PROGRAMS || only==g->slot[k])closing|=UINT32_C(1)<<g->slot[k];}
-      else if(!client_live(m,owner)){closing|=UINT32_C(1)<<g->slot[k];gone|=UINT32_C(1)<<g->slot[k];}
-    }
-    for(uint32_t k=0;gone && k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-      uint64_t rounds;
-      if(!(gone>>g->slot[k]&1))continue;
-      /* mid-execution (its peer's count may differ), or a piece of it that can never be posted (its gate shut, its
-         client gone: order_gate_shut); its pieces posted complete or fail through their own completions */
-      int outstanding=order_round_of(x,g,k,&rounds)!=0;
-      for(int d=0;!outstanding && d<2;d++)
-        outstanding=order_gate_shut(m,x,segments,g->slot[k],d,atomic_load_explicit(&x->raised[d],memory_order_acquire),
-                                    g->start[d]+rounds*g->round[d]);
-      if(outstanding){atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;}
-    }
-  }
-  /* a closed program of a client gone with a piece that can never be posted (its gate shut: a SEND its client never
-     published, e.g. a fused crossing's frame whose producer was never run) holds the queue pair that piece is on, so
-     every program after it would wait behind it for ever: the order restarts (a restart asked, as for a gone program
-     mid-execution) and this declaration fails as a value.  Its pieces posted or postable complete or fail through their
-     own completions, and the programs after them follow them on their queue pairs: nothing is waited for here */
-  for(uint32_t p=0;p<MESH_PROGRAMS;p++){
-    const struct mesh_declared *d=x->program+p;
-    const uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
-    if(!owner || client_live(m,owner) || atomic_load_explicit(&d->closed,memory_order_acquire)==UINT64_MAX)continue;
-    for(int k=0;k<2;k++)
-      if(order_gate_shut(m,x,segments,p,k,atomic_load_explicit(&x->raised[k],memory_order_acquire),atomic_load_explicit(&d->end[k],memory_order_acquire))){
-        atomic_store_explicit(&x->restart,1,memory_order_release);mesh_notify(&m->control);return ENOLINK;
+
+int mesh_alloc(struct mesh_ctx *ctx,uint32_t count,int allocate_pages,
+               uint32_t *out_indices,uint32_t *out_pages){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !count || (!out_indices && !out_pages))return EINVAL;
+  if(!out_indices){
+    if(!allocate_pages)return EINVAL;
+    uint32_t got=0;
+    while(got<count){
+      const uint32_t n=mesh_page_alloc_batch(m,out_pages+got,count-got,thread_seed());
+      if(!n){
+        for(uint32_t r=0;r<got;r++)mesh_page_release(m,out_pages[r]);
+        return ENOMEM;
       }
-  }
-  for(uint32_t p=0;p<MESH_PROGRAMS;p++){
-    struct mesh_declared *d=x->program+p;
-    uint64_t owner=atomic_load_explicit(&d->owner,memory_order_acquire);
-    if(owner && atomic_load_explicit(&d->closed,memory_order_acquire)!=UINT64_MAX &&
-       atomic_load_explicit(&x->raised[0],memory_order_acquire)>=atomic_load_explicit(&d->end[0],memory_order_acquire) &&
-       atomic_load_explicit(&x->raised[1],memory_order_acquire)>=atomic_load_explicit(&d->end[1],memory_order_acquire))
-      atomic_compare_exchange_strong_explicit(&d->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed);
-  }
-  if(!program && !closing)return 0;
-  uint32_t joining=MESH_PROGRAMS;
-  if(program){
-    for(uint32_t p=0;p<MESH_PROGRAMS && joining==MESH_PROGRAMS;p++){
-      uint64_t vacant=0;
-      if(atomic_compare_exchange_strong_explicit(&x->program[p].owner,&vacant,context->client,memory_order_acq_rel,memory_order_relaxed))joining=p;
+      got+=n;
     }
-    if(joining==MESH_PROGRAMS)return ENOSPC;
-    struct mesh_declared *d=x->program+joining;
-    d->program=*program;
-    atomic_store_explicit(&d->issued,0,memory_order_relaxed);atomic_store_explicit(&d->closed,UINT64_MAX,memory_order_relaxed);
-    atomic_store_explicit(&d->end[0],UINT64_MAX,memory_order_relaxed);atomic_store_explicit(&d->end[1],UINT64_MAX,memory_order_relaxed);
+    return 0;
   }
-  struct order_next next;
-  int error=order_compose(x,closing,joining,&next);
-  if(!error && segments>=MESH_SEGMENTS && !order_segment_done(x,segments-MESH_SEGMENTS))error=ENOSPC;
-  if(error){
-    if(joining<MESH_PROGRAMS)atomic_store_explicit(&x->program[joining].owner,0,memory_order_release);
-    return error;
-  }
-  if(segments){
-    const struct mesh_segment *g=x->segment+(segments-1)%MESH_SEGMENTS;
-    for(uint32_t k=0;k<g->programs && k<MESH_SEGMENT_PROGRAMS;k++){
-      if(!(closing>>g->slot[k]&1))continue;
-      struct mesh_declared *d=x->program+g->slot[k];
-      atomic_store_explicit(&d->end[0],next.start[0],memory_order_relaxed);atomic_store_explicit(&d->end[1],next.start[1],memory_order_relaxed);
-      atomic_store_explicit(&d->closed,g->base[k]+next.rounds*d->program.count,memory_order_release);
+  if(!allocate_pages){
+    uint32_t got=0;
+    while(got<count){
+      const uint32_t n=mesh_idx_alloc_batch(m,out_indices+got,count-got,thread_seed());
+      if(!n){
+        for(uint32_t r=0;r<got;r++)mesh_idx_free_one(m,out_indices[r]);
+        return ENOMEM;
+      }
+      got+=n;
     }
+    if(out_pages)for(uint32_t i=0;i<count;i++)out_pages[i]=MESH_PAGE_NONE;
+    return 0;
   }
-  order_publish_segment(m,x,segments,&next);
-  /* the bridge woken: it tells the peer the segment's digest (mesh-order.h order_segments_turn) */
-  mesh_notify(&m->control);
-  if(run)*run=(struct mesh_run){.order=*order,.program=joining,.issued=joining<MESH_PROGRAMS?&x->program[joining].issued:NULL};
-  return 0;
-}
-static int declare(struct mesh_ctx *context,const struct mesh_order *order,const struct mesh_declaration *program,uint32_t only,
-                   struct mesh_run *run){
-  if(!context || !context->M || !context->client || !order || order->slot>=MESH_NODES)return EINVAL;
-  struct hdr *m=context->M;
-  if(program && !program_valid(m,program))return EINVAL;
-  struct mesh_node *x=mesh_node_at(m,order->slot);
-  /* another client's declaration toward the node under way is awaited (declarations are made one at a time), at most
-     MESH_PLATFORM_NS */
-  int error;
-  for(const uint64_t until=mesh_clock_ns()+MESH_PLATFORM_NS;(error=declaring_take(m,x,context->client)) && mesh_clock_ns()<until;)
-    __asm__ volatile("yield");
-  if(error)return error;
-  error=declare_held(context,order,x,program,only,run);
-  uint64_t held=context->client;
-  atomic_compare_exchange_strong_explicit(&x->declaring,&held,0,memory_order_acq_rel,memory_order_relaxed);
-  return error;
-}
-int mesh_declare(struct mesh_ctx *context,const struct mesh_order *order,const struct mesh_declaration *program,struct mesh_run *run){
-  if(!program || !run)return EINVAL;
-  return declare(context,order,program,MESH_PROGRAMS,run);
-}
-int mesh_close(struct mesh_ctx *context,struct mesh_run *run){
-  if(!run || run->program>=MESH_PROGRAMS)return EINVAL;
-  return declare(context,&run->order,NULL,run->program,NULL);
-}
-int mesh_run_done(struct mesh_ctx *context,const struct mesh_run *run){
-  if(!context || !context->M || !run || run->program>=MESH_PROGRAMS || run->order.slot>=MESH_NODES)return 1;
-  if(!mesh_order_live(context,&run->order))return 1;
-  const struct mesh_node *x=mesh_node_at(context->M,run->order.slot);
-  const struct mesh_declared *d=x->program+run->program;
-  if(atomic_load_explicit(&d->owner,memory_order_acquire)!=context->client)return 1;
-  if(atomic_load_explicit(&d->closed,memory_order_acquire)==UINT64_MAX)return 0;
-  return atomic_load_explicit(&x->raised[0],memory_order_acquire)>=atomic_load_explicit(&d->end[0],memory_order_acquire) &&
-         atomic_load_explicit(&x->raised[1],memory_order_acquire)>=atomic_load_explicit(&d->end[1],memory_order_acquire);
-}
-
-/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the region has them */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
-  struct hdr *m=context->M;
-  if(!bytes || !count)return EINVAL;
-  size_t quantum=(size_t)m->block*m->pgsz,capacity=mesh_arena_pages(m);
-  if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
-  size_t span=(bytes+quantum-1)/quantum*m->block;
-  if(span>capacity/count)return ENOMEM;
-  uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
-  if(first==MESH_ABSENT)return errno;
-  for(uint32_t row=first;row<first+rows;row+=stride){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    buffer->pages=(uint32_t)span;
-    atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
+  for(uint32_t i=0;i<count;i++){
+    uint32_t p=MESH_PAGE_NONE;
+    const uint32_t idx=mesh_idx_alloc_one(m,allocate_pages,thread_seed(),&p);
+    if(idx==MESH_ABSENT){
+      for(uint32_t r=0;r<i;r++)mesh_idx_free_one(m,out_indices[r]);
+      return ENOMEM;
+    }
+    out_indices[i]=idx;
+    if(out_pages)out_pages[i]=p;
   }
-  mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
-  /* design/transport.md */
-  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
-  if(page==MESH_ABSENT){
-    int error=errno;
-    mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
-    for(uint32_t r=first;r<first+rows;r++){mesh_buffers(m)[r].pages=0;atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_release);}
-    mesh_rows_release(context,first,rows);return error;
-  }
-  for(uint32_t slot=0;slot<count;slot++)
-    mesh_backing_bind(context,first+slot*stride,(uint32_t)span,page+slot*(uint32_t)span,slot);
-  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride};
   return 0;
 }
 
-/* design/algorithm-sources.md#programtensor */
-void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return (char *)context->M+atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)].address,memory_order_relaxed);}
+int mesh_alloc_contiguous(struct mesh_ctx *ctx,uint32_t count,
+                          uint32_t *out_indices,void **out_base){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !count)return EINVAL;
+  const uint32_t base=mesh_page_alloc_contiguous(m,count);
+  if(base==MESH_PAGE_NONE)return errno?errno:ENOMEM;
+  if(out_indices){
+    const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->indices;
+    _Atomic uint64_t *tab=mesh_table(m);
+    for(uint32_t i=0;i<count;i++){
+      uint32_t got=MESH_ABSENT;
+      const uint64_t val=mesh_word_pack(base+i,0);
+      for(uint32_t tries=0;tries<32 && got==MESH_ABSENT;tries++){
+        uint64_t v0=0;
+        const uint32_t w0=mesh_bmp_find_word(m,d,thread_seed()+tries,&v0);
+        if(w0==MESH_ABSENT)break;
+        uint64_t clear=0;
+        while(v0){
+          const uint32_t b=(uint32_t)__builtin_ctzll(v0);
+          v0&=v0-1u;
+          const uint32_t idx=(w0<<6)+b;
+          clear|=UINT64_C(1)<<b;
+          if(idx>=d->items)continue;
+          uint64_t zero=0;
+          if(atomic_compare_exchange_strong_explicit(&tab[idx],&zero,val,memory_order_release,memory_order_relaxed)){
+            got=idx;break;
+          }
+        }
+        if(clear)mesh_bmp_clear_mask(m,d,w0,clear);
+      }
+      if(got==MESH_ABSENT){
+        for(uint32_t r=0;r<i;r++)mesh_idx_free_one(m,out_indices[r]);
+        for(uint32_t r=i;r<count;r++)mesh_page_release(m,base+r);
+        return ENOMEM;
+      }
+      out_indices[i]=got;
+    }
+  }
+  if(out_base)*out_base=mesh_page_at(m,base);
+  return 0;
+}
 
+int mesh_hold(struct mesh_ctx *ctx,uint32_t page){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m)return EINVAL;
+  return mesh_page_hold(m,page)?0:ENOENT;
+}
+
+uint32_t mesh_hold_index(struct mesh_ctx *ctx,uint32_t index){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || index>=m->entries)return MESH_PAGE_NONE;
+  for(;;){
+    const uint64_t w=mesh_table_load(m,index);
+    const uint32_t p=mesh_word_page(w);
+    if(p==MESH_PAGE_NONE)return MESH_PAGE_NONE;
+    if(!mesh_page_hold(m,p))continue;
+    if(mesh_word_page(mesh_table_load(m,index))==p)return p;
+    mesh_page_release(m,p);
+  }
+}
+
+void mesh_release(struct mesh_ctx *ctx,uint32_t page){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(m)mesh_page_release(m,page);
+}
+
+void mesh_clear_indices(struct mesh_ctx *ctx,const uint32_t *indices,uint32_t count){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !indices)return;
+  uint32_t run_p=MESH_PAGE_NONE,run_n=0;
+  for(uint32_t i=0;i<count;i++){
+    const uint32_t idx=indices[i];
+    if(idx>=m->entries)continue;
+    const uint64_t prev=atomic_exchange_explicit(&mesh_table(m)[idx],(uint64_t)MESH_TABLE_EMPTY,memory_order_acq_rel);
+    const uint32_t old_p=mesh_word_page(prev);
+    if(old_p==MESH_PAGE_NONE)continue;
+    if(run_n && old_p==run_p+run_n){run_n++;}
+    else{
+      if(run_n)mesh_page_release_run(m,run_p,run_n);
+      run_p=old_p;run_n=1u;
+    }
+  }
+  if(run_n)mesh_page_release_run(m,run_p,run_n);
+}
+
+void mesh_free_indices(struct mesh_ctx *ctx,const uint32_t *indices,uint32_t count){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !indices)return;
+  for(uint32_t i=0;i<count;i++)mesh_idx_free_one(m,indices[i]);
+}
+
+int mesh_defragment(struct mesh_ctx *ctx,const uint32_t *indices,uint32_t count,void **out_base){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !indices || !count)return EINVAL;
+  for(uint32_t i=0;i<count;i++)if(indices[i]>=m->entries)return EINVAL;
+  const uint32_t base=mesh_page_alloc_contiguous(m,count);
+  if(base==MESH_PAGE_NONE)return errno?errno:ENOMEM;
+  for(uint32_t r=0;r<count;r++){
+    const uint32_t idx=indices[r];
+    const uint32_t p=mesh_hold_index(ctx,idx);
+    uint32_t b=0;
+    if(p!=MESH_PAGE_NONE){
+      b=mesh_word_bytes(mesh_table_load(m,idx));
+      if(b>MESH_PAGE_BYTES)b=MESH_PAGE_BYTES;
+      if(b)memcpy(mesh_page_at(m,base+r),mesh_page_at(m,p),b);
+    }
+    mesh_table_land(m,idx,base+r,b);
+    if(p!=MESH_PAGE_NONE)mesh_page_release(m,p);
+  }
+  if(out_base)*out_base=mesh_page_at(m,base);
+  return 0;
+}
+
+int mesh_write(struct mesh_ctx *ctx,const struct mesh_xfer *xfers,uint32_t count){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !xfers || !count)return EINVAL;
+  const uint32_t self=m->node,pages=mesh_flat_pages(m);
+  struct mesh_wire_desc *desc=NULL;
+  uint32_t desc_page=MESH_PAGE_NONE,n=0;
+  for(uint32_t i=0;i<count;i++){
+    const struct mesh_xfer *x=xfers+i;
+    if(x->src_page>=pages || x->bytes>MESH_PAGE_BYTES || x->dst_index>=m->entries){
+      if(desc_page!=MESH_PAGE_NONE){
+        for(uint32_t k=0;k<n;k++)mesh_page_release(m,desc->e[k].src_page);
+        mesh_page_release(m,desc_page);
+      }
+      return EINVAL;
+    }
+    if(x->dst_node==self){
+      if(!mesh_page_hold(m,x->src_page))continue;
+      mesh_table_land(m,x->dst_index,x->src_page,x->bytes);
+      continue;
+    }
+    if(desc_page==MESH_PAGE_NONE){
+      desc_page=mesh_page_alloc(m,thread_seed());
+      if(desc_page==MESH_PAGE_NONE)return ENOMEM;
+      desc=mesh_desc_at(m,desc_page);
+      desc->origin_node=self;desc->from_node=self;
+      n=0;
+    }
+    if(!mesh_page_hold(m,x->src_page))continue;
+    desc->e[n++]=(struct mesh_wire_entry){
+      .dst_node=x->dst_node,.dst_index=x->dst_index,
+      .bytes=(uint16_t)x->bytes,.flags=0,.hops=0,.src_page=x->src_page
+    };
+    if(n==MESH_DESC_FLUSH){
+      desc->count=n;
+      mesh_llist_add(m,mesh_pending_head(m),desc_page);
+      desc_page=MESH_PAGE_NONE;desc=NULL;n=0;
+    }
+  }
+  if(desc_page!=MESH_PAGE_NONE){
+    if(n){
+      desc->count=n;
+      mesh_llist_add(m,mesh_pending_head(m),desc_page);
+    }else mesh_page_release(m,desc_page);
+  }
+  return 0;
+}
+
+int mesh_entry(struct mesh_ctx *ctx,uint32_t index,struct mesh_entry_info *out){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || !out || index>=m->entries)return EINVAL;
+  const uint64_t w=mesh_table_load(m,index);
+  const uint32_t p=mesh_word_page(w);
+  if(p==MESH_PAGE_NONE || p>=mesh_flat_pages(m)){
+    *out=(struct mesh_entry_info){.page=MESH_PAGE_NONE,.bytes=0,.data=NULL};
+  }else{
+    *out=(struct mesh_entry_info){.page=p,.bytes=mesh_word_bytes(w),.data=mesh_page_at(m,p)};
+  }
+  return 0;
+}
+
+void *mesh_page_ptr(struct mesh_ctx *ctx,uint32_t page){
+  struct hdr *m=ctx?ctx->M:NULL;
+  if(!m || page>=mesh_flat_pages(m))return NULL;
+  return mesh_page_at(m,page);
+}

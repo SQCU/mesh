@@ -373,8 +373,9 @@ receives in RTS queue pairs as the device closed (2).
 
 ### The restored service's answer to each
 
-The stripe service restored at MESH_VERSION 118 (deleted at MESH_VERSION 125; its guard stays) is built so that none of the
-three can happen:
+The stripe service restored at MESH_VERSION 118 (deleted at MESH_VERSION 125; its guard stayed until 2026-11-23, when
+it was deleted as dead code: a port child makes and connects every verbs object before its progress thread starts, and
+changes none after) is built so that none of the three can happen:
 - **One owner of every teardown.** Its queue pairs are a flow of the port, made, connected and destroyed only by jobs on
   the port's serial queue, where every flow's and the lanes' are; its posts run on the port's two progress threads, as
   every flow's do; the device's registrations go only at its retirement (`down_device`, `port_turn`, once no flow, no

@@ -5,46 +5,24 @@ by its import (rdma/NCCL.md "NumPy"):
     comm = Comm()
     comm.Allreduce(local, total, op=SUM)
 
-Every crossing call runs a declared program (design/declared-programs.md, nccl.h ncclMeshDeclareBegin): the calls made
-inside `with declare():` (on any communicators, with their buffers) are captured as the steps of this process's
-program, nothing moving; every later call runs the next step, in order, and is that step (the same collective, counts,
-types, root and arrays) or fails.  Every rank declares its own calls of the same steps at the same point:
-
-    with declare():
-        comm.Allreduce(local, total, op=SUM)
-    for _ in range(steps):
-        comm.Allreduce(local, total, op=SUM)
-
-A loop that changes size or buffers declares again where it changes.  allreduce uses an array the communicator keeps
-(one a dtype), so it is a declarable step like any other; Barrier meets the ranks over the bootstrap and is no step.
-
 Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
-communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
-links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
-complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv,
-Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Barrier, allreduce (a Python number), Free;
-IN_PLACE as a send buffer, None for a buffer a rank does not use
-(Gather's off the root, Scatter's send off it); an array of a dtype the library has no type of moves as its bytes, and
-a reduction takes the library's types alone.  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
-them (a receive buffer [array, counts], recvcounts): one program over the segments (ncclMeshAllGatherV,
-ncclMeshReduceScatterV), every rank passing the same counts; Allgather and Reduce_scatter_block are the same calls with
-equal counts (the library takes equal segments as its equal program).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
+communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank).  Every call is
+libnccl-mesh's: contiguous arrays at host pointers, a NULL stream, the call complete when it returns.  Methods:
+Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv, Reduce_scatter_block, Reduce_scatter, Alltoall,
+Gather, Scatter, Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer, None for a buffer a rank does
+not use (Reduce's receive and Gather's off the root, Scatter's send off it); an array of a dtype the library has no
+type of moves as its bytes, and a reduction takes the library's types alone.  Allgatherv and Reduce_scatter take a
+count a rank, as mpi4py spells them (a receive buffer [array, counts], recvcounts), every rank passing the same counts:
+equal counts are ncclAllGather and ncclReduceScatter, other counts one NCCL group of a broadcast or a reduce a rank, in
+rank order.  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
 for none), Shrink(exclude) (ncclCommShrink), Grow(size) and Comm.joining (ncclCommGrow), Revoke() (ncclCommRevoke), and
-a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
-each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
-nonblocking calls, Alltoallv, Gatherv and Scatterv, object (pickled) collectives, or paired Send/Recv.
-Directed transfers use the prepared WRITE interface below, with every physical rank admitted for forwarding.
-The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
-path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's region (ncclMemAlloc, the
-role mpi4py's MPI.Alloc_mem plays), the memory a program hands the collectives (rdma/NCCL.md "Memory"); the module's
-own temporaries are such arrays. Write_prepare, Write_rows_prepare, Write_spans_prepare and Write_view_prepare expose
-the same native AOT exact-byte WRITE bindings as other front ends; their WritePlan.Execute reuses the fixed bindings
-without exchanging layout metadata. Explicit spans and metadata-derived ndarray views preserve arbitrary byte
-strides and original array owners without packing values. This adds no alternative collective planner."""
+a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims), each sub-grid a
+Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here: nonblocking calls,
+Alltoallv, Gatherv and Scatterv, object (pickled) collectives, or paired Send/Recv.  Memory: empty(shape, dtype) is an
+array of the library's allocation (ncclMemAlloc, the role mpi4py's MPI.Alloc_mem plays); any C-contiguous array is a
+buffer."""
 import math
-import operator
 import os
-import weakref
 
 import numpy as np
 
@@ -64,36 +42,16 @@ except ImportError:
     pass
 
 
-class _Declaration:
-    """`with declare():` (ncclMeshDeclareBegin on entry, ncclMeshDeclareEnd on exit)."""
-
-    def __enter__(self):
-        check(lib.ncclMeshDeclareBegin())
-        return self
-
-    def __exit__(self, kind, value, traceback):
-        ended = lib.ncclMeshDeclareEnd()
-        if kind is None:
-            check(ended)
-        return False
-
-
-def declare():
-    """The process's program declared by the calls of a `with` block (the module's docstring; nccl.h
-    ncclMeshDeclareBegin): its steps are captured, nothing moves, and the calls after it run them in order."""
-    return _Declaration()
-
-
 def empty(shape, dtype=np.float64):
-    """An uninitialized C-contiguous array of `shape` and `dtype` in this node's bridge's region (mesh.lease), its pages
-    logically freed when it and every view/plan retaining it are gone; native future and posted DMA obligations defer reuse."""
+    """An uninitialized C-contiguous array of `shape` and `dtype` in the library's allocation (mesh.lease), freed when
+    it and every view of it are gone."""
     dtype = np.dtype(dtype)
     count = math.prod(shape) if isinstance(shape, (tuple, list)) else int(shape)
     return np.frombuffer(mesh.lease(count * dtype.itemsize), dtype, count=count).reshape(shape)
 
 
-def to_region(array):
-    """`array` where it is C-contiguous, else its copy in the region (empty)."""
+def contiguous(array):
+    """`array` where it is C-contiguous, else its copy (empty)."""
     if array.flags.c_contiguous:
         return array
     made = empty(array.shape, array.dtype)
@@ -102,12 +60,17 @@ def to_region(array):
 
 
 def at(array):
-    """A buffer's address: a C-contiguous array's own (another would cross only through a copy: rdma/NCCL.md "Memory")."""
+    """A buffer's address: a C-contiguous array's own."""
     if array is None:
         return ffi.NULL
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         raise ValueError('a buffer is a C-contiguous numpy array')
     return ffi.cast('void *', array.ctypes.data)
+
+
+def offset(array, elements):
+    """The address `elements` of `array`'s elements past its first."""
+    return ffi.cast('char *', at(array)) + elements * array.itemsize
 
 
 def kind(dtype):
@@ -131,76 +94,15 @@ def segments(spec, size):
     return array, counts
 
 
-def _row_pitch(array, row_bytes, rows):
-    """Prove the array's logical C-order bytes equal one positive affine row map.
-
-    This only reads shape/strides, never array contents. General indexed views
-    belong in the shared native view compiler; this binding does not pack them.
-    """
-    if not isinstance(array, np.ndarray) or array.dtype.hasobject:
-        raise ValueError('a WRITE binding is a numpy array without Python objects')
-    if row_bytes <= 0 or rows <= 0 or row_bytes * rows != array.nbytes or row_bytes % array.itemsize:
-        raise ValueError('row_bytes * rows must cover exactly the array, in whole dtype elements')
-    axes = [(int(n), int(stride)) for n, stride in zip(array.shape, array.strides) if n > 1]
-    contiguous = array.itemsize
-    while axes and axes[-1][1] == contiguous:
-        n, _ = axes.pop()
-        contiguous *= n
-    if not axes:
-        return row_bytes
-    if contiguous != row_bytes:
-        raise ValueError('the requested rows are not contiguous intervals of this view')
-    pitch, extent = axes[-1][1], 1
-    if pitch < row_bytes:
-        raise ValueError('affine WRITE rows must have positive, nonoverlapping pitch')
-    for n, stride in reversed(axes):
-        if stride != pitch * extent:
-            raise ValueError('this view needs the shared indexed descriptor API; it is not one affine row map')
-        extent *= n
-    return pitch
-
-
-class WritePlan:
-    """Fixed native WRITE bindings; preparation exchanges layout metadata once.
-
-    Execute is the synchronous host execution of that native plan. Original
-    arrays and their owners remain retained until Free. Source mutation requires
-    every scheduled DMA read to retire; a source-only Execute return alone does
-    not prove it. Destination reuse additionally requires its own consumers to
-    finish. Bindings and shape remain fixed. Every
-    participating rank prepares and executes the same write sequence, including
-    relay ranks with landing storage. This class contains no collective planner.
-    """
-    def __init__(self, comm, handle, arrays):
-        self.comm, self.handle, self.arrays = comm, handle, arrays
-        if not hasattr(comm, '_writes'):
-            comm._writes = weakref.WeakSet()
-        comm._writes.add(self)
-
-    def Execute(self):
-        if self.handle == ffi.NULL:
-            raise ValueError('WRITE plan is already freed')
-        check(lib.ncclMeshWriteExecute(self.handle, ffi.NULL))
-
-    __call__ = Execute
-
-    def Free(self):
-        if self.handle != ffi.NULL:
-            check(lib.ncclMeshWritePlanDestroy(self.handle))
-            self.handle, self.arrays = ffi.NULL, ()
-            self.comm._writes.discard(self)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.Free()
-
-    def __del__(self):
-        try:
-            self.Free()
-        except Exception:
-            pass
+def grouped(calls):
+    """`calls` (each a function of no arguments returning an ncclResult_t) as one NCCL group, run in order."""
+    result = lib.ncclGroupStart()
+    for call in calls:
+        if result:
+            break
+        result = call()
+    ended = lib.ncclGroupEnd()
+    check(result or ended)
 
 
 class Comm:
@@ -215,7 +117,7 @@ class Comm:
         self.rank, self.size, self.comm = rank, size, made[0]
 
     @classmethod
-    def _of(cls, handle, parent):
+    def _of(cls, handle):
         made = cls.__new__(cls)
         count, rank = ffi.new('int *'), ffi.new('int *')
         check(lib.ncclCommCount(handle, count))
@@ -227,14 +129,14 @@ class Comm:
         """The ranks of `color`, ordered by `key` then rank; None for UNDEFINED (ncclCommSplit)."""
         made = ffi.new('ncclComm_t *')
         check(lib.ncclCommSplit(self.comm, -1 if color == UNDEFINED else color, key, made, ffi.NULL))
-        return Comm._of(made[0], self) if made[0] != ffi.NULL else None
+        return Comm._of(made[0]) if made[0] != ffi.NULL else None
 
     def Shrink(self, exclude, abort=False):
         """This communicator without the ranks `exclude`, each kept rank's order kept (ncclCommShrink; `abort` revokes
-        this one's groups in flight first, NCCL_SHRINK_ABORT); None on a rank among those excluded."""
+        this one first, NCCL_SHRINK_ABORT); None on a rank among those excluded."""
         made, ranks = ffi.new('ncclComm_t *'), ffi.new('int[]', list(exclude) or [0])
         check(lib.ncclCommShrink(self.comm, ranks, len(exclude), made, ffi.NULL, 1 if abort else 0))
-        return Comm._of(made[0], self) if made[0] != ffi.NULL else None
+        return Comm._of(made[0]) if made[0] != ffi.NULL else None
 
     def Grow(self, size):
         """This communicator's ranks and `size` - its size more, which join with Comm.joining at the id its root
@@ -243,17 +145,17 @@ class Comm:
         if self.rank == 0:
             check(lib.ncclCommGetUniqueId(self.comm, unique))
         check(lib.ncclCommGrow(self.comm, size, unique, -1, made, ffi.NULL))
-        return Comm._of(made[0], self), unique[0] if self.rank == 0 else None
+        return Comm._of(made[0]), unique[0] if self.rank == 0 else None
 
     @classmethod
     def joining(cls, size, unique, rank):
         """A process joining a grown communicator of `size` ranks as `rank`, at the root's id `unique` (ncclCommGrow)."""
         made = ffi.new('ncclComm_t *')
         check(lib.ncclCommGrow(ffi.NULL, size, ffi.new('ncclUniqueId *', unique), rank, made, ffi.NULL))
-        return cls._of(made[0], None)
+        return cls._of(made[0])
 
     def Revoke(self):
-        """This communicator's groups in flight end with an error and none is issued after it (ncclCommRevoke)."""
+        """This communicator's calls under way end with an error and none is made after it (ncclCommRevoke)."""
         check(lib.ncclCommRevoke(self.comm, 0))
 
     def Create_cart(self, dims, periods=None, reorder=False):
@@ -267,114 +169,21 @@ class Comm:
         base = self if cells == self.size else self.Split(0 if self.rank < cells else UNDEFINED, self.rank)
         return Cartcomm(base, list(dims), list(periods) if periods is not None else [True] * len(dims)) if base is not None else None
 
-    declare = staticmethod(declare)
-
     def Get_rank(self):
         return self.rank
 
     def Get_size(self):
         return self.size
 
-    def Plan(self, calls):
-        """Declare the complete function's native calls through the shared controller.
-
-        Calls are dictionaries of ncclMeshCall fields, with ordinary count lists
-        where required. This is configuration metadata, not a Python schedule or
-        a collective decomposition. Every rank declares the same function.
-        """
-        from controller import declare
-        return declare(self.comm, calls)
-
-    def PlanDemands(self):
-        """Exact compiler-reported directed bytes for the declared complete function."""
-        from controller import function_demands
-        return function_demands(self.comm)
-
-    def Write_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
-        """Bind one exact contiguous native WRITE, without copying or routing in Python.
-
-        Only source's sendbuf and other ranks' landingbuf are used. All ranks
-        provide the same element count/type/endpoints; unused buffers may be
-        None. Every used array must belong to a bridge lease (empty or a view
-        thereof); native preparation validates actual registration and bounds.
-        """
-        own = sendbuf if self.rank == source else landingbuf
-        if not isinstance(own, np.ndarray) or own.dtype.hasobject:
-            raise ValueError('a WRITE binding is a numpy array without Python objects')
-        pointer, (datatype, multiple) = at(own), kind(own.dtype)
-        made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWritePrepare(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, own.size * multiple, datatype,
-            source, destination, self.comm, 0, 1, 0, max_packet, made))
-        return WritePlan(self, made[0], (own,))
-
-    def Write_rows_prepare(self, sendbuf, landingbuf, source, destination, *, row_bytes, rows, max_packet=0):
-        """Bind the same native WRITE as exact rows with local pitches.
-
-        row_bytes and rows agree across ranks; source, destination and relay
-        pitches may differ. The original NumPy view must describe exactly this
-        positive affine row map. No padding, staging allocation or per-row
-        execution call is introduced. General non-affine views need the shared
-        indexed native descriptor, not a private packing implementation here.
-        """
-        own = sendbuf if self.rank == source else landingbuf
-        row_bytes, rows = int(row_bytes), int(rows)
-        pitch = _row_pitch(own, row_bytes, rows)
-        pointer, made = ffi.cast('void *', own.ctypes.data), ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWriteRowsPrepare(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, row_bytes, rows, pitch,
-            source, destination, self.comm, 0, max_packet, made))
-        return WritePlan(self, made[0], (own,))
-
-    def _write_spans_prepare(self, own, spans, source, destination, max_packet, base_shift=0):
-        if not isinstance(own, np.ndarray) or own.dtype.hasobject:
-            raise ValueError('a WRITE binding is a numpy array without Python objects')
-        spans = [(operator.index(offset), operator.index(length)) for offset, length in spans]
-        metadata = ffi.new('ncclMeshSpan[]', spans) if spans else ffi.NULL
-        pointer = ffi.cast('void *', own.ctypes.data + base_shift)
-        made = ffi.new('ncclMeshWritePlan_t *')
-        check(lib.ncclMeshWriteSpansPrepare(pointer if self.rank == source else ffi.NULL,
-            ffi.NULL if self.rank == source else pointer, metadata, len(spans), source, destination,
-            self.comm, 0, max_packet, made))
-        return WritePlan(self, made[0], (own,))
-
-    def Write_spans_prepare(self, sendbuf, landingbuf, spans, source, destination, *, max_packet=0):
-        """Bind logical bytes to explicit (offset, length) ranges in one lease.
-
-        Offsets are relative to the used local array's first element address.
-        Every rank may supply a different ordered list, but logical byte totals
-        agree. Native preparation validates lease bounds and landing overlap.
-        Source ranges may repeat. This copies metadata only, never values.
-        """
-        own = sendbuf if self.rank == source else landingbuf
-        return self._write_spans_prepare(own, spans, source, destination, max_packet)
-
-    def Write_view_prepare(self, sendbuf, landingbuf, source, destination, *, max_packet=0):
-        """Bind an arbitrary ndarray view in logical row-major element order.
-
-        The shared metadata mapper handles transpose, gaps, reversed strides
-        and broadcast source views. The native plan rejects overlapping landing
-        views and spans outside one live lease. The original view retains its
-        storage; no contiguous temporary or numerical copy is constructed.
-        """
-        from views import byte_spans
-        own = sendbuf if self.rank == source else landingbuf
-        if not isinstance(own, np.ndarray) or own.dtype.hasobject:
-            raise ValueError('a WRITE binding is a numpy array without Python objects')
-        shift, spans = byte_spans(own.shape, own.strides, own.dtype.itemsize)
-        return self._write_spans_prepare(own, spans, source, destination, max_packet, shift)
-
     def Allreduce(self, sendbuf, recvbuf, op=SUM):
         send = recvbuf if sendbuf is IN_PLACE else sendbuf
         check(lib.ncclAllReduce(at(send), at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], op, self.comm, ffi.NULL))
 
     def Reduce(self, sendbuf, recvbuf, op=SUM, root=0):
+        """sendbuf reduced into the root's recvbuf; a rank but the root may pass None (its send buffer is then the
+        call's receive, which NCCL leaves unread off the root)."""
         send = recvbuf if sendbuf is IN_PLACE else sendbuf
-        if recvbuf is None:
-            targets = self.__dict__.setdefault('_targets', {})
-            key = (send.shape, np.dtype(send.dtype))
-            targets.setdefault(key, empty(send.shape, send.dtype))
-        target = recvbuf if recvbuf is not None else self._targets[(send.shape, np.dtype(send.dtype))]
+        target = recvbuf if recvbuf is not None else send
         check(lib.ncclReduce(at(send), at(target), send.size, TYPES[send.dtype], op, root, self.comm, ffi.NULL))
 
     def Bcast(self, buf, root=0):
@@ -386,28 +195,41 @@ class Comm:
 
     def Allgatherv(self, sendbuf, recvbuf):
         """Every rank's segment into recvbuf, given as [array, counts] (or [array, (counts, displacements)], the
-        displacements the counts' running sums: segments packed in rank order), rank r's counts[r] elements
-        (ncclMeshAllGatherV); IN_PLACE takes this rank's segment from the array."""
+        displacements the counts' running sums: segments packed in rank order), rank r's counts[r] elements; IN_PLACE
+        takes this rank's segment from the array.  Equal counts are one ncclAllGather; other counts one group of a
+        broadcast a rank, rank r's segment from rank r into its place."""
         array, counts = segments(recvbuf, self.size)
-        before = sum(counts[:self.rank])
-        send = to_region(array[before:before + counts[self.rank]] if sendbuf is IN_PLACE else sendbuf)
+        before = [sum(counts[:r]) for r in range(self.size)]
+        send = contiguous(array[before[self.rank]:before[self.rank] + counts[self.rank]] if sendbuf is IN_PLACE else sendbuf)
         if send.size != counts[self.rank]:
             raise ValueError(f'a send buffer of {send.size} elements: counts[{self.rank}] is {counts[self.rank]}')
         t, k = kind(array.dtype)
-        check(lib.ncclMeshAllGatherV(at(send), at(array), ffi.new('size_t[]', [c * k for c in counts]), t, self.comm, ffi.NULL))
+        if len(set(counts)) == 1:
+            check(lib.ncclAllGather(at(send), at(array), counts[0] * k, t, self.comm, ffi.NULL))
+            return
+        grouped(lambda r=r: lib.ncclBroadcast(at(send) if r == self.rank else offset(array, before[r]), offset(array, before[r]),
+                                              counts[r] * k, t, r, self.comm, ffi.NULL)
+                for r in range(self.size) if counts[r])
 
     def Reduce_scatter_block(self, sendbuf, recvbuf, op=SUM):
         self.Reduce_scatter(sendbuf, recvbuf, None, op)
 
     def Reduce_scatter(self, sendbuf, recvbuf, recvcounts=None, op=SUM):
         """sendbuf's segments reduced by op, rank r's recvcounts[r] elements left in its recvbuf (packed in rank order in
-        sendbuf; ncclMeshReduceScatterV); recvcounts None: recvbuf's size each (Reduce_scatter_block)."""
+        sendbuf); recvcounts None: recvbuf's size each (Reduce_scatter_block).  Equal counts are one ncclReduceScatter;
+        other counts one group of a reduce a rank, segment r reduced at rank r."""
         counts = [int(c) for c in recvcounts] if recvcounts is not None else [recvbuf.size] * self.size
         if len(counts) != self.size or sum(counts) != sendbuf.size or recvbuf.size != counts[self.rank]:
             raise ValueError(f'recvcounts {counts}: one a rank of {self.size}, summing to the send buffer\'s {sendbuf.size}, '
                              f'this rank\'s its receive buffer\'s {recvbuf.size}')
-        check(lib.ncclMeshReduceScatterV(at(sendbuf), at(recvbuf), ffi.new('size_t[]', counts), TYPES[recvbuf.dtype], op, self.comm,
-                                         ffi.NULL))
+        t = TYPES[recvbuf.dtype]
+        if len(set(counts)) == 1:
+            check(lib.ncclReduceScatter(at(sendbuf), at(recvbuf), counts[0], t, op, self.comm, ffi.NULL))
+            return
+        before = [sum(counts[:r]) for r in range(self.size)]
+        grouped(lambda r=r: lib.ncclReduce(offset(sendbuf, before[r]), at(recvbuf) if r == self.rank else offset(sendbuf, before[r]),
+                                           counts[r], t, op, r, self.comm, ffi.NULL)
+                for r in range(self.size) if counts[r])
 
     def Alltoall(self, sendbuf, recvbuf):
         if sendbuf.size % self.size or recvbuf.size != sendbuf.size or recvbuf.dtype != sendbuf.dtype:
@@ -430,8 +252,7 @@ class Comm:
         check(lib.ncclScatter(at(sendbuf if self.rank == root else None), at(target), count * k, t, root, self.comm, ffi.NULL))
 
     def _box(self, dtype):
-        """The one-element array of `dtype` this communicator keeps for allreduce (a declared step names its
-        buffers: design/declared-programs.md)."""
+        """The one-element array of `dtype` this communicator keeps for allreduce and Barrier."""
         boxes = self.__dict__.setdefault('_boxes', {})
         dtype = np.dtype(dtype)
         if dtype not in boxes:
@@ -439,10 +260,8 @@ class Comm:
         return boxes[dtype]
 
     def Barrier(self):
-        """Every rank met over the communicator's bootstrap (ncclMeshCommConfigGather: configuration, which no declared
-        program carries, so a Barrier is never a step)."""
-        mine, every = ffi.new('char[1]', b'\x01'), ffi.new('char[]', self.size)
-        check(lib.ncclMeshCommConfigGather(self.comm, mine, every, 1))
+        """Every rank met: a one-element all-reduce, complete on every rank only once every rank has called it."""
+        self.allreduce(0)
 
     def allreduce(self, value, op=SUM):
         box = self._box(value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
@@ -451,8 +270,6 @@ class Comm:
         return box[0].item()
 
     def Free(self):
-        for plan in tuple(getattr(self, '_writes', ())):
-            plan.Free()
         check(lib.ncclCommDestroy(self.comm))
 
 

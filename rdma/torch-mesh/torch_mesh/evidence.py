@@ -4,20 +4,19 @@ balances on).
 
 While a group is watched (`watch`), every collective it runs is marked as it is issued and once it has completed, by
 `mark` alone: every collective takes the one path (ProcessGroupMesh._issue into torch_mesh/_stream.mm issue, torch's
-functional collectives and the library's own calls alike), which marks a host-path group around its call and a Metal-path
-group on torch's stream.  On MPS tensors a mark is a timing event of torch's pool recorded on its stream, so the mark
-at issue is where the GPU finished the work before the collective and the mark at completion where the GPU has passed
-its wait, and an issued collective's (an async op's) also where its issue is encoded and where its wait begins; on host
-tensors the monotonic clock (a host collective completes in the call).  A step's work on the rank is the sum of its
-stretches, each from a mark where the GPU passed a collective (or the step's start) to the next where the rank's work
-ends: the work before each collective, the work an issued one overlaps, and the step's tail.  `step` closes a step;
+functional collectives and the library's own calls alike), which marks a host group around its call and an MPS group
+on torch's stream.  On MPS tensors a mark is a timing event of torch's pool recorded on its stream, so the mark at
+issue is where the GPU finished the work before the collective and the mark at completion where the GPU has passed it;
+on host tensors the monotonic clock.  Every collective completes in its call.  A step's work on the rank is the sum of
+its stretches, each from a mark where the GPU passed a collective (or the step's start) to the next where the rank's
+work ends: the work before each collective and the step's tail.  `step` closes a step;
 `work` returns the stretches (seconds in order, the last the tail) of each closed step the GPU has passed and forgets
 them, waiting for nothing: on MPS a step whose closing mark the GPU has not reached stays for a later `work` (torch's
 pool events complete in the stream's order, so the latest completed closing mark bounds a prefix of complete
 marks).  Two marks with no GPU work between them cannot be timed apart; that interval counts zero.
 
 An unwatched program pays one dictionary lookup a group call in Python and one empty-map test a collective in C++;
-a watched group two marks a collective (an issued one four)."""
+a watched group two marks a collective."""
 import time
 
 _WATCHED = {}

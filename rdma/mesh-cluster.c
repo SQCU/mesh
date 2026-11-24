@@ -1,13 +1,14 @@
-/* mesh-cluster: the whole cluster's fabric as this node's region holds it, one JSON object, read-only.
+/* mesh-cluster: the whole cluster's fabric as this node's region has it, one JSON object, read-only.
    The cluster part is the flooded link-state of every node with a bridge (mesh.h struct mesh_record: each bridge
    floods its own record, the newest of which every bridge keeps; a record's reach is an entry a cable, the peer node
    and the bandwidth that end reports), so it names nodes that are no communicator's member (a relay-only node) and is
    the same on every node once the floods settle: `records` (each node's boot, sequence, region, memory, model and
    cables) and `links` (every cable the two ends both report, each pair's count the fewer of the two ends' reports,
    its bandwidth the lesser, as mesh_map takes it; `one_sided` the reports the other end does not match).  The local
-   part is this node's own: its ports (peer, phase, bandwidth, pairings) and its orders (toward each node: live,
-   generation, the newest epoch's cables: port, lanes, wire).  Run it on every node and compare `records` and `links`.
-   usage: mesh-cluster   (MESH_REGION names another region, as the clients' attach) */
+   part is this node's own ports (peer, phase, bandwidth, pairings).  Run it on every node and compare `records` and
+   `links`.  The records are the map's published copy (mesh.h mesh_map_published), copied as they stand: no wait on the
+   bridge and no try again.
+   usage: mesh-cluster */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -19,26 +20,18 @@
 #include "mesh-observe.h"
 static unsigned long long u(uint64_t v){ return (unsigned long long)v; }
 int main(void){
-  int fd=shm_open(mesh_name(),O_RDONLY,0);
+  int fd=shm_open(MESH_NAME,O_RDONLY,0);
   if(fd<0){printf("{\"up\":false,\"errno\":%d}\n",errno);return 0;}
   struct stat st;
   if(fstat(fd,&st) || st.st_size<(off_t)sizeof(struct hdr)){close(fd);printf("{\"up\":false,\"errno\":%d}\n",EINVAL);return 0;}
   struct hdr *m=mmap(NULL,(size_t)st.st_size,PROT_READ,MAP_SHARED,fd,0);close(fd);
   if(m==MAP_FAILED){printf("{\"up\":false,\"errno\":%d}\n",errno);return 0;}
   if(m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT){printf("{\"up\":false,\"layout\":%u}\n",m->version);return 0;}
-  /* a whole copy of the records: the map's serial even before and unchanged after (mesh.h mesh_map_whole) */
-  struct mesh_record *rec=NULL;uint64_t n=0;
-  for(int tries=0;tries<1000;tries++){
-    const uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
-    if(before&1)continue;
-    n=atomic_load_explicit(&m->map_nodes,memory_order_relaxed);
-    if(atomic_load_explicit(&m->map_off,memory_order_relaxed)+n*sizeof *rec>(uint64_t)st.st_size){n=0;break;}
-    free(rec);rec=malloc((n+1)*sizeof *rec);
-    if(!rec)return 1;
-    memcpy(rec,mesh_records(m),n*sizeof *rec);
-    if(mesh_map_whole(m,before))break;
-    n=0;
-  }
+  const struct mesh_map_copy *map=mesh_map_published(m);
+  const uint64_t n=mesh_map_nodes(map);
+  struct mesh_record *rec=malloc((n+1)*sizeof *rec);
+  if(!rec)return 1;
+  memcpy(rec,map->record,n*sizeof *rec);
   printf("{\"up\":true,\"node\":%u,\"records\":[",m->node);
   for(uint64_t i=0;i<n;i++){
     const struct mesh_record *r=rec+i;
@@ -72,23 +65,6 @@ int main(void){
     if(phase==MESH_UNKNOWN)break;
     printf("%s{\"port\":%u,\"peer\":%u,\"phase\":\"%s\",\"bandwidth\":%llu,\"pairings\":%llu}",p?",":"",p,atomic_load(&l->peer),
            phase<=MESH_STOPPED?phase_name[phase]:"?",u(atomic_load(&l->bandwidth)),u(atomic_load(&l->pairings)));
-  }
-  printf("],\"orders\":[");
-  first=1;
-  for(uint32_t k=0;k<MESH_NODES;k++){
-    const struct mesh_node *x=mesh_node_at(m,k);
-    const uint32_t node=atomic_load(&x->node);
-    if(!node)continue;
-    const uint32_t epochs=atomic_load(&x->epochs);
-    printf("%s{\"peer\":%u,\"live\":%u,\"generation\":%llu,\"epochs\":%u,\"cables\":[",first?"":",",node,atomic_load(&x->live),
-           u(atomic_load(&x->generation)),epochs);
-    first=0;
-    if(epochs){
-      const struct mesh_epoch *e=x->epoch+(epochs<MESH_EPOCHS?epochs:MESH_EPOCHS)-1;
-      for(uint32_t c=0;c<e->cables && c<MESH_PORTS;c++)
-        printf("%s{\"port\":%u,\"lanes\":%u,\"wire\":%llu}",c?",":"",e->cable[c].port,e->cable[c].lanes,u(e->cable[c].wire));
-    }
-    printf("]}");
   }
   printf("]}\n");
   free(rec);munmap(m,(size_t)st.st_size);

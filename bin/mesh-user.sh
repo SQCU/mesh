@@ -11,6 +11,8 @@
 # bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its region kept (design/transport.md section 2).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes).
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT]  (~/mesh)
+# MESH_USER_PREPARE=1: the build and the Python environment alone (everything before the bridge's configuration and its
+# launchd agent), so an installer builds a new source while the running bridge serves on (rdma/mesh_install.py)
 set -u
 if [ $# -lt 1 ] || [ $# -gt 2 ] || [ ! -f "$1" ]; then
   echo "mesh-user.sh CONFIGURATION [CHECKOUT]: the node's bridge configuration document (JSON, TOML or YAML; etc/bridge/README.md) is required, the bridge has no default" >&2
@@ -25,11 +27,13 @@ fi
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
-make -C "$source/rdma" all install >/dev/null || exit 1
+# MESH_USER_BUILT=1: the build made already by a MESH_USER_PREPARE run of this source, so no build time is spent with no
+# bridge running
+[ "${MESH_USER_BUILT:-}" = 1 ] || make -C "$source/rdma" all install >/dev/null || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
 bound=$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))') || exit 1
-csum=$({ printf '%s\n' "$bound"; cat "$source/rdma/mesh-plan.h" "$source/rdma/nccl.h" "$source/rdma/mesh_c_build.py"; } | shasum)
+csum=$({ printf '%s\n' "$bound"; cat "$source/rdma/mesh-view.h" "$source/rdma/mesh-call.h" "$source/rdma/nccl.h" "$source/rdma/mesh_c_build.py"; } | shasum)
 [ -f "$source/rdma/_mesh_c$bound" ] && [ "$(cat "$venv/mesh-c.sum" 2>/dev/null)" = "$csum" ] \
   || { "$venv/bin/python" "$source/rdma/mesh_c_build.py" >/dev/null && printf '%s\n' "$csum" > "$venv/mesh-c.sum"; } || exit 1
 "$venv/bin/python" -c 'import sys, sysconfig; open(sysconfig.get_paths()["purelib"] + "/mesh.pth", "w").write(sys.argv[1] + "\n")' "$source/rdma" || exit 1
@@ -42,6 +46,10 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   [ "$status" = 0 ] || exit "$status"
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
+# the new images run once (each prints its usage and ends): the system's first-run assessment of a newly signed binary
+# (syspolicyd's scan) is made here, while any running bridge serves, not at the launchd job's start
+"$source/rdma/mesh-heartbeat" >/dev/null 2>&1; "$source/rdma/mesh-flow" >/dev/null 2>&1
+[ "${MESH_USER_PREPARE:-}" = 1 ] && exit 0
 configuration="$support/io.mesh.bridge/configuration.plist"; renew=
 "$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration.new" || exit 1
 if cmp -s "$configuration.new" "$configuration"; then rm -f "$configuration.new"
@@ -62,6 +70,9 @@ cat > "$launchd_agents/io.mesh.bridge.plist.new" <<PL
 PL
 out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
+# a job loaded just now runs the new images already: no SIGHUP for it (sent within its first milliseconds, before the
+# heartbeat holds the signal, it ended the heartbeat, and launchd held the respawn its ThrottleInterval, 60 s: 2026-11-20)
+case $out in *" loaded in "*) renew=; before=$images ;; esac
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
        echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the region kept"; }

@@ -8,9 +8,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
-from controller import WholeFunctionController, declare
+from controller import WholeFunctionController
 from mesh_mpi import Comm, empty
-import mesh
 
 TEAMS = 5
 EXPERTS = 8
@@ -63,13 +62,9 @@ def main():
     local = empty((args.bots + 1, args.width), np.float32)
     local[...] = 0
     total = empty(local.shape, local.dtype)
-    calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': local.size, 'type': mesh.lib.ncclFloat32,
-              'op': mesh.lib.ncclSum}]
-    declare(comm.comm, calls)
-    balancer = WholeFunctionController.from_comm(
-        {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}}, comm.comm,
-        workload={'function': 'planner tick', 'bots': args.bots, 'width': args.width}, schedule={'calls': calls})
-    installed = None
+    balancer = WholeFunctionController(
+        {'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}},
+        workload={'function': 'planner tick', 'bots': args.bots, 'width': args.width})
     previous = None
     shares = columns
     route, up, down, objective = model(args.width)
@@ -83,9 +78,6 @@ def main():
     for tick in range(args.ticks):
         proposal = balancer.proposal()
         shares = proposal['parts']['columns']
-        if installed != proposal['id']:
-            balancer.realize(comm.comm, calls, proposal)
-            installed = proposal['id']
         function_started = began = time.monotonic()
         low = sum(shares[:rank])
         share = slice(low, low + shares[rank])

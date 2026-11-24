@@ -902,7 +902,8 @@ map, two nodes linked by a link a cable each one's record names for the other, a
 (`mesh_joined`), its table the
 shortest routes (`mesh_routes`), and over the members the members' map of it (#topology). `mesh_nodes_health` reads
 the same records for each node's region, memory, model and health. `mesh_map_wait`, a wait for the seqlock's serial
-to move, was deleted with the serial (mesh 5dcb4f69, layout 144). The bridges keep their links paired with or without a client, so
+to move, was deleted with the serial (mesh 5dcb4f69, layout 144); it came back as a wait on `map`, and went again for
+`mesh_map_serial`, which reads the serial once and never waits (collapse-20261123). The bridges keep their links paired with or without a client, so
 the map is current whether or not anything runs (design/transport.md). `mesh_observe`, which copied the port table,
 became `mesh_reached` in f4b363ad, and Swift's `Mesh.observe` was deleted with swift/ in a8952de9.
 

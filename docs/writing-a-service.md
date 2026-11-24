@@ -27,7 +27,7 @@ f0(x) = tanh(rot₀(x) Aᵀ) and f1(y) = tanh(rot₁(y) B). Any f0 and f1 with t
 rot₀ and rot₁ are normalized Hadamard rotations of an operand's columns, in blocks: `rotation_blocks` gives each one's
 block, a power of two that divides the width. A block of 1 is no rotation, and a block of the whole width is the full
 Hadamard. A Hadamard H is linear, symmetric and orthogonal, so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0
-holds the whole weights before it distributes them, so it folds each rotation into them there, once, in region tensors
+holds the whole weights before it distributes them, so it folds each rotation into them there, once, in host tensors
 (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns of y, and it folds all the same: each rank's
 rows of H B are the rows its block of y meets. The step never rotates anything, and a rotation costs no time a step.
 An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
@@ -46,21 +46,24 @@ the chain.
 
 The bridge is `rdma/mesh-flow`. Each node runs one, kept up by the `io.mesh.bridge` job
 ([design/transport.md](../design/transport.md) section 2). It owns the Thunderbolt RDMA devices, the links and their
-queue pairs. It also owns the region, the shared memory that the devices may read and write. A program marks bytes in
-the region as ready to send, and the bridge sends them. When bytes arrive, the bridge marks them as landed. That is
-all it does with data.
+queue pairs. It also owns the region, the shared memory that the devices may read and write, which holds the node's
+page table and its pool of pages. A program writes the page an index of its node's table names to indices of other
+nodes, and the bridges carry the page there. When a page lands, the bridge makes the destination index name it and
+counts the landing. That is all it does with data.
 
 The bridge does not know what a model, a token, a layer or a step is. It runs no program and takes no request, and it
 starts no rank and picks no split. It runs whether or not a program is using it. To the bridge, a
-language model and this chain look the same: rows of bytes, sent and landed.
+language model and this chain look the same: pages, sent and landed.
 
 ## Program two: the mesh collective client
 
 The collective client is a library inside your process. It is `libnccl-mesh` ([rdma/NCCL.md](../rdma/NCCL.md)), and
-it is reached through torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)), `mesh_mpi.py` or
-`python/mesh`. It rents rows of the region for your tensors and opens groups of ranks. It turns calls like all-reduce,
-broadcast and send into work on the bridge's streams. Its waits end when data lands, or at their bound: a GPU wait's
-loads, or a host wait's platform deadline, 5 s in which nothing moves. Then the call fails as a value.
+it is reached through torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)) or `mesh_mpi.py`. It
+opens groups of ranks, each holding indices of its node's page table and pages of its pool. It turns calls like
+all-reduce and broadcast into pages: it copies what a rank sends into its own pages, writes each to the indices its
+peers hold for it, and copies (or reduces) what lands at its own indices into your buffers. Every call blocks, on host
+memory. Its waits end when the pages land, or at an error the bridge records (a destination unreachable, a link lost);
+then the call fails as a value. No timer ends a wait.
 
 The client does not own the devices, and it does not know your function or where your inputs come from. It does not
 pick how the work is split, and it is not a process of its own. It lives and dies with the service that loads it, and nothing
@@ -80,35 +83,36 @@ The rank service in metal-microbench is a service of this kind for a language mo
 ## How the example moves its data
 
 Rank 0 holds the files. Before the communicator exists it reads A and B memory-mapped and folds their rotations in, into
-region tensors, in float16: seconds of host work at a large width, which no peer's wait may span (a wait on the GPU ends
-at its stream's bound, about the platform's 5 s), while the other ranks wait in torch's rendezvous. Then it reads the
-input's shape and broadcasts two numbers, the steps and the rows, so every rank knows them.
+host tensors, in float16: seconds of host work at a large width, while the other ranks wait in torch's rendezvous. Then
+it reads the input's shape and broadcasts two numbers, the steps and the rows, so every rank knows them.
 
 Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute_tensor` with `Shard(0)` on the mesh
-dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
-it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Rank 0 copies them from its file into a
-region tensor and broadcasts it whole to every rank before the first step. The outputs are one operand of the same shape
-on every rank. Each step writes its tanh(z) there, and after the last step rank 0 copies it into the output file's
-memory. Within a step only the step's sum crosses between ranks.
+dimension `tp`: rank 0's tensor broadcast whole, each rank keeping its block), so each rank holds the block of rows the
+backend's partition gives it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Rank 0 copies
+them from its file into a host tensor and broadcasts it whole to every rank before the first step. The outputs are one
+operand of the same shape on every rank. Each step writes its tanh(z) there, and after the last step rank 0 copies it
+into the output file's memory. Within a step only the step's sum crosses between ranks.
 
-The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
-place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
+The example makes its shared tensors with `torch_mesh.empty`, host tensors. Collectives then read and write them where
+they lie; the library's copies into its pages and out of them are the only copies.
 
-## Memory outside the region
+## Memory the host reaches
 
-A program builds its buffers from pages of the region. In C it leases them with `ncclMemAlloc`. In torch it makes
-region tensors with `torch_mesh.empty`, which lease the same pages. The bridge wired these pages for the devices once,
-when it came up. So a collective sends from the pages a tensor lies in and lands bytes in the pages they belong in.
+A collective's operands are host memory: a CPU tensor, or an MPS tensor whose storage the host reaches, which
+`torch_mesh.empty` makes (a Metal buffer of shared storage, of the tensor's own size). In C a program allocates them
+with `ncclMemAlloc` or any allocator. The library copies what a rank sends into its pages, and what lands into the
+rank's buffers.
 
-A program should not take large blocks of memory of its own outside the region. They gain it nothing. No peer can be
-passed them zero copy, so the program must copy them into the region to send them, and it moves the bytes twice. When
-the GPU uses them, macOS wires them in RAM beside the region, where the node has little room. On 2026-10-23 at 03:08,
-the chain's process wired 3.64 GiB beside an 86 GiB region on a 96 GiB Studio, and both Studios reset
-([etc/bridge/README.md](../etc/bridge/README.md)).
+An MPS tensor of torch's own allocator lies in the GPU's private storage, which the host does not reach, so each
+collective stages it through a host tensor by torch's copies on its stream: its bytes cross memory once more each way.
+torch's allocator also serves a tensor of 10 MiB or more from a 1 GiB heap the GPU wires whole. Every buffer the GPU
+uses is wired in RAM beside the bridge's region, where the node has little room: on 2026-10-23 at 03:08, the chain's
+process wired 3.64 GiB beside an 86 GiB region on a 96 GiB Studio, and both Studios reset
+([etc/bridge/README.md](../etc/bridge/README.md)). A node's region and its programs' tensors share its memory.
 
-So put weights, KV caches, inputs, outputs and large scratch in the region. Only a kernel's few rows of scratch belong
-outside it. `torch_mesh.check_memory()` warns when the process's MPS tensors outside the region come to 1 GiB or more.
-Both examples call it once, after they make their tensors.
+So make weights, KV caches, inputs, outputs and large scratch with `torch_mesh.empty`. Only a kernel's few rows of
+scratch belong in torch's allocator. `torch_mesh.check_memory()` warns when the process's MPS tensors of torch's
+allocator come to 1 GiB or more. Both examples call it once, after they make their tensors.
 
 ## The step
 
@@ -135,10 +139,9 @@ is the library's.
 - **The products.** The compile backend runs both products as `torch_mesh::linear`, torch-mesh's small-rows linear
   kernel, one dispatch each at a host cost of about 2 µs where MPS's matmul costs about 12, with y's tanh folded in. It
   reads a weight laid out as nn.Linear's, so the chain holds B transposed, its rows padded to whole 4-element loads.
-- **The crossing.** The all-reduce is partition's fused crossing (`partition._fused`), declared once for the run
-  (`torch_mesh.plan` with `partition.summed`): z's product publishes itself (`torch_mesh::linear_sum`: linear's
-  `linear_publish` writes each rank's part into its send segment through the collective's `mesh_step_write` and
-  releases it from its last threadgroup), and `sum_land` adds every rank's part, in rank order, once they land.
+- **The crossing.** The all-reduce is the library's (`torch_mesh::all_reduce`, the functional all-reduce the compile
+  backend calls): torch's stream drained, each rank's part sent as pages, and every rank's parts summed in rank order on
+  the host into a host tensor, which the next kernels read.
 
 ## The configuration
 
@@ -151,8 +154,8 @@ be there. The service has no defaults, and a missing value is an error.
 [examples/chain-service.json](../examples/chain-service.json) is a sample.
 
 `chain.inputs(configuration, steps, rows)` makes sample inputs and weights for it from a fixed seed: standard normal
-inputs, and A and B standard normal over the square root of the width. Each is composed in a CPU region tensor
-(`chain.region`), drawn into it a chunk at a time through a region scratch, and written to its file from there.
+inputs, and A and B standard normal over the square root of the width. Each is composed in a CPU host tensor
+(`chain.host`), drawn into it a chunk at a time through a host scratch, and written to its file from there.
 
 ## Running it
 
@@ -190,14 +193,15 @@ after its input.
 **Split.** The hidden units are the mesh dimension `tp`, attached with the backend (`partition.attach(mesh, tp=H)`),
 which splits them evenly; each rank's block of them is the backend's (`partition.split`), never the configuration's.
 Each layer's weights are the files' own [4H, K] (w_ih and w_hh side by side), held as [4, H, K]: each gate's units in
-turn. The backend's scatter (`partition.distribute_tensor`, `Shard(1)`) gives each rank its units of every gate, and
+turn. The backend's distribution (`partition.distribute_tensor`, `Shard(1)`: rank 0's tensor broadcast whole, each
+rank keeping its block) gives each rank its units of every gate, and
 the rank holds them from load as [4 x its units, K]. Its gates are then torch's linear of u by its own rows: a column
 split, so nothing crosses for it (in the recorded graph, torch_mesh::linear). The layers' gates are stacked and their
 cells run at once (`Tick.layers`), one kernel for every layer's c and h. Its units' cell state never leaves the rank. The new h slices of every layer are one
 ragged tensor along the units, and the backend's allgatherv (`torch_mesh::allgatherv`, partition's op) gathers them to
-every rank along that dimension: one fused crossing a tick. This is Megatron's split of a cell by hidden unit. The h slices (two, a tick's and the
-last), c and rank 0's output are region tensors made at load (`torch_mesh.empty`), and the blocks hold for the whole
-run.
+every rank along that dimension: one all-gather a tick. This is Megatron's split of a cell by hidden unit. The h slices
+(two, a tick's and the last), c and rank 0's output are host tensors made at load (`torch_mesh.empty`), and the blocks
+hold for the whole run.
 
 **The recorded tick.** Every tick after the first L - 1 runs every layer, so it is one function of no arguments
 (`Tick.stepper`): it reads its input at a step counter held on the GPU, runs each layer and the gather, writes the top
@@ -206,20 +210,18 @@ records it as the chain's step is, k ticks unrolled in one graph and the fewer t
 their own, and the run issues every later tick through it (`Recording.issue`); the first L - 1 ticks, while the
 layers above have not begun, run as they are (`Tick.starting`). The service replays it before the run (k ticks and
 the rest, so each graph compiles on every rank) and runs the starting ticks once, so every path the run takes is
-compiled before it begins, then zeroes the state and the counter. Once the input is broadcast it
-declares the gather once (`torch_mesh.plan` of `partition.gathered`, as the chain declares its sum), and a replay's k
-gathers are one crossing issued once, each tick's its repeat (the compiler tells allgatherv its repeats).
+compiled before it begins, then zeroes the state and the counter.
 
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H), `layers` and `steps_per_replay`, the k
 ticks one replay runs (the chain's name for its k). The weights directory holds
 `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
 `lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them
-memory-mapped into region tensors before the communicator exists, so no peer's wait spans that host work; every other
-rank passes the global shape alone to the scatter. The input is broadcast once into a region tensor.
+memory-mapped into host tensors before the communicator exists, so no peer's wait spans that host work; every other
+rank passes the global shape alone to the distribution. The input is broadcast once into a host tensor.
 
 ## What to read next
 
 - [design/transport.md](../design/transport.md): the bridge, its region, its links and how they fail.
 - [rdma/NCCL.md](../rdma/NCCL.md): the collective client, its groups and the rules a program keeps.
-- [rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md): the same client from PyTorch, and region tensors.
+- [rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md): the same client from PyTorch, and host tensors.
 - [design/heterogeneity.md](../design/heterogeneity.md): nodes of different speeds and links of different costs.

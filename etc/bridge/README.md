@@ -14,7 +14,7 @@ they need.
 Servicing a node (design/transport.md section 2, the heartbeat): the bridge's job runs its heartbeat, which opens and
 closes the bridge.
 - `launchctl kill SIGUSR1 user/$(id -u)/io.mesh.bridge` releases the bridge and its region: every device object
-  freed at once, and the region's memory once none of its holders lives (each client's next lease or communicator returns the
+  freed at once, and the region's memory once none of its holders lives (each client's next communicator returns the
   expiry; the heartbeat's log names the processes that still hold it);
 - `launchctl kill SIGHUP user/$(id -u)/io.mesh.bridge` opens it again (once a released region is unlinked), or
   restarts it keeping the region (a changed region size replaces it, as a release does);
@@ -38,28 +38,32 @@ Studios' 86 GiB under `max_mr` 100 that is 1 GiB. The bank is the hardware's fac
 returns its errno as the port's open's value: the port is not open, the extents already registered stay, and it opens
 again at the events that open any port, its link's coming on, a hello heard on it or its child's end (rdma/mesh-link.c
 `port_opened`, line 895; 02002590 deleted the refusal's backoff). The bridge starts and serves the node either way;
-the region is not clamped. Clients lease from it; a lease that does not fit fails at its start with an error naming
-the execution, and the region does not grow.
+the region is not clamped. It holds the node's page table and its pool of pages, which every communicator's indices and
+pages are taken from ([design/PAGE-TABLE-SPEC-20261122.md](../../design/PAGE-TABLE-SPEC-20261122.md) section 2); a
+communicator whose pages the pool does not hold fails at its init, and the region does not grow. A program's own
+tensors are ordinary memory beside the region, so the region and the tensors of the programs a node runs share its
+memory.
 
 ## The examples
 
 These two ship with the bridge to show the form. Neither is likely to be what an application wants; both are for
 didactic programming exercises.
 
-- `example-1pct.json`: one percent of the node's memory (245 MiB on a 24 GiB Mac mini, 1.3 GiB on a 128 GiB M5). It
-  allows small streaming transfers. A libnccl-mesh communicator leases one page for its gate, and a pool for the
-  pages its groups send from and land in that are not the caller's (a reduce-scatter's operand, a tree's scratch, a
-  combine's landing area; rdma/nccl.h, Memory). Every operand that crosses a link is the program's own lease. It does
-  not allow programs that keep large operands in the region.
-- `example-10pct.yaml`: ten percent of the node's memory. It holds the operands of many crossings, and it is too
-  small for many applications: a model's weights and KV pool in the region, or a long reduction's operands.
+- `example-1pct.json`: one percent of the node's memory (245 MiB on a 24 GiB Mac mini, 1.3 GiB on a 128 GiB M5): a
+  pool scaled down to the arena, which holds the pages of few communicators (each takes its source pages and the
+  pages that land at its receive indices; rdma/nccl.h, Indices).
+- `example-10pct.yaml`: ten percent of the node's memory, whose pool holds the pages of many communicators.
 
 The operator, 2026-10-15 (below): "with the proper bridge configuration for their application deliberately left for
 the user to derive".
 
 ## The E2B pair under test
 
-These two are written for the source as it stands (metal-microbench d27fcd9): the rank leases its weights, its KV
+Each file below and in The Studios counts its rank's tensors inside its region. A program's tensors are ordinary
+memory beside the region (rdma/NCCL.md), so a node that runs such a rank holds both the region and the rank's tensors,
+which these sizes leave no room for.
+
+These two are written for the source of metal-microbench d27fcd9: the rank leases its weights, its KV
 pool and every buffer a crossing takes from the region (metal-microbench docs/placement.md#memory; the operator,
 2026-10-15: "why would weights or kv be outside of the memory pinned pool? being outside of it means that they cannot
 be zero copy passed to peers"). Until metal-microbench 773cead the rank kept them outside it, and a region beside them

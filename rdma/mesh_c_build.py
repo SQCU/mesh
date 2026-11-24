@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """The mesh's C headers as one Python module, _mesh_c (ffi, lib): the declarations are the headers' own text and the
-module is compiled against the same headers, so no Python layout or prototype is written by hand.  `make mesh-c`
+module is compiled against the same headers, so no Python layout or prototype is written by hand.  The headers are
+the fabric view (mesh-view.h), the page table's client calls (mesh-call.h) and NCCL's (nccl.h), each plain C
+declarations with no atomic type and no inline body.  `make mesh-c`
 runs it with the interpreter that will import it (torch-mesh's venv by default); the module lands beside the headers.
 Text the binder cannot take as written is left to the compiler: a C++-only block is skipped, an #include and a
 function-like #define are dropped, an object-like #define of an integer expression and an enum value written as an
@@ -13,7 +15,7 @@ import sys
 import cffi
 
 RDMA = os.path.dirname(os.path.abspath(__file__))
-HEADERS = ('mesh-plan.h', 'nccl.h')
+HEADERS = ('mesh-view.h', 'mesh-call.h', 'nccl.h')
 LITERAL = r'-?(?:0x[0-9a-fA-F]+|\d+)[uUlL]*'
 FLOATING = r'-?\d+\.\d*(?:[eE][-+]?\d+)?'
 
@@ -51,23 +53,21 @@ def declarations(text):
     text = '\n'.join(out)
 
     def enum(match):
-        return match.group(1) + re.sub(rf'=\s*(?!{LITERAL}\s*[,}}])[^,}}]+', '= ...', match.group(2)) + match.group(3)
+        return match.group(1) + re.sub(rf'=(?!\s*{LITERAL}\s*(?:[,}}]|$))[^,}}]+', '= ...', match.group(2)) + match.group(3)
     return re.sub(r'(enum\s*\w*\s*\{)([^}]*)(\})', enum, text, flags=re.S)
 
 
-def build(into=RDMA, libraries=RDMA):
-    """The module built into `into`, bound to the libraries in `libraries` (both rdma/ by default: the installed ones;
-    tests/sim-two-nodes.sh builds one bound to rdma/.build's, into a directory of its own)."""
+def build():
+    """The module built into rdma/, bound to the libraries installed there (make install)."""
     ffi = cffi.FFI()
     for header in HEADERS:
         with open(os.path.join(RDMA, header)) as file:
             ffi.cdef(declarations(file.read()))
-    ffi.set_source('_mesh_c', ''.join(f'#include "{h}"\n' for h in HEADERS), include_dirs=[RDMA], library_dirs=[libraries],
-                   libraries=['nccl-mesh', 'mesh'], extra_link_args=[f'-Wl,-rpath,{libraries}'])
-    return ffi.compile(tmpdir=into, verbose=False)
+    ffi.set_source('_mesh_c', ''.join(f'#include "{h}"\n' for h in HEADERS), include_dirs=[RDMA], library_dirs=[RDMA],
+                   libraries=['nccl-mesh', 'mesh'], extra_link_args=[f'-Wl,-rpath,{RDMA}'])
+    return ffi.compile(tmpdir=RDMA, verbose=False)
 
 
 if __name__ == '__main__':
-    # usage: mesh_c_build.py [INTO LIBRARIES]
-    print(build(*sys.argv[1:3]))
+    print(build())
     sys.exit(0)

@@ -190,7 +190,7 @@ def dominance(X):
 
 
 class TorchWorld:
-    """The world as torch.distributed's "mesh" backend (rdma/torch-mesh): one rank a node, its operands region
+    """The world as torch.distributed's "mesh" backend (rdma/torch-mesh): one rank a node, its operands host
     tensors (torch_mesh.empty) so the collectives read and write them where they lie."""
 
     def __init__(self, device):
@@ -199,9 +199,6 @@ class TorchWorld:
         self.dist, self.torch_mesh, self.device = dist, torch_mesh, device
         dist.init_process_group(backend="mesh", **({"device_id": torch.device("mps", 0)} if device == "mps" else {}))
         self.rank, self.size = dist.get_rank(), dist.get_world_size()
-        from torch_mesh import backend
-        group = dist.distributed_c10d._get_default_group()
-        self.native = backend._mesh(group.group_name, 'whole-function controller').comm
 
     def buffer(self, shape, dtype, device=None):
         return self.torch_mesh.empty(shape, dtype={np.float32: torch.float32, np.int64: torch.int64}[dtype],
@@ -226,14 +223,13 @@ class TorchWorld:
 
 
 class MPIWorld:
-    """The world as mesh_mpi's Comm (rdma/NCCL.md "NumPy"), its operands mesh_mpi.empty arrays in the region."""
+    """The world as mesh_mpi's Comm (rdma/NCCL.md "NumPy"), its operands mesh_mpi.empty arrays."""
 
     def __init__(self):
         import mesh_mpi
         self.mpi = mesh_mpi
         self.comm = mesh_mpi.Comm()
         self.rank, self.size = self.comm.Get_rank(), self.comm.Get_size()
-        self.native = self.comm.comm
 
     def buffer(self, shape, dtype, device=None):
         return self.mpi.empty(shape, dtype)
@@ -274,7 +270,6 @@ class CtxSolver:
         self.world, self.balancer = world, balancer
         self.previous_function = None
         self.pending_feedback = None
-        self.compiled_proposal = None
         self.columns = list(columns) if columns else [FF]
         if world is not None and len(self.columns) != world.size:
             raise ValueError(f"columns {self.columns}: one part a rank of {world.size}")
@@ -415,52 +410,30 @@ class CtxSolver:
         return np.nan_to_num(Kn).astype(np.float32)
 
     def configure(self, rows):
-        """Realize all communication and allocation before the complete solve."""
+        """The column shares of the complete solve: the balancer's proposal, a controller of its own for each window
+        of rows (its workload)."""
         if self.balancer is None or self.world is None:
             return None
-        import mesh
-        from controller import WholeFunctionController, declare
+        from controller import WholeFunctionController
         workload = {**self.balancer.workload, 'rows': rows}
         if self.balancer.workload != workload:
-            decisions = {k: {**d, 'parts': self.balancer.parts[k]} for k, d in self.balancer.flow.decisions.items()
-                         if not k.startswith('route:')}
+            decisions = {k: {**d, 'parts': self.balancer.parts[k]} for k, d in self.balancer.flow.decisions.items()}
             self.balancer = WholeFunctionController(decisions, workload=workload)
-            self.previous_function, self.compiled_proposal = None, None
+            self.previous_function = None
         proposal = self.balancer.proposal()
         self.columns = list(proposal['parts']['columns'])
-        widths = [hi - lo for lo, hi in (self.span(RES, rank) for rank in range(self.world.size))]
-        calls = [{'what': mesh.lib.MESH_ALLREDUCE, 'count': (self.T + 1) * RES, 'type': mesh.lib.ncclFloat32,
-                  'op': mesh.lib.ncclSum},
-                 {'what': mesh.lib.MESH_ALLREDUCE, 'count': RES * NOUT + NV * NV, 'type': mesh.lib.ncclFloat32,
-                  'op': mesh.lib.ncclSum},
-                 {'what': mesh.lib.MESH_ALLGATHER, 'count': rows * widths[self.rank()],
-                  'counts': [rows * width for width in widths], 'type': mesh.lib.ncclFloat32}]
-        if self.balancer.topology is None:
-            declare(self.world.native, calls)
-            self.balancer = WholeFunctionController.from_comm(
-                self.balancer.flow.decisions, self.world.native, workload=workload, schedule={'calls': calls})
-            proposal = self.balancer.proposal()
-        if self.compiled_proposal != proposal['id']:
-            self.balancer.realize(self.world.native, calls, proposal)
-            self.compiled_proposal = proposal['id']
-        mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 1))
         return proposal
 
     def solve(self, X):
         proposal = self.configure(min(len(X), self.T))
         started = time.monotonic()
-        try:
-            Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
-            Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
-            idx = self._insert(X, Xn)
-            G = self._solve(idx)
-            self.solves += 1
-            result = np.nan_to_num(G).astype(np.float32)
-            self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
-        finally:
-            if proposal is not None:
-                import mesh
-                mesh.check(mesh.lib.ncclMeshCommPlanActive(self.world.native, 0))
+        Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
+        Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
+        idx = self._insert(X, Xn)
+        G = self._solve(idx)
+        self.solves += 1
+        result = np.nan_to_num(G).astype(np.float32)
+        self.previous_function = {'proposal': proposal, 'seconds': time.monotonic() - started}
         if self.pending_feedback is not None:
             previous, seconds = self.pending_feedback
             self.pending_feedback = None
@@ -503,7 +476,7 @@ class CtxSolver:
         GmO = P[:RES * NOUT].reshape(RES, NOUT)
         G = Zcur @ GmO[:, :TEAMS]
         G2 = Zcur @ GmO[:, TEAMS:]
-        # Produce the collective source directly into its final region operand.
+        # Produce the collective source directly into its final host operand.
         block = self.operand("gather_source", (len(idx), rhi - rlo))
         if self.backend == "torch":
             torch.matmul(Zcur, Gm, out=block)

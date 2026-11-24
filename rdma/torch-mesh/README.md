@@ -1,19 +1,17 @@
 # torch-mesh
 
-torch.distributed's `mesh` backend over [libnccl-mesh](../NCCL.md). MPS tensors run on the library's Metal path:
-encoded on torch's MPS stream, with region operands passed as their storage's `MTLBuffer` and offset. The transport
-reads and lands those bytes in place; higher-level packing and layout operations can still make copies, as described
-below. CPU tensors run on the host path.
+torch.distributed's `mesh` backend over [libnccl-mesh](../NCCL.md), whose calls block, on host memory. Every
+collective is one group issued by `_stream.mm`'s `issue` (the backend's methods, torch's functional collectives and the
+library's own calls), each call one kind of the library's set, complete when it returns. A group that names an MPS
+tensor first drains torch's stream (its open command buffer committed and waited for), then runs on the host, and
+torch's later kernels read its results in the stream's order. An MPS tensor whose storage the host reaches (a host
+tensor, `torch_mesh.empty`) is read and written where it lies; any other MPS tensor is staged through one by torch's
+copies on its stream. CPU tensors are read where they lie.
 
-Ordinary backend collectives are groups issued by `_stream.mm`'s `issue` (the backend's methods, torch's functional
-collectives and the library's own calls), each call one kind of the library's set. Fused producer/consumer calls
-bind the same physical compiler through their native lowering, described below. An all-gather and a
-reduce-scatter are always the V calls (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`; the library takes equal
-segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and `scatter` are `ncclMeshAlltoAllV`,
-MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
-`Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms); a list that is not
-the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point; the
-partials merge is a reduction by the library's partials operator.
+An all-gather and a reduce-scatter of equal segments are `ncclAllGather` and `ncclReduceScatter`, of unequal ones one
+group of a broadcast or a reduce a rank. `all_to_all`, `all_to_all_single`, `gather` and `scatter` are `ncclAlltoAll`,
+`ncclGather` and `ncclScatter`, of segments of one size. A list that is not the pieces of one tensor goes through one
+flat tensor. The partials merge is an all-gather of every member's partials and their merge on each member.
 
 ## Install
 
@@ -33,133 +31,87 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
   bridge is its resident service, so a launch starts no bridge.
 - A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
-  exchange their nodes and the nodes their bridges reach, and the group keeps the map its init made of them.
-- A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
-  Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
-  ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
-- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
-  communicators hold one stream. Each communicator acquires a stream on every participating physical cable. A link
-  has up to four, subject to its endpoints' actual lane capacity; a required busy link refuses another communicator
-  (EBUSY) until a stream becomes free
-  ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
-- Every wait carries a deadline set when it is made (design/data-model.md section 6): a work's `wait(timeout)` its
-  timeout, 5 s where none is given; each turn of torch's queue and each command buffer `_stream.mm` waits for, 5 s;
-  the library's own waits theirs ([NCCL.md](../NCCL.md#bounded-waits)). Past it the process ends, naming the wait and
-  its deadline.
-- A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
-  next one's node. Routes cross communicator members; explicit WRITE can use a member solely to relay pages, and
-  generic gathers support zero-share ranks. A group
-  whose ranks no such path joins fails at its first collective that crosses a link
-  ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
-- Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a
-  barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
-  bridge's region (`torch_mesh.empty`). A program's CPU tensor in the region is
-  `torch_mesh.empty(shape, dtype=..., device="cpu")`.
-- Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
-  Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
-  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release defers reuse until
-  both its local GPU users and all registered local DMA reads have completed, including reads the bridge has not yet
-  posted (`ncclMeshMemReusable`). GPU completion alone does not establish source retirement, and no receipt collective
-  is needed to establish local DMA-read completion. Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
-  it reads or writes region operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the region
-  tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
-  `torch_mesh.check_memory()` warns where the process's MPS tensors outside the region come to 1 GiB or more
-  ([docs/writing-a-service.md](../../docs/writing-a-service.md#memory-outside-the-region)).
-  Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
-  tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
-  allocator's, and a collective that sends from one, or lands in one, across a link fails as a value
-  (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
-  fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
-  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a
-  functional collective's result) are region tensors (`torch_mesh.empty`). Raw transport operands must satisfy their
-  declared contiguous region layout. The generic fused gather separately supports strided source views by compiling
-  their strides into its publisher, without making a contiguous input tensor; it still writes a collective segment
-  and assembles the logical output.
-  metal-microbench's callers: `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
+  exchange their nodes and the first of the receive indices each holds for the others ([NCCL.md](../NCCL.md)).
+- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group.
+- Every call blocks until this rank's part is done. A page that never lands holds its call until the communicator is
+  revoked or its bridge records an error (a destination unreachable, a link lost), which fails the call as a value;
+  no timer ends a wait ([NCCL.md](../NCCL.md#failures)).
+- A group's collectives run wherever the bridges reach every rank's node from every other's, through cables or relays:
+  the bridges route every page ([design/PAGE-TABLE-SPEC-20261122.md](../../design/PAGE-TABLE-SPEC-20261122.md)).
+- Memory: a collective's operands are host memory. `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS
+  tensor whose storage is a Metal buffer of shared storage, of the tensor's own size, made through torch's DLPack
+  interop (`at::fromDLPack` of a `kDLMetal` tensor, its data the `MTLBuffer`, as torch's `toDLPack` writes an MPS
+  tensor), so the library reads and writes it where it lies; its buffer is let go once the stream's work before its
+  release has completed. `device="cpu"` is torch's CPU tensor. The tensors the backend makes itself (a functional
+  collective's result, a flattened list operand) are host tensors. `torch_mesh.records()` lists the MPS host tensors'
+  live buffers and `torch_mesh.address(t)` where the host reaches a tensor's bytes (0: it does not).
+- Other MPS tensors are torch's MPS allocator's, in the GPU's private storage, which the host does not reach: a
+  collective stages each through a host tensor by torch's copies, its bytes crossing memory once more each way.
+  torch's MPS factories take their allocator from a fixed instance (`at::mps::GetMPSAllocator`, no registered or
+  pluggable allocator for MPS), so a program makes a host tensor with `empty`, never by default.
+  `torch_mesh.check_memory()` warns where the process's MPS tensors of torch's allocator come to 1 GiB or more
+  ([docs/writing-a-service.md](../../docs/writing-a-service.md#memory-the-host-reaches)). A non-contiguous operand
+  fails as a value: nothing is copied to make it one.
 
 ## What works
 
 | works | notes |
 |---|---|
 | all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32 |
-| all_gather_object, all_to_all of lists, blocking send/recv | |
+| all_gather_object | |
 | broadcast, reduce | |
-| all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |
-| reduce_scatter (list and tensor) | a list of unequal sizes: one MPI_Reduce_scatter (Uneven nodes) |
-| gather, scatter | any per-rank sizes: the rooted V (`ncclMeshAlltoAllV`) |
-| all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
-| send, recv, isend, irecv, batch_isend_irecv | |
-| barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, under the one commit rule (Performance) |
+| all_gather (list and into a tensor) | a list of unequal sizes: a broadcast a rank in one group (Uneven nodes) |
+| reduce_scatter (list and tensor) | a list of unequal sizes: a reduce a rank in one group (Uneven nodes) |
+| gather, scatter, all_to_all, all_to_all_single | segments of one size (`ncclGather`, `ncclScatter`, `ncclAlltoAll`) |
+| barrier, async_op, coalescing | an async op's work is complete when it is issued |
+| shrink, grow, revoke | `ProcessGroupMesh.shrink`, `grow` and `revoke`: `ncclCommShrink`, `ncclCommGrow`, `ncclCommRevoke` |
+| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives |
 | DDP | |
-| ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
+| ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
-| training attention | `torch_mesh.attention.attention`: SDPA's (no mask, dropout or GQA) under autograd, its scores and their gradient in region leases reused per shape, where torch's SDPA on MPS makes each a tensor of torch's (from 10 MiB a 1 GiB heap the GPU wires) |
+| training attention | `torch_mesh.attention.attention`: SDPA's (no mask, dropout or GQA) under autograd, its scores and their gradient in host tensors reused per shape, where torch's SDPA on MPS makes each a tensor of torch's (from 10 MiB a 1 GiB heap the GPU wires) |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
-| expert parallelism | all_to_all_single (below) |
+| expert parallelism | all_to_all_single of equal splits (below) |
 
 An indexed scatter into the blocks of `all_to_all_single` at a program's maximum extents, written in the program's own
 code, is any dispatch by index (an expert dispatch among them); how much of a block a step fills is data in its pages.
-
-### Physical fused writes
-
-Every communicator retains its physical cables, including parallel cables to the same peer. Explicit WRITE and
-fused collective lowering share the same physical fragment compiler, relay dependencies, and channel bindings.
-`torch_mesh.fused.writes` declares immutable source/destination pairs; `fused.encode` takes a physical `channels`
-extent, independently of rank counts. The removed `fused.exchange` interface is not supported. Unsupported fused
-forms fail rather than executing an ordinary source read before the producer publishes it.
-
-Generic gather and sum declare one page-padded ALLGATHER. A single `gather_ready` dispatch observes their incoming
-prefixes before a parallel consumer; a one-threadgroup consumer inlines that observation. The LSTM example uses
-`torch_mesh::allgatherv_out` to write its persistent hidden-state destination directly, eliminating the additional
-result-to-state copy. Generic gather still uses its common segment layout; not every remaining layout copy has been
-removed. Positive-contribution recurrent gathers have a typed two-slot reuse proof; zero-share cases use fresh
-generations and deferred retirement. See [DESIGN-fused-stream.md](DESIGN-fused-stream.md) for the current API,
-ownership requirements, and dated two-/three-rank validation.
 
 ### Partials merge
 
 Attention whose keys are split among members (split-KV, Flash-Decoding) leaves each member a partial: each query row's
 logsumexp and its attention over the member's keys. `torch_mesh.merge_partials(out, lse, group, root=-1)` merges them
 by the rows' logsumexp into the attention over every member's keys (and its logsumexp), on every member or at `root`:
-the operator `torch_mesh::merge_partials`, an all-reduce or reduce by libnccl-mesh's partials operator
-(`ncclMeshRedOpCreatePartials`, [NCCL.md](../NCCL.md)) over float32 rows of `[m, l, O]` (`backend.partial` and
-`backend.attention` make and read them). The backend's `merge_partials(out, partials, rows=None, root=-1)` also takes
-`rows`, each rank's rows of the operand: a reduce-scatter by the operator (`ncclMeshReduceScatterV`), each rank's rows
-merged at it. Like every other call it is one group of the one path, so it coalesces. `partition`'s ring attention is
-its caller: every rank's query block gathered, each block's attention over the rank's own keys written as its owner's
-rows (a half of a block that sees none of the rank's keys left at none), and one reduce-scatter, so each owner holds its
-rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
+the operator `torch_mesh::merge_partials`, an all-gather of every member's float32 rows of `[m, l, O]`
+(`backend.partial` and `backend.attention` make and read them) and their merge in rank order on each member
+(`backend.merged`: each row rescaled to the greatest m and summed, a row that saw no key counting for none). The
+backend's `merge_partials(out, partials, rows=None, root=-1)` also takes `rows`, each rank's rows of the operand: each
+rank merges its own rows of the gathered partials. It is not coalesced, since its merge reads what its gather wrote.
+`partition`'s ring attention is its caller: every rank's query block gathered, each block's attention over the rank's
+own keys written as its owner's rows (a half of a block that sees none of the rank's keys left at none), and one merge,
+so each owner holds its rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 
 ### Record and replay
 
 `torch_mesh.record(step)` and `torch_mesh.replay(recording, steps)` are a step recorded once and replayed (the CUDA
 graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
 (`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
-each issued on torch's stream under the one commit rule: Performance), every rank's compilation met at the default
-group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
-peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `replay` issues its steps back to back on torch's stream,
-with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
-stream's order. It waits once, where its time is read: it returns the last step's interval in the stream, the span
-between MPS timing events recorded before and after it. With the steps back to back that span runs from the end of the
-step before it to its own end: the GPU's time or the host's issue, whichever is slower. The steps' outputs are read where the caller reads them (`.item()`, `.cpu()`,
-`torch.mps.synchronize()` commit and wait). Its caller is metal-microbench `tools/torch_parallel/tp.py` with
-`CAPTURE=K`: a training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
-traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
-(metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
-call past the wire against 186-216 eager.
+each complete where it is called), every rank's compilation met at the default group's store before any of its
+collectives runs. `replay` issues its steps back to back on torch's stream: the steps are an operand's leading
+dimension, each reading what the last wrote in the stream's order. It returns the last step's interval in the stream,
+the span between MPS timing events recorded before and after it. The steps' outputs are read where the caller reads
+them (`.item()`, `.cpu()`, `torch.mps.synchronize()` commit and wait). Its caller is metal-microbench
+`tools/torch_parallel/tp.py` with `CAPTURE=K`: a training step (its gradients set to none, the forward,
+`out.sum().backward()`) recorded whole, `Tensor.backward` traced by Dynamo under its `trace_autograd_ops`, replayed and
+checked at each of its parts. Reproduction target (metal-microbench docs/measurement.md 2026-09-30, parts C and D, the
+10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a call
+past the wire against 186-216 eager.
 
 The 10-01 form (mesh 4cbe704 `record`/`replay`, metal-microbench 35c30a9 `metal_recording.m`) also recorded every Metal
-command the step encoded, from any thread, and replayed them as one program; had torch's own copy kernels that store a
-send buffer publish it by range (`MetalRecordPublish`), so its sends started as the ranges were stored; gated the
-replay's command buffers on the calls' landings (`MetalRecordGate`); and made each call persistent, its receives posted
-ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
-(`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
-(no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
-Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a holding's
-receives into the holder's own landing pages, a window ahead of the data: [design/transport.md](../../design/transport.md)
-section 14), and the planning once is the communicator's compiled programs'. A training step's backward, run by
-autograd, is compiled and committed by the same rule.
+command the step encoded, from any thread, and replayed them as one program. That needs the recorder interposed on
+Metal (`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its
+place (no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here
+runs Inductor's wrapper and torch's MPS kernels each time, and each of its collectives is a blocking call. A training
+step's backward, run by autograd, is compiled the same way.
 
 ## What does not
 
@@ -167,9 +119,11 @@ autograd, is compiled and committed by the same rule.
   The project does not shard parameters (FSDP is a last resort among the parallelisms): port to DDP, tensor or
   expert parallelism, or shard optimizer state by hand over `reduce_scatter_tensor` and `all_gather_into_tensor`.
 - Streams: torch's MPS has one queue and no `torch.mps.Stream`, so CUDA-stream overlap (DeepSpeed `overlap_comm`,
-  Megatron's overlapped gradient reduction, side streams) does not port as written. What overlaps here: an
-  `async_op=True` collective waited after the compute it may overlap, or a compiled graph of functional
-  collectives.
+  Megatron's overlapped gradient reduction, side streams) does not port as written, and every collective here is
+  complete when it returns.
+- `send`, `recv`, `isend`, `irecv` and `batch_isend_irecv`: the library has no point to point (nccl.h).
+- An all-to-all, gather or scatter of segments of unequal sizes (NotImplementedError): the library's move segments of
+  one size.
 - `init_device_mesh("mps", ...)` and `DeviceMesh("mps", ...)`: torch 2.14's DeviceMesh setup calls
   `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have. Form an MPS mesh from the
   groups instead, which skips that setup: `DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("tp",))`
@@ -177,18 +131,17 @@ autograd, is compiled and committed by the same rule.
   DTensor's own sharding has no rule for MPS's `linear_backward` or SDPA: on a mesh dimension `partition` attaches,
   its RaggedTensor's dispatch carries both (Uneven nodes, below). torch-mesh patches nothing of torch.
 - ReduceOp PREMUL_SUM and the bitwise ops; `monitored_barrier` (it needs a CPU device type the group does not
-  list); `split_group`. One call mixing MPS and CPU tensors.
+  list); `split_group`.
 - More than one rank a node.
 
 ## Uneven nodes
 
 Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` is a partition operand on raw tensors: a
 mesh dimension's extents split among its ranks by parts the backend sets and moves by the measured residual, the
-program holding its share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
-`all_to_all_single` with splits: MPI's v-collectives). An unequal list is one program over unequal segments, the
-library's MPI_Allgatherv and MPI_Reduce_scatter (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`, [NCCL.md](../NCCL.md)),
-not a broadcast or reduce rooted at each rank; where the list is the pieces of one contiguous tensor (`out.split(sizes)`,
-as `partition`'s collectives pass it) the call reads or writes that tensor in place. Its callers are metal-microbench
+program holding its share and calling the list collectives with unequal sizes (`all_gather(list)`,
+`reduce_scatter(out, list)`: MPI's v-collectives). An unequal list is one group of a broadcast or a reduce a rank (the
+library's all-gather and reduce-scatter move equal segments); where the list is the pieces of one contiguous tensor
+(`out.split(sizes)`, as `partition`'s collectives pass it) the call reads or writes that tensor in place. Its callers are metal-microbench
 `tools/torch_parallel/tp.py`, `cp.py` and `ep.py` and this repository's examples/chain* and lstm*. On DTensor the partition is a placement, `RaggedShard`, carried
 by `RaggedTensor`, a DTensor subclass whose own dispatch keeps it capacity-shaped through every op (padding re-masked
 before contractions, gathered where an op needs the dimension whole); nothing of torch is patched.
@@ -215,26 +168,16 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-The program declares units; the backend initially splits them evenly. `partition.evaluations` drives the existing
-Balancer (`rdma/allocate.py`) between declared function evaluations, using each rank's measured work between
-collectives. A changed partition is attached as a new operand, registered tensors move through `partition.follow`,
-and callable plan declarations are rebuilt. The function's cached plan is enabled only around its evaluation and
-suspended for feedback and migration on the same communicator (`ncclMeshCommPlanActive`), so those calls cannot
-consume the function's plan cursor. This is the existing compute-share feedback implementation; the separate
-whole-function routing objective is documented in [whole-function.md](../../design/whole-function.md).
+The program declares units; the backend initially splits them evenly. `partition.evaluations` drives the
+whole-function controller (`rdma/controller.py`) between function evaluations, using the ranks' completed function
+latencies. A changed partition is attached as a new operand, and registered tensors move through `partition.follow`.
 
-`partition.follow(*ts)` compiles exact migration ranges. Page-aligned remote ranges in declared contiguous region
-layouts write from original source views to final destination views through the common WRITE interface, with
-distinct relay leases and no receipt all-gather. Unchanged contiguous local intervals can alias their sources;
-other retained pieces copy locally once. Contiguous sub-page layouts use compact affine
-masks and repeated physical WRITE frames: each frame streams selected original bytes into owned ingress pages, and
-its consumer stores valid bytes directly into the final positions. Padding cannot overwrite neighboring live
-destination bytes. Source frames are produced before incoming waits, and incoming frames are consumed round-robin;
-`fused.encode_many` batches the encoded sequences and submits any remaining source-producer command buffer at the
-batch boundary without waiting, so later descriptor allocation cannot strand its publications. Each train is bound once, with distinct immutable storage per
-frame and no receipt collective. Padding remains a wire cost, and the current implementation holds the complete
-train rather than recycling frames without a lifetime proof. Unsupported non-contiguous layouts still use the
-older whole-operand staging fallback.
+`partition.follow(*ts)` moves each tensor onto the new parts: the rows that stay are copied into their place in its new
+block, a host tensor, and each run of rows that changes rank is broadcast from its old rank and copied into its place at
+its new one, one broadcast a run, every rank calling them in one order (the library has no all-to-all of unequal
+segments). A tensor distributed from a source rank (`partition.distribute_tensor`) is the source's tensor broadcast
+whole, each rank keeping its own block.
+
 - A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
   `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
   call's own `aggregate_tok_s` and `per_sequence_tok_s`, its `program`, `backend` and batch `bs`) that no other beats in
@@ -383,37 +326,11 @@ w = s["lm_head"].to("cpu")                        # decoded
 
 ## Performance
 
-- The MPS path is the measured path; async ops hide the crossing behind compute.
-- Two-rank direct-exchange all-reduces stripe their crossing over the physical parallel cables according to the
-  compiled form. Rank count does not select one cable or establish that a particular collective form is optimal.
-- One commit rule for every caller (`_stream.mm`, "The commit rule"): eager calls and compiled graphs, the library's
-  own callers and user programs alike. Nothing is entered, wrapped or opted into, and how a program is written does
-  not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers
-  while the host keeps issuing: the GPU starts a command buffer at most every 13-19 us whatever it holds
-  (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication is a floor of its own.
-  - Each buffer the library commits signals its count on a shared event as the GPU reaches its end. A shared event's
-    value is the GPU's progress at once, while a completion handler runs 7-9 us later (20-60 at the 99th percentile).
-  - A publication (work a peer waits on) is committed at once, with every publication waiting in the open buffer,
-    while at most one of those buffers is in flight, read from the event's value then: double buffering, one committed
-    buffer queued behind the one the GPU runs, so a commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37).
-    Otherwise it joins torch's open command buffer. In flight counts the library's buffers, not torch's own. The depth
-    is the rule's structure, not a setting: nothing is read from a file or the environment, and no node is configured.
-  - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
-    library's: the host path, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
-    `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
-    (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
-  - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is
-    the program's responsibility; the peer's wait ends at its deadline, which ends its program
-    ([NCCL.md](../NCCL.md#bounded-waits)).
-  - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
-    host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
-    but the host's touches torch's stream. A group's workspace is held until the library retires the group
-    (`ncclMeshRetired`), never by the commit. The workspace is allocated on torch's queue, so under memory pressure
-    torch's allocator, freeing its cached buffers, enters that queue again (`MPSAllocator.mm`
-    `release_cached_buffers`): a deadlock, not an exception. A fix needs the library to report a group's scratch bytes
-    before encoding, or a pool grown off the queue: an `nccl.h` change.
+- Every collective blocks, on host memory. A group on MPS tensors drains torch's stream first (`MPSStream::synchronize`
+  with `COMMIT_AND_WAIT`), so the GPU waits for the host's call; host tensors (`torch_mesh.empty`) are read where they
+  lie, and any other MPS tensor is staged by a copy each way.
+- The bridges route every page and choose its lanes; nothing here selects a cable or a path.
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
-  point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
-  targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
-  (mesh 3c00d37). No reading of this rule has been taken yet.
+  point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. No reading of
+  this form has been taken yet.
 - Readings and their records: metal-microbench `docs/measurement.md`.

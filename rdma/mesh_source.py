@@ -92,7 +92,7 @@ def verify(root):
         path = snapshot_path(root, name)
         if digest(path) != record['sha256'] or path.is_symlink() != (record['kind'] == 'symlink'):
             raise ValueError(f'committed source differs: {name}')
-        if not path.is_symlink() and path.stat().st_mode & 0o777 != record['mode'] & 0o777:
+        if not path.is_symlink() and bool(path.stat().st_mode & 0o111) != bool(record['mode'] & 0o111):   # what git records: executable or not
             raise ValueError(f'committed source mode differs: {name}')
     return document
 

@@ -31,7 +31,8 @@ completes the expert output, the window's Gram is column-parallel over the same 
 with one all-reduce of its row-parallel products and an MPI_Allgatherv of the
 conditioned rows; `rdma/allocate.py`'s Balancer moves the parts on each tick's own
 times. The torch backend computes on the GPU with torch.distributed's `mesh` backend
-(`rdma/torch-mesh`), the numpy backend with `mesh_mpi`; operands are region leases.
+(`rdma/torch-mesh`), the numpy backend with `mesh_mpi`; operands are host tensors and arrays
+(`torch_mesh.empty`, `mesh_mpi.empty`).
 
     RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 \
         PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker serve CONFIG.json

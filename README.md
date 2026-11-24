@@ -222,8 +222,8 @@ per-controller IOMMU so a buffer is registered separately per device.
 
 The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `max_qp` 3
 on every device, not 11, and its driver keeps a queue pair of each device for itself. A
-link's two bridges state what their devices hold and make the lanes both can, ten where
-both hold ten and one stream's two where either holds two
+link's two bridges state what their devices hold and make the lanes both can, two a stream:
+eight (four streams) where both hold eight or more, and one stream's two where either holds two
 ([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
 
 The verbs transfer is point-to-point per cable, and its out-of-band GID/QPN exchange needs a socket to the directly
@@ -404,7 +404,7 @@ the node's uplink.
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement, its instance name the host UUID and its TXT record the node's number, UUID, serial, model and RDMA state. It execs `dns-sd -R`, which runs until it is stopped. |
 | `etc/mesh-nodes.json` | the name table: each node's name for people, keyed by its host UUID (`rdma/peers.py` `table` and `label`; `node <number>` for a node it does not list). Read by `mesh-peers`, node-info, `mesh-top`, the observer and telemetry; by nothing that finds a node. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
-| `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code, and every `/Applications/Xcode*.app` readied for the library's kernels (license, first launch, Metal toolchain). Idempotent. |
+| `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
@@ -420,9 +420,9 @@ watch cannot end (a thread inside a kernel call) leaves the heartbeat to launchd
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
-| `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-link.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-dataflow.c` and `mesh-call.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
-| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its communicators and groups), `nccl-mesh-metal.m`/`.h`, `nccl-mesh-kernels.h`/`.m` (its kernels), `mesh-collective.c`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py`, `attention.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
-| `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_nodes_health`, defined in `mesh-dataflow.c`) and the collectives' planning |
+| `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-link.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-dataflow.c`, `mesh-call.c` and `mesh-call.h` (the page table's client calls: `mesh_pages`, `mesh_write`, `mesh_invalidate`, `mesh_entry`), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's tensors as the library's host operands) |
+| `rdma/` collectives | NCCL's API over the substrate: `nccl.h` and `nccl-mesh.c` (its communicators, groups and calls, blocking on host memory), `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py`, `attention.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
+| `rdma/mesh-view.h` | the substrate's read side (`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_nodes_health`, defined in `mesh-dataflow.c` and `mesh-collective.c`), which `mesh-call.h` includes |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
 ## The toolchain, installed headlessly
@@ -445,21 +445,9 @@ The marker file is load-bearing, not folklore: without it `softwareupdate -l` li
 **zero** Command Line Tools labels; with it, two. `mesh-devtools-init` does this and
 is idempotent — it exits immediately when `verbs.h` is already resolvable.
 
-The Metal compiler is not in the Command Line Tools: it is an Xcode component, and
-`softwareupdate` offers no Xcode. Every node has one, so that any node builds the
-library's kernels itself (`rdma/Makefile`, `kernels`), copied once per node from a
-machine that has one, over the tailnet:
-
-```
-ditto -c --keepParent /Applications/Xcode-<version>.app - | ssh <node> 'sudo ditto -x - /Applications'
-```
-
-`mesh-devtools-init` then readies every `/Applications/Xcode*.app` headlessly
-(`xcodebuild -license accept`, `-runFirstLaunch`, `-downloadComponent MetalToolchain`,
-`xcrun --kill-cache` for root and the admin user), without changing the active
-developer directory, which stays the Command Line Tools. Which Xcode, Metal toolchain
-and macOS each node has, and what broke while setting them up, is in `NODE-STANDUPS.md`
-(gitignored; "Gitignored documents go to peers directly", above).
+No image `rdma/Makefile` builds needs the Metal compiler: torch-mesh's kernels are compiled from their source by the
+Metal framework at run time. Which toolchains and macOS each node has, and what broke while setting them up, is in
+`NODE-STANDUPS.md` (gitignored; "Gitignored documents go to peers directly", above).
 
 Nothing else in the stack needs a toolchain either. `uv` is a prebuilt binary linking
 only system frameworks, and `uv python list` offers prebuilt CPython, so Python is
@@ -527,7 +515,7 @@ port's line as the fabric init last wrote it (`port=<port> link=<status> rdma_pe
 port was `PORT_ACTIVE`. A port's address and neighbours are telemetry's (`io.mesh.telemetry`, its fabric section).
 
 The RDMA graph is the bridges' map: each bridge floods its ports' record to every other, so every node holds the
-whole graph (`mesh-plan.h` `mesh_map`) — no central registry, no multicast, no hop limit.
+whole graph (`mesh-view.h` `mesh_map`) — no central registry, no multicast, no hop limit.
 
 Job submission needs no new machinery. Every node already runs sshd and trusts the
 operator roster; the only missing piece was knowing which nodes exist, which the bridge's map and `mesh-peers` (the
@@ -570,8 +558,9 @@ install` by hand, which installs the binary anew whenever libmesh changed) or a 
 renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the bridge's heartbeat SIGHUP,
 which restarts the bridge keeping its region and runs its own new image (design/transport.md section 2); a process
 already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-launchd-agent.sh`). What each layer
-installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts nothing: no version enters the wire's
-magic and no reader tests a message's `version`, so bridges of any version pair (design/transport.md section 14). A
+installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map between the nodes of the old
+version and those of the new until every node runs the new: no version enters the wire's magic, so each hears the
+other, but a bridge pairs only with one of its own version (design/transport.md section 14). A
 MESH_LAYOUT change expires the old region, and a consumer's process holding the older library fails its calls as values
 until it is started again on the new one.
 

@@ -53,7 +53,7 @@ def operand(path, rank, width):
 
 
 # docs/writing-a-service.md#the-configuration
-def region(shape, dtype):
+def host(shape, dtype):
     return torch_mesh.empty(shape, dtype=dtype, device='cpu').numpy()
 
 
@@ -69,10 +69,10 @@ def _drawn(out, draw, scratch):
 
 # docs/writing-a-service.md#the-configuration
 def inputs(config, steps, rows):
-    g, w, scratch = np.random.default_rng(0), config['width'], region(CHUNK, torch.float64)
-    np.save(config['input'], _drawn(region((steps, rows, w), torch.half), lambda b: g.standard_normal(out=b), scratch))
+    g, w, scratch = np.random.default_rng(0), config['width'], host(CHUNK, torch.float64)
+    np.save(config['input'], _drawn(host((steps, rows, w), torch.half), lambda b: g.standard_normal(out=b), scratch))
     part, scaled = config['weights'] + '.part', lambda b: np.divide(g.standard_normal(out=b), np.sqrt(w), out=b)
     os.makedirs(part, exist_ok=True)
     for k in 'ab':
-        np.save(f'{part}/{k}.npy', _drawn(region((w, w), torch.half), scaled, scratch))
+        np.save(f'{part}/{k}.npy', _drawn(host((w, w), torch.half), scaled, scratch))
     os.replace(part, config['weights'])

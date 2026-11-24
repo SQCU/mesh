@@ -26,9 +26,9 @@
 #define MESH_EXTENT ((size_t)1<<30)
 struct wire_mapping { char *data; size_t length; };
 /* design/transport.md: a port's device: its context, protection domain and the whole region's `extents`
-   registered on it (design/transport.md), the queue pairs it holds against those it can use (`max_pairs`:
+   registered on it (design/transport.md), the queue pairs it has against those it can use (`max_pairs`:
    its max_qp less one, design/transport.md's "max_qp: 11 (10 usable)" on macOS 26; the M5 Ultra's macOS 27 devices
-   report 3, and their driver holds a queue pair of each device itself: design/HETEROGENEOUS-LINKS.md) */
+   report 3, and their driver takes a queue pair of each device itself: design/HETEROGENEOUS-LINKS.md) */
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **extent_mrs;
@@ -39,29 +39,29 @@ struct mesh_device {
   uint8_t gid_index,gid_matched;
 };
 /* the port's own address (its GID), its index in the port's GID table, and whether it is an address the port's
-   interface holds (`gid_matched`), chosen from the whole table (up to 256 entries) against the interface's addresses:
-   the entry equal to an IPv6 link-local address `interface` holds (getifaddrs, compared as bytes; BSD embeds the scope
+   interface has (`gid_matched`), chosen from the whole table (up to 256 entries) against the interface's addresses:
+   the entry equal to an IPv6 link-local address `interface` has (getifaddrs, compared as bytes; BSD embeds the scope
    in bytes 2-3 of a link-local address it reports, which the comparison clears), the address mesh-fabric-init assigns
    and the peer at the cable's other end reaches (README "Addressing").  Where no entry is one of those (an interface not
    yet addressed), the table's link-local entry (fe80::/10), else its
    first nonzero entry, `gid_matched` 0 so its opening says so.  A Thunderbolt port's table does not always begin at
-   index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed
+   index 0 (the Mini's en4 after its 2026-10-16 restart had its only entry at 1, and index 0's empty address failed
    every queue pair's connection with EIO), and its first entry is not always its address: the M5 Ultra Studio's macOS
-   27 rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local, [2]
+   27 rdma_en3 (2026-10-21) had [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local, [2]
    its fd6d ULA, and the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
 static __attribute__((unused)) int device_gid(struct mesh_device *device,const char *interface){
-  enum { HELD=16, ENTRIES=256 };
-  struct in6_addr held[HELD];
+  enum { LOCALS=16, ENTRIES=256 };
+  struct in6_addr local[LOCALS];
   union ibv_gid table[ENTRIES];
-  int helds=0,chosen=-1,matched=0,linklocal=-1,first=-1;
+  int locals=0,chosen=-1,matched=0,linklocal=-1,first=-1;
   struct ifaddrs *all=NULL;
   if(!getifaddrs(&all)){
-    for(const struct ifaddrs *a=all;a && helds<HELD;a=a->ifa_next){
+    for(const struct ifaddrs *a=all;a && locals<LOCALS;a=a->ifa_next){
       if(!a->ifa_addr || a->ifa_addr->sa_family!=AF_INET6 || strcmp(a->ifa_name,interface))continue;
       struct in6_addr x=((const struct sockaddr_in6 *)(const void *)a->ifa_addr)->sin6_addr;
       if(!IN6_IS_ADDR_LINKLOCAL(&x))continue;
       x.s6_addr[2]=x.s6_addr[3]=0;
-      held[helds++]=x;
+      local[locals++]=x;
     }
     freeifaddrs(all);
   }
@@ -73,27 +73,17 @@ static __attribute__((unused)) int device_gid(struct mesh_device *device,const c
     if(!nonzero)continue;
     if(first<0)first=i;
     if(linklocal<0 && table[i].raw[0]==0xfe && (table[i].raw[1]&0xc0)==0x80)linklocal=i;
-    for(int h=0;h<helds && chosen<0;h++)if(!memcmp(table[i].raw,held[h].s6_addr,16)){chosen=i;matched=1;}
+    for(int h=0;h<locals && chosen<0;h++)if(!memcmp(table[i].raw,local[h].s6_addr,16)){chosen=i;matched=1;}
   }
   if(chosen<0)chosen=linklocal>=0?linklocal:first;
   if(chosen<0)return ENXIO;
   device->gid=table[chosen];device->gid_index=(uint8_t)chosen;device->gid_matched=(uint8_t)matched;
   return 0;
 }
-/* design/transport.md */
-/* design/transport.md */
-/* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, the region's registered
-   part, which begins at data_off; a span never crosses a block, so it never crosses an extent. */
-static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t payload,uint64_t offset,uint64_t remaining){
-  uint64_t capacity=payload-offset%payload;
-  return (struct ibv_sge){.addr=(uintptr_t)device->wire+offset,
-    .length=(uint32_t)(remaining<capacity?remaining:capacity),
-    .lkey=device->extent_mrs[offset/MESH_EXTENT]->lkey};
-}
 /* design/algorithm-sources.md#programcopy */
 /* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
    every SEND, IBV_SEND_SIGNALED or not (the bridge's census: send completions equal requests), so a
-   SEND's completion is its queue's retirement and lands where the send thread polls it. */
+   SEND's completion is the one its queue makes and lands where the send thread polls it. */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
   struct ibv_cq *completion,*sent;
@@ -103,8 +93,8 @@ struct mesh_queue {
   uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
-/* a program's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan
-   holding none) and their two completion queues, polled through `poll` */
+/* a link's queue pairs on one port (`count` entries of `queues`, queue q lane q) and their two completion queues,
+   polled through `poll` */
 struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *); };
 /* design/transport.md */
@@ -124,8 +114,6 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-/* the stop flag, defined once in mesh-link.c (design/transport.md) */
-extern _Atomic sig_atomic_t stop;
 /* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
 static __attribute__((unused)) void say(const char *format,...){
@@ -133,7 +121,7 @@ static __attribute__((unused)) void say(const char *format,...){
   struct tm utc;gmtime_r(&t.tv_sec,&utc);
   char line[2048];
   size_t n=strftime(line,sizeof line,"%Y-%m-%dT%H:%M:%S",&utc);
-  n+=(size_t)snprintf(line+n,sizeof line-n,".%03ldZ %.3f ",t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
+  n+=(size_t)snprintf(line+n,sizeof line-n,".%03ldZ %.3f ",t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1e9);
   va_list arguments;va_start(arguments,format);vsnprintf(line+n,sizeof line-n,format,arguments);va_end(arguments);
   fputs(line,stderr);
 }
@@ -170,20 +158,20 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
   }
   if(!device->extent_mrs && !(device->extent_mrs=calloc(extents,sizeof *device->extent_mrs)))return ENOMEM;
   device->extents=extents;
-  const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
+  const uint64_t began=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for(size_t e=0,first=0;e<extents;e++,first+=MESH_EXTENT){
     const size_t bytes=wire->length-first<MESH_EXTENT?wire->length-first:MESH_EXTENT;
     if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
       const int error=errno?errno:EIO;
-      uint32_t held=0;
-      for(uint32_t k=0;k<extents;k++)held+=device->extent_mrs[k]!=NULL;
+      uint32_t registered=0;
+      for(uint32_t k=0;k<extents;k++)registered+=device->extent_mrs[k]!=NULL;
       say("%s: extent %zu of %u (%zu bytes at %zu) refused: %s; %u of the region's extents registered, max_mr %d\n",
-        device->name,e,extents,bytes,first,strerror(error),held,capabilities.max_mr);
+        device->name,e,extents,bytes,first,strerror(error),registered,capabilities.max_mr);
       *refused=error;return error;
     }
   }
   say("%s: region of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
-    (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
+    (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-began)/1e9);
   device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;
@@ -211,23 +199,22 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   return 0;
 }
-/* a UC queue pair in INIT for each lane of `plan` (a bit a lane, design/HETEROGENEOUS-LINKS.md), queue q lane q, against
-   the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port child's life
-   (design/transport.md section 14: no queue pair is moved to another state, destroyed or forgotten; the kernel releases
-   them at the child's exit).  0, or the error (ENOSPC: the device holds no more queue pairs). */
-static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t plan){
+/* a UC queue pair in INIT for each of a link's `lanes` lanes (its plan's lanes 0 to lanes - 1,
+   design/HETEROGENEOUS-LINKS.md), queue q lane q, against the device's usable queue pairs, on the provider's two
+   completion queues: a link's, made once in its port child's life (design/transport.md section 14: no queue pair is
+   moved to another state, destroyed or forgotten; the kernel releases them at the child's exit).  0, or the error
+   (ENOSPC: the device has no more queue pairs). */
+static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t lanes){
   struct mesh_device *device=provider->device;
-  const uint32_t count=(uint32_t)__builtin_popcount(plan),entries=plan?32-(uint32_t)__builtin_clz(plan):0;
-  if(device->pairs+count>device->max_pairs)return ENOSPC;
+  if(device->pairs+lanes>device->max_pairs)return ENOSPC;
   uint32_t frames=device->frame_capacity;
-  provider->queues=calloc(entries?entries:1,sizeof *provider->queues);
+  provider->queues=calloc(lanes?lanes:1,sizeof *provider->queues);
   if(!provider->queues)return ENOMEM;
-  provider->count=(int)entries;provider->psn=arc4random()&0xffffff;
+  provider->count=(int)lanes;provider->psn=arc4random()&0xffffff;
   if(!provider->completion && !(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   if(!provider->sent && !(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   provider->poll=provider->completion->context->ops.poll_cq;
-  for(uint32_t q=0;q<entries;q++){
-    if(!(plan>>q&1))continue;
+  for(uint32_t q=0;q<lanes;q++){
     const int error=pair_make(provider,(int)q);
     if(provider->queues[q].pair)provider->qp_count++;
     if(error)return error;
