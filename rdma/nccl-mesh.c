@@ -32,7 +32,7 @@ enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
 #define CHANNELS 4u
 #define BLOCK_PAGES 8u
 #define EXTENT_PAGES 512u
-#define SEND_BATCH 64u
+#define SEND_BATCH 32u
 #define ALLREDUCE_SINGLE_PHASE_MAX 36864u
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
@@ -1068,7 +1068,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
           }
           const int status = mesh_write(channel->context, xp, nx);
           if (xp != stack_xfers) free(xp);
-          for (uint32_t b = 0; b < batch; b++) mesh_release(channel->context, sp0 + b);
+          mesh_page_release_run(channel->context->M, sp0, batch);
           if (status == ENOMEM) return 0;
           if (status) {
             *result = comm_fail(comm, ncclInternalError, "communicator %s: %s's write: %s", comm->name, CALL_NAME[c->what], strerror(status));

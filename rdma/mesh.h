@@ -41,6 +41,8 @@
 #define MESH_DESC_FLUSH 192u
 #define MESH_WIRE_INLINE 2u
 #define MESH_WIRE_BULK8 4u
+#define MESH_TAIL_MAX 16u
+#define MESH_TAIL_SLOT1_MAX (MESH_PAGE_BYTES-(16u+MESH_TAIL_MAX*16u))
 
 struct mesh_dma_span { uint64_t offset,bytes; };
 _Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");
@@ -64,6 +66,16 @@ struct mesh_wire_desc {
   struct mesh_wire_entry e[MESH_WIRE_BATCH];
 };
 _Static_assert(sizeof(struct mesh_wire_desc)==MESH_PAGE_BYTES,"mesh_wire_desc is one 4096 B page");
+
+/* Tail descriptor inside the last 272 bytes of page h+1 on the 2-frame (8 KiB) inline lane. */
+struct mesh_wire_tail {
+  _Atomic uint32_t next;
+  uint32_t count;
+  uint32_t origin_node;
+  uint32_t from_node;
+  struct mesh_wire_entry e[MESH_TAIL_MAX];
+};
+_Static_assert(sizeof(struct mesh_wire_tail)==272u,"mesh_wire_tail");
 
 struct mesh_node { _Alignas(64) _Atomic uint32_t node; _Atomic uint32_t live; _Atomic uint64_t generation,bandwidth; };
 _Static_assert(sizeof(struct mesh_node)==64,"mesh_node");
@@ -135,6 +147,9 @@ static inline _Atomic uint64_t *mesh_contig_pages(struct hdr *m){ return &m->spa
 static inline unsigned char *mesh_page_at(struct hdr *m,uint32_t p){ return (unsigned char *)m+m->data_off+(uint64_t)p*MESH_PAGE_BYTES; }
 static inline uint64_t mesh_page_offset(const struct hdr *m,uint32_t p){ return m->data_off+(uint64_t)p*MESH_PAGE_BYTES; }
 static inline struct mesh_wire_desc *mesh_desc_at(struct hdr *m,uint32_t p){ return (struct mesh_wire_desc *)mesh_page_at(m,p); }
+static inline struct mesh_wire_tail *mesh_tail_at(struct hdr *m,uint32_t p){
+  return (struct mesh_wire_tail *)(mesh_page_at(m,p+1u)+MESH_PAGE_BYTES-sizeof(struct mesh_wire_tail));
+}
 static inline _Atomic uint64_t *mesh_table(struct hdr *m){ return (_Atomic uint64_t *)((char *)m+m->table_off); }
 static inline _Atomic uint32_t *mesh_refs(struct hdr *m){ return (_Atomic uint32_t *)((char *)m+m->arena_off); }
 
@@ -311,8 +326,51 @@ static inline uint32_t mesh_page_alloc_batch(struct hdr *m,uint32_t *out,uint32_
   return got;
 }
 
+static inline void mesh_bmp_set_mask(struct hdr *m,const struct mesh_bmp_desc *d,uint32_t w0,uint64_t mask){
+  if(!mask || w0>=d->l0_words)return;
+  const uint32_t w1=w0>>6,w2=w1>>6;
+  const uint64_t m1=UINT64_C(1)<<(w0&63u),m2=UINT64_C(1)<<(w1&63u);
+  _Atomic uint64_t *l0=mesh_bmp_l0(m,d),*l1=mesh_bmp_l1(m,d),*l2=mesh_bmp_l2(m,d);
+  const uint64_t prev0=atomic_fetch_or_explicit(&l0[w0],mask,memory_order_release);
+  if(prev0==0 || !(atomic_load_explicit(&l1[w1],memory_order_relaxed)&m1)){
+    atomic_thread_fence(memory_order_seq_cst);
+    const uint64_t prev1=atomic_fetch_or_explicit(&l1[w1],m1,memory_order_seq_cst);
+    if(prev1==0 || !(atomic_load_explicit(&l2[w2],memory_order_relaxed)&m2))
+      atomic_fetch_or_explicit(&l2[w2],m2,memory_order_seq_cst);
+  }
+}
+
 static inline void mesh_page_release_run(struct hdr *m,uint32_t base,uint32_t k){
-  for(uint32_t r=0;r<k;r++)mesh_page_release(m,base+r);
+  const uint32_t pages=mesh_flat_pages(m);
+  _Atomic uint32_t *refs=mesh_refs(m);
+  const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->pages;
+  uint32_t contig_freed=0,cur_w0=UINT32_MAX;
+  uint64_t cur_mask=0;
+  for(uint32_t r=0;r<k;r++){
+    const uint32_t p=base+r;
+    if(p>=pages)break;
+    _Atomic uint32_t *u=refs+p;
+    uint32_t v=atomic_load_explicit(u,memory_order_relaxed);
+    for(;;){
+      const uint32_t c=v&MESH_REF_MASK;
+      if(c==0)break;
+      const uint32_t nv=c==1u?0u:(v-1u);
+      if(atomic_compare_exchange_weak_explicit(u,&v,nv,memory_order_acq_rel,memory_order_relaxed)){
+        if(c==1u){
+          if(v&MESH_REF_CONTIG)contig_freed++;
+          const uint32_t w0=p>>6;
+          if(w0!=cur_w0){
+            if(cur_mask)mesh_bmp_set_mask(m,d,cur_w0,cur_mask);
+            cur_w0=w0;cur_mask=0;
+          }
+          cur_mask|=UINT64_C(1)<<(p&63u);
+        }
+        break;
+      }
+    }
+  }
+  if(cur_mask)mesh_bmp_set_mask(m,d,cur_w0,cur_mask);
+  if(contig_freed)atomic_fetch_sub_explicit(mesh_contig_pages(m),contig_freed,memory_order_relaxed);
 }
 
 static inline uint32_t mesh_page_alloc(struct hdr *m,uint32_t seed){
@@ -339,6 +397,8 @@ static inline uint32_t mesh_page_alloc_run(struct hdr *m,uint32_t k,uint32_t see
     if(k==8u){
       cand=v0&(v0>>1);cand&=cand>>2;cand&=cand>>4;
       cand&=UINT64_C(0x0101010101010101);
+    }else if(k==2u){
+      cand=v0&(v0>>1)&UINT64_C(0x5555555555555555);
     }else if(k==3u){
       cand=v0&(v0>>1)&(v0>>2)&UINT64_C(0x3FFFFFFFFFFFFFFF);
     }else{
@@ -405,6 +465,9 @@ static inline uint32_t mesh_page_alloc_contiguous(struct hdr *m,uint32_t count){
       uint64_t cand=0;
       if(count==64u){
         cand=(v0==~UINT64_C(0))?UINT64_C(1):0u;
+      }else if(count==32u){
+        if((uint32_t)v0==UINT32_MAX)cand=UINT64_C(1);
+        else if((uint32_t)(v0>>32)==UINT32_MAX)cand=UINT64_C(1)<<32;
       }else if(count==8u){
         cand=v0&(v0>>1);cand&=cand>>2;cand&=cand>>4;
         cand&=UINT64_C(0x0101010101010101);

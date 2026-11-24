@@ -48,8 +48,8 @@ There is **no `mesh_pd` pool**, **no owner byte array**, **no client write ring*
 
 Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each serving stream pair (`j = 0, 1` per port under `plan = 3`) uses two fixed-frame RC queue pair classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
 
-- **Class 0 (even `j`, `f = 3`, 12 KiB, `MESH_WIRE_INLINE`):** 1-WR inline lane carrying up to 2 unique raw 4 KiB pages plus their routing entries (`e[i].src_page = slot ∈ {1, 2}`). Handles tiny transfers (e.g., 6 KiB in 1 WR) and arbitrary scattered transfers; pages `h+1..h+2` land zero-copy via `XCHG(W[dst_idx], pack(h + slot, b))`.
-- **Class 1 (odd `j`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Bulk zero-copy lane (`1 DESC + m DATA`, 8 contiguous pages = 32 KiB per WR). Each 8-page RECV lands 8 raw 4 KiB pages zero-copy into `W[dst_idx_0..7]` and relays zero-copy at 32 KiB WR granularity.
+- **Class 0 (even `j`, `f = 2`, 8 KiB, `MESH_WIRE_INLINE`):** 1-WR inline lane carrying up to 2 raw 4 KiB pages (`h+0` up to 4096 B, `h+1` up to 3824 B) plus a 272-byte `struct mesh_wire_tail` in the unused tail `[3824..4095]` of `h+1`. Fits 6 KiB (`4096 + 2048 B`) in one 8 KiB WR with zero-copy landing via `XCHG(W[dst_idx], pack(h + slot, b))`.
+- **Class 1 (odd `j`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Bulk zero-copy lane (`1 DESC + m DATA`, 8 contiguous pages = 32 KiB per WR) with cross-poll relay batching. Each 8-page RECV lands 8 raw 4 KiB pages zero-copy into `W[dst_idx_0..7]` and relays zero-copy at 32 KiB WR granularity.
 
 Multicast groups sharing a `src_page` (or 8-page contiguous run) route direct neighbors first, then multi-hop destinations piggyback for free (`MESH_WIRE_SAME_DATA`) on any already-chosen port that reaches them.
 

@@ -119,6 +119,7 @@ struct link {
   uint64_t completed_at;
   uint64_t wire[MESH_LINK_STREAMS];
   uint32_t rx_pos[MESH_LINK_LANES],tx_tail[2];
+  uint32_t relay_bulk_dp[MESH_PORTS],relay_bulk_n[MESH_PORTS],relay_bulk_wrs[MESH_PORTS];
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message), each

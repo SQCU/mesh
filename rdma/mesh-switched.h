@@ -6,7 +6,7 @@
 #include <string.h>
 
 /* design/SPEC-flat-page-dma-bridge.md */
-#define MESH_SWITCH_MAGIC 0x5357434Cu
+#define MESH_SWITCH_MAGIC 0x5357434Du
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)
 #define MESH_SWITCH_N 8u
 #define MESH_SWITCH_LINKS 64u
@@ -91,12 +91,37 @@ static inline struct mesh_switch *mesh_switch_of(struct hdr *m){ return (struct 
 static inline uint32_t mesh_switch_published(const _Atomic uint64_t *version){ return (uint32_t)(atomic_load_explicit(version,memory_order_acquire)&1); }
 
 /* Two wire QP classes per stream pair over the flat 4096 B page space:
-   even j (0,2,4,6): 3-frame (12 KiB) 1-WR inline lane (up to 2 raw 4 KiB pages + DESC);
+   even j (0,2,4,6): 2-frame (8 KiB) 1-WR inline lane (raw slot 0 + slot 1 + 272 B tail);
    odd  j (1,3,5,7): 8-frame (32 KiB) bulk zero-copy contiguous lane (8 raw 4 KiB pages/WR). */
-static inline uint32_t mesh_switch_lane_frames(uint32_t j){ return (j&1u)?8u:3u; }
+static inline uint32_t mesh_switch_lane_frames(uint32_t j){ return (j&1u)?8u:2u; }
 static inline uint64_t mesh_switch_lane_bytes(uint32_t l){ return (uint64_t)mesh_switch_lane_frames(l)*MESH_PAGE_BYTES; }
-static inline uint32_t mesh_switch_class_frames(uint32_t cls){ return cls==MESH_CLS_BULK8?8u:3u; }
+static inline uint32_t mesh_switch_class_frames(uint32_t cls){ return cls==MESH_CLS_BULK8?8u:2u; }
 static inline uint32_t mesh_switch_class_mask(uint32_t cls){ return cls==MESH_CLS_BULK8?0xAAu:0x55u; }
+
+static inline _Atomic uint32_t *mesh_class_next(struct hdr *m,uint32_t cls,uint32_t q){
+  return cls==MESH_CLS_INLINE?&mesh_tail_at(m,q)->next:&mesh_desc_at(m,q)->next;
+}
+static inline void mesh_llist_add_cls(struct hdr *m,_Atomic uint64_t *head,uint32_t cls,uint32_t q){
+  _Atomic uint32_t *nxt=mesh_class_next(m,cls,q);
+  uint64_t first=atomic_load_explicit(head,memory_order_relaxed);
+  do {
+    atomic_store_explicit(nxt,(uint32_t)first,memory_order_relaxed);
+  } while(!atomic_compare_exchange_weak_explicit(head,&first,(uint64_t)(q+1u),memory_order_seq_cst,memory_order_relaxed));
+}
+static inline uint32_t mesh_llist_reverse_cls(struct hdr *m,uint32_t cls,uint32_t head){
+  uint32_t rev=0;
+  const uint32_t pages=mesh_flat_pages(m);
+  while(head){
+    const uint32_t q=head-1u;
+    if(q>=pages)break;
+    _Atomic uint32_t *nxt=mesh_class_next(m,cls,q);
+    const uint32_t next=atomic_load_explicit(nxt,memory_order_relaxed);
+    atomic_store_explicit(nxt,rev,memory_order_relaxed);
+    rev=head;
+    head=next;
+  }
+  return rev;
+}
 
 static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x,&a,4);memcpy(&y,&b,4);return (uint64_t)x|(uint64_t)y<<32; }
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
@@ -296,11 +321,11 @@ static inline uint32_t mesh_desc_data_wrs(const struct mesh_wire_desc *d,uint32_
 /* Release a DESC page and every unique src_page it still holds (for dead-child / drop cleanup). */
 static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t dpage,uint32_t cls,uint32_t target_port,uint32_t ring,int unqueue){
   if(dpage>=mesh_flat_pages(m))return;
-  const struct mesh_wire_desc *d=mesh_desc_at(m,dpage);
-  const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
   const uint32_t f=mesh_switch_class_frames(cls);
   uint32_t pages_dropped=f;
   if(cls==MESH_CLS_BULK8){
+    const struct mesh_wire_desc *d=mesh_desc_at(m,dpage);
+    const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
     for(uint32_t i=0;i+8u<=n;i+=8u){
       if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
         mesh_page_release_run(m,d->e[i].src_page,8u);
@@ -323,7 +348,7 @@ static inline void mesh_switch_port_drop(struct hdr *m,struct mesh_switch *sw,ui
       while(cur){
         const uint32_t d=cur-1u;
         if(d>=mesh_flat_pages(m))break;
-        cur=atomic_load_explicit(&mesh_desc_at(m,d)->next,memory_order_relaxed);
+        cur=atomic_load_explicit(mesh_class_next(m,cls,d),memory_order_relaxed);
         mesh_desc_drop(m,sw,d,cls,port,ring,1);
       }
     }
