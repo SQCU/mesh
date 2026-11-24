@@ -550,16 +550,7 @@ try_claim:;
         atomic_store_explicit(&refs[base+r],0u,memory_order_release);
         mesh_bmp_set(m,d,base+r);
       }
-      run_start=base+k+1u;
       run_len=0;
-      w=run_start>>6;
-      if(w<d->l0_words && (run_start&63u)){
-        const uint64_t vw=atomic_load_explicit(&l0[w],memory_order_relaxed);
-        for(uint32_t b=run_start&63u;b<64u && (w<<6)+b<pages;b++){
-          if((vw>>b)&1u){if(!run_len)run_start=(w<<6)+b;run_len++;if(run_len>=count)goto try_claim;}
-          else run_len=0;
-        }
-      }
     }
   }
   atomic_fetch_sub_explicit(mesh_contig_pages(m),count,memory_order_relaxed);
