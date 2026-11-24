@@ -118,7 +118,10 @@ struct link {
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t completed_at;
   uint64_t wire[MESH_LINK_STREAMS];
-  uint32_t rx_pos[MESH_LINK_LANES],tx_tail[2];
+  uint32_t tx_tail[2];
+  uint32_t rx_desc_q[MESH_SWITCH_FLIGHT],rx_desc_h,rx_desc_t;
+  uint32_t rx_data_q[MESH_SWITCH_FLIGHT],rx_data_h,rx_data_t;
+  uint32_t rx_desc_pos,rx_desc_rem;
   uint32_t relay_bulk_dp[MESH_PORTS],relay_bulk_n[MESH_PORTS],relay_bulk_wrs[MESH_PORTS];
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on

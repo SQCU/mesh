@@ -38,11 +38,12 @@
 #define MESH_REF_CONTIG (UINT32_C(1)<<31)
 #define MESH_REF_MASK (MESH_REF_CONTIG-1u)
 #define MESH_WIRE_BATCH 255u
-#define MESH_DESC_FLUSH 192u
+#define MESH_DESC_FLUSH 240u
 #define MESH_WIRE_INLINE 2u
 #define MESH_WIRE_BULK8 4u
 #define MESH_TAIL_MAX 16u
 #define MESH_TAIL_SLOT1_MAX (MESH_PAGE_BYTES-(16u+MESH_TAIL_MAX*16u))
+#define MESH_TAIL_BULK_DESC 0xFFFFFFFFu
 
 struct mesh_dma_span { uint64_t offset,bytes; };
 _Static_assert(sizeof(struct mesh_dma_span)==16,"mesh_dma_span ABI");

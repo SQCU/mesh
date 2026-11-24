@@ -331,11 +331,10 @@ static inline uint32_t mesh_desc_data_wrs(const struct mesh_wire_desc *d,uint32_
   return wrs;
 }
 
-/* Release a DESC page and every unique src_page it still holds (for dead-child / drop cleanup). */
+/* Release a DESC page (2 frames on j0) and every unique src_page it still holds (for dead-child / drop cleanup). */
 static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t dpage,uint32_t cls,uint32_t target_port,uint32_t ring,int unqueue){
   if(dpage>=mesh_flat_pages(m))return;
-  const uint32_t f=mesh_switch_class_frames(cls);
-  uint32_t pages_dropped=f;
+  uint32_t pages_dropped=2u;
   if(cls==MESH_CLS_BULK8){
     const struct mesh_wire_desc *d=mesh_desc_at(m,dpage);
     const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
@@ -346,7 +345,7 @@ static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t 
       }
     }
   }
-  mesh_page_release_run(m,dpage,f);
+  mesh_page_release_run(m,dpage,2u);
   if(unqueue && target_port<MESH_PORTS)
     atomic_fetch_sub_explicit(&sw->cable[target_port].queued,(uint64_t)pages_dropped*MESH_PAGE_BYTES,memory_order_relaxed);
   MESH_SWITCH_COUNT(sw,ring,lost,pages_dropped);

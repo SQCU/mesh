@@ -32,7 +32,7 @@ enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
 #define CHANNELS 4u
 #define BLOCK_PAGES 8u
 #define EXTENT_PAGES 1024u
-#define SEND_BATCH 32u
+#define SEND_BATCH 64u
 #define ALLREDUCE_SINGLE_PHASE_MAX 36864u
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
@@ -1140,7 +1140,7 @@ static void own_contribution(struct channel_phase *m, uint64_t q) {
   m->next[q]++;
 }
 
-static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, ncclResult_t *result) {
+static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, uint32_t *clr, uint32_t *nclr, ncclResult_t *result) {
   struct call *c = m->call;
   struct ncclComm *comm = c->comm;
   struct channel *channel = m->channel;
@@ -1167,7 +1167,8 @@ static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, nccl
     m->next[q]++;
     own_contribution(m, q);
   }
-  mesh_clear_indices(channel->context, &index, 1);
+  clr[(*nclr)++] = index;
+  if (*nclr == 64u) { mesh_clear_indices(channel->context, clr, *nclr); *nclr = 0; }
   m->taken[peer->at + q] = 1;
   m->left--;
   return 0;
@@ -1175,6 +1176,7 @@ static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, nccl
 
 static int take_some(struct channel_phase *m, ncclResult_t *result) {
   struct ncclComm *comm = m->call->comm;
+  uint32_t clr[64], nclr = 0;
   for (int r = 0; r < comm->nranks; r++) {
     struct peer_pages *peer = m->channel->peer + r;
     if (peer->low == peer->due) continue;
@@ -1183,7 +1185,11 @@ static int take_some(struct channel_phase *m, ncclResult_t *result) {
     uint64_t low = peer->low, end = peer->due - low > room ? low + room : peer->due;
     const unsigned char *taken = m->taken + peer->at;
     for (uint64_t q = low; q < end; q++)
-      if (!taken[q] && take(m, r, q, recv->idx[recv->used + (uint32_t)(q - low)], result)) return -1;
+      if (!taken[q] && take(m, r, q, recv->idx[recv->used + (uint32_t)(q - low)], clr, &nclr, result)) {
+        if (nclr) mesh_clear_indices(m->channel->context, clr, nclr);
+        return -1;
+      }
+    if (nclr) { mesh_clear_indices(m->channel->context, clr, nclr); nclr = 0; }
     while (peer->low < end && taken[peer->low]) { peer->low++; recv->used++; }
     int rc = extend_receive(m, r);
     if (rc && rc != EAGAIN) {

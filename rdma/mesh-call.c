@@ -138,7 +138,20 @@ void mesh_release(struct mesh_ctx *ctx,uint32_t page){
 void mesh_clear_indices(struct mesh_ctx *ctx,const uint32_t *indices,uint32_t count){
   struct hdr *m=ctx?ctx->M:NULL;
   if(!m || !indices)return;
-  for(uint32_t i=0;i<count;i++)if(indices[i]<m->entries)mesh_table_land(m,indices[i],MESH_PAGE_NONE,0);
+  uint32_t run_p=MESH_PAGE_NONE,run_n=0;
+  for(uint32_t i=0;i<count;i++){
+    const uint32_t idx=indices[i];
+    if(idx>=m->entries)continue;
+    const uint64_t prev=atomic_exchange_explicit(&mesh_table(m)[idx],(uint64_t)MESH_TABLE_EMPTY,memory_order_acq_rel);
+    const uint32_t old_p=mesh_word_page(prev);
+    if(old_p==MESH_PAGE_NONE)continue;
+    if(run_n && old_p==run_p+run_n){run_n++;}
+    else{
+      if(run_n)mesh_page_release_run(m,run_p,run_n);
+      run_p=old_p;run_n=1u;
+    }
+  }
+  if(run_n)mesh_page_release_run(m,run_p,run_n);
 }
 
 void mesh_free_indices(struct mesh_ctx *ctx,const uint32_t *indices,uint32_t count){
