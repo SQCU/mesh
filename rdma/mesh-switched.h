@@ -1,6 +1,7 @@
 #ifndef MESH_SWITCHED_H
 #define MESH_SWITCHED_H
 #include "mesh.h"
+#include "mesh-reduce.h"
 #include "route/split.h"
 #include <errno.h>
 #include <math.h>
@@ -70,6 +71,7 @@ struct mesh_switch {
   struct mesh_switch_bp bp[MESH_SWITCH_N][MESH_SWITCH_N];
   struct mesh_switch_lane lane[MESH_SWITCH_LANES];
   struct mesh_switch_counters counters[MESH_SWITCH_LOGS];
+  struct mesh_c2_bucket c2_stash[MESH_C2_BUCKETS];
 };
 _Static_assert(sizeof(struct mesh_switch)<=MESH_SWITCH_BYTES,"switch fits in MESH_SWITCH_BYTES");
 _Static_assert(sizeof(((struct mesh_switch *)0)->port)==64,"port lines one cache line");
@@ -605,12 +607,34 @@ static inline void mesh_switch_route_split(struct mesh_switch *sw,const struct m
   }
 }
 
+/* Deterministic cable-affinity reduction router: picks best next-hop neighbor (earliest-arrival + live async BP),
+   then maps (dst_index >> 3) deterministically onto a serving cable toward that neighbor so local + relayed reduction
+   blocks for the same (dst_node, dst_index) collide in the same single-threaded port queue and coalesce in-queue. */
+static inline uint32_t mesh_switch_route_reduce(struct mesh_switch *sw,const struct mesh_switch_view *v,
+                                                struct mesh_switch_togo *togo,uint64_t now_ns,
+                                                const uint64_t *line,struct mesh_switch_terms *t,
+                                                uint32_t dst_node,uint32_t dst_index,uint32_t origin,uint32_t from,
+                                                uint64_t unit_bytes){
+  if(unit_bytes>2u*MESH_PAGE_BYTES)mesh_switch_togo_refresh(sw,v,now_ns,togo);
+  const uint32_t chosen=mesh_switch_route_dest(v,togo,line,t,dst_node,origin,from);
+  if(chosen>=MESH_PORTS)return UINT32_MAX;
+  const uint32_t peer=mesh_port_peer(line[chosen]);
+  uint32_t cports[MESH_PORTS],nc=0;
+  for(uint32_t p=0;p<MESH_PORTS;p++){
+    if(mesh_port_state(line[p])==CHILD_SERVING && mesh_port_plan(line[p]) && mesh_port_peer(line[p])==peer)
+      cports[nc++]=p;
+  }
+  const uint32_t tp=nc>1u?cports[(dst_index>>3)%nc]:chosen;
+  t[tp].backlog+=(double)unit_bytes/t[tp].rate;
+  return tp;
+}
+
 /* Count data WRs a DESC page requires on the wire for class `cls`. */
 static inline uint32_t mesh_desc_data_wrs(const struct mesh_wire_desc *d,uint32_t cls){
   if(cls==MESH_CLS_INLINE)return 0u;
   const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
   uint32_t wrs=0;
-  for(uint32_t i=0;i+8u<=n;i+=8u)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))wrs++;
+  for(uint32_t i=0;i+8u<=n;i+=8u)if(!(d->e[i].flags&(MESH_WIRE_SAME_DATA|MESH_WIRE_SKIP)))wrs++;
   return wrs;
 }
 
@@ -622,7 +646,7 @@ static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t 
     const struct mesh_wire_desc *d=mesh_desc_at(m,dpage);
     const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
     for(uint32_t i=0;i+8u<=n;i+=8u){
-      if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
+      if(!(d->e[i].flags&(MESH_WIRE_SAME_DATA|MESH_WIRE_SKIP))){
         mesh_page_release_run(m,d->e[i].src_page,8u);
         pages_dropped+=8u;
       }

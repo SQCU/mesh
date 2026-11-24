@@ -107,6 +107,15 @@ _Static_assert(offsetof(struct message,port)==36 && offsetof(struct message,vers
    write rings (mesh-link.c switch_takes): the slot its next pass looks at first (`take_from`); and its posts from its
    port's inbound rings (mesh-link.c switch_sends): the pushing port whose ring its next pass reads first
    (`send_from`) */
+#define RED_HT_SIZE 4096u
+#define RED_HT_MASK (RED_HT_SIZE-1u)
+#define RED_SQ_CAP  4u
+struct red_slot {
+  uint32_t dp;
+  uint16_t off;
+  uint8_t  op,used;
+  uint32_t dst_node,dst_index;
+};
 struct link {
   struct mesh_device device;
   struct mesh_verbs provider;
@@ -123,6 +132,8 @@ struct link {
   uint32_t rx_data_q[MESH_SWITCH_FLIGHT],rx_data_h,rx_data_t;
   uint32_t rx_desc_pos,rx_desc_rem;
   uint32_t relay_bulk_dp[MESH_PORTS],relay_bulk_n[MESH_PORTS],relay_bulk_wrs[MESH_PORTS];
+  struct red_slot red_ht[RED_HT_SIZE];
+  uint32_t red_ht_live,red_ht_tomb;
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message), each

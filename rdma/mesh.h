@@ -41,8 +41,10 @@
 #define MESH_DESC_FLUSH 240u
 #define MESH_WIRE_INLINE 2u
 #define MESH_WIRE_BULK8 4u
+#define MESH_WIRE_REDUCE 8u
+#define MESH_WIRE_SKIP 16u
 #define MESH_TAIL_MAX 16u
-#define MESH_TAIL_SLOT1_MAX (MESH_PAGE_BYTES-(16u+MESH_TAIL_MAX*16u))
+#define MESH_TAIL_SLOT1_MAX (MESH_PAGE_BYTES-(16u+MESH_TAIL_MAX*16u+MESH_TAIL_MAX*4u))
 #define MESH_TAIL_BULK_DESC 0xFFFFFFFFu
 #define MESH_TAIL_BP        0xFFFFFFFEu
 #define MESH_BP_MAGIC       0x42503031u
@@ -71,15 +73,18 @@ struct mesh_wire_desc {
 };
 _Static_assert(sizeof(struct mesh_wire_desc)==MESH_PAGE_BYTES,"mesh_wire_desc is one 4096 B page");
 
-/* Tail descriptor inside the last 272 bytes of page h+1 on the 2-frame (8 KiB) inline lane. */
+/* Tail descriptor inside the last 336 bytes of page h+1 on the 2-frame (8 KiB) inline lane. */
 struct mesh_wire_tail {
   _Atomic uint32_t next;
   uint32_t count;
   uint32_t origin_node;
   uint32_t from_node;
   struct mesh_wire_entry e[MESH_TAIL_MAX];
+  uint8_t  red_op[MESH_TAIL_MAX];
+  uint8_t  red_pad[MESH_TAIL_MAX];
+  uint16_t red_tag[MESH_TAIL_MAX];
 };
-_Static_assert(sizeof(struct mesh_wire_tail)==272u,"mesh_wire_tail");
+_Static_assert(sizeof(struct mesh_wire_tail)==336u,"mesh_wire_tail");
 
 /* Async backpressure payload carried in bytes [0..3823] of page h+1 on j=0 bulk DESC / BP frames (0 extra WRs). */
 struct mesh_bp_edge { uint32_t from,to,wait_ns; };
@@ -165,11 +170,15 @@ static inline struct mesh_bp_frame *mesh_bp_at(struct hdr *m,uint32_t p){
 static inline _Atomic uint64_t *mesh_table(struct hdr *m){ return (_Atomic uint64_t *)((char *)m+m->table_off); }
 static inline _Atomic uint32_t *mesh_refs(struct hdr *m){ return (_Atomic uint32_t *)((char *)m+m->arena_off); }
 
+static inline uint64_t mesh_word_pack_red(uint32_t p,uint32_t bytes,uint16_t tag){
+  return p==MESH_PAGE_NONE?(uint64_t)MESH_TABLE_EMPTY:(((uint64_t)tag<<48)|(((uint64_t)bytes&0xffffu)<<32)|(uint64_t)(p+1u));
+}
 static inline uint64_t mesh_word_pack(uint32_t p,uint32_t bytes){
-  return p==MESH_PAGE_NONE?(uint64_t)MESH_TABLE_EMPTY:(((uint64_t)bytes<<32)|(uint64_t)(p+1u));
+  return mesh_word_pack_red(p,bytes,0u);
 }
 static inline uint32_t mesh_word_page(uint64_t w){ const uint32_t lo=(uint32_t)w; return (!lo || lo==MESH_TABLE_EMPTY)?MESH_PAGE_NONE:lo-1u; }
-static inline uint32_t mesh_word_bytes(uint64_t w){ return (uint32_t)(w>>32); }
+static inline uint32_t mesh_word_bytes(uint64_t w){ return (uint32_t)((w>>32)&0xffffu); }
+static inline uint16_t mesh_word_tag(uint64_t w){ return (uint16_t)(w>>48); }
 
 /* ---- 3-level lock-free free bitmap (design/SPEC-flat-page-dma-bridge.md section 2, 5.1) ---- */
 struct mesh_bmp_desc {
