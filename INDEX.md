@@ -20,6 +20,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 ## The bridge and transport
 
+- [design/SPEC-flat-page-dma-bridge.md](design/SPEC-flat-page-dma-bridge.md): the flat page-table async DMA bridge
+  specification (`MESH_VERSION = 168`, `MESH_LAYOUT = 200`): raw 4096 B page array `P[0..N-1]`, atomic page table
+  `W[0..2^20-1]`, elective refcounts `u[0..N-1]` with 45% contiguous bound (`ERR:NPHARD`), opaque lock-free pending-set
+  client API (`rdma/mesh-call.h`), and dual-QP wire framing (8 KiB inline + bulk `DESC` on `j = 0`, 32 KiB pure raw
+  `DATA` on `j = 1`) with zero-copy, zero-RTT landing via `XCHG(W[dst_idx])`.
 - [design/data-model.md](design/data-model.md): the hardware preliminaries of the data model: the M-series
   accelerator and its caches beside sm90's, memory to NIC to memory on InfiniBand and here, the Thunderbolt RDMA
   driver's SEND and RECV, and what the chain and the LSTM cost. Section 6 works out from them why code here only loses
