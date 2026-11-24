@@ -414,105 +414,161 @@ static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,c
   return best_pref_p<MESH_PORTS?best_pref_p:best_any_p;
 }
 
-/* Closed-form joint congestion + latency + multicast-sharing split optimizer over rdma/route/split.h.
-   Evaluates all valid assignments of owed destinations S to distinct neighbor links (<= 3^3 = 27 splits)
-   in registers using live local backlog + async draining downstream backpressure (togo). */
-static inline void mesh_switch_route_split(const struct mesh_switch_view *v,const struct mesh_switch_togo *togo,
+/* Closed-form Garg-Konemann dual-priced exact directed Steiner arborescence oracle (Dreyfus-Wagner for |S| <= 3).
+   Uses live local cable backlog + async draining downstream backpressure (sw->bp) to jointly maximize fabric
+   utilization, conserve cut capacity (1 cut crossing per multicast), and minimize latency on small inline packets. */
+static inline void mesh_switch_route_split(const struct mesh_switch *sw,const struct mesh_switch_view *v,uint64_t now_ns,
                                            const uint64_t *line,struct mesh_switch_terms *t,
                                            const uint32_t *dsts,uint32_t nd,uint32_t origin,uint32_t from,
                                            uint64_t unit_bytes,uint32_t *out_ports){
   for(uint32_t i=0;i<nd;i++)out_ports[i]=UINT32_MAX;
   if(!nd)return;
-  const uint32_t nodes_read=__atomic_load_n(&v->nodes,__ATOMIC_RELAXED),nodes=nodes_read<MESH_SWITCH_N?nodes_read:MESH_SWITCH_N;
+  const uint32_t nodes_read=__atomic_load_n(&v->nodes,__ATOMIC_RELAXED),n=nodes_read<MESH_SWITCH_N?nodes_read:MESH_SWITCH_N;
   const uint32_t self=mesh_switch_index(v,v->self);
+  if(self>=n)return;
   const uint32_t oi=mesh_switch_index(v,origin),fi=mesh_switch_index(v,from);
   const int is_relay=(origin!=v->self);
+  const int is_small=(unit_bytes<=2u*MESH_PAGE_BYTES);
+  uint32_t avoid_mid=(1u<<self);
+  if(oi<n)avoid_mid|=1u<<oi;
+  if(fi<n)avoid_mid|=1u<<fi;
 
-  /* Deduplicate parallel serving cables into distinct neighbor nodes (picking min backlog+own cable per neighbor). */
-  uint32_t nb_node[SPLIT_DEG],nb_idx[SPLIT_DEG],nb_port[SPLIT_DEG],deg=0;
-  double nb_cost[SPLIT_DEG];
+  /* Pick min-(backlog+own) serving cable per distinct neighbor and sum aggregate neighbor rate. */
+  uint32_t nb_port[MESH_SWITCH_N];
+  double nb_best[MESH_SWITCH_N],nb_rsum[MESH_SWITCH_N];
+  for(uint32_t i=0;i<MESH_SWITCH_N;i++){nb_port[i]=UINT32_MAX;nb_best[i]=INFINITY;nb_rsum[i]=0.0;}
   for(uint32_t p=0;p<MESH_PORTS;p++){
     if(mesh_port_state(line[p])!=CHILD_SERVING || !mesh_port_plan(line[p]))continue;
-    const uint32_t peer=mesh_port_peer(line[p]),ni=mesh_switch_index(v,peer);
-    if(ni>=nodes)continue;
+    const uint32_t ni=mesh_switch_index(v,mesh_port_peer(line[p]));
+    if(ni>=n)continue;
+    nb_rsum[ni]+=t[p].rate;
     const double c=t[p].backlog+t[p].own;
-    uint32_t k=0;
-    for(;k<deg;k++)if(nb_node[k]==peer)break;
-    if(k<deg){
-      const int hp=(p==mesh_switch_home),hb=(nb_port[k]==mesh_switch_home);
-      if(c<nb_cost[k] || (c==nb_cost[k] && (hp>hb || (hp==hb && t[p].backlog<t[nb_port[k]].backlog)))){
-        nb_port[k]=p;nb_cost[k]=c;
-      }
-    }else if(deg<SPLIT_DEG){
-      nb_node[deg]=peer;nb_idx[deg]=ni;nb_port[deg]=p;nb_cost[deg]=c;deg++;
+    const int hp=(p==mesh_switch_home),hb=(nb_port[ni]==mesh_switch_home);
+    if(c<nb_best[ni] || (c==nb_best[ni] && nb_port[ni]!=UINT32_MAX && (hp>hb || (hp==hb && t[p].backlog<t[nb_port[ni]].backlog)))){
+      nb_best[ni]=c;nb_port[ni]=p;
     }
   }
-  if(!deg || nd>SPLIT_N){
+
+  /* Build all-pairs shortest dual-price paths avoiding {self, origin, from} as intermediate relays. */
+  float sp[MESH_SWITCH_N][MESH_SWITCH_N];
+  uint8_t nh[MESH_SWITCH_N][MESH_SWITCH_N];
+  for(uint32_t i=0;i<n;i++)for(uint32_t j=0;j<n;j++){
+    sp[i][j]=i==j?0.0f:1e12f;
+    nh[i][j]=i==j?(uint8_t)i:255u;
+  }
+  for(uint32_t nb=0;nb<n;nb++){
+    const uint32_t p=nb_port[nb];
+    if(p>=MESH_PORTS)continue;
+    const double R=nb_rsum[nb]>0.0?nb_rsum[nb]:t[p].rate;
+    const double W=t[p].backlog,L=t[p].own;
+    const double tx=(double)unit_bytes/R;
+    const double cost=is_small?(W+L+tx):(tx*(1.0+W/12000.0)+0.15*L);
+    sp[self][nb]=(float)cost;
+    nh[self][nb]=(uint8_t)nb;
+  }
+  for(uint32_t l=0;l<v->links && l<MESH_SWITCH_LINKS;l++){
+    const struct mesh_switch_link *x=v->link+l;
+    const uint32_t a=x->ends&255,b=x->ends>>8&255;
+    if(a>=n || b>=n || a==self || b==self || (avoid_mid>>a&1))continue;
+    const double R=x->rate>0?x->rate:8.5;
+    const double W=mesh_switch_bp_wait(sw,a,b,now_ns);
+    const double L=x->latency>0?x->latency:1500.0;
+    const double tx=(double)unit_bytes/R;
+    const double cost=is_small?(W+L+tx):(tx*(1.0+W/12000.0)+0.15*L);
+    if((float)cost<sp[a][b]){sp[a][b]=(float)cost;nh[a][b]=(uint8_t)b;}
+  }
+  for(uint32_t via=0;via<n;via++){
+    if(avoid_mid>>via&1)continue;
+    for(uint32_t i=0;i<n;i++){
+      const float first=sp[i][via];
+      if(first>=1e11f)continue;
+      for(uint32_t j=0;j<n;j++){
+        const float through=first+sp[via][j];
+        if(through<sp[i][j]){sp[i][j]=through;nh[i][j]=nh[i][via];}
+      }
+    }
+  }
+
+  /* Map valid destinations; on inline small packets or direct single-dest relays, take direct/min-latency path. */
+  uint32_t dt[MESH_SWITCH_N],di[MESH_SWITCH_N],m=0;
+  for(uint32_t i=0;i<nd;i++){
+    const uint32_t d=mesh_switch_index(v,dsts[i]);
+    if(d>=n || d==self)continue;
+    if(is_relay && nb_port[d]<MESH_PORTS && nd==1u){
+      out_ports[i]=nb_port[d];
+      t[nb_port[d]].backlog+=(double)unit_bytes/t[nb_port[d]].rate;
+      return;
+    }
+    if(is_small || nd>3u){
+      const uint32_t hop=nh[self][d];
+      if(hop<n && nb_port[hop]<MESH_PORTS)out_ports[i]=nb_port[hop];
+      continue;
+    }
+    dt[m]=d;di[m]=i;m++;
+  }
+  if(is_small || nd>3u){
     uint32_t used=0;
     for(uint32_t i=0;i<nd;i++){
-      const uint32_t tp=mesh_switch_route_dest(v,togo,line,t,dsts[i],origin,from);
-      out_ports[i]=tp;
+      const uint32_t tp=out_ports[i];
       if(tp<MESH_PORTS && !(used&(1u<<tp))){used|=1u<<tp;t[tp].backlog+=(double)unit_bytes/t[tp].rate;}
     }
     return;
   }
 
-  struct route_draw rd;
-  memset(&rd,0,sizeof rd);
-  rd.deg=deg;
-  rd.unit=4000.0f;
-  float w[SPLIT_FS]={0};
-  w[35]=-1.0f;   /* sp->most: makespan / worst-destination arrival */
-  w[36]=-0.35f;  /* sp->mean: mean arrival across S */
-  w[37]=-1.20f;  /* sp->share: multicast wire-sharing (saving 1 cable send saves ~1 unit) */
-
-  uint32_t map_i[SPLIT_N],nact=0;
-  for(uint32_t i=0;i<nd;i++){
-    const uint32_t d=mesh_switch_index(v,dsts[i]);
-    if(d>=nodes)continue;
-    uint64_t av=self<64?(UINT64_C(1)<<self):0;
-    if(oi<nodes && oi!=d)av|=UINT64_C(1)<<oi;
-    if(fi<nodes && fi!=d)av|=UINT64_C(1)<<fi;
-    uint32_t direct_mask=0,any_mask=0;
-    for(uint32_t k=0;k<deg;k++){
-      if(av>>nb_idx[k]&1)continue;
-      if(nb_idx[k]!=d && !mesh_switch_reaches(v,nb_idx[k],av,d))continue;
-      const uint32_t b=nact*SPLIT_DEG+k;
-      const double rem=nb_idx[k]==d?0.0:(double)togo->to[nb_idx[k]][d];
-      rd.arrive[b]=(float)(nb_cost[k]+rem);
-      const uint8_t hh=nb_idx[k]==d?0u:togo->hops[nb_idx[k]][d];
-      w[b]=hh==0u?0.0f:(hh==1u?-0.25f:-0.85f);
-      any_mask|=1u<<k;
-      if(nb_idx[k]==d)direct_mask|=1u<<k;
+  /* Exact Dreyfus-Wagner minimum-price directed Steiner tree for m = 1, 2, 3 destinations. */
+  uint32_t chosen_nb[3]={255u,255u,255u};
+  if(m==1u){
+    chosen_nb[0]=nh[self][dt[0]];
+  }else if(m==2u){
+    float best=1e12f;uint32_t best_u=self;
+    for(uint32_t u=0;u<n;u++){
+      if(u!=self && (avoid_mid>>u&1))continue;
+      const float c=sp[self][u]+sp[u][dt[0]]+sp[u][dt[1]];
+      if(c<best){best=c;best_u=u;}
     }
-    const uint32_t use_mask=(is_relay && direct_mask)?direct_mask:any_mask;
-    if(!use_mask)continue;
-    rd.S|=1u<<nact;
-    rd.valid|=any_mask<<(nact*SPLIT_DEG);
-    rd.mask|=use_mask<<(nact*SPLIT_DEG);
-    map_i[nact++]=i;
+    if(best_u!=self){chosen_nb[0]=chosen_nb[1]=nh[self][best_u];}
+    else{chosen_nb[0]=nh[self][dt[0]];chosen_nb[1]=nh[self][dt[1]];}
+  }else if(m==3u){
+    const uint32_t pa[3]={1u,0u,0u},pb[3]={2u,2u,1u};
+    float t2[MESH_SWITCH_N][3];
+    uint8_t t2x[MESH_SWITCH_N][3];
+    for(uint32_t u=0;u<n;u++){
+      for(uint32_t p=0;p<3;p++){t2[u][p]=1e12f;t2x[u][p]=(uint8_t)u;}
+      if(u!=self && (avoid_mid>>u&1))continue;
+      for(uint32_t p=0;p<3;p++){
+        const uint32_t da=dt[pa[p]],db=dt[pb[p]];
+        for(uint32_t x=0;x<n;x++){
+          if(x!=self && (avoid_mid>>x&1))continue;
+          const float c=sp[u][x]+sp[x][da]+sp[x][db];
+          if(c<t2[u][p]){t2[u][p]=c;t2x[u][p]=(uint8_t)x;}
+        }
+      }
+    }
+    float best=1e12f;uint32_t best_m=self,best_p=0;
+    for(uint32_t u=0;u<n;u++){
+      if(u!=self && (avoid_mid>>u&1))continue;
+      for(uint32_t p=0;p<3;p++){
+        const float c=sp[self][u]+sp[u][dt[p]]+t2[u][p];
+        if(c<best){best=c;best_m=u;best_p=p;}
+      }
+    }
+    if(best_m!=self){
+      const uint32_t h=nh[self][best_m];
+      chosen_nb[0]=chosen_nb[1]=chosen_nb[2]=h;
+    }else{
+      chosen_nb[best_p]=nh[self][dt[best_p]];
+      const uint32_t a=pa[best_p],b=pb[best_p],x=t2x[self][best_p];
+      if(x!=self){chosen_nb[a]=chosen_nb[b]=nh[self][x];}
+      else{chosen_nb[a]=nh[self][dt[a]];chosen_nb[b]=nh[self][dt[b]];}
+    }
   }
-  if(!nact)return;
-
-  const struct split_set ss=split_set_of(&rd);
-  if(!ss.n)return;
-  float best_score=-INFINITY;
-  uint32_t best_tok=0;
-  for(struct split_walk swk=split_walk_at(&ss,0,ss.n);swk.left;split_walk_next(&swk)){
-    const struct split sp=split_of(&rd,swk.token);
-    if(!sp.ok)continue;
-    const float sc=split_dot(&sp,w);
-    if(sc>best_score){best_score=sc;best_tok=swk.token;}
-  }
-  uint32_t used_ports=0;
-  uint32_t tok=best_tok;
-  for(uint32_t r=0;r<nact;r++){
-    const uint32_t k=tok%deg;tok/=deg;
-    const uint32_t tp=nb_port[k];
-    out_ports[map_i[r]]=tp;
-    if(tp<MESH_PORTS && !(used_ports&(1u<<tp))){
-      used_ports|=1u<<tp;
-      t[tp].backlog+=(double)unit_bytes/t[tp].rate;
+  uint32_t used=0;
+  for(uint32_t r=0;r<m;r++){
+    const uint32_t hop=chosen_nb[r];
+    if(hop<n && nb_port[hop]<MESH_PORTS){
+      const uint32_t tp=nb_port[hop];
+      out_ports[di[r]]=tp;
+      if(!(used&(1u<<tp))){used|=1u<<tp;t[tp].backlog+=(double)unit_bytes/t[tp].rate;}
     }
   }
 }
