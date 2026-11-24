@@ -46,11 +46,10 @@ There is **no `mesh_pd` pool**, **no owner byte array**, **no client write ring*
 
 ## 4. Wire Format (`MESH_VERSION = 168`, `MESH_LAYOUT = 200`)
 
-Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each port partitions its 8 RC queue pairs (`j = 0..7`) into three fixed-frame classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
+Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each serving stream pair (`j = 0, 1` per port under `plan = 3`) uses two fixed-frame RC queue pair classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
 
-- **Class 0 (`j = 0, 1`, `f = 3`, 12 KiB, `MESH_WIRE_INLINE`):** 1-WR inline lane for tiny transfers (`<= 2` unique pages, e.g., 6 KiB). Page `h+0` carries `struct mesh_wire_desc` (`e[i].src_page = slot ∈ {1, 2}`); pages `h+1..h+2` carry raw 4 KiB data pages that land zero-copy via `XCHG(W[dst_idx], pack(h + slot, b))`.
-- **Class 1 (`j = 2, 3`, `f = 1`, 4 KiB):** Scattered zero-copy lane (`1 DESC + m DATA` linked `ibv_post_send`, 1 page per WR).
-- **Class 2 (`j = 4..7`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Bulk zero-copy lane (`1 DESC + m DATA`, 8 contiguous pages = 32 KiB per WR). Each 8-page RECV lands 8 raw 4 KiB pages zero-copy into `W[dst_idx_0..7]` and relays zero-copy at 32 KiB WR granularity.
+- **Class 0 (even `j`, `f = 3`, 12 KiB, `MESH_WIRE_INLINE`):** 1-WR inline lane carrying up to 2 unique raw 4 KiB pages plus their routing entries (`e[i].src_page = slot ∈ {1, 2}`). Handles tiny transfers (e.g., 6 KiB in 1 WR) and arbitrary scattered transfers; pages `h+1..h+2` land zero-copy via `XCHG(W[dst_idx], pack(h + slot, b))`.
+- **Class 1 (odd `j`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Bulk zero-copy lane (`1 DESC + m DATA`, 8 contiguous pages = 32 KiB per WR). Each 8-page RECV lands 8 raw 4 KiB pages zero-copy into `W[dst_idx_0..7]` and relays zero-copy at 32 KiB WR granularity.
 
 Multicast groups sharing a `src_page` (or 8-page contiguous run) route direct neighbors first, then multi-hop destinations piggyback for free (`MESH_WIRE_SAME_DATA`) on any already-chosen port that reaches them.
 

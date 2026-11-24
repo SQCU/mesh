@@ -403,7 +403,9 @@ static inline uint32_t mesh_page_alloc_contiguous(struct hdr *m,uint32_t count){
       if(w0==MESH_ABSENT)break;
       probe=w0+1u;
       uint64_t cand=0;
-      if(count==8u){
+      if(count==64u){
+        cand=(v0==~UINT64_C(0))?UINT64_C(1):0u;
+      }else if(count==8u){
         cand=v0&(v0>>1);cand&=cand>>2;cand&=cand>>4;
         cand&=UINT64_C(0x0101010101010101);
       }else if(count==16u){

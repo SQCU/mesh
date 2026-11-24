@@ -6,17 +6,16 @@
 #include <string.h>
 
 /* design/SPEC-flat-page-dma-bridge.md */
-#define MESH_SWITCH_MAGIC 0x5357434Bu
+#define MESH_SWITCH_MAGIC 0x5357434Cu
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)
 #define MESH_SWITCH_N 8u
 #define MESH_SWITCH_LINKS 64u
 #define MESH_SWITCH_FLIGHT 4096u
 #define MESH_SWITCH_LOGS (MESH_PORTS+1u)
 #define MESH_SWITCH_PARENT MESH_PORTS
-#define MESH_SWITCH_CLASSES 3u
+#define MESH_SWITCH_CLASSES 2u
 #define MESH_CLS_INLINE 0u
-#define MESH_CLS_SCAT   1u
-#define MESH_CLS_BULK8  2u
+#define MESH_CLS_BULK8  1u
 
 _Static_assert(MESH_SWITCH_N<=64 && MESH_SWITCH_N<=MESH_NODES,"a node a bit");
 _Static_assert(!(MESH_SWITCH_FLIGHT&(MESH_SWITCH_FLIGHT-1)) && MESH_SWITCH_FLIGHT<=(UINT64_C(1)<<48),"flight size");
@@ -91,23 +90,13 @@ static inline struct mesh_switch_cable *mesh_switch_cable_of(struct mesh_switch 
 static inline struct mesh_switch *mesh_switch_of(struct hdr *m){ return (struct mesh_switch *)((char *)m+m->switch_off); }
 static inline uint32_t mesh_switch_published(const _Atomic uint64_t *version){ return (uint32_t)(atomic_load_explicit(version,memory_order_acquire)&1); }
 
-/* Three wire QP classes per port over the flat 4096 B page space:
-   j = 0,1: 3-frame (12 KiB) 1-WR inline lane for <= 2 pages (e.g. 6 KiB);
-   j = 2,3: 1-frame (4 KiB) scattered zero-copy lane;
-   j = 4..7: 8-frame (32 KiB) bulk zero-copy contiguous lane. */
-static inline uint32_t mesh_switch_lane_frames(uint32_t j){
-  const uint32_t k=j%(2u*MESH_LINK_STREAMS);
-  return k<2u?3u:(k<4u?1u:8u);
-}
-static inline uint64_t mesh_switch_lane_bytes(uint32_t l){
-  return (uint64_t)mesh_switch_lane_frames(l)*MESH_PAGE_BYTES;
-}
-static inline uint32_t mesh_switch_class_frames(uint32_t cls){
-  return cls==MESH_CLS_INLINE?3u:(cls==MESH_CLS_BULK8?8u:1u);
-}
-static inline uint32_t mesh_switch_class_mask(uint32_t cls){
-  return cls==MESH_CLS_INLINE?0x03u:(cls==MESH_CLS_SCAT?0x0Cu:0xF0u);
-}
+/* Two wire QP classes per stream pair over the flat 4096 B page space:
+   even j (0,2,4,6): 3-frame (12 KiB) 1-WR inline lane (up to 2 raw 4 KiB pages + DESC);
+   odd  j (1,3,5,7): 8-frame (32 KiB) bulk zero-copy contiguous lane (8 raw 4 KiB pages/WR). */
+static inline uint32_t mesh_switch_lane_frames(uint32_t j){ return (j&1u)?8u:3u; }
+static inline uint64_t mesh_switch_lane_bytes(uint32_t l){ return (uint64_t)mesh_switch_lane_frames(l)*MESH_PAGE_BYTES; }
+static inline uint32_t mesh_switch_class_frames(uint32_t cls){ return cls==MESH_CLS_BULK8?8u:3u; }
+static inline uint32_t mesh_switch_class_mask(uint32_t cls){ return cls==MESH_CLS_BULK8?0xAAu:0x55u; }
 
 static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x,&a,4);memcpy(&y,&b,4);return (uint64_t)x|(uint64_t)y<<32; }
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
@@ -300,11 +289,7 @@ static inline uint32_t mesh_desc_data_wrs(const struct mesh_wire_desc *d,uint32_
   if(cls==MESH_CLS_INLINE)return 0u;
   const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
   uint32_t wrs=0;
-  if(cls==MESH_CLS_BULK8){
-    for(uint32_t i=0;i+8u<=n;i+=8u)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))wrs++;
-    return wrs;
-  }
-  for(uint32_t i=0;i<n;i++)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))wrs++;
+  for(uint32_t i=0;i+8u<=n;i+=8u)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))wrs++;
   return wrs;
 }
 
@@ -320,13 +305,6 @@ static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t 
       if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
         mesh_page_release_run(m,d->e[i].src_page,8u);
         pages_dropped+=8u;
-      }
-    }
-  }else if(cls==MESH_CLS_SCAT){
-    for(uint32_t i=0;i<n;i++){
-      if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
-        mesh_page_release(m,d->e[i].src_page);
-        pages_dropped++;
       }
     }
   }

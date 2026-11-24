@@ -29,10 +29,10 @@ static const char *const CALL_NAME[] = {"ncclAllReduce", "ncclBroadcast", "ncclR
                                         "ncclAllGather", "ncclAlltoAll", "ncclGather", "ncclScatter"};
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
 /* Page j of each message runs on channel j % CHANNELS. Each writer addresses the receiver's allocated extent. */
-#define CHANNELS 8u
+#define CHANNELS 4u
 #define BLOCK_PAGES 8u
 #define EXTENT_PAGES 512u
-#define SEND_BATCH 16u
+#define SEND_BATCH 64u
 #define ALLREDUCE_SINGLE_PHASE_MAX 36864u
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
