@@ -64,6 +64,19 @@ Next-hop selection (`mesh_switch_route_split`) separates the three physical regi
 2. **Bulk unicast (`|S| = 1`, `unit_bytes > 8 KiB`):** Earliest-arrival path `W_local + L_local + togo[peer][d]` using dynamically refreshed `togo` with live draining `sw->bp`. Balances across parallel direct cables and multi-hop detours proportionally to capacity (`3:1:1` on `A -> B`).
 3. **Bulk multicast (`|S| > 1`, `unit_bytes > 8 KiB`):** Exact **Dreyfus–Wagner directed Steiner arborescence** (`|S| <= 3`) over Garg–Könemann dual-priced edges `price(e) = (unit_bytes / R_e) * (1 + W_e / tau) + 0.15 * L_e` (`tau = 12 us`), with grouped multicast relaying in `link_receive`. Conserves bottleneck graph cuts (1 cut crossing per source instead of 2) while equalizing utilization across heterogeneous 1/2/3/4-cable bundles.
 
+### 4.2 Switch-Side Algebraic Page Morphisms (`Pages^k -> Pages^m`)
+
+As the exact categorical dual of zero-copy multicast fan-out (`MESH_WIRE_SAME_DATA`, `1 -> k`), the bridge exposes a lower-level schedulable reduction API (`mesh_reduce_write`, `mesh_entry_red`) over raw 4 KiB pages with zero metadata inside `P[p]`. Each reduction entry carries a 1-byte algebraic op code (`alg` in bits `7..6`, kernel `id` in bits `5..0`) and a 16-bit algebraic contribution tag:
+
+- **`C0` (`MESH_ALG_C0_COMM`):** Commutative monoids (`SUM_F32`, `MAX_F32`, `MIN_F32`, `SUM_I32`, `SUM_I64` superaccumulator); `tag = leaf weight` (`w_a + w_b`).
+- **`C1` (`MESH_ALG_C1_LIFTED`):** Lifted commutative monoids on augmented state pages (`ONLINE_SOFTMAX_F32` `[m, l, o_0..o_125]`); `tag = leaf weight`.
+- **`C2` (`MESH_ALG_C2_INTERVAL`):** Associative non-commutative monoids (`AFFINE_SCAN_F32` `(a_R, b_R) o (a_L, b_L)`); `tag = lo | (hi << 8)` half-open rank interval, coalescing strictly when `hi_a == lo_b` or `hi_b == lo_a`.
+
+In-switch coalescing runs **opportunistically inside each single-threaded port poller's software queue `tx_head[p][BULK8]`**:
+1. Reduction routing (`mesh_switch_route_reduce`) stripes `(dst_index >> 3)` deterministically across parallel cables toward the chosen next-hop peer so local and relayed partial streams for the same `(dst_node, dst_index)` collide in the same port queue with zero cross-port locking.
+2. When `out1 < RED_SQ_CAP` (`8` WRs = 256 KiB = ~8x TB5 BDP), `REDUCE` blocks bypass immediately onto the idle wire with zero waiting. Under load (`out1 >= RED_SQ_CAP`), excess backlog remains in `tx_head[p]` where colliding algebraically mergeable 32 KiB runs fold via NEON (~150–300 ns) into one run, immediately releasing the duplicate 8-page run and decrementing `cable[p].queued`.
+3. At the destination node, `W[dst_idx]` packs `(page + 1) | (bytes << 32) | (tag << 48)`: `C0/C1` fold lock-free via `XCHG(W[i], EMPTY)` / `CAS` directly inside `W[i]`, and `C2` folds adjacent intervals with a per-bucket out-of-order interval stash until `[0, N)` completes.
+
 ```c
 #define MESH_WIRE_SAME_DATA 1u
 #define MESH_WIRE_INLINE    2u
