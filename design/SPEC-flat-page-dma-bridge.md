@@ -46,21 +46,26 @@ There is **no `mesh_pd` pool**, **no owner byte array**, **no client write ring*
 
 ## 4. Wire Format (`MESH_VERSION = 168`, `MESH_LAYOUT = 200`)
 
-Every serving QP uses uniform 1-frame (4096 B) work requests (`f = 1`). A batch of `1..255` transfers on a QP is posted as one linked `ibv_post_send` list (`H13`):
+Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each port partitions its 8 RC queue pairs (`j = 0..7`) into three fixed-frame classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
 
-1. One `DESC` frame (`struct mesh_wire_desc`, 4096 B exact), followed by
-2. One raw `DATA` frame (`P[src_page]`, 4096 B exact) per entry whose `flags & MESH_WIRE_SAME_DATA == 0`.
+- **Class 0 (`j = 0, 1`, `f = 3`, 12 KiB, `MESH_WIRE_INLINE`):** 1-WR inline lane for tiny transfers (`<= 2` unique pages, e.g., 6 KiB). Page `h+0` carries `struct mesh_wire_desc` (`e[i].src_page = slot ∈ {1, 2}`); pages `h+1..h+2` carry raw 4 KiB data pages that land zero-copy via `XCHG(W[dst_idx], pack(h + slot, b))`.
+- **Class 1 (`j = 2, 3`, `f = 1`, 4 KiB):** Scattered zero-copy lane (`1 DESC + m DATA` linked `ibv_post_send`, 1 page per WR).
+- **Class 2 (`j = 4..7`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Bulk zero-copy lane (`1 DESC + m DATA`, 8 contiguous pages = 32 KiB per WR). Each 8-page RECV lands 8 raw 4 KiB pages zero-copy into `W[dst_idx_0..7]` and relays zero-copy at 32 KiB WR granularity.
+
+Multicast groups sharing a `src_page` (or 8-page contiguous run) route direct neighbors first, then multi-hop destinations piggyback for free (`MESH_WIRE_SAME_DATA`) on any already-chosen port that reaches them.
 
 ```c
 #define MESH_WIRE_SAME_DATA 1u
+#define MESH_WIRE_INLINE    2u
+#define MESH_WIRE_BULK8     4u
 
 struct mesh_wire_entry {
   uint32_t dst_node;
   uint32_t dst_index;
   uint16_t bytes;      /* 1..4096 */
-  uint8_t  flags;      /* bit 0: MESH_WIRE_SAME_DATA (multicast fanout) */
+  uint8_t  flags;      /* bit 0: SAME_DATA; bit 1: INLINE; bit 2: BULK8 */
   uint8_t  hops;       /* hop count (dropped past MESH_SWITCH_N - 1) */
-  uint32_t src_page;   /* sender-local physical page id; ignored by receiver */
+  uint32_t src_page;   /* sender-local physical page id (or slot 1..2 for INLINE) */
 };                     /* 16 bytes */
 
 struct mesh_wire_desc {
@@ -71,8 +76,6 @@ struct mesh_wire_desc {
   struct mesh_wire_entry e[255]; /* 16 + 255*16 = 4096 bytes exact */
 };
 ```
-
-Because `P[q]` written by `mesh_write` has the exact same `struct mesh_wire_desc` layout, a batch whose entries all route to the taking poller's own port is posted to the wire with zero copies and zero descriptor reallocation.
 
 ## 5. Register-Transfer Steps
 

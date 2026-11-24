@@ -30,6 +30,7 @@ static const char *const CALL_NAME[] = {"ncclAllReduce", "ncclBroadcast", "ncclR
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
 /* Page j of each message runs on channel j % CHANNELS. Each writer addresses the receiver's allocated extent. */
 #define CHANNELS 8u
+#define BLOCK_PAGES 8u
 #define EXTENT_PAGES 512u
 #define SEND_BATCH 16u
 #define ALLREDUCE_SINGLE_PHASE_MAX 36864u
@@ -924,13 +925,22 @@ struct channel_phase {
   struct channel *channel;
   uint32_t id;
   uint32_t o;
-  uint64_t j;
+  uint64_t q;
   unsigned char *taken;
   uint64_t positions, left;
   uint32_t *next;
 };
 
-static uint64_t channel_pages(uint64_t pages, uint32_t id) { return pages > id ? (pages - id + CHANNELS - 1) / CHANNELS : 0; }
+static uint64_t page_of_channel(uint64_t q, uint32_t id) {
+  return ((q / BLOCK_PAGES) * CHANNELS + id) * BLOCK_PAGES + (q % BLOCK_PAGES);
+}
+
+static uint64_t channel_pages(uint64_t pages, uint32_t id) {
+  const uint64_t full = pages / BLOCK_PAGES, tail = pages % BLOCK_PAGES;
+  const uint64_t my_full = full > id ? (full - 1u - id) / CHANNELS + 1u : 0u;
+  const uint64_t my_tail = (full % CHANNELS == id) ? tail : 0u;
+  return my_full * BLOCK_PAGES + my_tail;
+}
 
 static int destination(struct channel_phase *m, int rank) {
   struct ncclComm *comm = m->call->comm;
@@ -996,23 +1006,85 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
   struct channel *channel = m->channel;
   const struct phase *p = m->p;
   const int me = comm->rank;
-  for (; m->o < p->outs; m->o++, m->j = m->id) {
+  for (; m->o < p->outs; m->o++, m->q = 0) {
     const struct out *x = p->out + m->o;
-    const uint64_t pages = pages_of(x->bytes);
+    const uint64_t total_pages = pages_of(x->bytes);
+    const uint64_t ch_pages = channel_pages(total_pages, m->id);
     const uint32_t dests = x->to < 0 ? (uint32_t)comm->nranks - 1 : 1;
     const uint32_t max_b = dests <= MESH_DESC_FLUSH ? (MESH_DESC_FLUSH / dests < SEND_BATCH ? MESH_DESC_FLUSH / dests : SEND_BATCH) : 1u;
-    while (m->j < pages) {
-      uint32_t batch = max_b;
-      const uint64_t rem = (pages - 1u - m->j) / CHANNELS + 1u;
-      if ((uint64_t)batch > rem) batch = (uint32_t)rem;
+    while (m->q < ch_pages) {
+      const uint64_t rem = ch_pages - m->q;
+      uint32_t min_left = comm->extent_pages;
       for (uint32_t i = 0; i < dests; i++) {
         const int d = x->to < 0 ? other(me, i) : x->to;
         const int rc = destination(m, d);
         if (rc == EAGAIN) return 0;
         if (rc) { *result = comm_fail(comm, ncclInternalError, "receive extent from rank %d: %s", d, strerror(rc)); return -1; }
         const uint32_t left = comm->extent_pages - channel->peer[d].send.used;
-        if (left < batch) batch = left;
+        if (left < min_left) min_left = left;
       }
+      uint32_t batch = max_b;
+      if ((uint64_t)batch > rem) batch = (uint32_t)rem;
+      if (batch > min_left) batch = min_left;
+
+      /* Bulk 32 KiB contiguous path for aligned 8-page blocks (8 or 16 pages). */
+      if ((m->q & (BLOCK_PAGES - 1u)) == 0 && batch >= BLOCK_PAGES) {
+        batch &= ~(BLOCK_PAGES - 1u);
+        void *base = NULL;
+        int arc = mesh_alloc_contiguous(channel->context, batch, NULL, &base);
+        if (arc && batch > BLOCK_PAGES) {
+          batch = BLOCK_PAGES;
+          arc = mesh_alloc_contiguous(channel->context, batch, NULL, &base);
+        }
+        if (!arc && base) {
+          const uint32_t sp0 = (uint32_t)(((unsigned char *)base - ((unsigned char *)channel->context->M + channel->context->M->data_off)) / MESH_PAGE_BYTES);
+          struct mesh_xfer stack_xfers[SEND_BATCH * MESH_DESTS];
+          struct mesh_xfer *xp = dests <= MESH_DESTS ? stack_xfers : malloc((size_t)batch * dests * sizeof *xp);
+          if (!xp) {
+            for (uint32_t b = 0; b < batch; b++) mesh_release(channel->context, sp0 + b);
+            *result = comm_fail(comm, ncclSystemError, "communicator %s: out of memory", comm->name);
+            return -1;
+          }
+          uint32_t nx = 0;
+          for (uint32_t blk = 0; blk < batch; blk += BLOCK_PAGES) {
+            const uint64_t j0 = page_of_channel(m->q + blk, m->id);
+            const size_t blk_off = (size_t)j0 * MESH_PAGE_BYTES;
+            const size_t blk_bytes = x->bytes - blk_off < BLOCK_PAGES * MESH_PAGE_BYTES ? x->bytes - blk_off : BLOCK_PAGES * MESH_PAGE_BYTES;
+            unsigned char *dst_ptr = (unsigned char *)base + (size_t)blk * MESH_PAGE_BYTES;
+            if (x->pre) premultiply(c->type, dst_ptr, x->data + blk_off, c->pre, blk_bytes / SIZE[c->type]);
+            else memcpy(dst_ptr, x->data + blk_off, blk_bytes);
+            for (uint32_t i = 0; i < dests; i++) {
+              const int d = x->to < 0 ? other(me, i) : x->to;
+              const struct extent *send = &channel->peer[d].send;
+              for (uint32_t k = 0; k < BLOCK_PAGES; k++) {
+                size_t poff;
+                const size_t pb = page_at(x->bytes, j0 + k, &poff);
+                xp[nx++] = (struct mesh_xfer){
+                  .src_page = sp0 + blk + k, .bytes = (uint32_t)pb,
+                  .dst_node = comm->node[d], .dst_index = send->idx[send->used + blk + k]
+                };
+              }
+            }
+          }
+          const int status = mesh_write(channel->context, xp, nx);
+          if (xp != stack_xfers) free(xp);
+          for (uint32_t b = 0; b < batch; b++) mesh_release(channel->context, sp0 + b);
+          if (status == ENOMEM) return 0;
+          if (status) {
+            *result = comm_fail(comm, ncclInternalError, "communicator %s: %s's write: %s", comm->name, CALL_NAME[c->what], strerror(status));
+            return -1;
+          }
+          for (uint32_t i = 0; i < dests; i++) {
+            const int d = x->to < 0 ? other(me, i) : x->to;
+            channel->peer[d].send.used += batch;
+          }
+          m->q += batch;
+          continue;
+        }
+      }
+
+      /* Scattered / tiny (< 8 pages) path */
+      if (batch > BLOCK_PAGES) batch = BLOCK_PAGES;
       uint32_t sp[SEND_BATCH];
       if (mesh_alloc(channel->context, batch, 1, NULL, sp)) {
         batch = 1;
@@ -1028,7 +1100,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
       uint32_t nx = 0;
       for (uint32_t b = 0; b < batch; b++) {
         size_t offset;
-        const size_t bytes = page_at(x->bytes, m->j + (uint64_t)b * CHANNELS, &offset);
+        const size_t bytes = page_at(x->bytes, page_of_channel(m->q + b, m->id), &offset);
         unsigned char *data = mesh_page_ptr(channel->context, sp[b]);
         if (x->pre) premultiply(c->type, data, x->data + offset, c->pre, bytes / SIZE[c->type]);
         else memcpy(data, x->data + offset, bytes);
@@ -1053,7 +1125,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
         const int d = x->to < 0 ? other(me, i) : x->to;
         channel->peer[d].send.used += batch;
       }
-      m->j += (uint64_t)batch * CHANNELS;
+      m->q += batch;
     }
   }
   return 0;
@@ -1062,7 +1134,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
 static void own_contribution(struct channel_phase *m, uint64_t q) {
   if (m->next[q] != (uint32_t)m->call->comm->rank) return;
   size_t offset;
-  size_t bytes = page_at(m->p->bytes, m->id + q * CHANNELS, &offset);
+  size_t bytes = page_at(m->p->bytes, page_of_channel(q, m->id), &offset);
   if (!m->next[q]) memcpy(m->p->acc + offset, m->p->own + offset, bytes);
   else combine_into(m->call->type, m->call->combine, m->p->acc + offset, m->p->own + offset, bytes / SIZE[m->call->type]);
   m->next[q]++;
@@ -1083,7 +1155,7 @@ static int take(struct channel_phase *m, int r, uint64_t q, uint32_t index, nccl
   }
   if (!entry.data) return 0;
   size_t offset;
-  const size_t bytes = page_at(x ? x->bytes : p->bytes, m->id + q * CHANNELS, &offset);
+  const size_t bytes = page_at(x ? x->bytes : p->bytes, page_of_channel(q, m->id), &offset);
   if (entry.bytes != bytes) {
     *result = comm_fail(comm, ncclInternalError, "page %u contains %u bytes; expected %zu", index, entry.bytes, bytes);
     return -1;
@@ -1125,7 +1197,7 @@ static int take_some(struct channel_phase *m, ncclResult_t *result) {
 static ncclResult_t channel_phase_begin(struct channel_phase *m, struct call *c, const struct phase *p, uint32_t id) {
   struct ncclComm *comm = c->comm;
   const int n = comm->nranks, me = comm->rank;
-  *m = (struct channel_phase){.call = c, .p = p, .channel = comm->channel + id, .id = id, .j = id,
+  *m = (struct channel_phase){.call = c, .p = p, .channel = comm->channel + id, .id = id, .q = 0,
                               .positions = p->acc ? channel_pages(pages_of(p->bytes), id) : 0};
   struct channel *ch = m->channel;
   for (int r = 0; r < n; r++) ch->peer[r].message = NULL;
@@ -1169,35 +1241,31 @@ struct work {
   struct said said[CHANNELS];
 };
 
-/* channel id's pages of the reduction's own contribution made in comm's scratch from `fill`, before anything reads
-   them */
 static void channel_fill(struct work *work, uint32_t id) {
   struct call *c = work->call;
   const struct phase *p = work->phase;
   if (!work->fill) return;
-  for (uint64_t j = id, pages = pages_of(p->bytes); j < pages; j += CHANNELS) {
+  for (uint64_t q = 0, n = channel_pages(pages_of(p->bytes), id); q < n; q++) {
     size_t offset;
-    const size_t bytes = page_at(p->bytes, j, &offset);
+    const size_t bytes = page_at(p->bytes, page_of_channel(q, id), &offset);
     if (c->premultiplied) premultiply(c->type, c->comm->scratch + offset, work->fill + offset, c->pre, bytes / SIZE[c->type]);
     else memcpy(c->comm->scratch + offset, work->fill + offset, bytes);
   }
 }
-/* channel id's pages of this rank's local copy */
 static void channel_local(struct work *work, uint32_t id) {
   const struct local *l = &work->local;
-  for (uint64_t j = id, pages = pages_of(l->bytes); j < pages; j += CHANNELS) {
+  for (uint64_t q = 0, n = channel_pages(pages_of(l->bytes), id); q < n; q++) {
     size_t offset;
-    const size_t bytes = page_at(l->bytes, j, &offset);
+    const size_t bytes = page_at(l->bytes, page_of_channel(q, id), &offset);
     memcpy(l->to + offset, l->from + offset, bytes);
   }
 }
-/* channel id's positions of the reduction's result divided by nranks (an integer average) */
 static void channel_divide(struct work *work, uint32_t id) {
   struct call *c = work->call;
   const struct phase *p = work->phase;
-  for (uint64_t j = id, pages = pages_of(p->bytes); j < pages; j += CHANNELS) {
+  for (uint64_t q = 0, n = channel_pages(pages_of(p->bytes), id); q < n; q++) {
     size_t offset;
-    const size_t bytes = page_at(p->bytes, j, &offset);
+    const size_t bytes = page_at(p->bytes, page_of_channel(q, id), &offset);
     truncdiv(c->type, p->acc + offset, p->acc + offset, bytes / SIZE[c->type], (uint64_t)c->comm->nranks);
   }
 }
@@ -1403,8 +1471,9 @@ static ncclResult_t call_move(struct call *c) {
     uint64_t most = phase_pages(p), local = pages_of(work.local.bytes);
     if (work.phases > 1 && phase_pages(work.phase + 1) > most) most = phase_pages(work.phase + 1);
     if (local > most) most = local;
+    const uint64_t blocks = (most + BLOCK_PAGES - 1u) / BLOCK_PAGES;
     const uint32_t threads = comm->attach->threads;
-    work.active = most < CHANNELS ? (uint32_t)most : CHANNELS;
+    work.active = blocks < CHANNELS ? (uint32_t)blocks : CHANNELS;
     work.threads = work.active < threads ? work.active : threads;
     if (work.active) result = work_launch(&work);
   }

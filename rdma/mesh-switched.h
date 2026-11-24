@@ -6,13 +6,17 @@
 #include <string.h>
 
 /* design/SPEC-flat-page-dma-bridge.md */
-#define MESH_SWITCH_MAGIC 0x5357434Au
+#define MESH_SWITCH_MAGIC 0x5357434Bu
 #define MESH_SWITCH_LANES (MESH_PORTS*2u*MESH_LINK_STREAMS)
 #define MESH_SWITCH_N 8u
 #define MESH_SWITCH_LINKS 64u
 #define MESH_SWITCH_FLIGHT 4096u
 #define MESH_SWITCH_LOGS (MESH_PORTS+1u)
 #define MESH_SWITCH_PARENT MESH_PORTS
+#define MESH_SWITCH_CLASSES 3u
+#define MESH_CLS_INLINE 0u
+#define MESH_CLS_SCAT   1u
+#define MESH_CLS_BULK8  2u
 
 _Static_assert(MESH_SWITCH_N<=64 && MESH_SWITCH_N<=MESH_NODES,"a node a bit");
 _Static_assert(!(MESH_SWITCH_FLIGHT&(MESH_SWITCH_FLIGHT-1)) && MESH_SWITCH_FLIGHT<=(UINT64_C(1)<<48),"flight size");
@@ -57,8 +61,8 @@ _Static_assert(2*MESH_LINK_STREAMS<=8,"a port's plan a byte of its line");
 struct mesh_switch {
   uint32_t magic,padding;
   _Alignas(64) _Atomic uint64_t port[MESH_PORTS];
-  _Alignas(64) _Atomic uint64_t port_q[MESH_PORTS];
-  _Alignas(64) _Atomic uint64_t tx_head[MESH_PORTS];
+  _Alignas(64) _Atomic uint64_t port_q[MESH_PORTS][MESH_SWITCH_CLASSES];
+  _Alignas(64) _Atomic uint64_t tx_head[MESH_PORTS][MESH_SWITCH_CLASSES];
   _Alignas(64) _Atomic uint64_t view_version;
   struct mesh_switch_view view[2];
   struct mesh_switch_cable cable[MESH_PORTS];
@@ -87,9 +91,23 @@ static inline struct mesh_switch_cable *mesh_switch_cable_of(struct mesh_switch 
 static inline struct mesh_switch *mesh_switch_of(struct hdr *m){ return (struct mesh_switch *)((char *)m+m->switch_off); }
 static inline uint32_t mesh_switch_published(const _Atomic uint64_t *version){ return (uint32_t)(atomic_load_explicit(version,memory_order_acquire)&1); }
 
-/* Uniform 1-frame (4096 B) WRs across every serving QP */
-static inline uint32_t mesh_switch_lane_frames(uint32_t j){ (void)j; return 1u; }
-static inline uint64_t mesh_switch_lane_bytes(uint32_t l){ (void)l; return MESH_PAGE_BYTES; }
+/* Three wire QP classes per port over the flat 4096 B page space:
+   j = 0,1: 3-frame (12 KiB) 1-WR inline lane for <= 2 pages (e.g. 6 KiB);
+   j = 2,3: 1-frame (4 KiB) scattered zero-copy lane;
+   j = 4..7: 8-frame (32 KiB) bulk zero-copy contiguous lane. */
+static inline uint32_t mesh_switch_lane_frames(uint32_t j){
+  const uint32_t k=j%(2u*MESH_LINK_STREAMS);
+  return k<2u?3u:(k<4u?1u:8u);
+}
+static inline uint64_t mesh_switch_lane_bytes(uint32_t l){
+  return (uint64_t)mesh_switch_lane_frames(l)*MESH_PAGE_BYTES;
+}
+static inline uint32_t mesh_switch_class_frames(uint32_t cls){
+  return cls==MESH_CLS_INLINE?3u:(cls==MESH_CLS_BULK8?8u:1u);
+}
+static inline uint32_t mesh_switch_class_mask(uint32_t cls){
+  return cls==MESH_CLS_INLINE?0x03u:(cls==MESH_CLS_SCAT?0x0Cu:0xF0u);
+}
 
 static inline uint64_t mesh_switch_pack(float a,float b){ uint32_t x,y;memcpy(&x,&a,4);memcpy(&y,&b,4);return (uint64_t)x|(uint64_t)y<<32; }
 static inline void mesh_switch_unpack(uint64_t v,float *a,float *b){ const uint32_t x=(uint32_t)v,y=(uint32_t)(v>>32);memcpy(a,&x,4);memcpy(b,&y,4); }
@@ -277,53 +295,71 @@ static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,c
   return best_p;
 }
 
-/* Count data frames a DESC page requires on the wire (1 DESC + data_frames DATA). */
-static inline uint32_t mesh_desc_data_frames(const struct mesh_wire_desc *d){
+/* Count data WRs a DESC page requires on the wire for class `cls`. */
+static inline uint32_t mesh_desc_data_wrs(const struct mesh_wire_desc *d,uint32_t cls){
+  if(cls==MESH_CLS_INLINE)return 0u;
   const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
-  uint32_t frames=0;
-  for(uint32_t i=0;i<n;i++)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))frames++;
-  return frames;
+  uint32_t wrs=0;
+  if(cls==MESH_CLS_BULK8){
+    for(uint32_t i=0;i+8u<=n;i+=8u)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))wrs++;
+    return wrs;
+  }
+  for(uint32_t i=0;i<n;i++)if(!(d->e[i].flags&MESH_WIRE_SAME_DATA))wrs++;
+  return wrs;
 }
 
 /* Release a DESC page and every unique src_page it still holds (for dead-child / drop cleanup). */
-static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t dpage,uint32_t target_port,uint32_t ring,int unqueue){
+static inline void mesh_desc_drop(struct hdr *m,struct mesh_switch *sw,uint32_t dpage,uint32_t cls,uint32_t target_port,uint32_t ring,int unqueue){
   if(dpage>=mesh_flat_pages(m))return;
   const struct mesh_wire_desc *d=mesh_desc_at(m,dpage);
   const uint32_t n=d->count<MESH_WIRE_BATCH?d->count:MESH_WIRE_BATCH;
-  uint32_t frames=1u;
-  for(uint32_t i=0;i<n;i++){
-    if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
-      mesh_page_release(m,d->e[i].src_page);
-      frames++;
+  const uint32_t f=mesh_switch_class_frames(cls);
+  uint32_t pages_dropped=f;
+  if(cls==MESH_CLS_BULK8){
+    for(uint32_t i=0;i+8u<=n;i+=8u){
+      if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
+        mesh_page_release_run(m,d->e[i].src_page,8u);
+        pages_dropped+=8u;
+      }
+    }
+  }else if(cls==MESH_CLS_SCAT){
+    for(uint32_t i=0;i<n;i++){
+      if(!(d->e[i].flags&MESH_WIRE_SAME_DATA)){
+        mesh_page_release(m,d->e[i].src_page);
+        pages_dropped++;
+      }
     }
   }
-  mesh_page_release(m,dpage);
+  mesh_page_release_run(m,dpage,f);
   if(unqueue && target_port<MESH_PORTS)
-    atomic_fetch_sub_explicit(&sw->cable[target_port].queued,(uint64_t)frames*MESH_PAGE_BYTES,memory_order_relaxed);
-  MESH_SWITCH_COUNT(sw,ring,lost,frames);
+    atomic_fetch_sub_explicit(&sw->cable[target_port].queued,(uint64_t)pages_dropped*MESH_PAGE_BYTES,memory_order_relaxed);
+  MESH_SWITCH_COUNT(sw,ring,lost,pages_dropped);
 }
 
 static inline void mesh_switch_port_drop(struct hdr *m,struct mesh_switch *sw,uint32_t port,uint32_t ring){
-  uint32_t lists[2]={(uint32_t)atomic_exchange_explicit(&sw->tx_head[port],0,memory_order_seq_cst),
-                     mesh_llist_del_all(m,&sw->port_q[port])};
-  for(int k=0;k<2;k++){
-    uint32_t cur=lists[k];
-    while(cur){
-      const uint32_t d=cur-1u;
-      if(d>=mesh_flat_pages(m))break;
-      cur=atomic_load_explicit(&mesh_desc_at(m,d)->next,memory_order_relaxed);
-      mesh_desc_drop(m,sw,d,port,ring,1);
+  for(uint32_t cls=0;cls<MESH_SWITCH_CLASSES;cls++){
+    uint32_t lists[2]={(uint32_t)atomic_exchange_explicit(&sw->tx_head[port][cls],0,memory_order_seq_cst),
+                       mesh_llist_del_all(m,&sw->port_q[port][cls])};
+    for(int k=0;k<2;k++){
+      uint32_t cur=lists[k];
+      while(cur){
+        const uint32_t d=cur-1u;
+        if(d>=mesh_flat_pages(m))break;
+        cur=atomic_load_explicit(&mesh_desc_at(m,d)->next,memory_order_relaxed);
+        mesh_desc_drop(m,sw,d,cls,port,ring,1);
+      }
     }
   }
 }
 
 static inline void mesh_switch_flight_drop(struct hdr *m,struct mesh_switch *sw,uint32_t l,uint32_t ring){
   struct mesh_switch_lane *x=sw->lane+l%MESH_SWITCH_LANES;
+  const uint32_t f=mesh_switch_lane_frames(l);
   const uint64_t posted=atomic_load_explicit(&x->posted,memory_order_acquire);
   for(uint64_t at=atomic_load_explicit(&x->completed,memory_order_relaxed);at<posted;at++){
-    atomic_fetch_sub_explicit(&mesh_switch_cable_of(sw,l)->queued,MESH_PAGE_BYTES,memory_order_relaxed);
-    mesh_page_release(m,x->flight[at%MESH_SWITCH_FLIGHT].page);
-    MESH_SWITCH_COUNT(sw,ring,lost,1);
+    atomic_fetch_sub_explicit(&mesh_switch_cable_of(sw,l)->queued,(uint64_t)f*MESH_PAGE_BYTES,memory_order_relaxed);
+    mesh_page_release_run(m,x->flight[at%MESH_SWITCH_FLIGHT].page,f);
+    MESH_SWITCH_COUNT(sw,ring,lost,f);
   }
   atomic_store_explicit(&x->completed,posted,memory_order_relaxed);
 }
@@ -332,10 +368,11 @@ static inline uint32_t mesh_switch_receives_drop(struct hdr *m,struct mesh_switc
   uint32_t n=0;
   for(uint32_t l=first;l<first+count && l<MESH_SWITCH_LANES;l++){
     struct mesh_switch_lane *x=sw->lane+l;
+    const uint32_t f=mesh_switch_lane_frames(l);
     const uint64_t posted=atomic_load_explicit(&x->rx_posted,memory_order_acquire);
     for(uint64_t at=atomic_load_explicit(&x->rx_done,memory_order_relaxed);at<posted;at++){
-      mesh_page_release(m,x->rx_ring[at%MESH_SWITCH_FLIGHT]);
-      n++;
+      mesh_page_release_run(m,x->rx_ring[at%MESH_SWITCH_FLIGHT],f);
+      n+=f;
     }
     atomic_store_explicit(&x->rx_done,posted,memory_order_relaxed);
     if(atomic_exchange_explicit(&x->rx_rem,0,memory_order_acq_rel)){
