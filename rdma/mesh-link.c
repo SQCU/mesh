@@ -161,7 +161,7 @@ static void route_multicast_group(struct mesh_switch *sw,const struct mesh_switc
                                   const uint64_t *line,struct mesh_switch_terms *terms,
                                   const uint32_t *dsts,uint32_t nd,uint32_t origin,uint32_t from,uint64_t unit_bytes,
                                   uint32_t *out_ports){
-  mesh_switch_route_split(sw,v,now_ns,line,terms,dsts,nd,origin,from,unit_bytes,out_ports);
+  mesh_switch_route_split(sw,v,&togo,now_ns,line,terms,dsts,nd,origin,from,unit_bytes,out_ports);
 }
 
 #define RECEIVE_BATCH 64u
@@ -340,10 +340,10 @@ static void switch_sends(struct link *l,uint32_t served,const uint64_t *line){
       if(!sends_post(l,j,request,1u,first))return;
     }
   }
-  /* Async standalone backpressure pulse on quiet reverse j=0 ONLY when local egress queue >= 25 us. */
-  if(now_at>l->bp_sent_at && now_at-l->bp_sent_at>=40000u && (served&0x55u)){
+  /* Async standalone backpressure pulse on quiet reverse j=0 ONLY when local egress queue >= 12 us. */
+  if(now_at>l->bp_sent_at && now_at-l->bp_sent_at>=25000u && (served&0x55u)){
     const uint32_t max_w=mesh_switch_bp_pack(sw,v,line,now_at,NULL);
-    if(max_w>=25000u){
+    if(max_w>=12000u){
       const uint32_t j0=(uint32_t)__builtin_ctz(served&0x55u);
       struct mesh_switch_lane *x0=sw->lane+switch_lane(l->index,j0);
       const uint64_t out0=atomic_load_explicit(&x0->posted,memory_order_relaxed)-atomic_load_explicit(&x0->completed,memory_order_relaxed);

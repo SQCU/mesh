@@ -417,7 +417,8 @@ static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,c
 /* Closed-form Garg-Konemann dual-priced exact directed Steiner arborescence oracle (Dreyfus-Wagner for |S| <= 3).
    Uses live local cable backlog + async draining downstream backpressure (sw->bp) to jointly maximize fabric
    utilization, conserve cut capacity (1 cut crossing per multicast), and minimize latency on small inline packets. */
-static inline void mesh_switch_route_split(const struct mesh_switch *sw,const struct mesh_switch_view *v,uint64_t now_ns,
+static inline void mesh_switch_route_split(const struct mesh_switch *sw,const struct mesh_switch_view *v,
+                                           const struct mesh_switch_togo *togo,uint64_t now_ns,
                                            const uint64_t *line,struct mesh_switch_terms *t,
                                            const uint32_t *dsts,uint32_t nd,uint32_t origin,uint32_t from,
                                            uint64_t unit_bytes,uint32_t *out_ports){
@@ -429,6 +430,15 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
   const uint32_t oi=mesh_switch_index(v,origin),fi=mesh_switch_index(v,from);
   const int is_relay=(origin!=v->self);
   const int is_small=(unit_bytes<=2u*MESH_PAGE_BYTES);
+  if(is_small){
+    uint32_t used=0;
+    for(uint32_t i=0;i<nd;i++){
+      const uint32_t tp=mesh_switch_route_dest(v,togo,line,t,dsts[i],origin,from);
+      out_ports[i]=tp;
+      if(tp<MESH_PORTS && !(used&(1u<<tp))){used|=1u<<tp;t[tp].backlog+=(double)unit_bytes/t[tp].rate;}
+    }
+    return;
+  }
   uint32_t avoid_mid=(1u<<self);
   if(oi<n)avoid_mid|=1u<<oi;
   if(fi<n)avoid_mid|=1u<<fi;
@@ -462,7 +472,7 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
     const double R=nb_rsum[nb]>0.0?nb_rsum[nb]:t[p].rate;
     const double W=t[p].backlog,L=t[p].own;
     const double tx=(double)unit_bytes/R;
-    const double cost=is_small?(W+L+tx):(tx*(1.0+W/12000.0)+0.15*L);
+    const double cost=tx*(1.0+W/3500.0)+0.15*L;
     sp[self][nb]=(float)cost;
     nh[self][nb]=(uint8_t)nb;
   }
@@ -474,7 +484,7 @@ static inline void mesh_switch_route_split(const struct mesh_switch *sw,const st
     const double W=mesh_switch_bp_wait(sw,a,b,now_ns);
     const double L=x->latency>0?x->latency:1500.0;
     const double tx=(double)unit_bytes/R;
-    const double cost=is_small?(W+L+tx):(tx*(1.0+W/12000.0)+0.15*L);
+    const double cost=tx*(1.0+W/3500.0)+0.15*L;
     if((float)cost<sp[a][b]){sp[a][b]=(float)cost;nh[a][b]=(uint8_t)b;}
   }
   for(uint32_t via=0;via<n;via++){
