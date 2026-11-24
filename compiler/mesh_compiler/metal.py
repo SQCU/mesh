@@ -712,6 +712,8 @@ def _recorder():
                 ('MetalProgramSignatureBind', C.c_int, [P, U, C.POINTER(mesh_graph.Signature), text, room]),
                 ('MetalProgramExternals', C.POINTER(ExternalUse), [P, C.POINTER(U)]),
                 ('MetalProgramRunArguments', C.c_int, [P, P, Q, Q, P, P, P, C.POINTER(Argument), U, text, room]),
+                ('MetalProgramBindArguments', P, [P, P, C.POINTER(Argument), U, text, room]),
+                ('MetalProgramRunBound', C.c_int, [P, P, Q, Q, P, P, U, text, room]),
                 ('MetalProgramRunObserved', C.c_int, [P, P, Q, Q, P, P, P, C.POINTER(Argument), U, text, room]),
                 ('MetalProgramUnits', C.POINTER(Unit), [P, C.POINTER(U), C.POINTER(C.POINTER(UnitSlice)),
                                                         C.POINTER(C.POINTER(U)), C.POINTER(C.POINTER(Q))]),
