@@ -453,12 +453,12 @@ static inline uint32_t mesh_page_alloc_contiguous(struct hdr *m,uint32_t count){
   const struct mesh_bmp_desc *d=&mesh_bitmaps_of(m)->pages;
   _Atomic uint64_t *l0=mesh_bmp_l0(m,d);
   _Atomic uint32_t *refs=mesh_refs(m);
+  static _Thread_local uint32_t cseed;
+  if(!cseed)cseed=(uint32_t)((uintptr_t)&cseed>>4)*2654435761u;
   if(count<=64u){
-    static _Thread_local uint32_t cseed;
-    if(!cseed)cseed=(uint32_t)((uintptr_t)&cseed>>4)*2654435761u;
     uint32_t probe=(cseed++)%d->l0_words;
     const uint64_t kmask=mesh_bmp_tail_mask(count);
-    for(uint32_t tries=0;tries<32;tries++){
+    for(uint32_t tries=0;tries<128;tries++){
       uint64_t v0=0;
       const uint32_t w0=mesh_bmp_find_word(m,d,probe,&v0);
       if(w0==MESH_ABSENT)break;
@@ -509,7 +509,10 @@ static inline uint32_t mesh_page_alloc_contiguous(struct hdr *m,uint32_t count){
     }
   }
   uint32_t run_start=0,run_len=0;
-  for(uint32_t w=0;w<d->l0_words;w++){
+  const uint32_t start_w=(cseed++)%d->l0_words;
+  for(uint32_t step=0;step<d->l0_words;step++){
+    const uint32_t w=(start_w+step)%d->l0_words;
+    if(step && !w)run_len=0;
     const uint64_t v=atomic_load_explicit(&l0[w],memory_order_relaxed);
     if(v==~UINT64_C(0)){
       if(!run_len)run_start=w<<6;

@@ -1027,30 +1027,42 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
       if ((uint64_t)batch > rem) batch = (uint32_t)rem;
       if (batch > min_left) batch = min_left;
 
-      /* Bulk 32 KiB contiguous path for aligned 8-page blocks (8 or 16 pages). */
+      /* Bulk 32 KiB O(1) SWAR 8-page run path (zero contig_pages contention). */
       if ((m->q & (BLOCK_PAGES - 1u)) == 0 && batch >= BLOCK_PAGES) {
-        batch &= ~(BLOCK_PAGES - 1u);
-        void *base = NULL;
-        int arc = mesh_alloc_contiguous(channel->context, batch, NULL, &base);
-        if (arc && batch > BLOCK_PAGES) {
-          batch = BLOCK_PAGES;
-          arc = mesh_alloc_contiguous(channel->context, batch, NULL, &base);
+        static _Thread_local uint32_t run_base, run_cur;
+        if (!run_base) {
+          uint64_t tid = 0;
+          pthread_threadid_np(NULL, &tid);
+          run_base = 1u + ((uint32_t)((tid ^ (tid >> 32) ^ (uint64_t)getpid()) * 2654435761u) >> 16 & 1023u) * 32u;
+          run_cur = run_base;
         }
-        if (!arc && base) {
-          const uint32_t sp0 = (uint32_t)(((unsigned char *)base - ((unsigned char *)channel->context->M + channel->context->M->data_off)) / MESH_PAGE_BYTES);
+        batch &= ~(BLOCK_PAGES - 1u);
+        const uint32_t want_blks = batch / BLOCK_PAGES;
+        uint32_t sp_blk[SEND_BATCH / BLOCK_PAGES], got_blks = 0;
+        for (; got_blks < want_blks; got_blks++) {
+          const uint32_t w = run_cur;
+          run_cur = run_base + ((run_cur - run_base + 1u) & 31u);
+          const uint32_t sp = mesh_page_alloc_run(channel->context->M, BLOCK_PAGES, w);
+          if (sp == MESH_PAGE_NONE) break;
+          sp_blk[got_blks] = sp;
+        }
+        if (got_blks > 0u) {
+          batch = got_blks * BLOCK_PAGES;
           struct mesh_xfer stack_xfers[SEND_BATCH * MESH_DESTS];
           struct mesh_xfer *xp = dests <= MESH_DESTS ? stack_xfers : malloc((size_t)batch * dests * sizeof *xp);
           if (!xp) {
-            for (uint32_t b = 0; b < batch; b++) mesh_release(channel->context, sp0 + b);
+            for (uint32_t b = 0; b < got_blks; b++) mesh_page_release_run(channel->context->M, sp_blk[b], BLOCK_PAGES);
             *result = comm_fail(comm, ncclSystemError, "communicator %s: out of memory", comm->name);
             return -1;
           }
           uint32_t nx = 0;
-          for (uint32_t blk = 0; blk < batch; blk += BLOCK_PAGES) {
+          for (uint32_t bi = 0; bi < got_blks; bi++) {
+            const uint32_t blk = bi * BLOCK_PAGES;
+            const uint32_t sp0 = sp_blk[bi];
             const uint64_t j0 = page_of_channel(m->q + blk, m->id);
             const size_t blk_off = (size_t)j0 * MESH_PAGE_BYTES;
             const size_t blk_bytes = x->bytes - blk_off < BLOCK_PAGES * MESH_PAGE_BYTES ? x->bytes - blk_off : BLOCK_PAGES * MESH_PAGE_BYTES;
-            unsigned char *dst_ptr = (unsigned char *)base + (size_t)blk * MESH_PAGE_BYTES;
+            unsigned char *dst_ptr = mesh_page_at(channel->context->M, sp0);
             if (x->pre) premultiply(c->type, dst_ptr, x->data + blk_off, c->pre, blk_bytes / SIZE[c->type]);
             else memcpy(dst_ptr, x->data + blk_off, blk_bytes);
             for (uint32_t i = 0; i < dests; i++) {
@@ -1060,7 +1072,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
                 size_t poff;
                 const size_t pb = page_at(x->bytes, j0 + k, &poff);
                 xp[nx++] = (struct mesh_xfer){
-                  .src_page = sp0 + blk + k, .bytes = (uint32_t)pb,
+                  .src_page = sp0 + k, .bytes = (uint32_t)pb,
                   .dst_node = comm->node[d], .dst_index = send->idx[send->used + blk + k]
                 };
               }
@@ -1068,7 +1080,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
           }
           const int status = mesh_write(channel->context, xp, nx);
           if (xp != stack_xfers) free(xp);
-          mesh_page_release_run(channel->context->M, sp0, batch);
+          for (uint32_t b = 0; b < got_blks; b++) mesh_page_release_run(channel->context->M, sp_blk[b], BLOCK_PAGES);
           if (status == ENOMEM) return 0;
           if (status) {
             *result = comm_fail(comm, ncclInternalError, "communicator %s: %s's write: %s", comm->name, CALL_NAME[c->what], strerror(status));
@@ -1079,7 +1091,7 @@ static int send_some(struct channel_phase *m, ncclResult_t *result) {
             channel->peer[d].send.used += batch;
           }
           m->q += batch;
-          return 0;
+          continue;
         }
       }
 
@@ -1183,8 +1195,9 @@ static int take_some(struct channel_phase *m, ncclResult_t *result) {
     struct extent *recv = &peer->receive;
     uint32_t room = comm->extent_pages - recv->used;
     uint64_t low = peer->low, end = peer->due - low > room ? low + room : peer->due;
+    uint64_t scan_end = low + 64u < end ? low + 64u : end;
     const unsigned char *taken = m->taken + peer->at;
-    for (uint64_t q = low; q < end; q++)
+    for (uint64_t q = low; q < scan_end; q++)
       if (!taken[q] && take(m, r, q, recv->idx[recv->used + (uint32_t)(q - low)], clr, &nclr, result)) {
         if (nclr) mesh_clear_indices(m->channel->context, clr, nclr);
         return -1;

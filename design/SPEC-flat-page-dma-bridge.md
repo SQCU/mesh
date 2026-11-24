@@ -9,7 +9,7 @@ The bridge is an asynchronous DMA memory container over `/mesh0` that moves 4096
 Real hardware rules (Apple TN3205, `ibv_post_send(3)`, `ibv_post_recv(3)`, `ibv_poll_cq(3)`, and macOS 26/27 measurements):
 
 - **H1:** `IBV_WR_SEND` / `ibv_post_recv` only over `IBV_QPT_UC` (no RDMA WRITE, no immediate data).
-- **H2 / H10:** Work queues are sized in 4096-byte frames (`max_send_wr`, `max_recv_wr <= 4095`). Matching SEND and RECV must cover the same frame count (`f = 1`, 4096 B uniform across all QPs).
+- **H2 / H10:** Work queues are sized in 4096-byte frames (`max_send_wr`, `max_recv_wr <= 4095`). Matching SEND and RECV on a QP must cover the same frame count (`f = 2` on even QPs, `f = 8` on odd QPs).
 - **H9 / H11:** `ibv_post_recv` fixes the receive address before arrival; hardware credit flow control holds a SEND until a matching RECV is posted.
 - **H13:** `ibv_post_send` and `ibv_post_recv` accept linked lists of work requests in a single provider call.
 - **H14:** A work request's buffer may be reused only after its CQ completion is polled.
@@ -46,12 +46,14 @@ There is **no `mesh_pd` pool**, **no owner byte array**, **no client write ring*
 
 ## 4. Wire Format (`MESH_VERSION = 168`, `MESH_LAYOUT = 200`)
 
-Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each serving stream pair (`j = 0, 1` per port under `plan = 3`) uses two fixed-frame RC queue pair classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
+Client pages `P[0..N-1]` are raw 4096-byte pages with no inline headers and no pool classes. On the wire, each serving stream pair (`j = 0, 1` per port under `plan = 3`) uses two fixed-frame queue pair classes (`TN3205`, exact `f * 4096 B` SEND/RECV matching, `max_sge = 1`):
 
-- **Class 0 (even `j`, `f = 2`, 8 KiB, `MESH_WIRE_INLINE`):** 1-WR inline lane carrying up to 2 raw 4 KiB pages (`h+0` up to 4096 B, `h+1` up to 3824 B) plus a 272-byte `struct mesh_wire_tail` in the unused tail `[3824..4095]` of `h+1`. Fits 6 KiB (`4096 + 2048 B`) in one 8 KiB WR with zero-copy landing via `XCHG(W[dst_idx], pack(h + slot, b))`.
-- **Class 1 (odd `j`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Bulk zero-copy lane (`1 DESC + m DATA`, 8 contiguous pages = 32 KiB per WR) with cross-poll relay batching. Each 8-page RECV lands 8 raw 4 KiB pages zero-copy into `W[dst_idx_0..7]` and relays zero-copy at 32 KiB WR granularity.
+- **Class 0 (even `j = 0`, `f = 2`, 8 KiB):** Carries both:
+  1. **1-WR inline small packets (`tl->count` in `1..16`, `MESH_WIRE_INLINE`):** Up to 2 raw 4 KiB pages (`h+0` up to 4096 B, `h+1` up to 3824 B) plus a 272-byte `struct mesh_wire_tail` at bytes `[3824..4095]` of `h+1`. Fits 6 KiB (`4096 + 2048 B`) in one single 8 KiB WR with zero-copy landing via `XCHG(W[dst_idx], pack(h + slot, b))`.
+  2. **Bulk descriptors (`tl->count == MESH_TAIL_BULK_DESC` = `0xffffffff`):** `h+0` holds a `struct mesh_wire_desc` (up to 255 entries = 31 eight-page blocks = 992 KiB of Class 1 payload per 8 KiB descriptor; `h+1` is released immediately on arrival).
+- **Class 1 (odd `j = 1`, `f = 8`, 32 KiB, `MESH_WIRE_BULK8`):** Pure raw 32 KiB client data WRs (8 contiguous raw 4 KiB pages `h..h+7`, zero metadata on `j = 1`). Because both `j = 0` and `j = 1` are strict FIFO queue pairs and one port poller posts `(DESC_k on j = 0, DATA_{k,0..m-1} on j = 1)` sequentially, the receiver pairs `rx_desc_q` (from `j = 0`) and `rx_data_q` (from `j = 1`) in exact 1-to-1 FIFO order, landing 8 raw pages zero-copy into `W[dst_idx_0..7]` or relaying zero-copy at 32 KiB granularity (`~1.6%` wire overhead at bulk sizes).
 
-Multicast groups sharing a `src_page` (or 8-page contiguous run) route direct neighbors first, then multi-hop destinations piggyback for free (`MESH_WIRE_SAME_DATA`) on any already-chosen port that reaches them.
+Multicast groups sharing a `src_page` (or 8-page contiguous run) route direct neighbors first, then multi-hop destinations piggyback for free (`MESH_WIRE_SAME_DATA`) on any already-chosen port whose peer directly connects to them.
 
 ```c
 #define MESH_WIRE_SAME_DATA 1u
@@ -134,7 +136,7 @@ DF2  T_C: for r = 0..k-1:
             release(p); release(page_of(old))
 
 W1   T_C: local xfers: hold(src_page); old <- XCHG(M[W[dst_idx]], pack(src_page, bytes)); release(old)
-W2   T_C: remote chunks (<= 63, wire cap 255): q <- alloc_page(); hold each src_page; fill M[P[q]]
+W2   T_C: remote chunks (<= 240, wire cap 255): q <- alloc_page(); hold each src_page; fill M[P[q]]
 W3   T_C: h <- M[pending]                                                  [relaxed]  llist.c:29
 W4   T_C: M[P[q].next] <- h                                                [relaxed]  llist.c:32
 W5   T_C: ok <- CAS(M[pending], h, q + 1); !ok -> h <- read; W4           [seq_cst, fail relaxed]
@@ -144,33 +146,41 @@ W5   T_C: ok <- CAS(M[pending], h, q + 1); !ok -> h <- read; W4           [seq_c
 
 ```
 LR1  T_p: n <- poll CQ(completion) -> wc[0..n); error -> child_halt(EIO)
-LR2  T_p: (n > 0) -> fence                                                 [acquire]
+          (n == 0) -> flush relay_bulk_dp[0..7]; return
+LR2  T_p: fence                                                            [acquire]
           for each wc[i] = (qp j, slot s):
             h <- M[rx_ring[j][s % D]]; rx_done[j] += 1
-LR3  T_p:   (rx_rem[j] == 0) -> rx_desc[j] <- h; rx_pos[j] <- 0; rx_rem[j] <- clamp(P[h].count, 0, 255)
-LR4  T_p:   (rx_rem[j] > 0) -> consume DATA frame h for entry rx_pos[j] and any following SAME_DATA entries:
-              dst == self -> old <- XCHG(M[W[dst_idx]], pack(h, bytes)) [acq_rel]; release(old)
-              dst != self -> route(dst) -> port q; append to relay_desc[q] (0 copy)
-            (rx_rem[j] == 0) -> release(rx_desc[j])
-LR5  T_p: flush relay_desc[q] via llist_add to M[port_q[q]] (or local tx_head[p])
+LR3  T_p:   (f == 2 && tail(h).count == BULK_DESC) -> release(h+1); push h to rx_desc_q
+            (f == 2 && inline) -> land local slots via XCHG(W[dst_idx], pack(h+slot, b)) or pack relay_inl[q]
+            (f == 8) -> push h to rx_data_q
+LR4  T_p: while (!empty(rx_desc_q) && !empty(rx_data_q)):
+            pop DATA run h..h+7 for next 8-entry group (and following SAME_DATA groups) in front(rx_desc_q):
+              dst == self -> for k=0..7: old <- XCHG(M[W[dst_idx_k]], pack(h+k, b_k)) [acq_rel]; release(old)
+              dst != self -> route(dst) -> port q; append h..h+7 to relay_bulk_dp[q] (0 copy; flush >= 4 WRs)
+            when front(rx_desc_q) finishes -> pop & release(dp)
+LR5  T_p: flush relay_inl[q] via llist_add to M[port_q[q][INLINE]] (or local tx_head[p][INLINE])
 
-SR1  T_p: refill each serving QP j up to D with alloc_page_batch + post RECV (H9, H13)
+SR1  T_p: refill each serving QP j up to D with alloc_page_run(f) + post RECV (H9, H13)
 
 TK1  T_p: (M[pending] == 0) -> skip                                        [relaxed]  llist.h:218
 TK2  T_p: list <- llist_reverse_order(XCHG(M[pending], 0))                 [seq_cst]  llist.h:266
-TK3  T_p: route each batch q: all-own-port -> append q directly to tx_head[p];
-          else partition by route(dst) into per-port DESC pages (merging SAME_DATA), release(q), llist_add to port_q[r]
+TK3  T_p: partition each batch q into 8-page contiguous bulk runs (port_q[r][BULK8], 2-page DESC)
+          and <= 2-page inline frames (port_q[r][INLINE], 2-page inline), merging SAME_DATA; release(q)
 
-SD1  T_p: (M[port_q[p]] != 0) -> append llist_reverse_order(XCHG(M[port_q[p]], 0)) to tx_head[p] [seq_cst]
-SD2  T_p: while tx_head[p] != 0:
-            pop DESC d; pick least-loaded QP j with SQ room >= 1 + m_data;
-            post SEND(j, linked list [d, data_0..data_{m-1}]) (H12, H13); record pages in flight[j]
+SD1  T_p: for cls in {INLINE, BULK8}:
+            (M[port_q[p][cls]] != 0) -> append llist_reverse_order(XCHG(M[port_q[p][cls]], 0)) to tx_head[p][cls]
+SD2  T_p: while tx_head[p][INLINE] != 0:
+            pop d; post 1x 8 KiB SEND on even QP j0; record d in flight[j0]
+          while tx_head[p][BULK8] != 0:
+            peek d (m_data unique 8-page runs); check room(j0) >= 1 && room(j1) >= m_data;
+            pop d; set tail(d).count = BULK_DESC;
+            post 1x 8 KiB SEND(d) on j0 and linked list [data_0..data_{m-1}] (32 KiB each) on j1 (H12, H13)
 
 SC1  T_p: n <- poll CQ(sent) -> wc[0..n); error -> child_halt(EIO)
-SC2  T_p: for each wc[i]: p <- flight[j][s % D]; sq_done[j] += 1; release(p)  (H14)
+SC2  T_p: for each wc[i]: p <- flight[j][s % D]; sq_done[j] += 1; release_run(p, f(j))  (H14)
 ```
 
 ## 6. Dead-Child and Crash Safety
 
 - **Killed client (`T_C`):** Before `W5`, `M[pending]` is untouched. After `W5`, `P[q]` is fully populated and every `src_page` is already held `+1`. No permanent gap is possible.
-- **Killed port child (`T_p`):** After `waitpid` (`H18`), parent `T_E` walks `flight[j][sq_done..sq_posted)`, `rx_ring[j][rx_done..rx_posted)`, `rx_desc[j]` (if `rx_rem > 0`), `tx_head[p]`, and `llist_del_all(port_q[p])`, releasing every held page once in `O(D + queued)` time.
+- **Killed port child (`T_p`):** After `waitpid` (`H18`), parent `T_E` walks `flight[j][sq_done..sq_posted)`, `rx_ring[j][rx_done..rx_posted)`, `tx_head[p][cls]`, and `llist_del_all(port_q[p][cls])`, releasing every held page run once in `O(D + queued)` time.

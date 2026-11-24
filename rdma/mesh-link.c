@@ -447,8 +447,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
   const int count=l->provider.poll(l->provider.completion,RECEIVE_BATCH,done);
   if(count<0){link_failed(l,EIO,3);return 0;}
   if(!count){
-    if(l->rx_desc_h==l->rx_desc_t && l->rx_data_h==l->rx_data_t)
-      for(uint32_t tp=0;tp<MESH_PORTS;tp++)relay_bulk_flush_port(l,sw,tp);
+    for(uint32_t tp=0;tp<MESH_PORTS;tp++)relay_bulk_flush_port(l,sw,tp);
     return 0;
   }
   atomic_thread_fence(memory_order_acquire);
@@ -606,7 +605,7 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
       }
       l->relay_bulk_n[tp]+=8u;
       MESH_SWITCH_COUNT(sw,l->index,forwards,8);
-      if(l->relay_bulk_n[tp]>=240u || l->relay_bulk_wrs[tp]>=8u)
+      if(l->relay_bulk_n[tp]>=240u || l->relay_bulk_wrs[tp]>=4u)
         relay_bulk_flush_port(l,sw,tp);
     }
     l->rx_desc_pos=pos;

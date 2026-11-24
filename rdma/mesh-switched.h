@@ -284,8 +284,7 @@ static inline int mesh_switch_reaches(const struct mesh_switch_view *v,uint32_t 
 }
 
 /* Earliest-arrival next-hop port for destination `dst_node`, avoiding {self, origin_node, from_node}.
-   On relay (origin != self), direct delivery to dst_node always wins over multi-hop detours.
-   At origin (origin == self), <= 2-hop paths always win over >= 3-hop paths when available. */
+   On relay (origin != self), direct delivery to dst_node always wins over multi-hop detours. */
 static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,const struct mesh_switch_togo *togo,
                                               const uint64_t *line,const struct mesh_switch_terms *t,
                                               uint32_t dst_node,uint32_t origin_node,uint32_t from_node){
@@ -306,7 +305,7 @@ static inline uint32_t mesh_switch_route_dest(const struct mesh_switch_view *v,c
     if(nb>=nodes || (avoid>>nb&1))continue;
     if(nb!=d && !mesh_switch_reaches(v,nb,avoid,d))continue;
     const double cost=t[p].backlog+t[p].own+(nb==d?0.0:(double)togo->to[nb][d]);
-    const int pref=is_relay?(nb==d):(nb==d || mesh_switch_link_of((struct mesh_switch_view *)v,peer,dst_node)!=NULL);
+    const int pref=is_relay?(nb==d):1;
     const int home=(p==mesh_switch_home);
     if(pref){
       const int bh=(best_pref_p==mesh_switch_home);
