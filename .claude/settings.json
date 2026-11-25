@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 30,
+            "statusMessage": "Warnings from the records of new commits",
+            "async": true,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-told.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task|SendMessage|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-brief-gate.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 150,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-stop.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 150,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-stop.py",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
