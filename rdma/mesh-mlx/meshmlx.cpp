@@ -519,6 +519,7 @@ std::string tname(mx::Dtype t) {
 
 // Common MSL prelude for system-coherent /mesh0 access, doorbells, W[] polling, and GF(2)^6 FWHT-64.
 const char* kMeshMslPrelude = R"MSL(
+#pragma METAL internals : enable
 #include <metal_stdlib>
 using namespace metal;
 
@@ -545,7 +546,8 @@ inline void mesh_ring_ret(device ulong* db, uint slot, ulong seq) {
 }
 inline uint mesh_poll_land(const device ulong* W, uint idx, uint want_tag) {
   const volatile coherent(system) device ulong* wp = (const volatile coherent(system) device ulong*)W + idx;
-  for (uint spin = 0; spin < 200000000u; spin++) {
+  for (uint spin = 0; spin < 4500000u; spin++) {
+    mesh_sys_fence();
     ulong w = *wp;
     uint lo = uint(w & 0xfffffffful);
     uint tag = uint(w >> 48);
@@ -1394,7 +1396,7 @@ template <uint B, uint SG, uint S, uint ROWS, uint VEC, uint UNROLL>
 }
 
 std::string gemm_source() {
-  return std::string("#include <metal_stdlib>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n") + R"MSL(
+  return std::string("#include <metal_stdlib>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n#pragma METAL internals : enable\n") + R"MSL(
 using namespace metal;
 #define UNROLL_ALL _Pragma("clang loop unroll(full)")
 template <typename T>
