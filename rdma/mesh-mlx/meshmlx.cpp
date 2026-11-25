@@ -1517,10 +1517,9 @@ template <typename T, int UM, int UN, int SM, int SN, int KS>
   if (t < n4) y[t] = x[t];
 }
 
-inline void group_arrive_db(device ulong* db, device atomic_uint* done, constant uint* pub_cfg, uint arrivals, uint i, bool stored) {
+inline void group_arrive_db(device ulong* db, device atomic_uint* done, constant uint* pub_cfg, uint arrivals, uint i, threadgroup bool& last, bool stored) {
   if (stored) mesh_sys_fence();
   threadgroup_barrier(mem_flags::mem_device);
-  threadgroup bool last;
   if (i == 0) {
     mesh_sys_fence();
     last = atomic_fetch_add_explicit(done, 1u, memory_order_relaxed) == arrivals - 1u;
@@ -1581,7 +1580,8 @@ template <typename T, int vecs_per_tg, int k_lanes>
           else if (wmode != 3u) mesh_sys_write<T>(send, at, y);
         }
   }
-  if (wmode != 3u) group_arrive_db(db, done, pub_cfg, tgpg.x * tgpg.y, i, k_lane == 0 && out_row < out_vec_size);
+  threadgroup bool last;
+  if (wmode != 3u) group_arrive_db(db, done, pub_cfg, tgpg.x * tgpg.y, i, last, k_lane == 0 && out_row < out_vec_size);
 }
 
 template <typename T, int UM, int UN, int SM, int SN, int KS>
@@ -1655,7 +1655,8 @@ template <typename T, int UM, int UN, int SM, int SN, int KS>
       }
     }
   }
-  if (wmode != 3u) group_arrive_db(db, done, pub_cfg, tgpg.x, i, true);
+  threadgroup bool last;
+  if (wmode != 3u) group_arrive_db(db, done, pub_cfg, tgpg.x, i, last, true);
 }
 
 #define WIDE(NV, KL) template [[host_name("gemm_rows_wide_" #NV "_" #KL)]] [[kernel]] void gemm_rows_wide<bfloat, NV, KL>(const device bfloat*, const device bfloat*, device bfloat*, constant int*, uint3, uint3, uint, uint);
