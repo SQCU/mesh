@@ -56,3 +56,9 @@ void(entity this, float ratingscale, vector org, float sradius) havocbot_goalrat
 void(entity this, float ratingscale, vector org, float sradius) havocbot_goalrating_enemyplayers;
 
 .entity draggedby;
+
+.float bot_plan_pwr_w;
+.float bot_plan_atk_cyl;
+.float bot_plan_focus_team;
+.float bot_plan_posture;
+.float bot_plan_in_cart;

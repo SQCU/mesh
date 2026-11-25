@@ -116,7 +116,8 @@ void payload_occupancy(entity cart)
 		payload_w[j] = 0;
 		payload_n[j] = 0;
 	}
-	FOREACH_CLIENT(true, { it.plc_in = 0; });
+	int cid_tag = cart.plc_cart_id + 1;
+	FOREACH_CLIENT(true, { it.plc_in = 0; if (it.bot_plan_in_cart == cid_tag) it.bot_plan_in_cart = 0; });
 	FOREACH_CLIENT(IS_PLAYER(it) && !IS_DEAD(it),
 	{
 		int j = Team_TeamToIndex(it.team);
@@ -128,6 +129,7 @@ void payload_occupancy(entity cart)
 		if(vlen(vec2(d)) > r)
 			continue;
 		it.plc_in = j;
+		it.bot_plan_in_cart = cid_tag;
 		payload_n[j] += 1;
 	});
 	for(int j = 1; j <= NUM_TEAMS; ++j)
@@ -777,13 +779,13 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 	int myteam = Team_TeamToIndex(this.team);
 	int archetype = etof(this) % 4;
 	int pref_cart = payload_cart_count > 0 ? (etof(this) % payload_cart_count) : 0;
+	bool has_plan = (this.plc_pl_f_id == etof(this));
 	int plan_cart = -1;
-	float plan_boost = 1.0;
-	if (this.plc_pl_f_id == etof(this) && this.plc_pl_f_pick >= 0 && this.plc_pl_f_pick < PLC_MAX_CARTS * 5)
-	{
-		plan_cart = floor(this.plc_pl_f_pick / 5);
-		plan_boost = 1.5 + bound(0, this.plc_pl_f_w0 + this.plc_pl_f_w1 + this.plc_pl_f_w2, 3.0);
-	}
+	float plan_ds = 0;
+	if (has_plan && this.plc_pl_f_pick >= 0 && this.plc_pl_f_pick < PLC_MAX_CARTS)
+		plan_cart = floor(this.plc_pl_f_pick);
+	if (has_plan)
+		plan_ds = bound(-600, this.plc_pl_f_cart_ds, 600);
 	IL_EACH(g_payload_carts, true,
 	{
 		vector cpos = it.origin + it.view_ofs;
@@ -796,21 +798,72 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 			weight = (archetype == 1 ? 2.4 : 1.7);
 		else if (archetype == 0 || archetype == 3)
 			weight = 1.8;
-		if (plan_cart >= 0)
+		if (has_plan)
 		{
-			if (it.plc_cart_id == plan_cart)
-				weight *= plan_boost;
+			float u = 0;
+			if (it.plc_cart_id == 0) u = this.plc_pl_f_w0;
+			else if (it.plc_cart_id == 1) u = this.plc_pl_f_w1;
+			else if (it.plc_cart_id == 2) u = this.plc_pl_f_w2;
+			weight *= pow(2.7182818, bound(-2.0, u, 2.0));
+			if (plan_cart >= 0 && it.plc_cart_id == plan_cart)
+				weight *= 2.2;
 		}
 		else if (it.plc_cart_id == pref_cart)
 			weight *= 1.35;
 		entity goal = it;
-		if (vdist(cpos - org, >, autocvar_g_payload_push_radius * 1.5))
+		if (has_plan && fabs(plan_ds) > 120)
+		{
+			vector tpos = payload_pos(it, bound(0, it.plc_s + plan_ds, it.plc_length));
+			entity track_wp = payload_nearest_waypoint(tpos);
+			if (track_wp && !wasfreed(track_wp))
+				goal = track_wp;
+		}
+		else if (vdist(cpos - org, >, autocvar_g_payload_push_radius * 1.5))
 		{
 			entity best_wp = it.plc_wp;
 			if (best_wp && !wasfreed(best_wp))
 				goal = best_wp;
 		}
 		navigation_routerating(this, goal, ratingscale * weight, 10000);
+	});
+}
+
+void havocbot_goalrating_payload_nav_flow(entity this, float nav_x, float nav_y, float nav_w)
+{
+	if (nav_w <= 0.05)
+		return;
+	vector target = vec2(nav_x, nav_y);
+	entity best_wp = NULL;
+	float best_d2 = 1000000000;
+	IL_EACH(g_waypoints, !(it.wpflags & WAYPOINTFLAG_TELEPORT),
+	{
+		float dx = it.origin.x - target.x;
+		float dy = it.origin.y - target.y;
+		float d2 = dx * dx + dy * dy;
+		if (d2 < best_d2)
+		{
+			best_d2 = d2;
+			best_wp = it;
+		}
+	});
+	if (best_wp)
+		navigation_routerating(this, best_wp, 32000 * bound(0, nav_w, 4.0), 10000);
+}
+
+void havocbot_goalrating_payload_focus_team(entity this, float ratingscale, vector org, float sradius, int focus_team)
+{
+	if (focus_team <= 0 || autocvar_bot_nofire)
+		return;
+	int myteam = Team_TeamToIndex(this.team);
+	if (focus_team == myteam)
+		return;
+	FOREACH_CLIENT(IS_PLAYER(it) && !IS_DEAD(it) && it != this,
+	{
+		if (Team_TeamToIndex(it.team) != focus_team)
+			continue;
+		if (vdist(it.origin - org, >, sradius))
+			continue;
+		navigation_routerating(this, it, ratingscale, 4000);
 	});
 }
 
@@ -824,13 +877,33 @@ void havocbot_role_payload(entity this)
 		float cart_scale = (archetype == 2) ? 18000 : (archetype == 0 ? 36000 : 30000);
 		float item_scale = (archetype == 2) ? 22000 : 10000;
 		float enemy_scale = (archetype == 1 || archetype == 3) ? 14000 : 8000;
+		int focus_team = 0;
+		float focus_scale = 0;
+		float nav_x = 0, nav_y = 0, nav_w = 0;
+		if (this.plc_pl_f_id == etof(this))
+		{
+			cart_scale *= pow(2.7182818, bound(-2.0, this.plc_pl_f_w3, 2.0));
+			enemy_scale *= pow(2.7182818, bound(-2.0, this.plc_pl_f_w4, 2.0));
+			item_scale *= pow(2.7182818, bound(-2.0, this.plc_pl_f_item_w, 2.5));
+			focus_team = floor(this.plc_pl_f_leader + 0.5);
+			focus_scale = enemy_scale * 0.85;
+			nav_x = this.plc_pl_f_nav_x;
+			nav_y = this.plc_pl_f_nav_y;
+			nav_w = this.plc_pl_f_nav_w;
+		}
 		navigation_goalrating_start(this);
 		havocbot_goalrating_payload_carts(this, cart_scale, this.origin, 15000);
-		havocbot_goalrating_items(this, item_scale, this.origin, 8000);
+		havocbot_goalrating_items(this, item_scale, this.origin, 12000);
 		havocbot_goalrating_enemyplayers(this, enemy_scale, this.origin, 10000);
+		if (focus_team > 0)
+			havocbot_goalrating_payload_focus_team(this, focus_scale, this.origin, 10000, focus_team);
+		if (nav_w > 0.05)
+			havocbot_goalrating_payload_nav_flow(this, nav_x, nav_y, nav_w);
 		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);
 		navigation_goalrating_end(this);
 		navigation_goalrating_timeout_set(this);
+		if (this.plc_pl_f_id == etof(this))
+			navigation_goalrating_timeout_expire(this, 0.75);
 	}
 }
 

@@ -1264,6 +1264,19 @@ void havocbot_movetogoal(entity this)
 				evadedanger = '0 0 0';
 		}
 		dir = normalize(dir + dodge + do_break + evadedanger);
+		if (this.bot_plan_posture != 0 && this.enemy && !IS_DEAD(this.enemy))
+		{
+			vector evec = this.enemy.origin - this.origin;
+			evec.z = 0;
+			if (vlen2(evec) > 1)
+			{
+				evec = normalize(evec);
+				float sgn = (sin(time * 2.1 + etof(this)) >= 0) ? 1 : -1;
+				vector etan = vec2(-evec.y, evec.x) * sgn;
+				float p = bound(-1, this.bot_plan_posture, 1);
+				dir = normalize(dir + evec * (p * 0.85) + etan * (fabs(p) * 0.35));
+			}
+		}
 	}
 
 	makevectors(this.v_angle);
@@ -1272,7 +1285,7 @@ void havocbot_movetogoal(entity this)
 	CS(this).movement_y = dir * v_right * maxspeed;
 	CS(this).movement_z = dir * v_up * maxspeed;
 
-	if (SUPERBOT && this.aistatus == AI_STATUS_ATTACKING && !dodge)
+	if (SUPERBOT && this.aistatus == AI_STATUS_ATTACKING && !dodge && this.bot_plan_posture == 0)
 	{
 		if (!this.randomdirectiontime || this.randomdirectiontime + 0.35 < time)
 		{
@@ -1390,6 +1403,17 @@ void havocbot_chooseenemy(entity this)
 			vector v = (it.absmin + it.absmax) * 0.5;
 			float distance = vlen2(v - eye);
 
+			float prio = 1;
+			if (this.bot_plan_atk_cyl != 0 || this.bot_plan_focus_team > 0)
+			{
+				float lp = 0;
+				if (it.bot_plan_in_cart > 0)
+					lp += bound(-2, this.bot_plan_atk_cyl, 3);
+				if (this.bot_plan_focus_team > 0 && Team_TeamToIndex(it.team) == this.bot_plan_focus_team)
+					lp += 1.4;
+				prio = pow(2.7182818, bound(-2.5, lp, 3.5));
+			}
+
 			if (SUPERBOT)
 			{
 				if (bot_shouldattack(this, it))
@@ -1397,7 +1421,7 @@ void havocbot_chooseenemy(entity this)
 
 					float health = GetResource(it, RES_HEALTH);
 					float armor  = GetResource(it, RES_ARMOR);
-					float rating = bound(50, health + armor, 250) * distance;
+					float rating = (bound(50, health + armor, 250) * distance) / prio;
 					if (!best || (rating < bestrating))
 					{
 						traceline(eye, v, true, this);
@@ -1411,13 +1435,14 @@ void havocbot_chooseenemy(entity this)
 			}
 			else
 			{
-				if (distance < bestrating && bot_shouldattack(this, it))
+				float erating = distance / prio;
+				if (erating < bestrating && bot_shouldattack(this, it))
 				{
 					traceline(eye, v, true, this);
 					if (trace_ent == it || trace_fraction >= 1)
 					{
 						best = it;
-						bestrating = distance;
+						bestrating = erating;
 					}
 				}
 			}

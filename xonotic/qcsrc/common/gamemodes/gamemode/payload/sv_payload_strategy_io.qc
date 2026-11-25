@@ -280,8 +280,15 @@ void payload_perceive(entity bot)
 		if (trace_fraction < 1)
 			continue;
 		float kind = it.solid ? PLC_EVT_KIND_ITEM_HERE : PLC_EVT_KIND_ITEM_GONE;
+		float iclass = 1;
+		if (it.itemdef.instanceOfPowerup)
+			iclass = 4;
+		else if (GetResource(it, RES_HEALTH) >= 100 || GetResource(it, RES_ARMOR) >= 50)
+			iclass = 3;
+		else if (STAT(WEAPONS, it))
+			iclass = 2;
 		payload_str_deposit(kind, etof(bot), myteam, etof(it), o,
-			payload_str_cell_of(o), '0 0 0', it.scheduledrespawntime, 0, 0, 0, 0);
+			payload_str_cell_of(o), '0 0 0', it.scheduledrespawntime, 0, 0, iclass, 0);
 	});
 }
 
@@ -590,7 +597,8 @@ void payload_strategy_gather(float nclients)
 	mesh_publish(plc_str_h_team, plc_str_req_seq, payload_teams);
 	mesh_publish(plc_str_h_obs,  plc_str_req_seq, nclients);
 	mesh_publish(plc_str_h_evt,  plc_str_req_seq, event_rows);
-	mesh_view_publish(PLC_STR_NODE, plc_str_req_seq);
+	if (!autocvar_g_payload_plan_only)
+		mesh_view_publish(PLC_STR_NODE, plc_str_req_seq);
 	entity event = plc_str_evt_head;
 	while (event)
 	{
@@ -617,6 +625,24 @@ void payload_strategy_step(entity leadcart)
 		{
 			plc_str_plan_done = plan_id;
 			mesh_scatter_rows(plc_str_h_plan, plc_pl_f_id, 1, nclients, PLC_STR_PLAN_W);
+			FOREACH_CLIENT(IS_BOT_CLIENT(it) && !IS_DEAD(it),
+			{
+				if (it.plc_pl_f_id == etof(it))
+				{
+					it.bot_plan_pwr_w = it.plc_pl_f_pwr_w;
+					it.bot_plan_atk_cyl = it.plc_pl_f_atk_cyl;
+					it.bot_plan_focus_team = floor(it.plc_pl_f_leader + 0.5);
+					it.bot_plan_posture = bound(-1, it.plc_pl_f_posture, 1);
+					navigation_goalrating_timeout_expire(it, 0.35);
+				}
+				else
+				{
+					it.bot_plan_pwr_w = 0;
+					it.bot_plan_atk_cyl = 0;
+					it.bot_plan_focus_team = 0;
+					it.bot_plan_posture = 0;
+				}
+			});
 		}
 	}
 	if (mesh_stat(plc_str_h_obs, MESH_STAT_PENDING) == 0)

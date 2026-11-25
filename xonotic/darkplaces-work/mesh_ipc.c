@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/un.h>
@@ -91,7 +93,10 @@ static size_t meshx_pending_frames;
 static size_t meshx_local_slots = 64;
 static size_t meshx_usable;
 static int meshx_relay_fd = -1;
-static struct sockaddr_un meshx_relay_worker;
+static struct sockaddr_storage meshx_relay_worker;
+static socklen_t meshx_relay_worker_len;
+static char meshx_relay_worker_desc[256];
+static int meshx_relay_is_udp;
 static int meshx_relay_send_error;
 
 static int meshx_slot(meshxhandle_t *m, const unsigned char *q, size_t b, int from);
@@ -103,9 +108,8 @@ int MeshX_Descriptor(void)
 
 static int meshx_relay_init(void)
 {
-	struct sockaddr_un local;
 	const char *worker_path = getenv("MESH_EXPERT_SOCKET"), *framebytes = getenv("MESH_EXPERT_FRAMEBYTES");
-	int socket_buffer = 8 * 1024 * 1024;
+	int socket_buffer = 1 * 1024 * 1024;
 
 	if (meshx_relay_fd >= 0)
 		return 0;
@@ -115,31 +119,102 @@ static int meshx_relay_init(void)
 		return -1;
 	}
 	meshx_usable = strtoul(framebytes, NULL, 10);
-	meshx_relay_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-	if (meshx_relay_fd < 0)
-	{
-		Con_Printf("mesh runtime socket failed: %s\n", strerror(errno));
-		return -1;
-	}
-	setsockopt(meshx_relay_fd, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
-	setsockopt(meshx_relay_fd, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
-	fcntl(meshx_relay_fd, F_SETFL, fcntl(meshx_relay_fd, F_GETFL, 0) | O_NONBLOCK);
-	memset(&local, 0, sizeof(local));
-	local.sun_family = AF_UNIX;
-	dpsnprintf(local.sun_path, sizeof(local.sun_path), "/tmp/mesh-engine-%d.sock", (int)getpid());
-	unlink(local.sun_path);
-	if (bind(meshx_relay_fd, (struct sockaddr *)&local, sizeof(local)) < 0)
-	{
-		Con_Printf("mesh runtime bind failed: %s\n", strerror(errno));
-		close(meshx_relay_fd);
-		meshx_relay_fd = -1;
-		return -1;
-	}
 	memset(&meshx_relay_worker, 0, sizeof(meshx_relay_worker));
-	meshx_relay_worker.sun_family = AF_UNIX;
-	strlcpy(meshx_relay_worker.sun_path, worker_path, sizeof(meshx_relay_worker.sun_path));
-	Con_Printf("mesh runtime %s: frames of %zu bytes\n", meshx_relay_worker.sun_path, meshx_usable);
-	return 0;
+	if (strncmp(worker_path, "udp://", 6) == 0)
+	{
+		struct sockaddr_in local_in, *dst_in = (struct sockaddr_in *)&meshx_relay_worker;
+		const char *spec = worker_path + 6;
+		const char *colon = strrchr(spec, ':');
+		char host[128];
+		unsigned long port;
+		if (!colon || !colon[1])
+		{
+			Con_Printf("mesh runtime invalid udp endpoint: %s\n", worker_path);
+			return -1;
+		}
+		if (colon == spec)
+			strlcpy(host, "127.0.0.1", sizeof(host));
+		else
+		{
+			size_t hlen = (size_t)(colon - spec);
+			if (hlen >= sizeof(host))
+				hlen = sizeof(host) - 1;
+			memcpy(host, spec, hlen);
+			host[hlen] = '\0';
+		}
+		port = strtoul(colon + 1, NULL, 10);
+		if (!port || port > 65535)
+		{
+			Con_Printf("mesh runtime invalid udp port: %s\n", worker_path);
+			return -1;
+		}
+		meshx_relay_fd = socket(AF_INET, SOCK_DGRAM, 0);
+		if (meshx_relay_fd < 0)
+		{
+			Con_Printf("mesh runtime udp socket failed: %s\n", strerror(errno));
+			return -1;
+		}
+		setsockopt(meshx_relay_fd, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
+		setsockopt(meshx_relay_fd, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
+		fcntl(meshx_relay_fd, F_SETFL, fcntl(meshx_relay_fd, F_GETFL, 0) | O_NONBLOCK);
+		memset(&local_in, 0, sizeof(local_in));
+		local_in.sin_family = AF_INET;
+		local_in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		local_in.sin_port = 0;
+		if (bind(meshx_relay_fd, (struct sockaddr *)&local_in, sizeof(local_in)) < 0)
+		{
+			Con_Printf("mesh runtime udp bind failed: %s\n", strerror(errno));
+			close(meshx_relay_fd);
+			meshx_relay_fd = -1;
+			return -1;
+		}
+		dst_in->sin_family = AF_INET;
+		dst_in->sin_port = htons((uint16_t)port);
+		if (inet_pton(AF_INET, host, &dst_in->sin_addr) != 1)
+		{
+			Con_Printf("mesh runtime invalid udp host: %s\n", host);
+			close(meshx_relay_fd);
+			meshx_relay_fd = -1;
+			return -1;
+		}
+		meshx_relay_worker_len = sizeof(*dst_in);
+		meshx_relay_is_udp = 1;
+		meshx_local_slots = meshx_usable < 8900 ? max((size_t)1, (8900 - sizeof(meshxrelay_t)) / meshx_usable) : 1;
+		strlcpy(meshx_relay_worker_desc, worker_path, sizeof(meshx_relay_worker_desc));
+		Con_Printf("mesh runtime %s: udp frames of %zu bytes (slots %zu)\n", meshx_relay_worker_desc, meshx_usable, meshx_local_slots);
+		return 0;
+	}
+	else
+	{
+		struct sockaddr_un local, *dst_un = (struct sockaddr_un *)&meshx_relay_worker;
+		meshx_relay_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+		if (meshx_relay_fd < 0)
+		{
+			Con_Printf("mesh runtime socket failed: %s\n", strerror(errno));
+			return -1;
+		}
+		setsockopt(meshx_relay_fd, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
+		setsockopt(meshx_relay_fd, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
+		fcntl(meshx_relay_fd, F_SETFL, fcntl(meshx_relay_fd, F_GETFL, 0) | O_NONBLOCK);
+		memset(&local, 0, sizeof(local));
+		local.sun_family = AF_UNIX;
+		dpsnprintf(local.sun_path, sizeof(local.sun_path), "/tmp/mesh-engine-%d.sock", (int)getpid());
+		unlink(local.sun_path);
+		if (bind(meshx_relay_fd, (struct sockaddr *)&local, sizeof(local)) < 0)
+		{
+			Con_Printf("mesh runtime bind failed: %s\n", strerror(errno));
+			close(meshx_relay_fd);
+			meshx_relay_fd = -1;
+			return -1;
+		}
+		dst_un->sun_family = AF_UNIX;
+		strlcpy(dst_un->sun_path, worker_path, sizeof(dst_un->sun_path));
+		meshx_relay_worker_len = sizeof(*dst_un);
+		meshx_relay_is_udp = 0;
+		strlcpy(meshx_relay_worker_desc, dst_un->sun_path, sizeof(meshx_relay_worker_desc));
+		Con_Printf("mesh runtime %s: frames of %zu bytes\n", meshx_relay_worker_desc, meshx_usable);
+		return 0;
+	}
 }
 
 static void meshx_reframe(meshxpacket_t *packet)
@@ -184,13 +259,13 @@ static int meshx_local_send(const meshxrelay_t *relay, const void *data, size_t 
 
 	memset(&message, 0, sizeof(message));
 	message.msg_name = &meshx_relay_worker;
-	message.msg_namelen = sizeof(meshx_relay_worker);
+	message.msg_namelen = meshx_relay_worker_len;
 	message.msg_iov = iov;
 	message.msg_iovlen = bytes ? 2 : 1;
 	sent = sendmsg(meshx_relay_fd, &message, MSG_DONTWAIT);
 	error = sent == (ssize_t)(sizeof(*relay) + bytes) ? 0 : sent < 0 ? errno : EIO;
 	if (error != meshx_relay_send_error)
-		Con_Printf("mesh runtime %s: %s\n", meshx_relay_worker.sun_path, error ? strerror(error) : "restored");
+		Con_Printf("mesh runtime %s: %s\n", meshx_relay_worker_desc, error ? strerror(error) : "restored");
 	meshx_relay_send_error = error;
 	return !error;
 }
@@ -216,18 +291,31 @@ static void meshx_relay_pump(void)
 
 	if (meshx_relay_fd < 0)
 		return;
-	while (!ioctl(meshx_relay_fd, FIONREAD, &available) && available > 0)
+	if (capacity < 65536)
+	{
+		unsigned char *next = (unsigned char *)realloc(frame, 65536);
+		if (!next)
+			Sys_Error("mesh local receive allocation failed");
+		frame = next;
+		capacity = 65536;
+	}
+	for (;;)
 	{
 		ssize_t n;
 		size_t b;
 
-		if (capacity < (size_t)available)
+		if (!meshx_relay_is_udp)
 		{
-			unsigned char *next = (unsigned char *)realloc(frame, (size_t)available);
-			if (!next)
-				Sys_Error("mesh local receive allocation failed");
-			frame = next;
-			capacity = (size_t)available;
+			if (ioctl(meshx_relay_fd, FIONREAD, &available) || available <= 0)
+				break;
+			if (capacity < (size_t)available)
+			{
+				unsigned char *next = (unsigned char *)realloc(frame, (size_t)available);
+				if (!next)
+					Sys_Error("mesh local receive allocation failed");
+				frame = next;
+				capacity = (size_t)available;
+			}
 		}
 		iov[0].iov_base = &relay;
 		iov[0].iov_len = sizeof(relay);
@@ -237,6 +325,8 @@ static void meshx_relay_pump(void)
 		message.msg_iov = iov;
 		message.msg_iovlen = 2;
 		n = recvmsg(meshx_relay_fd, &message, MSG_DONTWAIT);
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			break;
 		if (n < (ssize_t)sizeof(relay))
 		{
 			Con_Printf("mesh local receive incomplete: %zd bytes\n", n);

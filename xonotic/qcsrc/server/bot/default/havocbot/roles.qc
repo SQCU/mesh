@@ -110,9 +110,12 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 		if(it.bot_ratingscale_time == time && ratingscale < it.bot_ratingscale)
 			continue;
 
+		bool is_major_pickup = (it.itemdef.instanceOfPowerup
+			|| GetResource(it, RES_HEALTH) >= 100
+			|| GetResource(it, RES_ARMOR) >= 50);
 		if(!it.solid)
 		{
-			if(!autocvar_bot_ai_timeitems)
+			if(!autocvar_bot_ai_timeitems && !(this.bot_plan_pwr_w > 0.5 && is_major_pickup))
 				continue;
 			if(!it.scheduledrespawntime)
 				continue;
@@ -126,6 +129,8 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 				t = bound(0, skill / 10, 1) * 6;
 			else if(skill >= 9)
 				t = 4;
+			if (this.bot_plan_pwr_w > 0.25 && is_major_pickup)
+				t = max(t, bound(1, 2 + this.bot_plan_pwr_w * 1.2, 5));
 
 			if(time < it.scheduledrespawntime - t)
 				continue;
@@ -158,8 +163,20 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 		it.bot_ratingscale_time = time;
 		it.bot_ratingscale = ratingscale;
 		float rating = it.bot_pickupevalfunc(this, it);
+		float item_rbias = 2000;
+		if (is_major_pickup && this.bot_plan_pwr_w != 0)
+		{
+			float pmult = pow(2.7182818, bound(-1.5, this.bot_plan_pwr_w, 3.0));
+			if (!it.solid)
+				pmult *= pow(2.7182818, -0.35 * max(0, it.scheduledrespawntime - time));
+			if (rating <= 0 && this.bot_plan_pwr_w > 0.5)
+				rating = 1500;
+			rating *= pmult;
+			if (this.bot_plan_pwr_w > 0.5)
+				item_rbias = 6500;
+		}
 		if(rating > 0)
-			navigation_routerating(this, it, rating * ratingscale, 2000);
+			navigation_routerating(this, it, rating * ratingscale, item_rbias);
 	});
 }
 

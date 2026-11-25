@@ -184,8 +184,9 @@ class RuntimeFrames:
     of one (session, tick) make a snapshot, and each session keeps its latest complete snapshot until take() pops it
     round-robin; EVENT rows and OUTCOME records accumulate per session until taken."""
 
-    def __init__(self, usable):
+    def __init__(self, usable, plan_only=False):
         self.usable = usable
+        self.plan_only = bool(plan_only)
         self.receivers, self.events, self.outcomes = {}, {}, {}
         self.assembling, self.latest = {}, {}
 
@@ -212,12 +213,15 @@ class RuntimeFrames:
         if kind == EVENT_KIND:
             self.events[(*key, complete["req_id"])] = receiver.stage.copy()
             return session
+        if self.plan_only and kind == STATE_KIND:
+            return session
         current = self.assembling.get(session)
         if current is None or current[0] != key:
             current = (key, {})
             self.assembling[session] = current
         current[1][kind] = (complete, receiver.stage.copy())
-        if len(current[1]) == 4:
+        needed = 3 if self.plan_only else 4
+        if len(current[1]) == needed:
             self.latest[session] = current
             self.assembling.pop(session, None)
         return session
@@ -264,20 +268,38 @@ class Engine:
     refuses a datagram's size (EMSGSIZE, as mesh_ipc.c does for its own).  The engine reads the latest response it
     holds, so a send the socket refuses is reported and the next response is the next send."""
 
-    def __init__(self, path, usable, slots=LOCAL_SLOTS, buffer_bytes=16 << 20):
+    def __init__(self, path, usable, slots=LOCAL_SLOTS, buffer_bytes=2 << 20):
         self.path, self.usable, self.slots = str(path), int(usable), int(slots)
         if values_per_slot(self.usable) < 1:
             raise ValueError(f'a frame of {self.usable} bytes holds no value past its {HDRSZ}-byte header')
-        self.service = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        self.service.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_bytes)
-        self.service.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_bytes)
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
-        self.service.bind(self.path)
-        self.service.setblocking(False)
-        self.receive_buffer = bytearray(self.service.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+        self.is_udp = self.path.startswith('udp://')
+        if self.is_udp:
+            spec = self.path[6:]
+            host, _, port_s = spec.rpartition(':')
+            host = host or '127.0.0.1'
+            port = int(port_s) if port_s else 0
+            self.service = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            buf_cap = min(int(buffer_bytes), 2 << 20)
+            self.service.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buf_cap)
+            self.service.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buf_cap)
+            self.service.bind((host, port))
+            bound_host, bound_port = self.service.getsockname()
+            self.path = f'udp://{bound_host}:{bound_port}'
+            self.service.setblocking(False)
+            self.slots = min(self.slots, max(1, (8900 - LOCAL_HDR.size) // self.usable))
+            self.receive_buffer = bytearray(65536)
+        else:
+            self.service = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            buf_cap = min(int(buffer_bytes), 2 << 20)
+            self.service.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buf_cap)
+            self.service.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buf_cap)
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            self.service.bind(self.path)
+            self.service.setblocking(False)
+            self.receive_buffer = bytearray(self.service.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
         self.errors = {}
         self.received = self.sent = self.invalid = 0
 
@@ -333,7 +355,8 @@ class Engine:
 
     def close(self):
         self.service.close()
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
+        if not self.is_udp:
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
