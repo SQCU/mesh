@@ -660,8 +660,9 @@ def pack_plan_rows(
             else:
                 nav_x = nav_y = nav_w = 0.0
             cpick = int(cart_np[i])
-            lane_scale = float(cart_lengths[cpick]) * 0.45 if (cart_lengths is not None and 0 <= cpick < len(cart_lengths)) else 350.0
-            cart_ds = float(np.clip(np.tanh(cont_np[i, 7]) * lane_scale, -600.0, 600.0))
+            # Physical push-radius scale: <120u at init (stays inside cart push radius on all map sizes),
+            # up to +-315u (>120u) when the policy intentionally commands vanguard/ambush lead.
+            cart_ds = float(np.clip(350.0 * np.tanh(cont_np[i, 7] * 0.65), -450.0, 450.0))
             posture = float(np.tanh(cont_np[i, 10]))
             out[eid - 1, 0] = float(eid)
             out[eid - 1, 1] = float(cpick)
