@@ -496,7 +496,7 @@ class Gemma4TargetVerifyFX(nn.Module):
 
 
 class Gemma4AssistantBatchStepFX(nn.Module):
-    """Batched N-hypothesis Saguaro assistant step lowered via torch.export -> libmesh-graph.dylib.
+    """Batched N-hypothesis single assistant step lowered via torch.export -> libmesh-graph.dylib.
     Reads target's shared KV caches zero-copy via `shared_buffers` and `shared_kv_b0=True`!"""
 
     def __init__(self, aw, target_embed_w, max_seq_sliding: int, max_seq_full: int):
@@ -510,6 +510,32 @@ class Gemma4AssistantBatchStepFX(nn.Module):
     def forward(self, tok: torch.Tensor, hid: torch.Tensor, anchor_pos: torch.Tensor):
         logits, proj_h = self.core.step(tok, hid, anchor_pos, self.kc_swa, self.vc_swa, self.kc_full, self.vc_full, True)
         return logits, proj_h
+
+
+class Gemma4AssistantFanoutUnrolledFX(nn.Module):
+    """Unrolled K-step batched N-hypothesis Saguaro fan-out in ONE pre-encoded native Metal CB!
+    Uses on-GPU vocab_argmax -> returns only N*K int32 tokens (~160 bytes) + K+1 hidden states,
+    avoiding any 50 MB CPU logit readback so fan-out finishes inside the target verify window!"""
+
+    def __init__(self, aw, target_embed_w, K: int, max_seq_sliding: int, max_seq_full: int):
+        super().__init__()
+        self.K = K
+        self.core = Gemma4AssistantCoreFX(aw, target_embed_w, tp_rank=0, tp_size=1, max_seq_sliding=max_seq_sliding, max_seq_full=max_seq_full)
+        self.register_buffer("kc_swa", torch.zeros((1, 1, max_seq_sliding, 256), dtype=torch.bfloat16))
+        self.register_buffer("vc_swa", torch.zeros((1, 1, max_seq_sliding, 256), dtype=torch.bfloat16))
+        self.register_buffer("kc_full", torch.zeros((1, 1, max_seq_full, 512), dtype=torch.bfloat16))
+        self.register_buffer("vc_full", torch.zeros((1, 1, max_seq_full, 512), dtype=torch.bfloat16))
+
+    def forward(self, tok: torch.Tensor, hid: torch.Tensor, anchor_pos: torch.Tensor):
+        outs = []
+        cur_t = tok
+        cur_h = hid
+        for _ in range(self.K):
+            lg, cur_h = self.core.step(cur_t, cur_h, anchor_pos, self.kc_swa, self.vc_swa, self.kc_full, self.vc_full, True)
+            cur_t = torch.ops.mesh.vocab_argmax(lg, cur_t, anchor_pos, 0, False)
+            outs.append(cur_t)
+            outs.append(cur_h)
+        return tuple(outs)
 
 
 def saguaro_fanout_allocation(budget: int, K: int, a_p: float = 0.75, r: float = 0.5) -> list[int]:
@@ -715,19 +741,31 @@ def run_saguaro_ssd(
     }
     a_mod = Gemma4AssistantBatchStepFX(aw, v_mod.embed_w, v_mod.max_seq_sliding, v_mod.max_seq_full)
     a_mod.eval()
-    ag_fan = compile_fx_to_metal(
-        torch.export.export(a_mod, (torch.zeros((N,), dtype=torch.int32), torch.zeros((N, 1536), dtype=torch.bfloat16), torch.zeros((1,), dtype=torch.int32))),
-        world_size=1, rank=0, wire_mode="bf16", shared_buffers=shared_kv,
-    )
     ag_b1 = compile_fx_to_metal(
         torch.export.export(a_mod, (torch.zeros((1,), dtype=torch.int32), torch.zeros((1, 1536), dtype=torch.bfloat16), torch.zeros((1,), dtype=torch.int32))),
         world_size=1, rank=0, wire_mode="bf16", shared_buffers=shared_kv,
     )
+    if temp == 0.0:
+        # Greedy Saguaro: unroll all K steps for all N hypotheses in ONE native Metal CB (160 B readback!)
+        a_fan_mod = Gemma4AssistantFanoutUnrolledFX(aw, v_mod.embed_w, K, v_mod.max_seq_sliding, v_mod.max_seq_full)
+        a_fan_mod.eval()
+        ag_fan = compile_fx_to_metal(
+            torch.export.export(a_fan_mod, (torch.zeros((N,), dtype=torch.int32), torch.zeros((N, 1536), dtype=torch.bfloat16), torch.zeros((1,), dtype=torch.int32))),
+            world_size=1, rank=0, wire_mode="bf16", shared_buffers=shared_kv,
+        )
+    else:
+        ag_fan = compile_fx_to_metal(
+            torch.export.export(a_mod, (torch.zeros((N,), dtype=torch.int32), torch.zeros((N, 1536), dtype=torch.bfloat16), torch.zeros((1,), dtype=torch.int32))),
+            world_size=1, rank=0, wire_mode="bf16", shared_buffers=shared_kv,
+        )
+
+    max_fk = max(F_alloc) + 1
 
     def draft_single(anchor_tok: int, anchor_hid: torch.Tensor, anchor_pos: int):
-        """Synchronous backup draft (1 chain, K+1 logit rows & hidden states)."""
+        """Synchronous backup draft (1 chain, K+1 top-F candidates / logit rows & hidden states)."""
         toks = []
         raw_rows = []
+        top_cands = []
         hids = [anchor_hid.clone()]
         cur_t = anchor_tok
         cur_h = anchor_hid
@@ -737,42 +775,74 @@ def run_saguaro_ssd(
             ag_b1.state_view("hid").copy_(cur_h)
             ag_b1.run(1, 0)
             lg, nh = ag_b1.output_views()
-            lg_f = lg[0].float().clone()
-            raw_rows.append(lg_f)
-            if step_k < K:
-                if temp == 0.0:
-                    nxt = int(lg_f.argmax().item())
-                else:
+            if temp == 0.0:
+                # Stay in BF16 and extract only top-(max_fk+1) indices (fast, zero 1 MB float32 copy!)
+                _, ti = torch.topk(lg[0], k=max_fk + 1, dim=-1)
+                top_list = ti.tolist()
+                top_cands.append(top_list)
+                raw_rows.append(None)
+                if step_k < K:
+                    nxt = top_list[0]
+                    toks.append(nxt)
+                    cur_t = nxt
+                    cur_h = nh.clone()
+                    hids.append(cur_h)
+            else:
+                lg_f = lg[0].float().clone()
+                raw_rows.append(lg_f)
+                _, ti = torch.topk(lg_f, k=max_fk + 1, dim=-1)
+                top_cands.append(ti.tolist())
+                if step_k < K:
                     q_row = apply_sigma_temp(lg_f, F_alloc[step_k], sigma_c, temp)
                     probs = torch.softmax(q_row, dim=-1)
                     nxt = int(torch.multinomial(probs, 1, generator=rng).item())
-                toks.append(nxt)
-                cur_t = nxt
-                cur_h = nh.clone()
-                hids.append(cur_h)
-        return toks, raw_rows, hids
+                    toks.append(nxt)
+                    cur_t = nxt
+                    cur_h = nh.clone()
+                    hids.append(cur_h)
+        return toks, raw_rows, hids, top_cands
 
-    def spec_fanout(draft_toks: list[int], draft_rows: list[torch.Tensor], draft_hids: list[torch.Tensor], base_pos: int):
+    def spec_fanout(draft_toks: list[int], draft_rows, draft_hids: list[torch.Tensor], draft_tops: list[list[int]], base_pos: int):
         """Predict N=(sum F_k) plausible outcomes (k, cand_tok) with sent-token exclusion (§4.1.1) and batch-draft K steps!"""
         t0 = time.perf_counter()
         cands = []
         h_in = torch.empty((N, 1536), dtype=torch.bfloat16)
         idx = 0
         for k, fk in enumerate(F_alloc):
-            row = draft_rows[k].clone()
-            if k < K:
-                row[draft_toks[k]] = -1e30  # sent-token exclusion (§4.1.1)
-            _, top_i = torch.topk(row, k=fk, dim=-1)
-            for j in range(fk):
-                cands.append((k, int(top_i[j].item())))
+            excl = draft_toks[k] if k < K else -1
+            picked = [t for t in draft_tops[k] if t != excl][:fk]
+            for ct in picked:
+                cands.append((k, ct))
                 h_in[idx].copy_(draft_hids[k][0])
                 idx += 1
 
-        # Batched N-hypothesis draft over shared KV cache (zero KV copy!)
         tok_in = torch.tensor([c[1] for c in cands], dtype=torch.int32)
         ag_fan.state_view("anchor_pos").fill_(base_pos)
+
+        if temp == 0.0:
+            # ONE single Metal CB for ALL N hypotheses x K steps!
+            ag_fan.state_view("tok").copy_(tok_in)
+            ag_fan.state_view("hid").copy_(h_in)
+            ag_fan.run(1, 0)
+            ov = ag_fan.output_views()
+            chains = [[] for _ in range(N)]
+            hids_out = [[h_in[i : i + 1].clone()] for i in range(N)]
+            for step_k in range(K):
+                tk = ov[2 * step_k].tolist()
+                hk = ov[2 * step_k + 1]
+                for i in range(N):
+                    chains[i].append(int(tk[i]))
+                    hids_out[i].append(hk[i : i + 1].clone())
+            fan_ms = (time.perf_counter() - t0) * 1e3
+            cache = {}
+            for i, key in enumerate(cands):
+                # Store chain + hids; tops for next fan-out are computed lazily if needed on hit
+                cache[key] = (chains[i], [None] * (K + 1), hids_out[i], None)
+            return cache, fan_ms
+
         chains = [[] for _ in range(N)]
         rows_out = [[] for _ in range(N)]
+        tops_out = [[] for _ in range(N)]
         hids_out = [[h_in[i : i + 1].clone()] for i in range(N)]
         for step_k in range(K + 1):
             ag_fan.state_view("tok").copy_(tok_in)
@@ -781,16 +851,15 @@ def run_saguaro_ssd(
             lg, nh = ag_fan.output_views()
             lg_f = lg.float().clone()
             nh_c = nh.clone()
+            _, ti_all = torch.topk(lg_f, k=max_fk + 1, dim=-1)
             for i in range(N):
                 rows_out[i].append(lg_f[i])
+                tops_out[i].append(ti_all[i].tolist())
             if step_k < K:
-                if temp == 0.0:
-                    nxts = lg_f.argmax(dim=-1)
-                else:
-                    nxts = torch.empty((N,), dtype=torch.int64)
-                    for i in range(N):
-                        q_row = apply_sigma_temp(lg_f[i], F_alloc[step_k], sigma_c, temp)
-                        nxts[i] = torch.multinomial(torch.softmax(q_row, dim=-1), 1, generator=rng)[0]
+                nxts = torch.empty((N,), dtype=torch.int64)
+                for i in range(N):
+                    q_row = apply_sigma_temp(lg_f[i], F_alloc[step_k], sigma_c, temp)
+                    nxts[i] = torch.multinomial(torch.softmax(q_row, dim=-1), 1, generator=rng)[0]
                 for i in range(N):
                     chains[i].append(int(nxts[i].item()))
                     hids_out[i].append(nh_c[i : i + 1].clone())
@@ -799,15 +868,29 @@ def run_saguaro_ssd(
         fan_ms = (time.perf_counter() - t0) * 1e3
         cache = {}
         for i, key in enumerate(cands):
-            cache[key] = (chains[i], rows_out[i], hids_out[i])
+            cache[key] = (chains[i], rows_out[i], hids_out[i], tops_out[i])
         return cache, fan_ms
+
+    def compute_tops_for_chain(anchor_tok: int, chain_toks: list[int], chain_hids: list[torch.Tensor], base_pos: int) -> list[list[int]]:
+        """Fast 1-row top-F extraction for greedy next-round fan-out candidates (used only when hit lacks tops)."""
+        tops = []
+        ag_b1.state_view("anchor_pos").fill_(base_pos)
+        seq = [anchor_tok] + chain_toks
+        for k in range(K + 1):
+            ag_b1.state_view("tok").fill_(seq[k])
+            ag_b1.state_view("hid").copy_(chain_hids[k])
+            ag_b1.run(1, 0)
+            lg, _ = ag_b1.output_views()
+            _, ti = torch.topk(lg[0], k=max_fk + 1, dim=-1)
+            tops.append(ti.tolist())
+        return tops
 
     rng = torch.Generator().manual_seed(7)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     cur_pos = prompt_len
     anchor_tok = first_tok
-    draft_toks, draft_rows, draft_hids = draft_single(anchor_tok, first_hid, cur_pos - 1)
+    draft_toks, draft_rows, draft_hids, draft_tops = draft_single(anchor_tok, first_hid, cur_pos - 1)
     emitted = [first_tok]
     hits = 0
     acc_list = []
@@ -819,24 +902,27 @@ def run_saguaro_ssd(
     calib_acc_cnt = 0
     calib_total_cnt = 0
 
-    # Warmup 1 verify CB if benchmarking
     for r in range(n_rounds):
         tr0 = time.perf_counter()
         vtok = torch.tensor([anchor_tok] + draft_toks, dtype=torch.int32)
         vg.state_view("tok").copy_(vtok)
         vg.state_view("pos").fill_(cur_pos)
 
+        def _run_fan():
+            tops_use = draft_tops if draft_tops is not None else compute_tops_for_chain(anchor_tok, draft_toks, draft_hids, cur_pos - 1)
+            return spec_fanout(draft_toks, draft_rows, draft_hids, tops_use, cur_pos - 1)
+
         tv0 = time.perf_counter()
         cb = vg.submit_step(0)
         if overlap:
-            fut = pool.submit(spec_fanout, draft_toks, draft_rows, draft_hids, cur_pos - 1)
+            fut = pool.submit(_run_fan)
             vg.wait_step(cb)
             v_ms = (time.perf_counter() - tv0) * 1e3
             cache, fan_ms = fut.result()
         else:
             vg.wait_step(cb)
             v_ms = (time.perf_counter() - tv0) * 1e3
-            cache, fan_ms = spec_fanout(draft_toks, draft_rows, draft_hids, cur_pos - 1)
+            cache, fan_ms = _run_fan()
 
         outs = vg.output_views()
         targ_tok = outs[0].clone()
@@ -886,10 +972,10 @@ def run_saguaro_ssd(
         b_ms = 0.0
         if hit_val is not None:
             hits += 1
-            draft_toks, draft_rows, draft_hids = hit_val
+            draft_toks, draft_rows, draft_hids, draft_tops = hit_val
         else:
             tb0 = time.perf_counter()
-            draft_toks, draft_rows, draft_hids = draft_single(t_star, targ_xn[n_acc : n_acc + 1].clone(), new_anchor_pos)
+            draft_toks, draft_rows, draft_hids, draft_tops = draft_single(t_star, targ_xn[n_acc : n_acc + 1].clone(), new_anchor_pos)
             b_ms = (time.perf_counter() - tb0) * 1e3
 
         r_ms = (time.perf_counter() - tr0) * 1e3
