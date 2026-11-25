@@ -122,6 +122,18 @@ class MapManifold:
         self.cell_areas = cell_areas.astype(np.float32)          # [C]
         self.n_cells = len(self.cell_centroids)
         self.n_items = len(self.item_pos)
+        # Map center & spatial scale for coordinate-invariant EDM2 input prenormalization
+        all_pts = [p for p in [self.cell_centroids, self.item_pos] if len(p) > 0]
+        for sp in splines:
+            if len(sp.points) > 0:
+                all_pts.append(sp.points)
+        if all_pts:
+            cat = np.concatenate(all_pts, axis=0)
+            self.map_center = cat.mean(axis=0).astype(np.float32)
+            self.map_radius = float(max(256.0, np.percentile(np.linalg.norm(cat - self.map_center[None, :], axis=-1), 95)))
+        else:
+            self.map_center = np.zeros((3,), dtype=np.float32)
+            self.map_radius = 1000.0
         self.item_cells = (
             np.asarray([nav.map.assign_cell(p) for p in self.item_pos], dtype=np.int64)
             if (nav.map is not None and self.n_items > 0)
@@ -256,7 +268,9 @@ class MapManifold:
                 p = sp.sample_pos[r]
                 t = sp.sample_tan[r]
                 track_list.append([
-                    p[0] / 1000.0, p[1] / 1000.0, p[2] / 500.0,
+                    (p[0] - self.map_center[0]) / self.map_radius,
+                    (p[1] - self.map_center[1]) / self.map_radius,
+                    (p[2] - self.map_center[2]) / self.map_radius,
                     t[0], t[1],
                     sr / L,
                     (sr - s_cur) / L,
@@ -297,12 +311,14 @@ class MapManifold:
             p = self.item_pos[mi]
             d_cart = float(np.min(np.linalg.norm(cart_pos - p[None, :], axis=-1))) if j > 0 else 1000.0
             item_tokens[mi] = [
-                p[0] / 1000.0, p[1] / 1000.0, p[2] / 500.0,
+                (p[0] - self.map_center[0]) / self.map_radius,
+                (p[1] - self.map_center[1]) / self.map_radius,
+                (p[2] - self.map_center[2]) / self.map_radius,
                 self.item_class[mi] / 4.0,
                 1.0 if self.item_class[mi] >= 3.0 else 0.0,
                 item_avail[mi],
                 item_eta[mi],
-                min(d_cart / 1000.0, 3.0),
+                min(d_cart / self.map_radius, 3.0),
                 float(self.item_cells[mi]) / max(1.0, self.n_cells),
             ]
 
@@ -330,10 +346,12 @@ class MapManifold:
                 min_tr = float(self.cell_track_dist[c, near_j]) if near_j < self.cell_track_dist.shape[1] else 1000.0
                 s_rel = float(self.cell_track_s[c, near_j] - (cart_s[near_j] / cart_len[near_j])) if j > 0 and near_j < self.cell_track_s.shape[1] else 0.0
                 cell_tokens[c] = [
-                    p[0] / 1000.0, p[1] / 1000.0, p[2] / 500.0,
+                    (p[0] - self.map_center[0]) / self.map_radius,
+                    (p[1] - self.map_center[1]) / self.map_radius,
+                    (p[2] - self.map_center[2]) / self.map_radius,
                     float(area_norm[c]),
-                    min(float(d_carts[near_j]) / 1000.0, 3.0),
-                    min(min_tr / 1000.0, 3.0),
+                    min(float(d_carts[near_j]) / self.map_radius, 3.0),
+                    min(min_tr / self.map_radius, 3.0),
                     s_rel,
                     bots_in_c / 4.0,
                     major_in_c,
@@ -382,6 +400,8 @@ class MapManifold:
             "item_tokens": item_tokens,
             "fovea_weights": fovea_w,
             "bot_cells": bot_cells,
+            "map_center": self.map_center.copy(),
+            "map_radius": np.asarray([self.map_radius], dtype=np.float32),
         }
 
 

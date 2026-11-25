@@ -159,7 +159,7 @@ static int meshx_relay_init(void)
 		fcntl(meshx_relay_fd, F_SETFL, fcntl(meshx_relay_fd, F_GETFL, 0) | O_NONBLOCK);
 		memset(&local_in, 0, sizeof(local_in));
 		local_in.sin_family = AF_INET;
-		local_in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		local_in.sin_addr.s_addr = (strcmp(host, "127.0.0.1") == 0) ? htonl(INADDR_LOOPBACK) : htonl(INADDR_ANY);
 		local_in.sin_port = 0;
 		if (bind(meshx_relay_fd, (struct sockaddr *)&local_in, sizeof(local_in)) < 0)
 		{

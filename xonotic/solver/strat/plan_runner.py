@@ -34,6 +34,8 @@ from .plan_policy import (
     PlanTransition,
     PlanWally,
     _geo_to_torch,
+    compute_batch_adv_stats,
+    edm2_step,
     ema_update,
     pack_plan_rows,
     plan_losses_for_transition,
@@ -138,8 +140,27 @@ class MultiServerPlanHarness:
                 cmd.extend(["+slowmo", str(self.slowmo)])
             cmd.extend(["+map", str(mname)])
             procs.append(subprocess.Popen(cmd, cwd=self.basedir, env=env, stdout=logf, stderr=subprocess.STDOUT))
+            self._browser_notify("register", f"{os.getpid()}-{idx}", {"node": os.uname().nodename, "host": "127.0.0.1", "port": base_port + idx, "map": str(mname)})
             time.sleep(0.15)
         return procs, logs
+
+    @staticmethod
+    def _browser_notify(action: str, server_id: str, payload: dict | None = None):
+        url = os.environ.get("MESH_SERVER_BROWSER", "").rstrip("/")
+        if not url:
+            return
+        import json as _json
+        import urllib.request as _req
+        try:
+            if action == "register" and payload is not None:
+                data = _json.dumps({"id": server_id, **payload}).encode()
+                r = _req.Request(f"{url}/api/servers/register", data=data, headers={"Content-Type": "application/json"}, method="POST")
+                _req.urlopen(r, timeout=0.5).close()
+            elif action == "delete":
+                r = _req.Request(f"{url}/api/servers/{server_id}", method="DELETE")
+                _req.urlopen(r, timeout=0.5).close()
+        except Exception:
+            pass
 
     @staticmethod
     def _stop_servers(procs, logs):
@@ -205,6 +226,8 @@ class MultiServerPlanHarness:
         fsq_code_counts: dict[str, dict[tuple[int, ...], int]] = defaultdict(lambda: defaultdict(int))
         all_transitions: list[PlanTransition] = []
         fresh_buf: list[PlanTransition] = []
+        next_batch_target = int(min_batch_transitions)
+        deferred_batches = 0
         update_logs: list[dict] = []
         online_snr_pairs: list[dict] = []
         online_group_pairs: dict[str, list[dict]] = defaultdict(list)
@@ -317,6 +340,7 @@ class MultiServerPlanHarness:
                                 part = pack_plan_rows(
                                     obs_rows, team_rows, samp, bot_arms, {arm_name},
                                     self.maxclients, cell_centroids=cell_centroids,
+                                    cart_lengths=cart_rows[:, CS["PATH_LENGTH"]],
                                 )
                                 mask_rows = part[:, 0] > 0
                                 plan_matrix[mask_rows] = part[mask_rows]
@@ -329,20 +353,37 @@ class MultiServerPlanHarness:
                         id_to_idx = {int(eid): idx for idx, eid in enumerate(c_ids)}
                         succ = np.asarray([id_to_idx.get(int(eid), -1) for eid in p_ids], dtype=np.int64)
                         rew = role_rewards(prev["tick"].context, prev["tick"].cartstate, tick.cartstate)
+                        # True per-step deltas (OBS["CART_PUSH/CONTEST/PICKUPS"] are cumulative match counters!)
+                        prev_obs = prev["obs"]
                         push_delta = np.asarray([
-                            float(obs_rows[idx, OBS["CART_PUSH"]]) if idx >= 0 else 0.0 for idx in succ
+                            max(0.0, float(obs_rows[idx, OBS["CART_PUSH"]]) - float(prev_obs[i, OBS["CART_PUSH"]])) if idx >= 0 else 0.0
+                            for i, idx in enumerate(succ)
                         ], dtype=np.float32)
                         contest_delta = np.asarray([
-                            float(obs_rows[idx, OBS["CART_CONTEST"]]) if idx >= 0 else 0.0 for idx in succ
+                            max(0.0, float(obs_rows[idx, OBS["CART_CONTEST"]]) - float(prev_obs[i, OBS["CART_CONTEST"]])) if idx >= 0 else 0.0
+                            for i, idx in enumerate(succ)
                         ], dtype=np.float32)
                         pickup_delta = np.asarray([
-                            float(obs_rows[idx, OBS["PICKUPS"]]) if idx >= 0 else 0.0 for idx in succ
+                            max(0.0, float(obs_rows[idx, OBS["PICKUPS"]]) - float(prev_obs[i, OBS["PICKUPS"]])) if idx >= 0 else 0.0
+                            for i, idx in enumerate(succ)
                         ], dtype=np.float32)
+                        # Scale-invariant lane-progress shaping (so long-lane maps carry dense checkpoint-aligned signal)
+                        p_carts = prev["carts"]
+                        prev_frac = p_carts[:, CS["PATH_POSITION"]] / np.maximum(p_carts[:, CS["PATH_LENGTH"]], 1.0)
+                        cur_frac = cart_rows[:, CS["PATH_POSITION"]] / np.maximum(cart_rows[:, CS["PATH_LENGTH"]], 1.0)
+                        dfrac = cur_frac - prev_frac
+                        ctrl_t = cart_rows[:, CS["CONTROL_TEAM"]].astype(np.int64)
+                        p_teams_1 = prev_obs[:, OBS["TEAM"]].astype(np.int64)
+                        lane_prog = np.zeros((len(prev_obs),), dtype=np.float32)
+                        for ci in range(min(len(dfrac), len(ctrl_t))):
+                            if ctrl_t[ci] > 0:
+                                lane_prog += np.where(p_teams_1 == ctrl_t[ci], float(dfrac[ci]), -0.4 * float(dfrac[ci]))
                         rew = (
                             rew
-                            + 0.012 * np.tanh(push_delta / 50.0)
-                            + 0.010 * np.tanh(contest_delta / 50.0)
-                            + 0.004 * np.tanh(pickup_delta)
+                            + 0.25 * lane_prog
+                            + 0.015 * np.tanh(push_delta / 25.0)
+                            + 0.012 * np.tanh(contest_delta / 1.0)
+                            + 0.008 * np.tanh(pickup_delta)
                         )
 
                         w_before = effective_leader(prev["tick"].context, prev["tick"].cartstate)
@@ -379,6 +420,7 @@ class MultiServerPlanHarness:
                             geo_out=geo_np,
                             h_in=prev["h_in"],
                             h_out=train_h_in,
+                            map_name=sess_map_name,
                         )
                         all_transitions.append(tr)
                         if train_arm is not None and np.any(actor_mask):
@@ -470,20 +512,26 @@ class MultiServerPlanHarness:
 
                     if train_arm is not None and optimizer is not None and arm_models.get(train_arm) is not None:
                         distinct_groups = sorted({tr.session for tr in fresh_buf})
-                        if len(fresh_buf) >= min_batch_transitions and len(distinct_groups) >= min_groups_per_step:
+                        if len(fresh_buf) >= next_batch_target and len(distinct_groups) >= min_groups_per_step:
                             mdl = arm_models[train_arm]
-                            batch = fresh_buf
-                            fresh_buf = []
+                            max_accum = max(min_batch_transitions * 2, 48)
                             upd_info = self._ppo_update_with_snr(
-                                mdl, optimizer, batch, distinct_groups,
+                                mdl, optimizer, fresh_buf, distinct_groups,
                                 ppo_epochs=ppo_epochs, grad_clip=grad_clip, device=device,
                                 step_id=len(update_logs),
                                 online_snr_pairs=online_snr_pairs,
                                 online_group_pairs=online_group_pairs,
+                                allow_snr_defer=(len(fresh_buf) < max_accum),
                             )
-                            if ema_model is not None:
-                                ema_update(ema_model, mdl, decay=ema_decay)
-                            update_logs.append(upd_info)
+                            if upd_info.get("deferred"):
+                                deferred_batches += 1
+                                next_batch_target = len(fresh_buf) + min_batch_transitions
+                            else:
+                                fresh_buf = []
+                                next_batch_target = int(min_batch_transitions)
+                                if ema_model is not None:
+                                    ema_update(ema_model, mdl, decay=ema_decay)
+                                update_logs.append(upd_info)
         finally:
             self._stop_servers(procs, logs)
             engine.close()
@@ -532,6 +580,7 @@ class MultiServerPlanHarness:
             "transitions": all_transitions,
             "n_transitions": len(all_transitions),
             "updates": len(update_logs),
+            "deferred_batches": deferred_batches,
             "update_logs": update_logs,
             "online_cross_server_snr": summarize_mccandlish_pairs(online_snr_pairs),
             "online_cross_server_snr_by_group": {
@@ -562,22 +611,40 @@ class MultiServerPlanHarness:
         step_id: int,
         online_snr_pairs: list[dict],
         online_group_pairs: dict[str, list[dict]],
+        allow_snr_defer: bool = True,
     ) -> dict:
-        left_groups = set(groups[0::2])
+        # Map-stratified split into two balanced replica groups so both halves see identical map mix
+        sess_by_map: dict[str, list[int]] = defaultdict(list)
+        for tr in batch:
+            if tr.session not in sess_by_map[tr.map_name]:
+                sess_by_map[tr.map_name].append(tr.session)
+        left_groups: set[int] = set()
+        for mn in sorted(sess_by_map):
+            s_list = sorted(sess_by_map[mn])
+            for idx, s in enumerate(s_list):
+                if idx % 2 == 0:
+                    left_groups.add(s)
         half0 = [tr for tr in batch if tr.session in left_groups]
         half1 = [tr for tr in batch if tr.session not in left_groups]
+        if not half0 or not half1:
+            left_groups = set(groups[0::2])
+            half0 = [tr for tr in batch if tr.session in left_groups]
+            half1 = [tr for tr in batch if tr.session not in left_groups]
         can_split = len(half0) > 0 and len(half1) > 0
         ordered = (half0 + half1) if can_split else batch
         split_at = len(half0)
         last_diags = []
         last_gnorm = 0.0
+        adv_mean, adv_std = compute_batch_adv_stats(model, ordered, device=device)
 
         for epoch in range(max(1, ppo_epochs)):
             optimizer.zero_grad(set_to_none=True)
             half0_grads = None
             inv_n = 1.0 / len(ordered)
             for idx, tr in enumerate(ordered):
-                comps, diag = plan_losses_for_transition(model, tr, device=device)
+                comps, diag = plan_losses_for_transition(
+                    model, tr, device=device, adv_mean=adv_mean, adv_std=adv_std,
+                )
                 (comps["total"] * inv_n).backward()
                 if epoch == 0:
                     last_diags.append(diag)
@@ -601,6 +668,10 @@ class MultiServerPlanHarness:
                 pair = mccandlish_pair_from_grads(
                     [g0, g1], b0_transitions=0.5 * len(ordered), b0_rows=0.5 * len(ordered) * 9.0, generation=step_id
                 )
+                # McCandlish SNR gate: if halves oppose (signal_sq <= 0), defer & grow batch instead of stepping on noise!
+                if allow_snr_defer and pair is not None and float(pair["signal_sq"]) <= 0.0:
+                    optimizer.zero_grad(set_to_none=True)
+                    return {"step": step_id, "batch": len(batch), "groups": len(groups), "deferred": True, "cosine": pair.get("cosine")}
                 if pair is not None:
                     online_snr_pairs.append(pair)
                 for grp in ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "dynamics_head"):
@@ -612,9 +683,7 @@ class MultiServerPlanHarness:
                         )
                         if gp is not None:
                             online_group_pairs[grp].append(gp)
-            gnorm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
-            last_gnorm = gnorm
-            optimizer.step()
+            last_gnorm = edm2_step(optimizer, model, grad_clip=grad_clip)
 
         def _m(k):
             vals = [d[k] for d in last_diags if d.get(k) is not None]
