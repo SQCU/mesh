@@ -5,6 +5,9 @@
    invalidates. */
 #include "nccl.h"
 #include "mesh.h"
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include "mesh-call.h"
 #include <errno.h>
 #include <math.h>
@@ -184,6 +187,49 @@ static void combine_into(ncclDataType_t t, int combine, void *dst, const void *s
 /* dst[i] = src[i] * scalar in the type (FuncPreMulSum, src/device/reduce_kernel.h; a floating average's 1 / nranks);
    dst may be src */
 static void premultiply(ncclDataType_t t, void *dst, const void *src, const unsigned char *scalar, size_t n) {
+#if defined(__ARM_NEON)
+  if (t == ncclFloat32) {
+    float *d = (float *)dst;
+    const float *s = (const float *)src;
+    float sc; memcpy(&sc, scalar, 4);
+    const float32x4_t vsc = vdupq_n_f32(sc);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) vst1q_f32(d + i, vmulq_f32(vld1q_f32(s + i), vsc));
+    for (; i < n; i++) d[i] = s[i] * sc;
+    return;
+  }
+  if (t == ncclFloat16) {
+    __fp16 *d = (__fp16 *)dst;
+    const __fp16 *s = (const __fp16 *)src;
+    const float sc = (float)load(t, scalar);
+    const float32x4_t vsc = vdupq_n_f32(sc);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+      const float16x8_t v = vld1q_f16(s + i);
+      const float32x4_t lo = vmulq_f32(vcvt_f32_f16(vget_low_f16(v)), vsc);
+      const float32x4_t hi = vmulq_f32(vcvt_f32_f16(vget_high_f16(v)), vsc);
+      vst1q_f16(d + i, vcombine_f16(vcvt_f16_f32(lo), vcvt_f16_f32(hi)));
+    }
+    for (; i < n; i++) d[i] = (__fp16)((float)s[i] * sc);
+    return;
+  }
+  if (t == ncclBfloat16) {
+    uint16_t *d = (uint16_t *)dst;
+    const uint16_t *s = (const uint16_t *)src;
+    const float sc = (float)load(t, scalar);
+    const float32x4_t vsc = vdupq_n_f32(sc);
+    const uint32x4_t rbias = vdupq_n_u32(0x7fffu), one = vdupq_n_u32(1u);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+      const float32x4_t fv = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vld1_u16(s + i)), 16));
+      const uint32x4_t ur = vreinterpretq_u32_f32(vmulq_f32(fv, vsc));
+      const uint32x4_t rnd = vaddq_u32(ur, vaddq_u32(rbias, vandq_u32(vshrq_n_u32(ur, 16), one)));
+      vst1_u16(d + i, vmovn_u32(vshrq_n_u32(rnd, 16)));
+    }
+    for (; i < n; i++) d[i] = bf16_from(bf16_to(s[i]) * sc);
+    return;
+  }
+#endif
   if (dst != src) memmove(dst, src, n * SIZE[t]);
   const size_t z = SIZE[t];
   const double s = load(t, scalar);
