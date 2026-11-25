@@ -2037,15 +2037,9 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
         const uint32_t B = op.u[0], h_q = op.u[1], h_kv = op.u[2], D = op.u[3], max_seq = op.u[4], window = op.u[5];
         const float sc = (op.f[0] == 0.0f) ? 1.0f : op.f[0];
         const uint32_t bh = B * h_q;
-        // Use Split-K FlashDecoding when KV span is large and B*h_q under-fills the 80-core M5 Ultra GPU!
         const uint32_t splits = (max_seq >= 1024u && bh <= 32u) ? std::min<uint32_t>(32u, std::max<uint32_t>(1u, 64u / bh))
                               : ((max_seq >= 512u && bh <= 8u) ? std::min<uint32_t>(16u, std::max<uint32_t>(1u, 32u / bh)) : 1u);
-        if (splits > 1u) {
-          const size_t need = static_cast<size_t>(bh) * splits * (D + 2u) * sizeof(float);
-          if (need > g->sdpa_scratch_bytes) {
-            g->sdpa_scratch = [g->dev newBufferWithLength:need options:MTLResourceStorageModePrivate];
-            g->sdpa_scratch_bytes = need;
-          }
+        if (splits > 1u && g->sdpa_scratch) {
           const uint32_t u[6] = {B, h_q, h_kv, max_seq, window, splits};
           [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_splitk_512" : "mg_kv_sdpa_splitk_256")];
           [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
@@ -2416,6 +2410,22 @@ int mesh_graph_add_op(mesh_graph_t *g, const struct mesh_graph_op *op) {
 
 int mesh_graph_compile(mesh_graph_t *g) {
   if (!g) return -1;
+  // Pre-allocate Split-K SDPA scratch ONCE before any unretained command buffer encodes!
+  size_t max_sdpa = 0;
+  for (const auto &op : g->ops) {
+    if (op.kind != MG_OP_KV_SDPA_DECODE) continue;
+    const uint32_t bh = op.u[0] * op.u[1], D = op.u[3], max_seq = op.u[4];
+    const uint32_t splits = (max_seq >= 1024u && bh <= 32u) ? std::min<uint32_t>(32u, std::max<uint32_t>(1u, 64u / bh))
+                          : ((max_seq >= 512u && bh <= 8u) ? std::min<uint32_t>(16u, std::max<uint32_t>(1u, 32u / bh)) : 1u);
+    if (splits > 1u) {
+      const size_t need = static_cast<size_t>(bh) * splits * (D + 2u) * sizeof(float);
+      if (need > max_sdpa) max_sdpa = need;
+    }
+  }
+  if (max_sdpa > 0) {
+    g->sdpa_scratch = [g->dev newBufferWithLength:max_sdpa options:MTLResourceStorageModePrivate];
+    g->sdpa_scratch_bytes = max_sdpa;
+  }
   if (g->world_size > 1 && !g->crossings.empty()) {
     // Allocate contiguous TX pages + W[] landing indices for ALL crossings in ONE batch + ONE TCP allgather!
     uint32_t total_tx_pages = 0;
