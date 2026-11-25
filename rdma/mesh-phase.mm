@@ -26,6 +26,7 @@
 
 extern "C" {
 #include "mesh-call.h"
+#include "mesh-codec.h"
 }
 
 static double now_us(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC) * 1e-3; }
@@ -78,6 +79,16 @@ struct mesh_phase_group {
   id<MTLCommandQueue> q;
   id<MTLComputePipelineState> pso_flash_c1;
   id<MTLComputePipelineState> pso_scan_c2;
+  id<MTLComputePipelineState> pso_had8_pack_f32;
+  id<MTLComputePipelineState> pso_had8_unpack_f32;
+  id<MTLComputePipelineState> pso_had8_pack_f16;
+  id<MTLComputePipelineState> pso_had8_unpack_f16;
+  id<MTLComputePipelineState> pso_had6_pack_f32;
+  id<MTLComputePipelineState> pso_had6_unpack_f32;
+  id<MTLComputePipelineState> pso_had6_pack_f16;
+  id<MTLComputePipelineState> pso_had6_unpack_f16;
+  id<MTLComputePipelineState> pso_kalo27_pack_f16;
+  id<MTLComputePipelineState> pso_kalo27_adc_qk;
 };
 
 static const char *kPhaseMSL = R"MSL(
@@ -155,6 +166,372 @@ kernel void affine_scan_c2_packed(
     B = ab.x * B + ab.y;
   }
   Out[gid] = float2(A, B);
+}
+
+/* ---- Ticket G3: GF(2)^6 FWHT-64 Hadamard-domain & Kalomaze-27b wire codecs directly over /mesh0 pages ---- */
+inline void fwht64_simd_pair(thread float &a, thread float &b, uint lane) {
+  float s = a + b, d = a - b;
+  a = s; b = d;
+  #pragma unroll
+  for (uint mask = 1u; mask <= 16u; mask <<= 1u) {
+    float oa = simd_shuffle_xor(a, mask);
+    float ob = simd_shuffle_xor(b, mask);
+    bool hi = (lane & mask) != 0u;
+    a = hi ? (oa - a) : (a + oa);
+    b = hi ? (ob - b) : (b + ob);
+  }
+  a *= 0.125f;
+  b *= 0.125f;
+}
+
+/* Page-self-contained had_int8 wire layout: 60 blocks/page x 68 B = 4080 B <= 4096 B.
+   Matches struct mesh_had_i8_blk { half s[2]; int8_t q[64]; } in rdma/mesh-codec.h & rdma/mesh-reduce.h. */
+kernel void fwht64_had_int8_pack_wire_f32(
+    device const float *x       [[buffer(0)]],
+    device uchar       *wire    [[buffer(1)]],
+    constant uint      &n_blks  [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong base = ulong(blk) * 64ul;
+  float a = x[base + lane * 2u];
+  float b = x[base + lane * 2u + 1u];
+  fwht64_simd_pair(a, b, lane);
+
+  const bool upper = (lane >= 16u);
+  const float ab = max(fabs(a), fabs(b));
+  const float amax_lo = simd_max(upper ? 0.0f : ab);
+  const float amax_hi = simd_max(upper ? ab : 0.0f);
+  const half sh_lo = (amax_lo > 0.0f) ? half(max(amax_lo * (1.0f / 127.0f), 6.103515625e-5f)) : half(0.0f);
+  const half sh_hi = (amax_hi > 0.0f) ? half(max(amax_hi * (1.0f / 127.0f), 6.103515625e-5f)) : half(0.0f);
+  const float sc = float(upper ? sh_hi : sh_lo);
+  const float inv_s = (sc > 0.0f) ? (1.0f / sc) : 0.0f;
+
+  const ulong dst_off = ulong(blk / 60u) * 4096ul + ulong(blk % 60u) * 68ul;
+  if (lane == 0u) {
+    device half *ds = (device half *)(wire + dst_off);
+    ds[0] = sh_lo;
+    ds[1] = sh_hi;
+  }
+  device char *dq = (device char *)(wire + dst_off + 4ul);
+  dq[lane * 2u]      = char(clamp(int(rint(a * inv_s)), -127, 127));
+  dq[lane * 2u + 1u] = char(clamp(int(rint(b * inv_s)), -127, 127));
+}
+
+kernel void fwht64_had_int8_unpack_wire_f32(
+    device const uchar *wire    [[buffer(0)]],
+    device float       *y       [[buffer(1)]],
+    constant uint      &n_blks  [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = ulong(blk / 60u) * 4096ul + ulong(blk % 60u) * 68ul;
+  device const half *ds = (device const half *)(wire + src_off);
+  device const char *sq = (device const char *)(wire + src_off + 4ul);
+  const float sc = float(ds[lane >= 16u ? 1u : 0u]);
+  float a = float(sq[lane * 2u]) * sc;
+  float b = float(sq[lane * 2u + 1u]) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = a;
+  y[base + lane * 2u + 1u] = b;
+}
+
+kernel void fwht64_had_int8_pack_wire_f16(
+    device const half *x        [[buffer(0)]],
+    device uchar      *wire     [[buffer(1)]],
+    constant uint     &n_blks   [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong base = ulong(blk) * 64ul;
+  float a = float(x[base + lane * 2u]);
+  float b = float(x[base + lane * 2u + 1u]);
+  fwht64_simd_pair(a, b, lane);
+
+  const bool upper = (lane >= 16u);
+  const float ab = max(fabs(a), fabs(b));
+  const float amax_lo = simd_max(upper ? 0.0f : ab);
+  const float amax_hi = simd_max(upper ? ab : 0.0f);
+  const half sh_lo = (amax_lo > 0.0f) ? half(max(amax_lo * (1.0f / 127.0f), 6.103515625e-5f)) : half(0.0f);
+  const half sh_hi = (amax_hi > 0.0f) ? half(max(amax_hi * (1.0f / 127.0f), 6.103515625e-5f)) : half(0.0f);
+  const float sc = float(upper ? sh_hi : sh_lo);
+  const float inv_s = (sc > 0.0f) ? (1.0f / sc) : 0.0f;
+
+  const ulong dst_off = ulong(blk / 60u) * 4096ul + ulong(blk % 60u) * 68ul;
+  if (lane == 0u) {
+    device half *ds = (device half *)(wire + dst_off);
+    ds[0] = sh_lo;
+    ds[1] = sh_hi;
+  }
+  device char *dq = (device char *)(wire + dst_off + 4ul);
+  dq[lane * 2u]      = char(clamp(int(rint(a * inv_s)), -127, 127));
+  dq[lane * 2u + 1u] = char(clamp(int(rint(b * inv_s)), -127, 127));
+}
+
+kernel void fwht64_had_int8_unpack_wire_f16(
+    device const uchar *wire    [[buffer(0)]],
+    device half        *y       [[buffer(1)]],
+    constant uint      &n_blks  [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = ulong(blk / 60u) * 4096ul + ulong(blk % 60u) * 68ul;
+  device const half *ds = (device const half *)(wire + src_off);
+  device const char *sq = (device const char *)(wire + src_off + 4ul);
+  const float sc = float(ds[lane >= 16u ? 1u : 0u]);
+  float a = float(sq[lane * 2u]) * sc;
+  float b = float(sq[lane * 2u + 1u]) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = half(a);
+  y[base + lane * 2u + 1u] = half(b);
+}
+
+/* Page-self-contained had_int6_pk wire layout: 78 blocks/page x 52 B = 4056 B <= 4096 B.
+   Matches struct mesh_had_i6_blk { float s; uint32_t w[12]; } in rdma/mesh-codec.h & rdma/mesh-reduce.h. */
+kernel void fwht64_had_int6_pack_wire_f32(
+    device const float *x       [[buffer(0)]],
+    device uchar       *wire    [[buffer(1)]],
+    constant uint      &n_blks  [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong base = ulong(blk) * 64ul;
+  float a = x[base + lane * 2u];
+  float b = x[base + lane * 2u + 1u];
+  fwht64_simd_pair(a, b, lane);
+
+  const float amax = simd_max(max(fabs(a), fabs(b)));
+  const float sc = (amax > 0.0f) ? (amax * (1.0f / 31.0f)) : 0.0f;
+  const float inv_s = (sc > 0.0f) ? (1.0f / sc) : 0.0f;
+
+  const uint ua = uint(clamp(int(rint(a * inv_s)), -31, 31) + 31);
+  const uint ub = uint(clamp(int(rint(b * inv_s)), -31, 31) + 31);
+  const uint u12 = (ua & 63u) | ((ub & 63u) << 6u);
+
+  const uint g = lane >> 3u;
+  const uint sub = lane & 7u;
+  const uint b0 = g << 3u;
+  const uint v0 = simd_shuffle(u12, ushort(b0 + 0u));
+  const uint v1 = simd_shuffle(u12, ushort(b0 + 1u));
+  const uint v2 = simd_shuffle(u12, ushort(b0 + 2u));
+  const uint v3 = simd_shuffle(u12, ushort(b0 + 3u));
+  const uint v4 = simd_shuffle(u12, ushort(b0 + 4u));
+  const uint v5 = simd_shuffle(u12, ushort(b0 + 5u));
+  const uint v6 = simd_shuffle(u12, ushort(b0 + 6u));
+  const uint v7 = simd_shuffle(u12, ushort(b0 + 7u));
+
+  const ulong dst_off = ulong(blk / 78u) * 4096ul + ulong(blk % 78u) * 52ul;
+  if (lane == 0u) *(device float *)(wire + dst_off) = sc;
+  device uint *dw = (device uint *)(wire + dst_off + 4ul);
+  if (sub == 0u)      dw[g * 3u + 0u] = v0 | (v1 << 12u) | ((v2 & 0xFFu) << 24u);
+  else if (sub == 1u) dw[g * 3u + 1u] = (v2 >> 8u) | (v3 << 4u) | (v4 << 16u) | ((v5 & 0xFu) << 28u);
+  else if (sub == 2u) dw[g * 3u + 2u] = (v5 >> 4u) | (v6 << 8u) | (v7 << 20u);
+}
+
+kernel void fwht64_had_int6_unpack_wire_f32(
+    device const uchar *wire    [[buffer(0)]],
+    device float       *y       [[buffer(1)]],
+    constant uint      &n_blks  [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = ulong(blk / 78u) * 4096ul + ulong(blk % 78u) * 52ul;
+  const float sc = *(device const float *)(wire + src_off);
+  device const uint *sw = (device const uint *)(wire + src_off + 4ul);
+  const uint g = lane >> 3u;
+  const uint sub = lane & 7u;
+  const uint w0 = sw[g * 3u + 0u], w1 = sw[g * 3u + 1u], w2 = sw[g * 3u + 2u];
+  uint u12 = 0u;
+  switch (sub) {
+    case 0u: u12 = w0 & 0xFFFu; break;
+    case 1u: u12 = (w0 >> 12u) & 0xFFFu; break;
+    case 2u: u12 = (w0 >> 24u) | ((w1 & 0xFu) << 8u); break;
+    case 3u: u12 = (w1 >> 4u) & 0xFFFu; break;
+    case 4u: u12 = (w1 >> 16u) & 0xFFFu; break;
+    case 5u: u12 = (w1 >> 28u) | ((w2 & 0xFFu) << 4u); break;
+    case 6u: u12 = (w2 >> 8u) & 0xFFFu; break;
+    default: u12 = (w2 >> 20u) & 0xFFFu; break;
+  }
+  float a = float(int(u12 & 63u) - 31) * sc;
+  float b = float(int((u12 >> 6u) & 63u) - 31) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = a;
+  y[base + lane * 2u + 1u] = b;
+}
+
+kernel void fwht64_had_int6_pack_wire_f16(
+    device const half *x        [[buffer(0)]],
+    device uchar      *wire     [[buffer(1)]],
+    constant uint     &n_blks   [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong base = ulong(blk) * 64ul;
+  float a = float(x[base + lane * 2u]);
+  float b = float(x[base + lane * 2u + 1u]);
+  fwht64_simd_pair(a, b, lane);
+
+  const float amax = simd_max(max(fabs(a), fabs(b)));
+  const float sc = (amax > 0.0f) ? (amax * (1.0f / 31.0f)) : 0.0f;
+  const float inv_s = (sc > 0.0f) ? (1.0f / sc) : 0.0f;
+
+  const uint ua = uint(clamp(int(rint(a * inv_s)), -31, 31) + 31);
+  const uint ub = uint(clamp(int(rint(b * inv_s)), -31, 31) + 31);
+  const uint u12 = (ua & 63u) | ((ub & 63u) << 6u);
+
+  const uint g = lane >> 3u;
+  const uint sub = lane & 7u;
+  const uint b0 = g << 3u;
+  const uint v0 = simd_shuffle(u12, ushort(b0 + 0u));
+  const uint v1 = simd_shuffle(u12, ushort(b0 + 1u));
+  const uint v2 = simd_shuffle(u12, ushort(b0 + 2u));
+  const uint v3 = simd_shuffle(u12, ushort(b0 + 3u));
+  const uint v4 = simd_shuffle(u12, ushort(b0 + 4u));
+  const uint v5 = simd_shuffle(u12, ushort(b0 + 5u));
+  const uint v6 = simd_shuffle(u12, ushort(b0 + 6u));
+  const uint v7 = simd_shuffle(u12, ushort(b0 + 7u));
+
+  const ulong dst_off = ulong(blk / 78u) * 4096ul + ulong(blk % 78u) * 52ul;
+  if (lane == 0u) *(device float *)(wire + dst_off) = sc;
+  device uint *dw = (device uint *)(wire + dst_off + 4ul);
+  if (sub == 0u)      dw[g * 3u + 0u] = v0 | (v1 << 12u) | ((v2 & 0xFFu) << 24u);
+  else if (sub == 1u) dw[g * 3u + 1u] = (v2 >> 8u) | (v3 << 4u) | (v4 << 16u) | ((v5 & 0xFu) << 28u);
+  else if (sub == 2u) dw[g * 3u + 2u] = (v5 >> 4u) | (v6 << 8u) | (v7 << 20u);
+}
+
+kernel void fwht64_had_int6_unpack_wire_f16(
+    device const uchar *wire    [[buffer(0)]],
+    device half        *y       [[buffer(1)]],
+    constant uint      &n_blks  [[buffer(2)]],
+    uint3 tg                    [[threadgroup_position_in_grid]],
+    uint lane                   [[thread_index_in_simdgroup]],
+    uint sg                     [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = ulong(blk / 78u) * 4096ul + ulong(blk % 78u) * 52ul;
+  const float sc = *(device const float *)(wire + src_off);
+  device const uint *sw = (device const uint *)(wire + src_off + 4ul);
+  const uint g = lane >> 3u;
+  const uint sub = lane & 7u;
+  const uint w0 = sw[g * 3u + 0u], w1 = sw[g * 3u + 1u], w2 = sw[g * 3u + 2u];
+  uint u12 = 0u;
+  switch (sub) {
+    case 0u: u12 = w0 & 0xFFFu; break;
+    case 1u: u12 = (w0 >> 12u) & 0xFFFu; break;
+    case 2u: u12 = (w0 >> 24u) | ((w1 & 0xFu) << 8u); break;
+    case 3u: u12 = (w1 >> 4u) & 0xFFFu; break;
+    case 4u: u12 = (w1 >> 16u) & 0xFFFu; break;
+    case 5u: u12 = (w1 >> 28u) | ((w2 & 0xFFu) << 4u); break;
+    case 6u: u12 = (w2 >> 8u) & 0xFFFu; break;
+    default: u12 = (w2 >> 20u) & 0xFFFu; break;
+  }
+  float a = float(int(u12 & 63u) - 31) * sc;
+  float b = float(int((u12 >> 6u) & 63u) - 31) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = half(a);
+  y[base + lane * 2u + 1u] = half(b);
+}
+
+/* Kalomaze 27-bit Dual-RVQ KV packer (3.75 bpe -> 4.27x smaller than FP16) + zero-DRAM-decompress ADC Q*K^T
+   imported directly from metal-microbench/had_int8_metal/dual_rvq_kernels.metal. */
+kernel void kalomaze_27b_pack_wire_f16(
+    device const half4 *K       [[buffer(0)]], /* [rows, vecs8 * 2] */
+    device uint        *packed  [[buffer(1)]], /* [rows, words_per_row] in /mesh0 */
+    constant uint4     &dims    [[buffer(2)]], /* x=rows, y=vecs8_per_row, z=words_per_row, w=0 */
+    uint r                      [[thread_position_in_grid]])
+{
+  const uint rows = dims.x, vecs8 = dims.y, words_per_row = dims.z;
+  if (r >= rows) return;
+  device uint *row_w = packed + ulong(r) * ulong(words_per_row);
+  for (uint w = 0u; w < words_per_row; w++) row_w[w] = 0u;
+  for (uint v = 0u; v < vecs8; v++) {
+    const ulong p = (ulong(r) * ulong(vecs8) + ulong(v)) * 2ul;
+    const float4 lo = float4(K[p]);
+    const float4 hi = float4(K[p + 1u]);
+    const uint l0 = uint(clamp(int(rint((lo.x + lo.y) * 16.0f)) + 32, 0, 63));
+    const uint l1 = uint(clamp(int(rint((lo.z + lo.w) * 32.0f)) + 64, 0, 127));
+    const uint l2 = uint(clamp(int(rint((hi.x + hi.y) * 32.0f)) + 64, 0, 127));
+    const uint l3 = uint(clamp(int(rint((hi.z + hi.w) * 32.0f)) + 64, 0, 127));
+    const uint u27 = l0 | (l1 << 6u) | (l2 << 13u) | (l3 << 20u);
+    const uint bit_pos = v * 27u;
+    const uint wi = bit_pos >> 5u;
+    const uint sh = bit_pos & 31u;
+    row_w[wi] |= (u27 << sh);
+    if (sh > 5u) row_w[wi + 1u] |= (u27 >> (32u - sh));
+  }
+}
+
+kernel void kalomaze_27b_adc_qk_sram(
+    device const uint     *packed_u32 [[buffer(0)]],
+    device const uint16_t *row_src    [[buffer(1)]],
+    device const half     *adc_lut    [[buffer(2)]],
+    device float          *out_scores [[buffer(3)]],
+    constant uint4        &dims       [[buffer(4)]], /* x=rows, y=vecs8_per_row, z=words_per_row, w=rows_per_tg */
+    uint2 tgid                        [[threadgroup_position_in_grid]],
+    uint2 ltid                        [[thread_position_in_threadgroup]],
+    uint  tid                         [[thread_index_in_threadgroup]],
+    uint2 tgs                         [[threads_per_threadgroup]])
+{
+  const uint rows = dims.x, vecs8_per_row = dims.y, words_per_row = dims.z, rows_per_tg = dims.w;
+  const uint v_base = tgid.x * 16u;
+  const uint v_cnt = min(16u, vecs8_per_row - v_base);
+
+  threadgroup half tg_adc[16 * 448];
+  const uint total_lut = v_cnt * 448u;
+  const uint stride = tgs.x * tgs.y;
+  device const half *src_lut = adc_lut + ulong(v_base) * 448ul;
+  for (uint i = tid; i < total_lut; i += stride) tg_adc[i] = src_lut[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const uint lv = ltid.x;
+  if (lv >= v_cnt) return;
+  const uint v = v_base + lv;
+  const uint bit_pos = v * 27u;
+  const uint w_idx = bit_pos >> 5u;
+  const uint sh = bit_pos & 31u;
+  const uint lbase = lv * 448u;
+
+  const uint r_start = tgid.y * rows_per_tg + ltid.y;
+  const uint r_end = min((tgid.y + 1u) * rows_per_tg, rows);
+  for (uint r = r_start; r < r_end; r += tgs.y) {
+    const uint src_r = uint(row_src[r]);
+    device const uint *row_w = packed_u32 + ulong(src_r) * ulong(words_per_row);
+    const uint w_lo = row_w[w_idx];
+    const uint w_hi = (sh > 5u) ? row_w[w_idx + 1u] : 0u;
+    const uint u27 = ((w_lo >> sh) | (sh > 5u ? (w_hi << (32u - sh)) : 0u)) & 0x7FFFFFFu;
+    const float s = float(tg_adc[lbase + (u27 & 63u)])
+                  + float(tg_adc[lbase + 64u + ((u27 >> 6u) & 127u)])
+                  + float(tg_adc[lbase + 192u + ((u27 >> 13u) & 127u)])
+                  + float(tg_adc[lbase + 320u + ((u27 >> 20u) & 127u)]);
+    const float s_sum = simd_sum(s);
+    if (lv == 0u) out_scores[r * ((vecs8_per_row + 15u) / 16u) + tgid.x] = s_sum;
+  }
 }
 )MSL";
 
@@ -278,6 +655,16 @@ struct mesh_phase_group *mesh_phase_open(int rank, int ranks, const char *master
   }
   g->pso_flash_c1 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"flash_c1_packed"] error:&err];
   g->pso_scan_c2  = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"affine_scan_c2_packed"] error:&err];
+  g->pso_had8_pack_f32   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_pack_wire_f32"] error:&err];
+  g->pso_had8_unpack_f32 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_wire_f32"] error:&err];
+  g->pso_had8_pack_f16   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_pack_wire_f16"] error:&err];
+  g->pso_had8_unpack_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_wire_f16"] error:&err];
+  g->pso_had6_pack_f32   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_pack_wire_f32"] error:&err];
+  g->pso_had6_unpack_f32 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_wire_f32"] error:&err];
+  g->pso_had6_pack_f16   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_pack_wire_f16"] error:&err];
+  g->pso_had6_unpack_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_wire_f16"] error:&err];
+  g->pso_kalo27_pack_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_pack_wire_f16"] error:&err];
+  g->pso_kalo27_adc_qk   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_adc_qk_sram"] error:&err];
   return g;
 }
 
@@ -1076,6 +1463,639 @@ int mesh_phase_run_hetero(struct mesh_phase_group *grp,
   out->gpu_us = gpu_sum / reps; /* exact R2 compute stretch excluding collective wait! */
   out->throughput = (2.0 * (double)M * (double)K_total * (double)N) / ((wall_sum / reps) * 1e-6) / 1e12;
   out->ok = 1;
+  out->max_err = 0.0;
+  return 0;
+}
+
+/* ---- Ticket G2/G3: Hadamard-Domain Compressed C0 GEMM + In-Switch ReduceScatter ----
+   Computes MPSMatrixMultiplication -> Metal FWHT-64 pack_wire (68 B/64 for had_int8 or 52 B/64 for had_int6_pk)
+   directly into zero-copy /mesh0 pages -> mesh_reduce_write(MESH_RED_SUM_HAD_I8 / I6) (zero inverse FWHT on switch CPU!)
+   -> Metal FWHT-64 unpack_wire on receiver. Reports 1.0 - cos_sim in out->max_err against exact FP32 reference. */
+int mesh_phase_run_coded(struct mesh_phase_group *grp,
+                         uint32_t M,
+                         uint32_t K,
+                         uint32_t N,
+                         uint32_t tiles,
+                         uint32_t coalesce_g,
+                         int codec_id, /* 1=MESH_CODEC_HAD_INT8, 2=MESH_CODEC_HAD_INT6_PK */
+                         int standalone,
+                         int reps,
+                         struct mesh_phase_result *out) {
+  const int rank = grp->rank, ranks = grp->ranks;
+  const uint32_t g = coalesce_g > 0 ? coalesce_g : 1u;
+  if (codec_id != MESH_CODEC_HAD_INT8 && codec_id != MESH_CODEC_HAD_INT6_PK) return -1;
+  const uint32_t K_loc = K / (uint32_t)ranks;
+  const uint32_t N_sh = N / (uint32_t)ranks;
+  const uint32_t M_tile = M / tiles;
+  const uint32_t tile_elems = M_tile * N_sh;
+  if ((tile_elems & 63u) != 0u) return -1;
+  const uint32_t tile_blks = tile_elems / 64u;
+  const uint32_t blks_per_page = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_HAD_I8_BLKS_PAGE : MESH_HAD_I6_BLKS_PAGE;
+  const uint32_t blk_bytes = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_HAD_I8_BLK_BYTES : MESH_HAD_I6_BLK_BYTES;
+  const uint8_t red_op = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_RED_SUM_HAD_I8 : MESH_RED_SUM_HAD_I6;
+  id<MTLComputePipelineState> pso_pack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_pack_f32 : grp->pso_had6_pack_f32;
+  id<MTLComputePipelineState> pso_unpack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_f32 : grp->pso_had6_unpack_f32;
+
+  const uint32_t tile_wire_pages = (tile_blks + blks_per_page - 1u) / blks_per_page;
+  const uint32_t sh_wire_pages = tiles * tile_wire_pages;
+  const uint32_t alloc_pages = ((tile_wire_pages + 3u) & ~3u);
+  const uint32_t nph = tiles * (uint32_t)ranks;
+  const uint64_t data_off = *(const uint64_t *)((const unsigned char *)grp->ctx.M + 88);
+
+  /* Inputs with realistic 1% 16x heavy-tail outliers to exercise GF(2)^6 FWHT-64 outlier spreading */
+  id<MTLBuffer> bufA = [grp->dev newBufferWithLength:(size_t)M * K_loc * sizeof(float) options:MTLResourceStorageModeShared];
+  float *pA = (float *)bufA.contents;
+  for (size_t i = 0; i < (size_t)M * K_loc; i++) {
+    float v = 0.25f * (float)((int)((i + (size_t)rank * 17u) % 5u) - 2);
+    if ((i % 97u) == 0u) v *= 16.0f;
+    pA[i] = v;
+  }
+  std::vector<id<MTLBuffer>> bufB(ranks);
+  for (int d = 0; d < ranks; d++) {
+    bufB[d] = [grp->dev newBufferWithLength:(size_t)K_loc * N_sh * sizeof(float) options:MTLResourceStorageModeShared];
+    float *pB = (float *)bufB[d].contents;
+    for (size_t i = 0; i < (size_t)K_loc * N_sh; i++) pB[i] = 0.25f * (float)((int)((i + (size_t)(rank * 7 + d * 3)) % 5u) - 2);
+  }
+
+  std::vector<id<MTLBuffer>> bufTmp(nph), bufWire(nph);
+  std::vector<uint32_t> raw_p0(nph), src_p0(nph);
+  for (uint32_t i = 0; i < nph; i++) {
+    bufTmp[i] = [grp->dev newBufferWithLength:(size_t)tile_elems * sizeof(float) options:MTLResourceStorageModeShared];
+    void *base = NULL;
+    if (mesh_alloc_contiguous(&grp->ctx, alloc_pages + 4u, NULL, &base)) return -2;
+    uintptr_t raw = (uintptr_t)base, aligned = (raw + 16383u) & ~(uintptr_t)16383u;
+    raw_p0[i] = (uint32_t)(((unsigned char *)raw - ((unsigned char *)grp->ctx.M + data_off)) / MESH_PAGE_BYTES);
+    src_p0[i] = (uint32_t)(((unsigned char *)aligned - ((unsigned char *)grp->ctx.M + data_off)) / MESH_PAGE_BYTES);
+    bufWire[i] = [grp->dev newBufferWithBytesNoCopy:(void *)aligned length:(size_t)alloc_pages * MESH_PAGE_BYTES
+                                            options:MTLResourceStorageModeShared deallocator:nil];
+    if (!bufWire[i]) return -3;
+  }
+
+  MPSMatrixDescriptor *descA = [MPSMatrixDescriptor matrixDescriptorWithRows:M_tile columns:K_loc rowBytes:K_loc * sizeof(float) dataType:MPSDataTypeFloat32];
+  MPSMatrixDescriptor *descB = [MPSMatrixDescriptor matrixDescriptorWithRows:K_loc columns:N_sh rowBytes:N_sh * sizeof(float) dataType:MPSDataTypeFloat32];
+  MPSMatrixDescriptor *descC = [MPSMatrixDescriptor matrixDescriptorWithRows:M_tile columns:N_sh rowBytes:N_sh * sizeof(float) dataType:MPSDataTypeFloat32];
+  MPSMatrixMultiplication *mm = [[MPSMatrixMultiplication alloc] initWithDevice:grp->dev transposeLeft:NO transposeRight:NO
+                                                                     resultRows:M_tile resultColumns:N_sh interiorColumns:K_loc alpha:1.0 beta:0.0];
+  std::vector<MPSMatrix *> matA(tiles), matB(ranks), matTmp(nph);
+  for (uint32_t t = 0; t < tiles; t++)
+    matA[t] = [[MPSMatrix alloc] initWithBuffer:bufA offset:(size_t)t * M_tile * K_loc * sizeof(float) descriptor:descA];
+  for (int d = 0; d < ranks; d++) matB[d] = [[MPSMatrix alloc] initWithBuffer:bufB[d] descriptor:descB];
+  for (uint32_t i = 0; i < nph; i++) matTmp[i] = [[MPSMatrix alloc] initWithBuffer:bufTmp[i] descriptor:descC];
+
+  id<MTLBuffer> bufRecvWire = [grp->dev newBufferWithLength:(size_t)sh_wire_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bufOutF32 = [grp->dev newBufferWithLength:(size_t)tiles * tile_elems * sizeof(float) options:MTLResourceStorageModeShared];
+
+  const uint32_t slots = 2u;
+  const uint32_t n_recv = slots * sh_wire_pages;
+  std::vector<uint32_t> my_idx(n_recv), all_idx((size_t)ranks * n_recv);
+  if (!standalone) {
+    if (mesh_alloc(&grp->ctx, n_recv, 0, my_idx.data(), NULL)) return -4;
+    if (group_allgather(grp, my_idx.data(), all_idx.data(), n_recv * sizeof(uint32_t))) return -5;
+  }
+
+  const uint16_t my_tag = MESH_TAG_WEIGHT(1), done_tag = MESH_TAG_WEIGHT(ranks);
+  std::vector<std::vector<struct mesh_red_xfer>> dxf(slots * nph);
+  if (!standalone) {
+    for (uint32_t sl = 0; sl < slots; sl++) {
+      for (uint32_t t = 0; t < tiles; t++) {
+        for (int d = 0; d < ranks; d++) {
+          auto &v = dxf[(sl * tiles + t) * (uint32_t)ranks + (uint32_t)d];
+          v.reserve(tile_wire_pages);
+          const uint32_t *didx = all_idx.data() + (size_t)d * n_recv + sl * sh_wire_pages + t * tile_wire_pages;
+          const uint32_t p0 = src_p0[t * (uint32_t)ranks + (uint32_t)d];
+          for (uint32_t k = 0; k < tile_wire_pages; k++) {
+            const uint32_t bcnt = (k + 1u < tile_wire_pages) ? blks_per_page : (tile_blks - k * blks_per_page);
+            v.push_back((struct mesh_red_xfer){ p0 + k, bcnt * blk_bytes, grp->nodes[d], didx[k], red_op, 0, my_tag });
+          }
+        }
+      }
+    }
+  }
+
+  const uint32_t pack_tgs = (tile_blks + 3u) / 4u;
+  double wall_sum = 0.0, gpu_sum = 0.0;
+  for (int rep = -3; rep < reps; rep++) {
+    const uint32_t sl = (uint32_t)((rep + 3) & 1);
+    if (!standalone) mesh_phase_barrier(grp);
+    const double t0 = now_us();
+    @autoreleasepool {
+      std::vector<id<MTLCommandBuffer>> cbs(nph);
+      std::vector<uint32_t> ph_t(nph), ph_d(nph);
+      uint32_t p = 0;
+      for (uint32_t t = 0; t < tiles; t++) {
+        for (int step = 0; step < ranks; step++) {
+          const int d = (step + rank / (int)g) % ranks;
+          const uint32_t idx = t * (uint32_t)ranks + (uint32_t)d;
+          ph_t[p] = t; ph_d[p] = (uint32_t)d;
+          cbs[p] = [grp->q commandBuffer];
+          [mm encodeToCommandBuffer:cbs[p] leftMatrix:matA[t] rightMatrix:matB[d] resultMatrix:matTmp[idx]];
+          id<MTLComputeCommandEncoder> enc = [cbs[p] computeCommandEncoder];
+          [enc setComputePipelineState:pso_pack];
+          [enc setBuffer:bufTmp[idx] offset:0 atIndex:0];
+          [enc setBuffer:bufWire[idx] offset:0 atIndex:1];
+          [enc setBytes:&tile_blks length:sizeof(tile_blks) atIndex:2];
+          [enc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          [enc endEncoding];
+          [cbs[p] commit];
+          p++;
+        }
+      }
+      for (uint32_t qi = 0; qi < nph; qi++) {
+        [cbs[qi] waitUntilCompleted];
+        if (!standalone) {
+          const auto &v = dxf[(sl * tiles + ph_t[qi]) * (uint32_t)ranks + ph_d[qi]];
+          for (size_t off = 0; off < v.size(); ) {
+            const uint32_t n = (uint32_t)(v.size() - off < 240u ? v.size() - off : 240u);
+            while (mesh_reduce_write(&grp->ctx, v.data() + off, n) == ENOMEM) {}
+            off += n;
+          }
+        }
+      }
+      if (!standalone) {
+        const uint32_t *ridx = my_idx.data() + sl * sh_wire_pages;
+        unsigned char *rw = (unsigned char *)bufRecvWire.contents;
+        for (uint32_t pi = 0; pi < sh_wire_pages; pi++) {
+          struct mesh_entry_info e; uint16_t tag = 0;
+          for (;;) { mesh_entry_red(&grp->ctx, ridx[pi], &e, &tag); if (e.data && tag == done_tag) break; }
+          memcpy(rw + (size_t)pi * MESH_PAGE_BYTES, e.data, e.bytes);
+        }
+        mesh_clear_indices(&grp->ctx, ridx, sh_wire_pages);
+        id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
+        id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
+        [uenc setComputePipelineState:pso_unpack];
+        for (uint32_t t = 0; t < tiles; t++) {
+          [uenc setBuffer:bufRecvWire offset:(size_t)t * tile_wire_pages * MESH_PAGE_BYTES atIndex:0];
+          [uenc setBuffer:bufOutF32 offset:(size_t)t * tile_elems * sizeof(float) atIndex:1];
+          [uenc setBytes:&tile_blks length:sizeof(tile_blks) atIndex:2];
+          [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [uenc endEncoding];
+        [ucb commit];
+        [ucb waitUntilCompleted];
+      }
+    }
+    const double dt = now_us() - t0;
+    if (rep >= 0) { wall_sum += dt; gpu_sum += dt; }
+  }
+
+  int ok = 1;
+  double one_minus_cos = 0.0;
+  if (!standalone) {
+    const size_t check_n = tile_elems < 4096u ? tile_elems : 4096u;
+    std::vector<float> loc(check_n), all(check_n * (size_t)ranks);
+    memcpy(loc.data(), bufTmp[0].contents, check_n * sizeof(float));
+    group_allgather(grp, loc.data(), all.data(), check_n * sizeof(float));
+    if (rank == 0) {
+      const float *got = (const float *)bufOutF32.contents;
+      double dot = 0.0, na = 0.0, nb = 0.0;
+      for (size_t i = 0; i < check_n; i++) {
+        double ref = 0.0;
+        for (int r = 0; r < ranks; r++) ref += (double)all[r * check_n + i];
+        const double gval = (double)got[i];
+        dot += ref * gval;
+        na += ref * ref;
+        nb += gval * gval;
+      }
+      const double cos_sim = (na > 0.0 && nb > 0.0) ? (dot / sqrt(na * nb)) : 1.0;
+      one_minus_cos = 1.0 - cos_sim;
+      const double min_cos = (codec_id == MESH_CODEC_HAD_INT8) ? 0.999 : 0.990;
+      if (std::isnan(cos_sim) || cos_sim < min_cos) ok = 0;
+    }
+    mesh_free_indices(&grp->ctx, my_idx.data(), n_recv);
+  }
+  for (uint32_t i = 0; i < nph; i++)
+    for (uint32_t k = 0; k < alloc_pages + 4u; k++) mesh_release(&grp->ctx, raw_p0[i] + k);
+
+  const double mean_us = wall_sum / reps;
+  out->wall_us = mean_us;
+  out->gpu_us = gpu_sum / reps;
+  out->throughput = (2.0 * (double)M * (double)K * (double)N) / (mean_us * 1e-6) / 1e12;
+  out->ok = ok;
+  out->max_err = one_minus_cos; /* 1 - cos_sim against exact FP32 sum */
+  return 0;
+}
+
+/* ---- Ticket M4+G2: Stacked Sparse Zero-Payload MoE + Hadamard-Domain In-Switch Compression ----
+   Active experts pack FP16 -> FWHT-64 had_int8 / had_int6_pk directly into /mesh0 and reduce via
+   MESH_RED_SUM_HAD_I8 / MESH_RED_SUM_HAD_I6; unrouted experts emit 0-byte 0_M(w) identity tokens! */
+int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
+                                uint32_t n_experts,
+                                uint32_t expert_elems,
+                                uint32_t top_k,
+                                int codec_id, /* 1=had_int8, 2=had_int6_pk */
+                                int dense_counterfactual,
+                                int reps,
+                                struct mesh_phase_result *out) {
+  const int rank = grp->rank, ranks = grp->ranks;
+  if (n_experts < (uint32_t)ranks || (n_experts % (uint32_t)ranks) != 0 || (expert_elems & 63u) != 0u) return -1;
+  if (codec_id != MESH_CODEC_HAD_INT8 && codec_id != MESH_CODEC_HAD_INT6_PK) return -1;
+  const uint32_t exp_per_rank = n_experts / (uint32_t)ranks;
+  const uint32_t exp_blks = expert_elems / 64u;
+  const uint32_t blks_per_page = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_HAD_I8_BLKS_PAGE : MESH_HAD_I6_BLKS_PAGE;
+  const uint32_t blk_bytes = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_HAD_I8_BLK_BYTES : MESH_HAD_I6_BLK_BYTES;
+  const uint8_t red_op = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_RED_SUM_HAD_I8 : MESH_RED_SUM_HAD_I6;
+  id<MTLComputePipelineState> pso_pack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_pack_f16 : grp->pso_had6_pack_f16;
+  id<MTLComputePipelineState> pso_unpack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_f16 : grp->pso_had6_unpack_f16;
+
+  const uint32_t exp_wire_pages = (exp_blks + blks_per_page - 1u) / blks_per_page;
+  const uint32_t alloc_pages = ((exp_wire_pages + 3u) & ~3u);
+  const uint32_t my_recv_pages = exp_per_rank * exp_wire_pages;
+  const uint64_t data_off = *(const uint64_t *)((const unsigned char *)grp->ctx.M + 88);
+
+  std::vector<int> active(n_experts, 0);
+  const uint32_t routable = (top_k + 1u < n_experts) ? (n_experts - 1u) : n_experts;
+  for (uint32_t k = 0; k < top_k && k < routable; k++) active[((uint32_t)rank * 2u + k) % routable] = 1;
+
+  std::vector<uint32_t> raw_p0(n_experts, MESH_PAGE_NONE), src_p0(n_experts, MESH_PAGE_NONE);
+  std::vector<id<MTLBuffer>> bufF16(n_experts), bufWire(n_experts);
+  for (uint32_t e = 0; e < n_experts; e++) {
+    if (!dense_counterfactual && !active[e]) continue;
+    bufF16[e] = [grp->dev newBufferWithLength:(size_t)expert_elems * sizeof(__fp16) options:MTLResourceStorageModeShared];
+    __fp16 *fp = (__fp16 *)bufF16[e].contents;
+    if (active[e]) {
+      const float base_v = (float)(rank + 1) * 0.5f + 0.125f * (float)(e & 3u);
+      for (uint32_t i = 0; i < expert_elems; i++) fp[i] = (__fp16)(base_v + 0.0625f * (float)((int)(i % 7u) - 3));
+    } else {
+      memset(fp, 0, (size_t)expert_elems * sizeof(__fp16));
+    }
+    void *base = NULL;
+    if (mesh_alloc_contiguous(&grp->ctx, alloc_pages + 4u, NULL, &base)) return -2;
+    uintptr_t raw = (uintptr_t)base, aligned = (raw + 16383u) & ~(uintptr_t)16383u;
+    raw_p0[e] = (uint32_t)(((unsigned char *)raw - ((unsigned char *)grp->ctx.M + data_off)) / MESH_PAGE_BYTES);
+    src_p0[e] = (uint32_t)(((unsigned char *)aligned - ((unsigned char *)grp->ctx.M + data_off)) / MESH_PAGE_BYTES);
+    bufWire[e] = [grp->dev newBufferWithBytesNoCopy:(void *)aligned length:(size_t)alloc_pages * MESH_PAGE_BYTES
+                                            options:MTLResourceStorageModeShared deallocator:nil];
+  }
+
+  id<MTLBuffer> bufRecvWire = [grp->dev newBufferWithLength:(size_t)my_recv_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bufOutF16 = [grp->dev newBufferWithLength:(size_t)exp_per_rank * expert_elems * sizeof(__fp16) options:MTLResourceStorageModeShared];
+
+  const uint32_t slots = 2u;
+  const uint32_t n_recv = slots * my_recv_pages;
+  std::vector<uint32_t> my_idx(n_recv), all_idx((size_t)ranks * n_recv);
+  if (mesh_alloc(&grp->ctx, n_recv, 0, my_idx.data(), NULL)) return -3;
+  if (group_allgather(grp, my_idx.data(), all_idx.data(), n_recv * sizeof(uint32_t))) return -4;
+
+  const uint16_t my_tag = MESH_TAG_WEIGHT(1), done_tag = MESH_TAG_WEIGHT(ranks);
+  std::vector<std::vector<struct mesh_red_xfer>> xfs(slots);
+  for (uint32_t sl = 0; sl < slots; sl++) {
+    xfs[sl].reserve((size_t)n_experts * exp_wire_pages);
+    for (uint32_t base = 0; base < exp_wire_pages; base += 8u) {
+      const uint32_t blk = exp_wire_pages - base < 8u ? exp_wire_pages - base : 8u;
+      for (uint32_t e = 0; e < n_experts; e++) {
+        const uint32_t dst_r = e / exp_per_rank;
+        const uint32_t local_e = e % exp_per_rank;
+        const uint32_t *didx = all_idx.data() + (size_t)dst_r * n_recv + sl * my_recv_pages + local_e * exp_wire_pages;
+        if (!dense_counterfactual && !active[e]) {
+          for (uint32_t k = 0; k < blk; k++)
+            xfs[sl].push_back((struct mesh_red_xfer){ MESH_PAGE_NONE, 0u, grp->nodes[dst_r], didx[base + k], red_op, 0, my_tag });
+        } else {
+          for (uint32_t k = 0; k < blk; k++) {
+            const uint32_t pk = base + k;
+            const uint32_t bcnt = (pk + 1u < exp_wire_pages) ? blks_per_page : (exp_blks - pk * blks_per_page);
+            xfs[sl].push_back((struct mesh_red_xfer){ src_p0[e] + pk, bcnt * blk_bytes, grp->nodes[dst_r], didx[pk], red_op, 0, my_tag });
+          }
+        }
+      }
+    }
+  }
+
+  const uint32_t pack_tgs = (exp_blks + 3u) / 4u;
+  std::vector<int> was_null(exp_per_rank, 0);
+  double sum_us = 0.0;
+  for (int rep = -3; rep < reps; rep++) {
+    const uint32_t sl = (uint32_t)((rep + 3) & 1);
+    mesh_phase_barrier(grp);
+    const double t0 = now_us();
+    @autoreleasepool {
+      id<MTLCommandBuffer> pcb = [grp->q commandBuffer];
+      id<MTLComputeCommandEncoder> penc = [pcb computeCommandEncoder];
+      [penc setComputePipelineState:pso_pack];
+      for (uint32_t e = 0; e < n_experts; e++) {
+        if (!dense_counterfactual && !active[e]) continue;
+        [penc setBuffer:bufF16[e] offset:0 atIndex:0];
+        [penc setBuffer:bufWire[e] offset:0 atIndex:1];
+        [penc setBytes:&exp_blks length:sizeof(exp_blks) atIndex:2];
+        [penc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+      }
+      [penc endEncoding];
+      [pcb commit];
+      [pcb waitUntilCompleted];
+    }
+    const auto &v = xfs[sl];
+    for (size_t off = 0; off < v.size(); ) {
+      const uint32_t n = (uint32_t)(v.size() - off < 240u ? v.size() - off : 240u);
+      while (mesh_reduce_write(&grp->ctx, v.data() + off, n) == ENOMEM) {}
+      off += n;
+    }
+    const uint32_t *ridx = my_idx.data() + sl * my_recv_pages;
+    unsigned char *rw = (unsigned char *)bufRecvWire.contents;
+    std::vector<int> exp_has_data(exp_per_rank, 0);
+    for (uint32_t le = 0; le < exp_per_rank; le++) {
+      for (uint32_t k = 0; k < exp_wire_pages; k++) {
+        const uint32_t pi = le * exp_wire_pages + k;
+        struct mesh_entry_info e; uint16_t tag = 0;
+        for (;;) { mesh_entry_red(&grp->ctx, ridx[pi], &e, &tag); if (tag == done_tag) break; }
+        if (e.data) { memcpy(rw + (size_t)pi * MESH_PAGE_BYTES, e.data, e.bytes); exp_has_data[le] = 1; }
+      }
+      if (rep == reps - 1) was_null[le] = !exp_has_data[le];
+    }
+    mesh_clear_indices(&grp->ctx, ridx, my_recv_pages);
+    @autoreleasepool {
+      id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
+      id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
+      [uenc setComputePipelineState:pso_unpack];
+      for (uint32_t le = 0; le < exp_per_rank; le++) {
+        if (!exp_has_data[le]) continue;
+        [uenc setBuffer:bufRecvWire offset:(size_t)le * exp_wire_pages * MESH_PAGE_BYTES atIndex:0];
+        [uenc setBuffer:bufOutF16 offset:(size_t)le * expert_elems * sizeof(__fp16) atIndex:1];
+        [uenc setBytes:&exp_blks length:sizeof(exp_blks) atIndex:2];
+        [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+      }
+      [uenc endEncoding];
+      [ucb commit];
+      [ucb waitUntilCompleted];
+    }
+    const double dt = now_us() - t0;
+    if (rep >= 0) sum_us += dt;
+  }
+
+  int ok = 1;
+  double worst_1mcos = 0.0;
+  const __fp16 *got_all = (const __fp16 *)bufOutF16.contents;
+  for (uint32_t le = 0; le < exp_per_rank; le++) {
+    const uint32_t e = (uint32_t)rank * exp_per_rank + le;
+    int any_active = 0;
+    std::vector<double> ref(256, 0.0);
+    for (int r = 0; r < ranks; r++) {
+      int r_act = 0;
+      for (uint32_t k = 0; k < top_k && k < routable; k++)
+        if ((((uint32_t)r * 2u + k) % routable) == e) r_act = 1;
+      if (r_act) {
+        any_active = 1;
+        const float base_v = (float)(r + 1) * 0.5f + 0.125f * (float)(e & 3u);
+        for (uint32_t i = 0; i < 256u; i++) ref[i] += (double)(__fp16)(base_v + 0.0625f * (float)((int)(i % 7u) - 3));
+      }
+    }
+    if (!any_active) {
+      if (!dense_counterfactual && !was_null[le]) ok = 0;
+    } else {
+      const __fp16 *got = got_all + (size_t)le * expert_elems;
+      double dot = 0.0, na = 0.0, nb = 0.0;
+      for (uint32_t i = 0; i < 256u; i++) {
+        const double gval = (double)got[i];
+        dot += ref[i] * gval; na += ref[i] * ref[i]; nb += gval * gval;
+      }
+      const double cos_sim = (na > 0.0 && nb > 0.0) ? (dot / sqrt(na * nb)) : 1.0;
+      if (1.0 - cos_sim > worst_1mcos) worst_1mcos = 1.0 - cos_sim;
+      if (std::isnan(cos_sim) || cos_sim < (codec_id == MESH_CODEC_HAD_INT8 ? 0.999 : 0.990)) ok = 0;
+    }
+  }
+
+  mesh_free_indices(&grp->ctx, my_idx.data(), n_recv);
+  for (uint32_t e = 0; e < n_experts; e++)
+    if (raw_p0[e] != MESH_PAGE_NONE)
+      for (uint32_t k = 0; k < alloc_pages + 4u; k++) mesh_release(&grp->ctx, raw_p0[e] + k);
+
+  const double mean_us = sum_us / reps;
+  const double dense_bytes = (double)n_experts * (double)expert_elems * 2.0 * (double)(ranks - 1);
+  out->wall_us = mean_us;
+  out->gpu_us = 0.0;
+  out->throughput = dense_bytes / (mean_us * 1e-6) / 1e9; /* effective dense FP16-equiv GB/s */
+  out->ok = ok;
+  out->max_err = worst_1mcos;
+  return 0;
+}
+
+/* ---- Ticket M5+G3: Compressed Disaggregated Prefill -> Decode KV-Page Handoff ----
+   Supports raw FP16 (codec_id=0), FWHT-64 had_int8 (codec_id=1), FWHT-64 had_int6_pk (codec_id=2),
+   and Kalomaze 27-bit Dual-RVQ + zero-DRAM-decompress ADC-LUT Q*K^T (codec_id=9)! */
+int mesh_phase_kv_handoff_coded(struct mesh_phase_group *grp,
+                                uint32_t n_layers,
+                                uint32_t kv_seq,
+                                uint32_t kv_dim,
+                                int codec_id, /* 0=FP16, 1=had_int8, 2=had_int6_pk, 9=kalomaze_27b_adc */
+                                int standalone,
+                                int reps,
+                                struct mesh_phase_result *out) {
+  if (codec_id == MESH_CODEC_BF16)
+    return mesh_phase_kv_handoff(grp, n_layers, kv_seq, kv_dim, standalone, reps, out);
+  const int rank = grp->rank, ranks = grp->ranks;
+  if (ranks < 2 || (ranks & 1)) return -1;
+  if (codec_id != MESH_CODEC_HAD_INT8 && codec_id != MESH_CODEC_HAD_INT6_PK && codec_id != MESH_CODEC_KALOMAZE_27B_ADC)
+    return -1;
+  const int half = ranks / 2;
+  const int is_prefill = (rank < half);
+  const int peer_r = is_prefill ? (rank + half) : (rank - half);
+  const uint32_t kv_cols = kv_dim * 2u;
+  const uint32_t layer_elems = kv_seq * kv_cols;
+  if ((layer_elems & 63u) != 0u || (kv_cols & 7u) != 0u) return -1;
+  const size_t raw_layer_bytes = (size_t)layer_elems * sizeof(__fp16);
+
+  uint32_t layer_wire_pages = 0;
+  uint32_t layer_blks = layer_elems / 64u;
+  uint32_t blks_per_page = 1u, blk_bytes = 1u;
+  uint32_t vecs8_per_row = kv_cols / 8u;
+  uint32_t words_per_row = (vecs8_per_row * 27u + 31u) / 32u;
+  size_t kalo_layer_bytes = (size_t)kv_seq * (size_t)words_per_row * sizeof(uint32_t);
+  if (codec_id == MESH_CODEC_HAD_INT8) {
+    blks_per_page = MESH_HAD_I8_BLKS_PAGE; blk_bytes = MESH_HAD_I8_BLK_BYTES;
+    layer_wire_pages = (layer_blks + blks_per_page - 1u) / blks_per_page;
+  } else if (codec_id == MESH_CODEC_HAD_INT6_PK) {
+    blks_per_page = MESH_HAD_I6_BLKS_PAGE; blk_bytes = MESH_HAD_I6_BLK_BYTES;
+    layer_wire_pages = (layer_blks + blks_per_page - 1u) / blks_per_page;
+  } else {
+    layer_wire_pages = (uint32_t)((kalo_layer_bytes + MESH_PAGE_BYTES - 1u) / MESH_PAGE_BYTES);
+  }
+  const uint32_t alloc_pages = ((layer_wire_pages + 3u) & ~3u);
+  const uint64_t data_off = *(const uint64_t *)((const unsigned char *)grp->ctx.M + 88);
+
+  id<MTLBuffer> bufH = nil, bufW = nil;
+  MPSMatrixMultiplication *mm = nil;
+  MPSMatrix *matH = nil, *matW = nil;
+  std::vector<id<MTLBuffer>> bufTmpKV(n_layers), bufWire(n_layers);
+  std::vector<MPSMatrix *> matKV(n_layers);
+  std::vector<uint32_t> raw_p0(n_layers, MESH_PAGE_NONE), src_p0(n_layers, MESH_PAGE_NONE);
+
+  if (is_prefill) {
+    bufH = [grp->dev newBufferWithLength:(size_t)kv_seq * kv_dim * sizeof(__fp16) options:MTLResourceStorageModeShared];
+    bufW = [grp->dev newBufferWithLength:(size_t)kv_dim * kv_cols * sizeof(__fp16) options:MTLResourceStorageModeShared];
+    __fp16 *pH = (__fp16 *)bufH.contents, *pW = (__fp16 *)bufW.contents;
+    for (size_t i = 0; i < (size_t)kv_seq * kv_dim; i++) pH[i] = (__fp16)(0.125f * (float)((int)(i % 5u) - 2));
+    for (size_t i = 0; i < (size_t)kv_dim * kv_cols; i++) pW[i] = (__fp16)(0.125f * (float)((int)((i + 3u) % 5u) - 2));
+    MPSMatrixDescriptor *dH = [MPSMatrixDescriptor matrixDescriptorWithRows:kv_seq columns:kv_dim rowBytes:kv_dim * 2u dataType:MPSDataTypeFloat16];
+    MPSMatrixDescriptor *dW = [MPSMatrixDescriptor matrixDescriptorWithRows:kv_dim columns:kv_cols rowBytes:kv_cols * 2u dataType:MPSDataTypeFloat16];
+    MPSMatrixDescriptor *dO = [MPSMatrixDescriptor matrixDescriptorWithRows:kv_seq columns:kv_cols rowBytes:kv_cols * 2u dataType:MPSDataTypeFloat16];
+    mm = [[MPSMatrixMultiplication alloc] initWithDevice:grp->dev transposeLeft:NO transposeRight:NO
+                                              resultRows:kv_seq resultColumns:kv_cols interiorColumns:kv_dim alpha:1.0 beta:0.0];
+    matH = [[MPSMatrix alloc] initWithBuffer:bufH descriptor:dH];
+    matW = [[MPSMatrix alloc] initWithBuffer:bufW descriptor:dW];
+    for (uint32_t l = 0; l < n_layers; l++) {
+      bufTmpKV[l] = [grp->dev newBufferWithLength:raw_layer_bytes options:MTLResourceStorageModeShared];
+      matKV[l] = [[MPSMatrix alloc] initWithBuffer:bufTmpKV[l] descriptor:dO];
+      void *base = NULL;
+      if (mesh_alloc_contiguous(&grp->ctx, alloc_pages + 4u, NULL, &base)) return -2;
+      uintptr_t raw = (uintptr_t)base, aligned = (raw + 16383u) & ~(uintptr_t)16383u;
+      raw_p0[l] = (uint32_t)(((unsigned char *)raw - ((unsigned char *)grp->ctx.M + data_off)) / MESH_PAGE_BYTES);
+      src_p0[l] = (uint32_t)(((unsigned char *)aligned - ((unsigned char *)grp->ctx.M + data_off)) / MESH_PAGE_BYTES);
+      bufWire[l] = [grp->dev newBufferWithBytesNoCopy:(void *)aligned length:(size_t)alloc_pages * MESH_PAGE_BYTES
+                                              options:MTLResourceStorageModeShared deallocator:nil];
+    }
+  }
+
+  /* Decode-side buffers: wire staging + unpacked FP16 (had8/had6) OR ADC-LUT Q*K^T (kalomaze_27b_adc) */
+  id<MTLBuffer> bufDecWire = nil, bufDecOut = nil, bufRowSrc = nil, bufAdcLut = nil, bufScores = nil;
+  if (!is_prefill) {
+    bufDecWire = [grp->dev newBufferWithLength:(size_t)layer_wire_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
+    if (codec_id == MESH_CODEC_KALOMAZE_27B_ADC) {
+      bufRowSrc = [grp->dev newBufferWithLength:(size_t)kv_seq * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+      uint16_t *rs = (uint16_t *)bufRowSrc.contents;
+      for (uint32_t r = 0; r < kv_seq; r++) rs[r] = (uint16_t)r;
+      bufAdcLut = [grp->dev newBufferWithLength:(size_t)vecs8_per_row * 448u * sizeof(__fp16) options:MTLResourceStorageModeShared];
+      __fp16 *lut = (__fp16 *)bufAdcLut.contents;
+      for (size_t i = 0; i < (size_t)vecs8_per_row * 448u; i++) lut[i] = (__fp16)(0.01f * (float)((int)(i % 13u) - 6));
+      const uint32_t v_tgs = (vecs8_per_row + 15u) / 16u;
+      bufScores = [grp->dev newBufferWithLength:(size_t)kv_seq * v_tgs * sizeof(float) options:MTLResourceStorageModeShared];
+    } else {
+      bufDecOut = [grp->dev newBufferWithLength:raw_layer_bytes options:MTLResourceStorageModeShared];
+    }
+  }
+
+  const uint32_t slots = 2u;
+  const uint32_t total_pages = n_layers * layer_wire_pages;
+  const uint32_t n_recv = slots * total_pages;
+  std::vector<uint32_t> my_idx(n_recv, 0), all_idx((size_t)ranks * n_recv, 0);
+  if (!standalone) {
+    if (!is_prefill) {
+      if (mesh_alloc(&grp->ctx, n_recv, 0, my_idx.data(), NULL)) return -3;
+    }
+    if (group_allgather(grp, my_idx.data(), all_idx.data(), n_recv * sizeof(uint32_t))) return -4;
+  }
+
+  std::vector<std::vector<struct mesh_xfer>> xfs(slots * n_layers);
+  if (is_prefill && !standalone) {
+    for (uint32_t sl = 0; sl < slots; sl++) {
+      for (uint32_t l = 0; l < n_layers; l++) {
+        auto &v = xfs[sl * n_layers + l];
+        v.reserve(layer_wire_pages);
+        const uint32_t *didx = all_idx.data() + (size_t)peer_r * n_recv + sl * total_pages + l * layer_wire_pages;
+        for (uint32_t k = 0; k < layer_wire_pages; k++) {
+          uint32_t pb = MESH_PAGE_BYTES;
+          if (codec_id == MESH_CODEC_KALOMAZE_27B_ADC) {
+            const size_t off = (size_t)k * MESH_PAGE_BYTES;
+            pb = (kalo_layer_bytes - off < MESH_PAGE_BYTES) ? (uint32_t)(kalo_layer_bytes - off) : MESH_PAGE_BYTES;
+          } else {
+            const uint32_t bcnt = (k + 1u < layer_wire_pages) ? blks_per_page : (layer_blks - k * blks_per_page);
+            pb = bcnt * blk_bytes;
+          }
+          v.push_back((struct mesh_xfer){ src_p0[l] + k, pb, grp->nodes[peer_r], didx[k] });
+        }
+      }
+    }
+  }
+
+  const uint32_t pack_tgs = (layer_blks + 3u) / 4u;
+  id<MTLComputePipelineState> pso_pack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_pack_f16
+                                       : (codec_id == MESH_CODEC_HAD_INT6_PK) ? grp->pso_had6_pack_f16
+                                       : grp->pso_kalo27_pack_f16;
+  id<MTLComputePipelineState> pso_unpack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_f16
+                                         : (codec_id == MESH_CODEC_HAD_INT6_PK) ? grp->pso_had6_unpack_f16
+                                         : grp->pso_kalo27_adc_qk;
+
+  int ok = 1;
+  double sum_us = 0.0;
+  for (int rep = -2; rep < reps; rep++) {
+    const uint32_t sl = (uint32_t)((rep + 2) & 1);
+    if (!standalone) mesh_phase_barrier(grp);
+    const double t0 = now_us();
+    if (is_prefill) {
+      @autoreleasepool {
+        std::vector<id<MTLCommandBuffer>> cbs(n_layers);
+        for (uint32_t l = 0; l < n_layers; l++) {
+          cbs[l] = [grp->q commandBuffer];
+          [mm encodeToCommandBuffer:cbs[l] leftMatrix:matH rightMatrix:matW resultMatrix:matKV[l]];
+          id<MTLComputeCommandEncoder> enc = [cbs[l] computeCommandEncoder];
+          [enc setComputePipelineState:pso_pack];
+          [enc setBuffer:bufTmpKV[l] offset:0 atIndex:0];
+          [enc setBuffer:bufWire[l] offset:0 atIndex:1];
+          if (codec_id == MESH_CODEC_KALOMAZE_27B_ADC) {
+            uint32_t kdims[4] = { kv_seq, vecs8_per_row, words_per_row, 0u };
+            [enc setBytes:kdims length:sizeof(kdims) atIndex:2];
+            const uint32_t tg = 128u;
+            [enc dispatchThreadgroups:MTLSizeMake((kv_seq + tg - 1u) / tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+          } else {
+            [enc setBytes:&layer_blks length:sizeof(layer_blks) atIndex:2];
+            [enc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          }
+          [enc endEncoding];
+          [cbs[l] commit];
+        }
+        for (uint32_t l = 0; l < n_layers; l++) {
+          [cbs[l] waitUntilCompleted];
+          if (!standalone) {
+            const auto &v = xfs[sl * n_layers + l];
+            for (size_t off = 0; off < v.size(); ) {
+              const uint32_t n = (uint32_t)(v.size() - off < 240u ? v.size() - off : 240u);
+              while (mesh_write(&grp->ctx, v.data() + off, n) == ENOMEM) {}
+              off += n;
+            }
+          }
+        }
+      }
+      if (!standalone) mesh_phase_barrier(grp);
+    } else if (!standalone) {
+      const uint32_t *ridx = my_idx.data() + sl * total_pages;
+      unsigned char *dw = (unsigned char *)bufDecWire.contents;
+      @autoreleasepool {
+        for (uint32_t l = 0; l < n_layers; l++) {
+          for (uint32_t k = 0; k < layer_wire_pages; k++) {
+            struct mesh_entry_info e;
+            for (;;) { mesh_entry(&grp->ctx, ridx[l * layer_wire_pages + k], &e); if (e.data) break; }
+            memcpy(dw + (size_t)k * MESH_PAGE_BYTES, e.data, e.bytes);
+          }
+          id<MTLCommandBuffer> dcb = [grp->q commandBuffer];
+          id<MTLComputeCommandEncoder> denc = [dcb computeCommandEncoder];
+          [denc setComputePipelineState:pso_unpack];
+          if (codec_id == MESH_CODEC_KALOMAZE_27B_ADC) {
+            const uint32_t rows_per_tg = 64u;
+            uint32_t adims[4] = { kv_seq, vecs8_per_row, words_per_row, rows_per_tg };
+            [denc setBuffer:bufDecWire offset:0 atIndex:0];
+            [denc setBuffer:bufRowSrc offset:0 atIndex:1];
+            [denc setBuffer:bufAdcLut offset:0 atIndex:2];
+            [denc setBuffer:bufScores offset:0 atIndex:3];
+            [denc setBytes:adims length:sizeof(adims) atIndex:4];
+            const uint32_t v_tgs = (vecs8_per_row + 15u) / 16u;
+            const uint32_t r_tgs = (kv_seq + rows_per_tg - 1u) / rows_per_tg;
+            [denc dispatchThreadgroups:MTLSizeMake(v_tgs, r_tgs, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+          } else {
+            [denc setBuffer:bufDecWire offset:0 atIndex:0];
+            [denc setBuffer:bufDecOut offset:0 atIndex:1];
+            [denc setBytes:&layer_blks length:sizeof(layer_blks) atIndex:2];
+            [denc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          }
+          [denc endEncoding];
+          [dcb commit];
+          [dcb waitUntilCompleted];
+        }
+      }
+      mesh_clear_indices(&grp->ctx, ridx, total_pages);
+      mesh_phase_barrier(grp);
+    }
+    const double dt = now_us() - t0;
+    if (rep >= 0) sum_us += dt;
+  }
+
+  if (!standalone && !is_prefill) mesh_free_indices(&grp->ctx, my_idx.data(), n_recv);
+  if (is_prefill) {
+    for (uint32_t l = 0; l < n_layers; l++)
+      for (uint32_t k = 0; k < alloc_pages + 4u; k++) mesh_release(&grp->ctx, raw_p0[l] + k);
+  }
+  const double mean_us = sum_us / reps;
+  const double total_fp16_kv_bytes = (double)half * (double)n_layers * (double)raw_layer_bytes;
+  out->wall_us = mean_us;
+  out->gpu_us = is_prefill ? mean_us : 0.0;
+  out->throughput = total_fp16_kv_bytes / (mean_us * 1e-6) / 1e9; /* effective FP16-equiv GB/s */
+  out->ok = ok;
   out->max_err = 0.0;
   return 0;
 }

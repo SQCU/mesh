@@ -86,6 +86,26 @@ class TopologyGraph:
     def ingress_capacity(self, u) -> float:
         return sum(lk.rate_gbs for lk in self.links if lk.dst == u)
 
+    def bottleneck_rate_gbs(self, ranks=None) -> float:
+        """Minimum directional per-rank bottleneck bandwidth (GB/s) across `ranks` (drives Pareto codec hull)."""
+        nodes = tuple(self.nodes if ranks is None else ranks)
+        if len(nodes) <= 1:
+            return 10.0
+        rates = []
+        for u in nodes:
+            cap = min(self.egress_capacity(u), self.ingress_capacity(u))
+            if cap > 0.0:
+                rates.append(cap)
+        if not rates:
+            return 10.0
+        # Also check pairwise bisection / min-cut across the first half vs second half
+        mid = len(nodes) // 2
+        if mid > 0:
+            bis = self.max_flow(nodes[:mid], nodes[mid:])
+            if math.isfinite(bis) and bis > 0.0:
+                rates.append(bis / mid)
+        return min(rates)
+
     def max_flow(self, sources, sinks) -> float:
         """Exact Edmonds-Karp max-flow (GB/s) from super-source(sources) to super-sink(sinks)."""
         src_set, dst_set = set(sources), set(sinks)

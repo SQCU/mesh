@@ -6,7 +6,7 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # one's deprecation must not leave a node's bridge unbuilt)
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 # the region's headers every image includes (mesh.h includes the other two)
-MESH_H = mesh.h mesh-view.h mesh-call.h
+MESH_H = mesh.h mesh-view.h mesh-call.h mesh-codec.h
 # the routing policy's headers the bridge includes (mesh-switched.h includes route/route.h, which includes split.h)
 ROUTE_H = route/route.h route/split.h
 all: $(IMAGES:%=.build/%) .build/mesh-install-state

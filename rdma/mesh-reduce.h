@@ -1,6 +1,7 @@
 #ifndef MESH_REDUCE_H
 #define MESH_REDUCE_H
 #include "mesh.h"
+#include "mesh-codec.h"
 #include <math.h>
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -165,6 +166,132 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
       memcpy(&ur,&fr,4);
       ur+=0x7fffu+((ur>>16)&1u);
       d[i]=(uint16_t)(ur>>16);
+    }
+    return;
+  }
+  case MESH_RED_SUM_HAD_I8:{
+    /* C0 Hadamard-domain reduction (68 B / 64 elems, 60 blocks/page): because FWHT-64 over GF(2)^6 is linear,
+       H_64(x + y) = H_64(x) + H_64(y), so the switch sums directly in the Hadamard domain with zero inverse FWHT! */
+    uint8_t *dp=(uint8_t *)dst_v;
+    const uint8_t *sp=(const uint8_t *)src_v;
+    const uint32_t nb=bytes/MESH_HAD_I8_BLK_BYTES;
+    for(uint32_t b=0;b<nb;b++){
+      uint8_t *db=dp+b*MESH_HAD_I8_BLK_BYTES;
+      const uint8_t *sb=sp+b*MESH_HAD_I8_BLK_BYTES;
+      __fp16 *ds=(__fp16 *)db;
+      const __fp16 *ss=(const __fp16 *)sb;
+      int8_t *dq=(int8_t *)(db+4u);
+      const int8_t *sq=(const int8_t *)(sb+4u);
+      for(uint32_t h=0;h<2u;h++){
+        const float sd=(float)ds[h],sf=(float)ss[h];
+        int8_t *qd=dq+h*32u;
+        const int8_t *qs=sq+h*32u;
+#if defined(__ARM_NEON)
+        const float32x4_t vsd=vdupq_n_f32(sd),vsf=vdupq_n_f32(sf);
+        float32x4_t acc[8];
+        float32x4_t vmax=vdupq_n_f32(0.0f);
+        for(uint32_t c=0;c<2u;c++){
+          const int8x16_t vd8=vld1q_s8(qd+c*16u),vs8=vld1q_s8(qs+c*16u);
+          const int16x8_t vd16l=vmovl_s8(vget_low_s8(vd8)),vd16h=vmovl_s8(vget_high_s8(vd8));
+          const int16x8_t vs16l=vmovl_s8(vget_low_s8(vs8)),vs16h=vmovl_s8(vget_high_s8(vs8));
+          acc[c*4u+0u]=vfmaq_f32(vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(vd16l))),vsd),
+                                 vcvtq_f32_s32(vmovl_s16(vget_low_s16(vs16l))),vsf);
+          acc[c*4u+1u]=vfmaq_f32(vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(vd16l))),vsd),
+                                 vcvtq_f32_s32(vmovl_s16(vget_high_s16(vs16l))),vsf);
+          acc[c*4u+2u]=vfmaq_f32(vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(vd16h))),vsd),
+                                 vcvtq_f32_s32(vmovl_s16(vget_low_s16(vs16h))),vsf);
+          acc[c*4u+3u]=vfmaq_f32(vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(vd16h))),vsd),
+                                 vcvtq_f32_s32(vmovl_s16(vget_high_s16(vs16h))),vsf);
+          vmax=vmaxq_f32(vmax,vabsq_f32(acc[c*4u+0u]));
+          vmax=vmaxq_f32(vmax,vabsq_f32(acc[c*4u+1u]));
+          vmax=vmaxq_f32(vmax,vabsq_f32(acc[c*4u+2u]));
+          vmax=vmaxq_f32(vmax,vabsq_f32(acc[c*4u+3u]));
+        }
+        const float amax=vmaxvq_f32(vmax);
+        const float raw_s=amax*(1.0f/127.0f);
+        const __fp16 new_sh=(amax>0.0f)?(__fp16)(raw_s>6.103515625e-5f?raw_s:6.103515625e-5f):(__fp16)0.0f;
+        const float inv_s=(float)new_sh>0.0f?(1.0f/(float)new_sh):0.0f;
+        const float32x4_t vinv=vdupq_n_f32(inv_s);
+        const int8x16_t vlo=vdupq_n_s8(-127),vhi=vdupq_n_s8(127);
+        for(uint32_t c=0;c<2u;c++){
+          const int16x4_t n0=vqmovn_s32(vcvtnq_s32_f32(vmulq_f32(acc[c*4u+0u],vinv)));
+          const int16x4_t n1=vqmovn_s32(vcvtnq_s32_f32(vmulq_f32(acc[c*4u+1u],vinv)));
+          const int16x4_t n2=vqmovn_s32(vcvtnq_s32_f32(vmulq_f32(acc[c*4u+2u],vinv)));
+          const int16x4_t n3=vqmovn_s32(vcvtnq_s32_f32(vmulq_f32(acc[c*4u+3u],vinv)));
+          int8x16_t out8=vcombine_s8(vqmovn_s16(vcombine_s16(n0,n1)),vqmovn_s16(vcombine_s16(n2,n3)));
+          vst1q_s8(qd+c*16u,vmaxq_s8(vlo,vminq_s8(vhi,out8)));
+        }
+        ds[h]=new_sh;
+#else
+        float acc[32],amax=0.0f;
+        for(uint32_t j=0;j<32u;j++){
+          acc[j]=(float)qd[j]*sd+(float)qs[j]*sf;
+          const float a=fabsf(acc[j]);
+          if(a>amax)amax=a;
+        }
+        const float raw_s=amax*(1.0f/127.0f);
+        const __fp16 new_sh=(amax>0.0f)?(__fp16)(raw_s>6.103515625e-5f?raw_s:6.103515625e-5f):(__fp16)0.0f;
+        const float inv_s=(float)new_sh>0.0f?(1.0f/(float)new_sh):0.0f;
+        for(uint32_t j=0;j<32u;j++){
+          int v=(int)lrintf(acc[j]*inv_s);
+          if(v<-127)v=-127; else if(v>127)v=127;
+          qd[j]=(int8_t)v;
+        }
+        ds[h]=new_sh;
+#endif
+      }
+    }
+    return;
+  }
+  case MESH_RED_SUM_HAD_I6:{
+    /* C0 Hadamard-domain bit-packed INT6 reduction (52 B / 64 elems, 78 blocks/page, FP32 scale).
+       4 groups x 3 u32 = 384 bits = 64 x 6-bit unsigned values (v + 31), exact match with fwht64_had_int6_pack. */
+    uint8_t *dp=(uint8_t *)dst_v;
+    const uint8_t *sp=(const uint8_t *)src_v;
+    const uint32_t nb=bytes/MESH_HAD_I6_BLK_BYTES;
+    for(uint32_t b=0;b<nb;b++){
+      struct mesh_had_i6_blk *db=(struct mesh_had_i6_blk *)(dp+b*MESH_HAD_I6_BLK_BYTES);
+      const struct mesh_had_i6_blk *sb=(const struct mesh_had_i6_blk *)(sp+b*MESH_HAD_I6_BLK_BYTES);
+      const float sd=db->s,sf=sb->s;
+      float acc[64];
+      float amax=0.0f;
+      for(uint32_t g=0;g<4u;g++){
+        const uint32_t dw0=db->w[g*3u+0u],dw1=db->w[g*3u+1u],dw2=db->w[g*3u+2u];
+        const uint32_t sw0=sb->w[g*3u+0u],sw1=sb->w[g*3u+1u],sw2=sb->w[g*3u+2u];
+        const uint32_t du[8]={
+          dw0&0xfffu, (dw0>>12u)&0xfffu, (dw0>>24u)|((dw1&0xfu)<<8u), (dw1>>4u)&0xfffu,
+          (dw1>>16u)&0xfffu, (dw1>>28u)|((dw2&0xffu)<<4u), (dw2>>8u)&0xfffu, (dw2>>20u)&0xfffu
+        };
+        const uint32_t su[8]={
+          sw0&0xfffu, (sw0>>12u)&0xfffu, (sw0>>24u)|((sw1&0xfu)<<8u), (sw1>>4u)&0xfffu,
+          (sw1>>16u)&0xfffu, (sw1>>28u)|((sw2&0xffu)<<4u), (sw2>>8u)&0xfffu, (sw2>>20u)&0xfffu
+        };
+        for(uint32_t k=0;k<8u;k++){
+          const float va=(float)((int)(du[k]&63u)-31)*sd+(float)((int)(su[k]&63u)-31)*sf;
+          const float vb=(float)((int)((du[k]>>6u)&63u)-31)*sd+(float)((int)((su[k]>>6u)&63u)-31)*sf;
+          acc[g*16u+k*2u]=va;
+          acc[g*16u+k*2u+1u]=vb;
+          const float aa=fabsf(va),ab=fabsf(vb);
+          if(aa>amax)amax=aa;
+          if(ab>amax)amax=ab;
+        }
+      }
+      const float new_s=(amax>0.0f)?(amax*(1.0f/31.0f)):0.0f;
+      const float inv_s=(new_s>0.0f)?(1.0f/new_s):0.0f;
+      db->s=new_s;
+      for(uint32_t g=0;g<4u;g++){
+        uint32_t u[8];
+        for(uint32_t k=0;k<8u;k++){
+          int qa=(int)lrintf(acc[g*16u+k*2u]*inv_s);
+          int qb=(int)lrintf(acc[g*16u+k*2u+1u]*inv_s);
+          if(qa<-31)qa=-31; else if(qa>31)qa=31;
+          if(qb<-31)qb=-31; else if(qb>31)qb=31;
+          u[k]=((uint32_t)(qa+31)&63u)|(((uint32_t)(qb+31)&63u)<<6u);
+        }
+        db->w[g*3u+0u]=u[0]|(u[1]<<12u)|((u[2]&0xffu)<<24u);
+        db->w[g*3u+1u]=(u[2]>>8u)|(u[3]<<4u)|(u[4]<<16u)|((u[5]&0xfu)<<28u);
+        db->w[g*3u+2u]=(u[5]>>4u)|(u[6]<<8u)|(u[7]<<20u);
+      }
     }
     return;
   }

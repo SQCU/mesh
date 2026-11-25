@@ -20,6 +20,7 @@ from .algebra import (
     red_alg,
 )
 from .topology import PhaseStrategy, TopologyGraph, graph_locality_order, phase_destination, select_phase_strategy
+from .codec import CodecPolicy, CodecRouteDecision, select_codec_route
 
 
 def _reduce_decl_cls():
@@ -72,6 +73,7 @@ class CollectiveEdge:
     output_shard_axis: int | None = None
     bytes_per_shard: int = 0
     tiles: int = 1
+    codec_policy: CodecPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,7 @@ class CompiledPhaseStep:
     phase_dests: tuple[int, ...]  # exact destination rank index for each phase p = 0..P-1
     shard_slice: tuple[int, int]
     shares: tuple[int, ...]
+    codec_route: CodecRouteDecision | None = None
 
 
 class CallgraphProgram:
@@ -235,13 +238,27 @@ class CallgraphProgram:
                     shares = tuple(sh)
                 else:
                     shares = (1,) * p
+            codec_route = None
+            eff_op = call.edge.op
+            eff_bytes = call.edge.bytes_per_shard
+            if call.edge.codec_policy is not None and call.edge.bytes_per_shard > 0:
+                bottleneck_gbs = self.topo.bottleneck_rate_gbs(rank_order)
+                codec_route = select_codec_route(
+                    nbytes_bf16=call.edge.bytes_per_shard,
+                    link_gbps=bottleneck_gbs * 8.0,
+                    policy=call.edge.codec_policy,
+                    slack_us=call.phase_time_s * 1e6,
+                    base_op=call.edge.op,
+                )
+                eff_op = codec_route.wire_op
+                eff_bytes = max(1, int(math.ceil(call.edge.bytes_per_shard * codec_route.wire_ratio)))
             strategy = select_phase_strategy(
-                self.topo, rank_order, call.edge.bytes_per_shard, call.phase_time_s,
-                call.edge.op, tiles=call.edge.tiles,
+                self.topo, rank_order, eff_bytes, call.phase_time_s,
+                eff_op, tiles=call.edge.tiles,
             )
             phase_dests = tuple(phase_destination(rank, ph, p, strategy.coalesce_group) for ph in range(p))
-            my_tag = leaf_tag(call.edge.op, rank) if call.edge.op != RED_NONE else 0
-            done_tag = complete_tag(call.edge.op, p) if call.edge.op != RED_NONE else 0
+            my_tag = leaf_tag(eff_op, rank) if eff_op != RED_NONE else 0
+            done_tag = complete_tag(eff_op, p) if eff_op != RED_NONE else 0
             extent = call.shape[call.in_shard.axis] if (call.in_shard.axis is not None and call.in_shard.axis < len(call.shape)) else call.shape[0]
             shard_slice = ShardSpec(call.in_shard.axis, shares).slice_for(rank, extent, p)
             steps.append(CompiledPhaseStep(
@@ -250,27 +267,28 @@ class CallgraphProgram:
                 shape=call.shape,
                 rank=rank,
                 world_size=p,
-                op=call.edge.op,
+                op=eff_op,
                 alg=alg,
                 my_tag=my_tag,
                 done_tag=done_tag,
-                bytes_per_shard=call.edge.bytes_per_shard,
+                bytes_per_shard=eff_bytes,
                 strategy=strategy,
                 rank_order=rank_order,
                 phase_dests=phase_dests,
                 shard_slice=shard_slice,
                 shares=shares,
+                codec_route=codec_route,
             ))
-            if call.edge.op != RED_NONE:
+            if eff_op != RED_NONE:
                 for dst_idx, dst_node in enumerate(rank_order):
                     decls.append(ReduceDecl(
                         group=gid * p + dst_idx,
-                        op=call.edge.op,
+                        op=eff_op,
                         done_tag=done_tag,
                         sources=rank_order,
                         destination=dst_node,
                         shared_value=gid * p + dst_idx,
-                        bytes=call.edge.bytes_per_shard,
+                        bytes=eff_bytes,
                         shape=call.shape,
                         stride=(1,),
                     ))

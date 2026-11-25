@@ -43,6 +43,8 @@ RED_MIN_F16 = red_op(ALG_C0_COMM, 8)
 RED_SUM_BF16 = red_op(ALG_C0_COMM, 9)
 RED_MAX_BF16 = red_op(ALG_C0_COMM, 10)
 RED_MIN_BF16 = red_op(ALG_C0_COMM, 11)
+RED_SUM_HAD_I8 = red_op(ALG_C0_COMM, 12)
+RED_SUM_HAD_I6 = red_op(ALG_C0_COMM, 13)
 RED_ONLINE_SOFTMAX_F32 = red_op(ALG_C1_LIFTED, 1)
 RED_AFFINE_SCAN_F32 = red_op(ALG_C2_INTERVAL, 1)
 
@@ -63,6 +65,10 @@ REGISTRY = {
     RED_MIN_F32: AlgebraicOp("min_f32", RED_MIN_F32, ALG_C0_COMM, torch.float32, (math.inf,), 1.0),
     RED_SUM_I32: AlgebraicOp("sum_i32", RED_SUM_I32, ALG_C0_COMM, torch.int32, (0,), 1.0),
     RED_SUM_I64: AlgebraicOp("sum_i64", RED_SUM_I64, ALG_C0_COMM, torch.int64, (0,), 1.0),
+    RED_SUM_F16: AlgebraicOp("sum_f16", RED_SUM_F16, ALG_C0_COMM, torch.float16, (0.0,), 1.0),
+    RED_SUM_BF16: AlgebraicOp("sum_bf16", RED_SUM_BF16, ALG_C0_COMM, torch.bfloat16, (0.0,), 1.0),
+    RED_SUM_HAD_I8: AlgebraicOp("sum_had_i8", RED_SUM_HAD_I8, ALG_C0_COMM, torch.int8, (0,), 8.5 / 16.0),
+    RED_SUM_HAD_I6: AlgebraicOp("sum_had_i6", RED_SUM_HAD_I6, ALG_C0_COMM, torch.uint8, (0,), 6.5 / 16.0),
     RED_ONLINE_SOFTMAX_F32: AlgebraicOp(
         "online_softmax_f32", RED_ONLINE_SOFTMAX_F32, ALG_C1_LIFTED, torch.float32, (-math.inf, 0.0, 0.0), 1.0
     ),
