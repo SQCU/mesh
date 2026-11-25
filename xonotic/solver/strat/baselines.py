@@ -45,7 +45,7 @@ def default_strategy(policy, *values):
     frame = ChorusArrays(*values)
     zeros = torch.zeros_like(frame.state)
     values = frame.state.new_zeros(frame.state.shape[0])
-    present = writable_words(frame.layout).reshape(frame.state.shape)
+    present = writable_words(frame.layout, state=frame.state).reshape(frame.state.shape)
     rate = StateRate(zeros, zeros, values, present)
     zero = frame.state.new_zeros(0)
     return Strategy(rate, frame.state.new_zeros((frame.state.shape[0], 0)), values, values,

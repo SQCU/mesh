@@ -102,7 +102,7 @@ def emit_policies(programs, prepared, frame, arms, key, recorded=None):
         arm = next(iter(programs))
         integrated = programs[arm].integrate(values, command.values['velocity'])
         np.copyto(residual, np.asarray(integrated)[:n, :width])
-    writable = writable_words(frame.layout, np).reshape(n, width)
+    writable = writable_words(frame.layout, np, frame.state).reshape(n, width)
     np.copyto(velocity, 0, where=~writable)
     np.copyto(residual, 0, where=~writable)
     return PolicyEmission(outputs, comparisons, velocity, logp, residual,
@@ -113,23 +113,31 @@ LOSS_WEIGHTS = {"actor": POLICY_ACTOR_WEIGHT, "winnie": 0.5, "lou": 0.5, "moe_ba
 
 
 def _team_finish_rates(frame):
-    from payload.tools.strategy_io_schema import TS
+    from payload.tools.strategy_io_schema import CS, TS
     t_valid = frame.team_present.to(torch.bool)
     scores = frame.teams[:, TS["SCORE"]].to(torch.float32)
     held = frame.teams[:, TS["CHECKPOINTS_HELD"]].to(torch.float32)
     rate = frame.teams[:, TS["CHECKPOINT_RATE"]].to(torch.float32)
     limit = torch.clamp(frame.teams[:, TS["SCORE_LIMIT"]].to(torch.float32), min=1e-6)
     rem = torch.clamp(limit - scores, min=1e-6)
-    rho = torch.where(t_valid & (held > 0), (rate * held) / rem, torch.zeros_like(scores))
+    c_valid = frame.cart_present.to(torch.bool)
+    path_len = torch.clamp(frame.carts[:, CS["PATH_LENGTH"]].to(torch.float32), min=1e-6)
+    pos_frac = torch.clamp(frame.carts[:, CS["PATH_POSITION"]].to(torch.float32) / path_len, 0.0, 1.0)
+    cp_count = torch.clamp(frame.carts[:, CS["CHECKPOINT_COUNT"]].to(torch.float32), min=1.0)
+    seg_frac = torch.where(c_valid, (pos_frac * cp_count) - torch.floor(pos_frac * cp_count), torch.zeros_like(pos_frac))
+    cart_owner = (frame.carts[:, CS["CONTROL_TEAM"]].to(torch.float32)[:, None] == frame.teams[:, TS["ID"]].to(torch.float32)[None, :]) & c_valid[:, None] & t_valid[None, :]
+    eff_held = held + 0.5 * (cart_owner.to(scores.dtype).T @ seg_frac)
+    rho = torch.where(t_valid & (eff_held > 0), (rate * eff_held) / rem, torch.zeros_like(scores))
     mem = (frame.team_ids[:, None].to(rho.dtype) == frame.teams[None, :, TS["ID"]].to(rho.dtype)) & t_valid[None, :]
     return (mem.to(rho.dtype) @ rho)
 
 
 def tensor_loss(model, forward, policy_arm, current_inputs, next_inputs, item):
-    """1e1d8fb5^:online.OnlineLearner._tensor_loss on torch: the decoupled PPO actor term with rollout importance
-    weights, the winner and loser value regressions to the bootstrapped (or observed) return, the scale experts'
-    balance term, and the local action-linear dynamics regression; autograd derives its gradient."""
+    """1e1d8fb5^:online.OnlineLearner._tensor_loss on torch: the clipped off-policy PPO actor term on per-coordinate
+    normalized log-likelihoods, Huber-stabilized winner and loser value regressions, scale experts' balance term,
+    and continuous action-linear finish-rate dynamics regression; autograd derives its gradient."""
     from .policy_math import clipped_policy_surrogate, rollout_importance_weights
+    from .policy_contract import POLICY_LOG_RATIO_BOUND
     from .strategy import logp_of
     value_scale, actor_scale = item['value_scale'], item['actor_scale']
     velocity = item["velocity"]
@@ -158,28 +166,32 @@ def tensor_loss(model, forward, policy_arm, current_inputs, next_inputs, item):
     target = torch.where(item['target_present'], item['value_target'], target)
     error = target - value
 
-    proximal_logp = logpi.detach()
-    rollout_log_ratio = proximal_logp - torch.where(actor_active, behavior_logp, 0.0)
-    ratio = rollout_importance_weights(rollout_log_ratio)
-    td_advantage = error.detach()
-    actor = -(ratio * clipped_policy_surrogate(logpi - proximal_logp, td_advantage, POLICY_RATIO_CLIP) * actor_weight).sum() / actor_count
-
     present = torch.ones_like(current.rate.mean) if current.rate.present is None else current.rate.present.to(current.rate.mean.dtype)
     state_count = torch.clamp(present.sum(dim=-1), min=1)
+    behavior = torch.where(actor_active, behavior_logp, logpi.detach())
+    log_ratio = torch.clamp(logpi - behavior, -POLICY_LOG_RATIO_BOUND, POLICY_LOG_RATIO_BOUND)
+    rollout_log_ratio = log_ratio.detach()
+    ratio = rollout_importance_weights(rollout_log_ratio)
+    td_advantage = torch.clamp(error.detach(), -2.0, 2.0)
+    actor = -(clipped_policy_surrogate(log_ratio, td_advantage, POLICY_RATIO_CLIP) * torch.sqrt(state_count) * actor_weight).sum() / actor_count
+
     state_entropy = ((((current.rate.log_scale + 0.5 * np.log(2 * np.pi * np.e)) * present).sum(dim=-1) / state_count)
         * actor_weight).sum() / actor_count
     winner_weight = winner_mask.to(torch.float32) * train_weight
     loser_weight = (~winner_mask).to(torch.float32) * train_weight
-    winner_loss = ((current.value_winnie - target).square() * winner_weight).sum() / torch.clamp(winner_weight.sum(), min=1.0)
-    loser_loss = ((current.value_lou - target).square() * loser_weight).sum() / torch.clamp(loser_weight.sum(), min=1.0)
+    winner_huber = torch.nn.functional.smooth_l1_loss(current.value_winnie, target, reduction='none', beta=0.5)
+    loser_huber = torch.nn.functional.smooth_l1_loss(current.value_lou, target, reduction='none', beta=0.5)
+    winner_loss = (winner_huber * winner_weight).sum() / torch.clamp(winner_weight.sum(), min=1.0)
+    loser_loss = (loser_huber * loser_weight).sum() / torch.clamp(loser_weight.sum(), min=1.0)
     if current.dyn_drift is not None and current.dyn_action is not None:
         with torch.no_grad():
             rho_curr = _team_finish_rates(current_inputs)
             rho_next = _team_finish_rates(next_inputs)[successor_rows]
-            obs_delta_rho = torch.asinh(rho_next - rho_curr)
+            obs_delta_rho = torch.asinh(10.0 * (rho_next - rho_curr))
             dyn_valid = (item["successor_rows"] >= 0).to(torch.float32) * train_weight
         pred_delta_rho = current.dyn_drift + (current.dyn_action * velocity * present).sum(dim=-1)
-        dyn_loss = ((pred_delta_rho - obs_delta_rho).square() * dyn_valid).sum() / torch.clamp(dyn_valid.sum(), min=1.0)
+        dyn_huber = torch.nn.functional.smooth_l1_loss(pred_delta_rho, obs_delta_rho, reduction='none', beta=0.25)
+        dyn_loss = (dyn_huber * dyn_valid).sum() / torch.clamp(dyn_valid.sum(), min=1.0)
     else:
         dyn_loss = torch.zeros((), dtype=actor.dtype, device=actor.device)
 

@@ -12,6 +12,12 @@ STATE_HEADER = dict(ID=0, SCHEMA=1, ENGINE_TIME=2, APPLIED_SEQUENCE=3,
     ENTITY=4, OFFSET=5, GENERATION=6, OWNER_GENERATION=7, SESSION_HI=8, SESSION_LO=9,
     COMMAND_SOURCE_TIME=10, COMMAND_DURATION=11, COMMAND_TAU=12, RECEIVED_SEQUENCE=13, FORCING=14)
 READ_ONLY = 1 << 21
+ENCODED_WORD = 1 << 20
+EV_FLOAT = 2
+RATE_BASE_SCALE = 0.025
+RATE_LOG_SCALE_MIN = math.log(0.005)
+RATE_LOG_SCALE_MAX = math.log(0.15)
+STEERABLE_MIN_ABS = 1.0
 
 
 def advance_key(key, destination):
@@ -21,11 +27,22 @@ def advance_key(key, destination):
     key[0] = (int(key[0]) + (low >> 32)) & 0xffffffff
 
 
-def writable_words(layout, module=torch):
+def writable_words(layout, module=torch, state=None):
     tags = layout[..., 3:]
+    entity_ok = layout[..., 0:1] > 0
     if module is np or isinstance(tags, np.ndarray):
-        return (tags > 0) & ((tags.astype(np.uint32) & READ_ONLY) == 0)
-    return (tags > 0) & ((tags.to(torch.int64) & READ_ONLY) == 0)
+        u = tags.astype(np.uint32)
+        mask = entity_ok & (tags > 0) & ((u & READ_ONLY) == 0) & ((u & ENCODED_WORD) == 0) & ((u & 7) == EV_FLOAT)
+        if state is not None:
+            st = np.asarray(state, dtype=np.float32).reshape(mask.shape)
+            mask = mask & np.isfinite(st) & (np.abs(st) >= STEERABLE_MIN_ABS) & (np.abs(st - np.rint(st)) > 1e-4)
+        return mask
+    i = tags.to(torch.int64)
+    mask = entity_ok & (tags > 0) & ((i & READ_ONLY) == 0) & ((i & ENCODED_WORD) == 0) & ((i & 7) == EV_FLOAT)
+    if state is not None:
+        st = state.reshape(mask.shape)
+        mask = mask & torch.isfinite(st) & (st.abs() >= STEERABLE_MIN_ABS) & ((st - st.round()).abs() > 1e-4)
+    return mask
 
 class StateRate(NamedTuple):
     mean: torch.Tensor
@@ -93,15 +110,21 @@ def _spd_cholesky_logdet_solve(matrix, rhs, eps=1e-6):
     return logdet, torch.stack(xs, dim=-1)
 
 
-def rate_distribution(coordinates, layout, participant_present, k_cov=0):
+def rate_distribution(coordinates, layout, participant_present, k_cov=0, state=None):
     width = layout.shape[-1] - 3
     shape = (layout.shape[0], layout.shape[1] * width)
-    present = (writable_words(layout) & participant_present[:, None, None]).reshape(shape)
-    mean = (0.01 * coordinates[..., :width]).reshape(shape)
-    log_scale = (math.log(0.01) + control_log_scale(coordinates[..., width:2 * width])).reshape(shape)
+    present = (writable_words(layout, state=state) & participant_present[:, None, None]).reshape(shape)
+    mean = (RATE_BASE_SCALE * torch.tanh(coordinates[..., :width])).reshape(shape)
+    log_scale = torch.clamp(
+        math.log(RATE_BASE_SCALE) + 0.5 * control_log_scale(coordinates[..., width:2 * width]),
+        min=RATE_LOG_SCALE_MIN,
+        max=RATE_LOG_SCALE_MAX,
+    ).reshape(shape)
     factor = None
     if k_cov > 0:
-        raw_factor = (0.01 / math.sqrt(max(1, shape[1] * k_cov))) * coordinates[..., 2 * width:(2 + k_cov) * width]
+        raw_factor = (RATE_BASE_SCALE / math.sqrt(max(1, shape[1] * k_cov))) * torch.tanh(
+            coordinates[..., 2 * width:(2 + k_cov) * width]
+        )
         factor = raw_factor.reshape(shape[0], shape[1], k_cov)
         factor = torch.where(present.unsqueeze(-1), factor, 0.0)
     return StateRate(torch.where(present, mean, 0.0), torch.where(present, log_scale, 0.0),
@@ -124,12 +147,13 @@ def logp_of(rate, velocity, active=None):
     active = rate.density > 0 if active is None else active
     present = torch.ones_like(rate.mean) if rate.present is None else rate.present.to(rate.mean.dtype)
     mass = present * active.to(rate.mean.dtype)[:, None]
+    dim = torch.clamp(mass.sum(dim=-1), min=1.0)
     scale = torch.where(mass > 0, rate.log_scale, 0.0)
     delta = torch.where(mass > 0, velocity - rate.mean, 0.0)
     if rate.factor is None:
         error = delta * torch.exp(-scale)
         terms = error.square() + 2 * scale + math.log(2 * math.pi)
-        return -0.5 * (terms * mass).sum(dim=-1) * rate.density
+        return (-0.5 * (terms * mass).sum(dim=-1) / dim) * rate.density
     inv_var = torch.where(mass > 0, torch.exp(-2.0 * scale), 0.0)
     factor = rate.factor * mass.unsqueeze(-1)
     k = factor.shape[-1]
@@ -141,9 +165,9 @@ def logp_of(rate, velocity, active=None):
     logdet_m, solved = _spd_cholesky_logdet_solve(capacitance, ft_u)
     quad = (delta * u).sum(dim=-1) - (ft_u * solved).sum(dim=-1)
     logdet_d = (2.0 * scale * mass).sum(dim=-1)
-    dim = mass.sum(dim=-1)
     row_active = active.to(rate.mean.dtype)
-    return -0.5 * (quad + logdet_d + logdet_m * row_active + dim * math.log(2 * math.pi)) * rate.density
+    raw_dim = mass.sum(dim=-1)
+    return (-0.5 * (quad + logdet_d + logdet_m * row_active + raw_dim * math.log(2 * math.pi)) / dim) * rate.density
 
 
 def normal(shape, key, device):
@@ -189,7 +213,7 @@ class StatePages(NamedTuple):
                                     np.full(len(source), relaxation_time), source[:, 4:10], source[:, 3]))
         residual_pages = self.residual.reshape(len(self.state), -1, PAGE_WIDTH)
         velocity_pages = np.asarray(velocity).reshape(residual_pages.shape)
-        writable = writable_words(self.layout, np)
+        writable = writable_words(self.layout, np, self.state)
         if lead:
             tf = max(1e-6, 0.25 * float(relaxation_time))
             m_decay = math.exp(-float(duration) / tf)
@@ -206,8 +230,10 @@ class StatePages(NamedTuple):
 
 def unpack_pages(rows, participant_ids):
     rows = np.asarray(rows, dtype=np.float32)
-    if rows.ndim != 2 or rows.shape[1] != PAGE_STATE_WIDTH or not np.isfinite(rows).all():
-        raise ValueError('native view frame requires finite typed state pages')
+    if rows.ndim != 2 or rows.shape[1] != PAGE_STATE_WIDTH:
+        raise ValueError('native view frame requires typed state pages')
+    if not np.isfinite(rows).all():
+        rows = np.nan_to_num(rows, nan=0.0, posinf=0.0, neginf=0.0)
     selected = rows[np.isin(rows[:, 0], participant_ids)]
     identities = np.unique(selected[:, 0]).astype(np.int64)
     groups = [selected[selected[:, 0] == identity] for identity in identities]

@@ -45,11 +45,16 @@ def embedded_rows(model, frame, width, nonlinear=True):
         cart_extra, team_extra = cgt_tensor_features(frame.carts, frame.teams, frame.cart_present, frame.team_present)
         carts_in = torch.cat((carts_in, cart_extra), dim=-1)
         teams_in = torch.cat((teams_in, team_extra), dim=-1)
-    rows = torch.cat((linear(model.participant, observations), linear(model.quinn, pages).reshape(-1, model.participant.weight.shape[0]),
+    pages_in = torch.asinh(pages) if nonlinear else pages
+    obs_in = torch.asinh(observations) if nonlinear else observations
+    carts_in = torch.asinh(carts_in) if nonlinear else carts_in
+    teams_in = torch.asinh(teams_in) if nonlinear else teams_in
+    ctx_in = torch.asinh(frame.context) if nonlinear else frame.context
+    rows = torch.cat((linear(model.participant, obs_in), linear(model.quinn, pages_in).reshape(-1, model.participant.weight.shape[0]),
         linear(model.cart, carts_in), linear(model.team, teams_in)))
     source_valid = torch.cat((frame.context_present, frame.navigation_node_present,
         frame.navigation_edge_present, frame.navigation_cell_present))
-    sources = torch.cat((linear(model.phil, frame.context),
+    sources = torch.cat((linear(model.phil, ctx_in),
         model.neighborhood.encode(frame.navigation_nodes, frame.navigation_edges, frame.navigation_cells)))
     sources = torch.where(source_valid[:, None], torch.asinh(sources) if nonlinear else sources, 0.0)
     rows = torch.where(valid[:, None], torch.asinh(rows) if nonlinear else rows, 0.0)
@@ -132,7 +137,7 @@ def read_heads(model, encoded, rows, frame, statistics, load, balance):
     page_count = torch.clamp(valid.to(ir.dtype).sum(dim=1, keepdim=True), min=1.0)
     values = (projected[..., -2:] * valid[..., None].to(ir.dtype)).sum(dim=1) / page_count
     k_cov = getattr(getattr(model, 'w', None), 'k_cov', 0)
-    rate = rate_distribution(coordinates, frame.layout, frame.participant_present, k_cov=k_cov)
+    rate = rate_distribution(coordinates, frame.layout, frame.participant_present, k_cov=k_cov, state=frame.state)
     dyn_drift = None
     dyn_action = None
     if hasattr(model, 'dyn_drift') and hasattr(model, 'dyn_action'):

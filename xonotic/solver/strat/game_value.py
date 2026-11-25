@@ -327,8 +327,20 @@ def formal_projection_record(value, teams):
         "loser_ranks": [int(value.role_ranks.get(role, 0)) for role in teams],
     }
 
+def effective_leader(context: GameContext, snapshot: CartSnapshot) -> int | None:
+    formal = formal_game_value(context, snapshot).projected_role
+    if formal is not None:
+        return formal
+    rates = effective_finish_rates(snapshot)
+    if len(rates) == 0 or float(np.max(rates)) <= 0.0:
+        return None
+    best = float(np.max(rates))
+    leaders = [i for i, v in enumerate(rates) if float(v) == best]
+    return leaders[0] if len(leaders) == 1 else None
+
+
 def winner(context: GameContext, snapshot: CartSnapshot):
-    return formal_game_value(context, snapshot).projected_role
+    return effective_leader(context, snapshot)
 
 def loser_ranks(context: GameContext, snapshot: CartSnapshot, value=None) -> np.ndarray:
     value = value or formal_game_value(context, snapshot)
@@ -359,6 +371,25 @@ def hierarchy_rows(context: GameContext, snapshot: CartSnapshot, value=None):
         mask[player] = team == current
     return rows, mask
 
+POTENTIAL_SHAPING_WEIGHT = 0.25
+POTENTIAL_SHAPING_GAMMA = 0.95
+
+
+def effective_finish_rates(snapshot: CartSnapshot, eps=1e-12) -> np.ndarray:
+    scores = np.asarray(snapshot.scores, dtype=np.float64)
+    held = np.asarray(snapshot.held, dtype=np.float64).copy()
+    pos = np.clip(np.asarray(snapshot.pos, dtype=np.float64), 0.0, 1.0)
+    cp_max = np.maximum(np.asarray(snapshot.checkpoints, dtype=np.float64), 1.0)
+    ctrl = np.asarray(snapshot.control, dtype=np.int64)
+    for idx in range(len(pos)):
+        owner = int(ctrl[idx])
+        if 0 <= owner < len(held) and pos[idx] > 0.0:
+            seg = pos[idx] * cp_max[idx]
+            frac = seg - math.floor(seg)
+            held[owner] += 0.5 * frac
+    return finish_rates(scores, held, snapshot.checkpoint_rate, snapshot.score_limit, eps=eps)
+
+
 def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot) -> np.ndarray:
     before_value = formal_game_value(context, before)
     after_value = formal_game_value(context, after)
@@ -382,4 +413,14 @@ def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot
         winner_reward,
         rank_flip.astype(np.float32),
     ).astype(np.float32)
+    eff_before = winning_margin(effective_finish_rates(before))
+    eff_after = winning_margin(effective_finish_rates(after))
+    leader_before = before_winner if before_winner is not None else (int(np.argmax(eff_before)) if np.max(eff_before) > 0 else None)
+    leader_after = after_winner if after_winner is not None else (int(np.argmax(eff_after)) if np.max(eff_after) > 0 else None)
+    m_lead_before = float(eff_before[leader_before]) if leader_before is not None else 0.0
+    m_lead_after = float(eff_after[leader_after]) if leader_after is not None else 0.0
+    phi_before = np.where(teams == leader_before, eff_before[teams], -m_lead_before + 0.5 * eff_before[teams])
+    phi_after = np.where(teams == leader_after, eff_after[teams], -m_lead_after + 0.5 * eff_after[teams])
+    shaping = (POTENTIAL_SHAPING_WEIGHT * (POTENTIAL_SHAPING_GAMMA * phi_after - phi_before)).astype(np.float32)
+    team_rewards = team_rewards + shaping
     return team_rewards[np.asarray(context.team_of, dtype=np.int64)]

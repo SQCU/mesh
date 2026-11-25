@@ -137,7 +137,7 @@ def main():
                     help="optional transition-count bound; zero leaves retention to the memory budget")
     ap.add_argument("--replay-precision", default="float32",
                     help="storage precision label recorded with the replay run")
-    ap.add_argument("--replay-memory-mb", type=float, default=256.0,
+    ap.add_argument("--replay-memory-mb", type=float, default=1024.0,
                     help="byte budget for each retained-history and current-episode pool")
     ap.add_argument("--replay-batch", type=int, default=8,
                     help="historical value examples mixed into each shared fresh-state update")

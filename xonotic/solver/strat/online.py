@@ -34,6 +34,7 @@ ACTOR_METRIC_INDICES = [METRIC_NAMES.index(name) for name in
 from .replay import Replay
 from .strategy import strategy, logp_of
 from .execution import PolicyProgram, InputArena, tensor_loss
+from .grad_snr import OnlineMcCandlishTracker
 from .storage import TensorStorage
 
 
@@ -51,9 +52,10 @@ class OnlineLearner:
         checkpoint=None,
         load_checkpoint=None,
         replay_capacity: int = 1024,
-        replay_memory_mb: float = 256.0,
+        replay_memory_mb: float = 1024.0,
         replay_precision: str = "float32",
         replay_batch: int = 8,
+        min_fresh_batch: int = 4,
         seed: int = 20260831,
         policy_forward=strategy,
         policy_arm: str = "matrix_fusion",
@@ -74,6 +76,7 @@ class OnlineLearner:
         self.updates = 0
         self.replay = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
         self.episode = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
+        self.actor_probe = Replay(64, int(min(replay_memory_mb, 512.0) * (1 << 20)))
         self.episode_id = None
         self.awaiting_outcomes = {}
         self.outcomes = {}
@@ -83,6 +86,8 @@ class OnlineLearner:
         self.truncated_episodes = 0
         self.replay_precision = replay_precision
         self.replay_batch = max(1, int(replay_batch))
+        self.min_fresh_batch = max(1, int(min_fresh_batch))
+        self._fresh_buffer = []
         self.rng = np.random.default_rng(seed)
         self.transitions = 0
         self.gradient_steps = 0
@@ -115,6 +120,7 @@ class OnlineLearner:
         self.input_arena = InputArena(device)
         self.item_storage = TensorStorage(device=device)
         self.loss_traces = self.update_traces = self.accumulation_traces = 0
+        self.grad_snr_tracker = OnlineMcCandlishTracker(maxlen=64)
 
     def _load_full(self, source, payload=None):
         initial_parameters = parameters_of(self.wally)
@@ -321,23 +327,33 @@ class OnlineLearner:
         value_mass = max(sum(item.get('value_weight', 1.0) for item in items), 1.0)
         actor_rows = [int(np.count_nonzero(item['actor_mask'] & item['train_mask'])) for item in items]
         actor_mass = max(sum(actor_rows), 1)
-        prepared = []
+        fresh_prepared = []
         for item, rows in zip(items, actor_rows):
             value_weight = item.get('value_weight', 1.0) / value_mass
             actor_weight = rows / actor_mass
             weights = np.full(len(METRIC_NAMES), value_weight, dtype=np.float32)
             weights[ACTOR_METRIC_INDICES] = actor_weight
-            prepared.append((item, (1.0 - replay_weight) * value_weight, actor_weight, weights))
-        for item in replay_items:
-            prepared.append((item, replay_weight / len(replay_items), 0.0,
-                np.zeros(len(METRIC_NAMES), dtype=np.float32)))
-        return items, replay_items, prepared
+            fresh_prepared.append((item, (1.0 - replay_weight) * value_weight, actor_weight, weights))
+        replay_prepared = [
+            (item, replay_weight / len(replay_items), 0.0, np.zeros(len(METRIC_NAMES), dtype=np.float32))
+            for item in replay_items
+        ]
+        half0 = fresh_prepared[0::2] + replay_prepared[0::2]
+        half1 = fresh_prepared[1::2] + replay_prepared[1::2]
+        prepared = half0 + half1
+        return items, replay_items, prepared, len(half0)
 
     def learn(self, prepared_update):
-        items, replay_items, prepared = prepared_update
+        if len(prepared_update) == 4:
+            items, replay_items, prepared, split_at = prepared_update
+        else:
+            items, replay_items, prepared = prepared_update
+            split_at = len(prepared) // 2
         proximal_updates = self.updates
         ratios = []
         storage = self.item_storage
+        half0_grads = None
+        can_split = split_at > 0 and split_at < len(prepared)
         for index, (item, value_scale, actor_scale, weights) in enumerate(prepared):
             arguments = self._prepare_item(item, value_scale, actor_scale, storage)
             log_ratio, ratio, active = self.program.contribute(*arguments, weights, index == 0)
@@ -346,6 +362,23 @@ class OnlineLearner:
             mask = np.asarray(active)
             if np.any(mask):
                 ratios.append(np.stack((np.asarray(log_ratio), np.asarray(ratio)), axis=-1)[mask])
+            if can_split and index == split_at - 1:
+                half0_grads = {
+                    name: param.grad.detach().clone()
+                    for name, param in self.program.owned().items()
+                    if param.grad is not None
+                }
+        grad_snr = None
+        if can_split and half0_grads is not None:
+            total_grads = {name: param.grad for name, param in self.program.owned().items() if param.grad is not None}
+            actor_rows_total = sum(int(np.asarray(item.get("actor_mask", item["train_mask"])).sum()) for item in items)
+            grad_snr = self.grad_snr_tracker.record_split_update(
+                half0_grads,
+                total_grads,
+                generation=self.updates,
+                b0_transitions=0.5 * len(prepared),
+                b0_rows=0.5 * max(1, actor_rows_total),
+            )
         if ratios:
             self.ratios.append(np.concatenate(ratios))
         total, parts, gradient_norm = self.program.update()
@@ -356,6 +389,8 @@ class OnlineLearner:
         metrics = {name: float(parts[i]) for i, name in enumerate(METRIC_NAMES)}
         metrics["gradient_norm"] = float(np.asarray(gradient_norm))
         metrics["gradient_clip"] = self.gradient_clip
+        if grad_snr is not None:
+            metrics["grad_snr"] = grad_snr
         metrics.update(
             loss=float(np.asarray(total)),
             updates=self.updates,
@@ -390,6 +425,9 @@ class OnlineLearner:
 
     def observe_attributed(self, records):
         fresh = [self.transition(**record) for record in records]
+        for item in fresh:
+            if np.any(item["actor_mask"] & item["train_mask"]):
+                self.actor_probe.push(dict(item))
         observations = [item for item in fresh if item["value_weight"]]
         for item in observations:
             teams = {int(team): index for index, team in enumerate(item["teams"])}
@@ -443,17 +481,23 @@ class OnlineLearner:
         metrics.update(gradient_steps=0, completed_episodes=self.completed_episodes, truncated_episodes=self.truncated_episodes, replay_size=len(self.replay), replay=self.replay.report(), updates=self.updates)
         return metrics
 
-    def _train_fresh(self, fresh):
-        if not fresh:
+    def _train_fresh(self, fresh, *, flush: bool = False):
+        if fresh:
+            self._fresh_buffer.extend(fresh)
+        if not self._fresh_buffer:
             self.replay.release_unreferenced()
             return None
+        if not flush and len(self._fresh_buffer) < self.min_fresh_batch:
+            return None
+        batch_fresh = self._fresh_buffer
+        self._fresh_buffer = []
         self.replay.release_unreferenced()
-        prepared = self.prepare_update(fresh, self.replay.sample(self.replay_batch, self.rng))
+        prepared = self.prepare_update(batch_fresh, self.replay.sample(self.replay_batch, self.rng))
         out = self.learn(prepared)
         report = self.replay.report()
         out.update(
-            credited_steps=sum(bool(item.get("value_weight", 1.0)) for item in fresh),
-            credited_action_rows=sum(int(np.asarray(item["actor_mask"]).sum()) for item in fresh),
+            credited_steps=sum(bool(item.get("value_weight", 1.0)) for item in batch_fresh),
+            credited_action_rows=sum(int(np.asarray(item["actor_mask"]).sum()) for item in batch_fresh),
             gradient_steps=1,
             replay_size=len(self.replay),
             replay_capacity=self.replay.capacity,
@@ -510,6 +554,7 @@ class OnlineLearner:
             payload[LINEAGE_INITIAL_KEY] = np.asarray(self.initial_checkpoint_sha256)
         payload.update(self.replay.export_payload())
         payload.update(self.episode.export_payload("__episode__"))
+        payload.update(self.actor_probe.export_payload("__actor_probe__"))
         payload["__episodes__"] = np.asarray(json.dumps({"current": self.episode_id,
             "awaiting": list(self.awaiting_outcomes), "outcomes": self.outcomes}))
         for index, pool in enumerate(self.awaiting_outcomes.values()):
