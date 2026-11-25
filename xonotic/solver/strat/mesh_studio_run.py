@@ -430,145 +430,163 @@ def _run_sync_wave(
 
                     n_bots = len(obs_rows)
                     bot_teams = obs_rows[:, OBS["TEAM"]].astype(np.int64)
-                    bot_eids = obs_rows[:, OBS["ID"]].astype(np.int64)
-                    bot_arms = [sess_arms[(t - 1) % len(sess_arms)] if t >= 1 else "default" for t in bot_teams]
+                    bot_arms = np.asarray([sess_arms[(int(t) - 1) % len(sess_arms)] if int(t) >= 1 else "default" for t in bot_teams])
 
-                    plan_rows = np.zeros((harness.maxclients, PLAN_WIDTH), dtype=np.float32)
+                    cont_all = np.zeros((n_bots, PLAN_CONT_DIM), dtype=np.float32)
+                    cart_all = np.zeros((n_bots,), dtype=np.int64)
+                    rival_all = np.zeros((n_bots,), dtype=np.int64)
+                    cell_all = np.zeros((n_bots,), dtype=np.int64)
+                    logp_all = np.zeros((n_bots,), dtype=np.float32)
+                    plan_matrix = np.zeros((harness.maxclients, PLAN_WIDTH), dtype=np.float32)
+                    train_h_in: np.ndarray | None = None
+
                     obs_t = torch.as_tensor(obs_rows, dtype=torch.float32, device=device)
                     carts_t = torch.as_tensor(cart_rows, dtype=torch.float32, device=device)
                     teams_t = torch.as_tensor(team_rows, dtype=torch.float32, device=device)
                     evt_t = torch.as_tensor(np.array(evt_rows, copy=True), dtype=torch.float32, device=device) if len(evt_rows) else None
                     geo_t = _geo_to_torch(geo_np, device)
 
-                    train_sample = None
-                    train_h_in = None
-                    for arm_name in sorted(set(bot_arms)):
-                        mdl = arm_models.get(arm_name)
-                        if mdl is None:
-                            continue
-                        arm_mask = np.asarray([a == arm_name for a in bot_arms], dtype=bool)
-                        if not np.any(arm_mask):
-                            continue
-                        st_key = (session, arm_name)
-                        prev_h_map = mealy_states[st_key]
-                        h_in_np = np.zeros((n_bots, mdl.d), dtype=np.float32)
-                        for bi, eid in enumerate(bot_eids):
-                            if int(eid) in prev_h_map:
-                                h_in_np[bi] = prev_h_map[int(eid)]
-                        h_in_t = torch.as_tensor(h_in_np, dtype=torch.float32, device=device)
-                        with torch.no_grad():
-                            out = mdl(obs_t, carts_t, teams_t, evt_t, geo=geo_t, h_prev=h_in_t)
+                    with torch.no_grad():
+                        for arm_name, mdl in arm_models.items():
+                            if mdl is None:
+                                continue
+                            sel = bot_arms == arm_name
+                            if not np.any(sel):
+                                continue
+                            st_map = mealy_states[(session, arm_name)]
+                            h_prev_np = np.zeros((n_bots, mdl.d), dtype=np.float32)
+                            for bi in range(n_bots):
+                                eid = int(round(float(obs_rows[bi, OBS["ID"]])))
+                                if obs_rows[bi, OBS["ALIVE"]] > 0.5 and eid in st_map:
+                                    h_prev_np[bi] = st_map[eid]
+                            h_prev_t = torch.as_tensor(h_prev_np, dtype=torch.float32, device=device)
+                            out = mdl(obs_t, carts_t, teams_t, evt_t, geo=geo_t, h_prev=h_prev_t)
+                            if arm_name == train_arm and out.fsq_codes is not None:
+                                codes_np = out.fsq_codes.detach().cpu().numpy().astype(np.int64)
+                                for bi in np.flatnonzero(sel):
+                                    fsq_code_counts[tuple(int(v) for v in codes_np[bi])] += 1
                             samp = sample_plan(out, deterministic=(arm_name != train_arm))
-                        h_next_np = out.h_next.detach().cpu().numpy()
-                        for bi, eid in enumerate(bot_eids):
-                            prev_h_map[int(eid)] = h_next_np[bi]
-                        if arm_name == train_arm and out.fsq_codes is not None:
-                            codes_np = out.fsq_codes.detach().cpu().numpy()
-                            for bi in np.where(arm_mask)[0]:
-                                fsq_code_counts[tuple(int(v) for v in codes_np[bi])] += 1
+                            h_next_np = out.h_next.detach().cpu().numpy()
+                            for bi in range(n_bots):
+                                eid = int(round(float(obs_rows[bi, OBS["ID"]])))
+                                if obs_rows[bi, OBS["ALIVE"]] > 0.5:
+                                    st_map[eid] = h_next_np[bi]
+                                else:
+                                    st_map.pop(eid, None)
+                            if arm_name == train_arm:
+                                train_h_in = h_prev_np
+                            cont_all[sel] = samp.cont.cpu().numpy()[sel]
+                            cart_all[sel] = samp.cart_pick.cpu().numpy()[sel]
+                            rival_all[sel] = samp.rival_pick.cpu().numpy()[sel]
+                            cell_all[sel] = samp.cell_pick.cpu().numpy()[sel]
+                            logp_all[sel] = samp.logp.cpu().numpy()[sel]
+                            part = pack_plan_rows(
+                                obs_rows, team_rows, samp, bot_arms, {arm_name},
+                                harness.maxclients, cell_centroids=cell_centroids,
+                                cart_lengths=cart_rows[:, CS["PATH_LENGTH"]],
+                            )
+                            mask_rows = part[:, 0] > 0
+                            plan_matrix[mask_rows] = part[mask_rows]
 
-                        sub_rows = pack_plan_rows(
-                            obs_rows, cart_rows, team_rows,
-                            samp["cont"].cpu().numpy(),
-                            samp["cart_pick"].cpu().numpy(),
-                            samp["rival_pick"].cpu().numpy(),
-                            samp["cell_pick"].cpu().numpy(),
-                            harness.maxclients,
-                            cell_centroids=cell_centroids,
-                        )
-                        for bi in np.where(arm_mask)[0]:
-                            eid = int(round(float(obs_rows[bi, OBS["ID"]])))
-                            if 1 <= eid <= harness.maxclients:
-                                plan_rows[eid - 1] = sub_rows[eid - 1]
-                        if arm_name == train_arm:
-                            train_sample = {k: v.cpu().numpy() for k, v in samp.items()}
-                            train_h_in = h_in_np
-
-                    node, address = routes[session]
-                    for frame in frames(session, tick_id, harness.framebytes, ((PLAN_KIND, plan_rows),)):
-                        engine.send(node, address, frame)
+                    dest = routes.get(session)
+                    if dest is not None:
+                        node, addr = dest
+                        req_id = records[OBSERVATION_KIND][0]["req_id"]
+                        engine.send(addr, node, frames(PLAN_KIND, req_id, tick_id, plan_matrix, harness.framebytes, session))
                     total_responses += 1
 
                     prev = prev_state.get(session)
-                    if prev is not None and prev["episode"] == ep_id and prev["train_sample"] is not None:
-                        same_ep = True
-                        r_vec, w_mask, nw_mask = role_rewards(
-                            prev["obs"], prev["teams"], prev["carts"],
-                            obs_rows, team_rows, cart_rows, same_ep,
-                            events=evt_rows,
+                    if prev is not None and prev["episode"] == ep_id:
+                        p_ids = prev["obs"][:, OBS["ID"]].astype(np.int64)
+                        c_ids = obs_rows[:, OBS["ID"]].astype(np.int64)
+                        id_to_idx = {int(eid): idx for idx, eid in enumerate(c_ids)}
+                        succ = np.asarray([id_to_idx.get(int(eid), -1) for eid in p_ids], dtype=np.int64)
+                        rew = role_rewards(prev["tick"].context, prev["tick"].cartstate, tick.cartstate)
+                        prev_obs = prev["obs"]
+                        push_delta = np.asarray([
+                            max(0.0, float(obs_rows[idx, OBS["CART_PUSH"]]) - float(prev_obs[i, OBS["CART_PUSH"]])) if idx >= 0 else 0.0
+                            for i, idx in enumerate(succ)
+                        ], dtype=np.float32)
+                        contest_delta = np.asarray([
+                            max(0.0, float(obs_rows[idx, OBS["CART_CONTEST"]]) - float(prev_obs[i, OBS["CART_CONTEST"]])) if idx >= 0 else 0.0
+                            for i, idx in enumerate(succ)
+                        ], dtype=np.float32)
+                        pickup_delta = np.asarray([
+                            max(0.0, float(obs_rows[idx, OBS["PICKUPS"]]) - float(prev_obs[i, OBS["PICKUPS"]])) if idx >= 0 else 0.0
+                            for i, idx in enumerate(succ)
+                        ], dtype=np.float32)
+                        p_carts = prev["carts"]
+                        prev_frac = p_carts[:, CS["PATH_POSITION"]] / np.maximum(p_carts[:, CS["PATH_LENGTH"]], 1.0)
+                        cur_frac = cart_rows[:, CS["PATH_POSITION"]] / np.maximum(cart_rows[:, CS["PATH_LENGTH"]], 1.0)
+                        dfrac = cur_frac - prev_frac
+                        ctrl_t = cart_rows[:, CS["CONTROL_TEAM"]].astype(np.int64)
+                        p_teams_1 = prev_obs[:, OBS["TEAM"]].astype(np.int64)
+                        lane_prog = np.zeros((len(prev_obs),), dtype=np.float32)
+                        for ci in range(min(len(dfrac), len(ctrl_t))):
+                            if ctrl_t[ci] > 0:
+                                lane_prog += np.where(p_teams_1 == ctrl_t[ci], float(dfrac[ci]), -0.4 * float(dfrac[ci]))
+                        rew = (
+                            rew
+                            + 0.25 * lane_prog
+                            + 0.015 * np.tanh(push_delta / 25.0)
+                            + 0.012 * np.tanh(contest_delta / 1.0)
+                            + 0.008 * np.tanh(pickup_delta)
                         )
-                        cur_ids = {int(round(float(obs_rows[j, OBS["ID"]]))): j for j in range(n_bots)}
-                        succ = np.asarray([cur_ids.get(int(round(float(prev["obs"][i, OBS["ID"]]))), -1) for i in range(len(prev["obs"]))], dtype=np.int64)
-                        prev_scores = prev["teams"][:, TS["SCORE"]]
-                        cur_scores = team_rows[:, TS["SCORE"]]
-                        d_scores = cur_scores - prev_scores
-                        prev_cp = prev["teams"][:, TS["CHECKPOINTS_HELD"]]
-                        cur_cp = team_rows[:, TS["CHECKPOINTS_HELD"]]
-                        d_cp = cur_cp - prev_cp
-                        prev_pos = prev["carts"][:, CS["PATH_POSITION"]] / np.maximum(prev["carts"][:, CS["PATH_LENGTH"]], 1.0)
-                        cur_pos = cart_rows[:, CS["PATH_POSITION"]] / np.maximum(cart_rows[:, CS["PATH_LENGTH"]], 1.0)
-                        d_lane = cur_pos - prev_pos
-                        p_push = prev["obs"][:, OBS["CART_PUSH"]]
-                        p_cont = prev["obs"][:, OBS["CART_CONTEST"]]
-                        p_pick = prev["obs"][:, OBS["PICKUPS"]]
-                        shaped = np.zeros(len(prev["obs"]), dtype=np.float32)
-                        for i in range(len(prev["obs"])):
-                            t_i = int(round(float(prev["obs"][i, OBS["TEAM"]]))) - 1
-                            if 0 <= t_i < len(d_scores):
-                                own_ds = float(d_scores[t_i])
-                                rival_ds = float(np.max(np.delete(d_scores, t_i))) if len(d_scores) > 1 else 0.0
-                                own_dcp = float(d_cp[t_i])
-                                rival_dcp = float(np.max(np.delete(d_cp, t_i))) if len(d_cp) > 1 else 0.0
-                                dl_i = float(d_lane[t_i]) if t_i < len(d_lane) else 0.0
-                                shaped[i] = 0.25 * (own_ds - rival_ds) + 1.5 * (own_dcp - rival_dcp) + 3.0 * dl_i
-                            si = int(succ[i])
-                            if si >= 0:
-                                dp = max(0.0, float(obs_rows[si, OBS["CART_PUSH"]] - p_push[i]))
-                                dc = max(0.0, float(obs_rows[si, OBS["CART_CONTEST"]] - p_cont[i]))
-                                dk = max(0.0, float(obs_rows[si, OBS["PICKUPS"]] - p_pick[i]))
-                                shaped[i] += 0.25 * min(dp, 1.0) + 0.15 * min(dc, 1.0) + 0.10 * min(dk, 2.0)
-                        tot_r = (r_vec.astype(np.float32) + shaped).astype(np.float32)
-                        disc = np.full(len(prev["obs"]), float(gamma), dtype=np.float32)
-                        tr = PlanTransition(
-                            session=int(session),
-                            obs_in=prev["obs"].copy(),
-                            carts_in=prev["carts"].copy(),
-                            teams_in=prev["teams"].copy(),
-                            events_in=prev["events"].copy(),
-                            obs_out=obs_rows.copy(),
-                            carts_out=cart_rows.copy(),
-                            teams_out=team_rows.copy(),
-                            events_out=evt_rows.copy(),
-                            cont=prev["train_sample"]["cont"],
-                            cart_pick=prev["train_sample"]["cart_pick"],
-                            rival_pick=prev["train_sample"]["rival_pick"],
-                            cell_pick=prev["train_sample"]["cell_pick"],
-                            behavior_logp=prev["train_sample"]["logp"],
-                            reward=tot_r,
-                            winner_mask=w_mask,
-                            next_winner_mask=nw_mask,
-                            discount=disc,
-                            actor_mask=prev["train_actor_mask"],
-                            successor_rows=succ,
-                            geo_in=prev["geo"],
-                            geo_out=geo_np,
-                            h_in=prev["h_in"],
-                            h_out=train_h_in,
-                            map_name=sess_map_name,
-                        )
-                        fresh_buf.append(tr)
-                        total_local_transitions += 1
+                        w_before = effective_leader(prev["tick"].context, prev["tick"].cartstate)
+                        w_after = effective_leader(tick.context, tick.cartstate)
+                        p_teams_0 = np.asarray(prev["tick"].context.team_of, dtype=np.int64)
+                        wm = p_teams_0 == w_before
+                        nwm = np.asarray([
+                            (int(tick.context.team_of[idx]) == w_after) if idx >= 0 else False for idx in succ
+                        ], dtype=bool)
+                        disc = np.where((succ >= 0) & (~tick.cartstate.finished), gamma, 0.0).astype(np.float32)
+                        actor_mask = (prev["arms"] == train_arm) & (succ >= 0)
+                        if np.any(actor_mask):
+                            tr = PlanTransition(
+                                session=int(session),
+                                obs_in=prev["obs"].copy(),
+                                carts_in=prev["carts"].copy(),
+                                teams_in=prev["teams"].copy(),
+                                events_in=prev["events"].copy(),
+                                obs_out=obs_rows.copy(),
+                                carts_out=cart_rows.copy(),
+                                teams_out=team_rows.copy(),
+                                events_out=evt_rows[-64:].copy() if len(evt_rows) > 64 else evt_rows.copy(),
+                                cont=prev["cont"].copy(),
+                                cart_pick=prev["cart_pick"].copy(),
+                                rival_pick=prev["rival_pick"].copy(),
+                                cell_pick=prev["cell_pick"].copy(),
+                                behavior_logp=prev["logp"].copy(),
+                                reward=rew.astype(np.float32),
+                                winner_mask=wm,
+                                next_winner_mask=nwm,
+                                discount=disc,
+                                actor_mask=actor_mask,
+                                successor_rows=succ,
+                                geo_in=prev["geo"],
+                                geo_out=geo_np,
+                                h_in=prev["h_in"],
+                                h_out=train_h_in,
+                                map_name=sess_map_name,
+                            )
+                            fresh_buf.append(tr)
+                            total_local_transitions += 1
 
                     prev_state[session] = {
                         "episode": ep_id,
+                        "tick": tick,
                         "obs": obs_rows.copy(),
                         "carts": cart_rows.copy(),
                         "teams": team_rows.copy(),
-                        "events": evt_rows.copy(),
+                        "events": evt_rows[-64:].copy() if len(evt_rows) > 64 else evt_rows.copy(),
                         "geo": geo_np,
-                        "train_sample": train_sample,
-                        "train_actor_mask": np.asarray([a == train_arm for a in bot_arms], dtype=np.float32),
-                        "h_in": train_h_in,
+                        "h_in": train_h_in.copy() if train_h_in is not None else None,
+                        "arms": bot_arms.copy(),
+                        "cont": cont_all,
+                        "cart_pick": cart_all,
+                        "rival_pick": rival_all,
+                        "cell_pick": cell_all,
+                        "logp": logp_all,
                     }
 
             # All 4 Studios have collected local_batch_size transitions -> Synchronous RDMA Aurora Step!
