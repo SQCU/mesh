@@ -2121,8 +2121,10 @@ mesh_graph_t *mesh_graph_create(int world_size, int rank, const char *comm_id, i
     delete g;
     return nullptr;
   }
+  MTLCompileOptions *opts = [MTLCompileOptions new];
+  opts.languageVersion = (MTLLanguageVersion)((4u << 16) | 0u); // Metal 4.0 for MPP tensor_ops
   NSString *src_gemm = [NSString stringWithUTF8String:build_gemm_msl().c_str()];
-  g->lib_gemm = [g->dev newLibraryWithSource:src_gemm options:nil error:&err];
+  g->lib_gemm = [g->dev newLibraryWithSource:src_gemm options:opts error:&err];
   if (!g->lib_gemm) {
     fprintf(stderr, "mesh-graph: gemm MSL compile error: %s\n", err.localizedDescription.UTF8String);
     delete g;
