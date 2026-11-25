@@ -141,10 +141,19 @@ static void R_Ink_UpdateVolume(void)
 	}
 
 	texelsize = max(1.0f, r_ink_texelsize.value);
+	if (vid.renderpath == RENDERPATH_SOFT)
+		return;
 	for (i = 0; i < 3; i++)
 	{
 		res[i] = (int)((maxs[i] - mins[i]) / texelsize + 0.5f);
-		res[i] = bound(4, res[i], max(4, r_ink_maxresolution.integer));
+		res[i] = bound(4, res[i], max(4, min(r_ink_maxresolution.integer, (int)vid.maxtexturesize_3d)));
+		if (!vid.support.arb_texture_non_power_of_two)
+		{
+			int p = 4;
+			while (p * 2 <= res[i])
+				p <<= 1;
+			res[i] = p;
+		}
 	}
 
 	r_ink_state.numtexels = res[0] * res[1] * res[2];

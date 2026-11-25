@@ -309,7 +309,17 @@ void bot_setnameandstuff(entity this)
 				++j;
 		});
 		if (j)
+		{
 			this.netname = this.netname_freeme = strzone(strcat(prefix, name, "(", ftos(j), ")", suffix));
+			this.havocbot_keyboardskill = bound(-1, this.havocbot_keyboardskill + (2 * random() - 1) * 0.4, 1);
+			this.bot_moveskill = bound(-2, this.bot_moveskill + (2 * random() - 1) * 0.8, 2);
+			this.bot_dodgeskill = bound(-2, this.bot_dodgeskill + (2 * random() - 1) * 0.8, 2);
+			this.bot_weaponskill = bound(-2, this.bot_weaponskill + (2 * random() - 1) * 0.8, 2);
+			this.bot_aggresskill = bound(-1, this.bot_aggresskill + (2 * random() - 1) * 0.6, 1);
+			this.bot_rangepreference = bound(-1, this.bot_rangepreference + (2 * random() - 1) * 0.6, 1);
+			this.bot_aimskill = bound(-2, this.bot_aimskill + (2 * random() - 1) * 0.8, 2);
+			this.bot_aiskill = bound(-2, this.bot_aiskill + (2 * random() - 1) * 0.8, 2);
+		}
 		else
 			this.netname = this.netname_freeme = strzone(strcat(prefix, name, suffix));
 	}

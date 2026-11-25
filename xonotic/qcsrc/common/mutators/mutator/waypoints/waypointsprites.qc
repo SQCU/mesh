@@ -236,6 +236,7 @@ string spritelookuptext(entity this, string s)
     if (s == WP_Weapon.netname) return REGISTRY_GET(Weapons, this.wp_extra).m_name;
     if (s == WP_Item.netname) return REGISTRY_GET(Items, this.wp_extra).m_waypoint;
     if (s == WP_Monster.netname) return get_monsterinfo(this.wp_extra).monster_name;
+    if (s == WP_PayloadCart.netname && this.wp_extra >= 0) return sprintf(_("Cart %d"), this.wp_extra + 1);
     if (MUTATOR_CALLHOOK(WP_Format, this, s))
     {
         return M_ARGV(3, string);

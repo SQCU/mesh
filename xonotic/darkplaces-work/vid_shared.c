@@ -1538,17 +1538,15 @@ void VID_Shared_Init(void)
 {
 #ifdef SSE_POSSIBLE
 	if (Sys_HaveSSE2())
-	{
 		Con_Printf("DPSOFTRAST available (SSE2 instructions detected)\n");
-		Cvar_RegisterVariable(&vid_soft);
-		Cvar_RegisterVariable(&vid_soft_threads);
-		Cvar_RegisterVariable(&vid_soft_interlace);
-	}
 	else
-		Con_Printf("DPSOFTRAST not available (SSE2 disabled or not detected)\n");
+		Con_Printf("DPSOFTRAST available (scalar fallback; SSE2 not detected)\n");
 #else
-	Con_Printf("DPSOFTRAST not available (SSE2 not compiled in)\n");
+	Con_Printf("DPSOFTRAST available (scalar fallback)\n");
 #endif
+	Cvar_RegisterVariable(&vid_soft);
+	Cvar_RegisterVariable(&vid_soft_threads);
+	Cvar_RegisterVariable(&vid_soft_interlace);
 
 	Cvar_RegisterVariable(&gl_info_vendor);
 	Cvar_RegisterVariable(&gl_info_renderer);

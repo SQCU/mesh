@@ -2377,12 +2377,21 @@ void Scoreboard_Draw()
 					team_size_total += tm.team_size;
 		}
 
+		int teams_drawn = 0;
+		int teams_hidden = 0;
+		const int max_teams_shown = 8;
 		for(tm = teams.sort_next; tm; tm = tm.sort_next)
 		{
 			if(tm.team == NUM_SPECTATOR)
 				continue;
 			if(!tm.team)
 				continue;
+			if(teams_drawn >= max_teams_shown && tm.team != myteam)
+			{
+				++teams_hidden;
+				continue;
+			}
+			++teams_drawn;
 
 			draw_beginBoldFont();
 			vector rgb = Team_ColorRGB(tm.team);
@@ -2444,6 +2453,11 @@ void Scoreboard_Draw()
 			else
 				panel_bg_color = rgb;
 			pos = Scoreboard_MakeTable(pos, tm, panel_bg_color, bg_size);
+		}
+		if(teams_hidden > 0)
+		{
+			drawstring(pos, sprintf(_("+%d more teams"), teams_hidden), hud_fontsize, '0.85 0.85 0.85', panel_fg_alpha, DRAWFLAG_NORMAL);
+			pos.y += hud_fontsize.y * 1.25;
 		}
 		panel_bg_color = panel_bg_color_save;
 	}

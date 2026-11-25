@@ -364,7 +364,7 @@ void Draw_GrapplingHook(entity this)
 				case NUM_TEAM_3: tex = "particles/hook_yellow"; rgb = '1 1 0.3'; break;
 				case NUM_TEAM_4: tex = "particles/hook_pink"; rgb = '1 0.3 1'; break;
 				case NUM_TEAM_5: tex = "particles/hook_white"; rgb = '0.3 1 0.3'; break;
-				default: tex = "particles/hook_white"; rgb = entcs_GetColor(this.sv_entnum - 1); break;
+				default: tex = "particles/hook_white"; rgb = Team_IsValidTeam(t) ? Team_ColorRGB(t) : entcs_GetColor(this.sv_entnum - 1); break;
 			}
 			break;
 		case NET_ENT_CLIENT_ARC_BEAM:

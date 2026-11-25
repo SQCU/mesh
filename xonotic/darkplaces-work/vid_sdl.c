@@ -2548,13 +2548,13 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 
 #if SDL_MAJOR_VERSION != 1
 	Cvar_SetValueQuick(&vid_touchscreen_supportshowkeyboard, SDL_HasScreenKeyboardSupport() ? 1 : 0);
-#endif
-#ifdef SSE_POSSIBLE
+	if (vid_soft.integer || (SDL_GetCurrentVideoDriver() && !strcmp(SDL_GetCurrentVideoDriver(), "dummy")))
+		return VID_InitModeSoft(mode);
+#else
 	if (vid_soft.integer)
 		return VID_InitModeSoft(mode);
-	else
 #endif
-		return VID_InitModeGL(mode);
+	return VID_InitModeGL(mode);
 }
 
 void VID_Shutdown (void)

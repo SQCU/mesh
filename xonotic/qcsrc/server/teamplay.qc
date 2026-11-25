@@ -507,77 +507,20 @@ entity TeamBalance_CheckAllowedTeams(entity for_whom)
 
 	if (autocvar_bot_vs_human && AVAILABLE_TEAMS == 2 && for_whom)
 	{
-		if (autocvar_bot_vs_human > 0)
+		int low_team = 0, high_team = 0;
+		for (int i = 1; i <= NUM_TEAMS; ++i)
 		{
-
-			if (IS_BOT_CLIENT(for_whom))
+			if (TeamBalance_IsTeamAllowedInternal(balance, i))
 			{
-				if (TeamBalance_IsTeamAllowedInternal(balance, 4))
-				{
-					TeamBalance_BanTeamsExcept(balance, 4);
-				}
-				else if (TeamBalance_IsTeamAllowedInternal(balance, 3))
-				{
-					TeamBalance_BanTeamsExcept(balance, 3);
-				}
-				else
-				{
-					TeamBalance_BanTeamsExcept(balance, 2);
-				}
-
-			}
-			else
-			{
-				if (TeamBalance_IsTeamAllowedInternal(balance, 1))
-				{
-					TeamBalance_BanTeamsExcept(balance, 1);
-				}
-				else if (TeamBalance_IsTeamAllowedInternal(balance, 2))
-				{
-					TeamBalance_BanTeamsExcept(balance, 2);
-				}
-				else
-				{
-					TeamBalance_BanTeamsExcept(balance, 3);
-				}
-
+				if (!low_team)
+					low_team = i;
+				high_team = i;
 			}
 		}
-		else
+		if (low_team && high_team)
 		{
-
-			if (IS_BOT_CLIENT(for_whom))
-			{
-				if (TeamBalance_IsTeamAllowedInternal(balance, 1))
-				{
-					TeamBalance_BanTeamsExcept(balance, 1);
-				}
-				else if (TeamBalance_IsTeamAllowedInternal(balance, 2))
-				{
-					TeamBalance_BanTeamsExcept(balance, 2);
-				}
-				else
-				{
-					TeamBalance_BanTeamsExcept(balance, 3);
-				}
-
-			}
-			else
-			{
-				if (TeamBalance_IsTeamAllowedInternal(balance, 4))
-				{
-					TeamBalance_BanTeamsExcept(balance, 4);
-				}
-				else if (TeamBalance_IsTeamAllowedInternal(balance, 3))
-				{
-					TeamBalance_BanTeamsExcept(balance, 3);
-				}
-				else
-				{
-					TeamBalance_BanTeamsExcept(balance, 2);
-				}
-
-			}
+			bool pick_high = (autocvar_bot_vs_human > 0) ? IS_BOT_CLIENT(for_whom) : !IS_BOT_CLIENT(for_whom);
+			TeamBalance_BanTeamsExcept(balance, pick_high ? high_team : low_team);
 		}
 	}
 

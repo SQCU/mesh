@@ -510,6 +510,8 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 		node.plc_cart = this;
 		node.plc_idx = guard;
 		this.plc_checkpoint_count += (node.spawnflags & PLC_CHECKPOINT) != 0;
+		if(guard == 0 || (node.spawnflags & PLC_CHECKPOINT))
+			waypoint_spawn(node.origin, node.origin, WAYPOINTFLAG_GENERATED);
 		++guard;
 		if(node.curvetarget != "")
 			node.plc_curve = find(NULL, targetname, node.curvetarget);
@@ -551,12 +553,6 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 
 	entity wp = WP_PayloadCart;
-	switch(this.plc_cart_id)
-	{
-		case 1: wp = WP_PayloadCart2; break;
-		case 2: wp = WP_PayloadCart3; break;
-		case 3: wp = WP_PayloadCart4; break;
-	}
 	if(!this.sprite)
 		WaypointSprite_Spawn(wp, 0, 0, this, this.view_ofs + PLC_SPRITE_OFS, NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
 
@@ -779,16 +775,22 @@ entity payload_nearest_waypoint(vector cpos)
 void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector org, float sradius)
 {
 	int myteam = Team_TeamToIndex(this.team);
+	int archetype = etof(this) % 4;
+	int pref_cart = payload_cart_count > 0 ? (etof(this) % payload_cart_count) : 0;
 	IL_EACH(g_payload_carts, true,
 	{
 		vector cpos = it.origin + it.view_ofs;
 		if (vdist(cpos - org, >, sradius))
 			continue;
-		float weight = 1.5;
+		float weight = 1.4;
 		if (it.plc_ctrl == myteam)
-			weight = (it.plc_s < it.plc_length * 0.98) ? 1.4 : 0.4;
+			weight = (it.plc_s < it.plc_length * 0.98) ? (archetype == 0 ? 2.0 : 1.3) : 0.4;
 		else if (it.plc_ctrl > 0)
+			weight = (archetype == 1 ? 2.4 : 1.7);
+		else if (archetype == 0 || archetype == 3)
 			weight = 1.8;
+		if (it.plc_cart_id == pref_cart)
+			weight *= 1.35;
 		entity goal = it;
 		if (vdist(cpos - org, >, autocvar_g_payload_push_radius * 1.5))
 		{
@@ -806,10 +808,14 @@ void havocbot_role_payload(entity this)
 		return;
 	if (navigation_goalrating_timeout(this))
 	{
+		int archetype = etof(this) % 4;
+		float cart_scale = (archetype == 2) ? 18000 : (archetype == 0 ? 36000 : 30000);
+		float item_scale = (archetype == 2) ? 22000 : 10000;
+		float enemy_scale = (archetype == 1 || archetype == 3) ? 14000 : 8000;
 		navigation_goalrating_start(this);
-		havocbot_goalrating_payload_carts(this, 30000, this.origin, 15000);
-		havocbot_goalrating_items(this, 10000, this.origin, 8000);
-		havocbot_goalrating_enemyplayers(this, 10000, this.origin, 10000);
+		havocbot_goalrating_payload_carts(this, cart_scale, this.origin, 15000);
+		havocbot_goalrating_items(this, item_scale, this.origin, 8000);
+		havocbot_goalrating_enemyplayers(this, enemy_scale, this.origin, 10000);
 		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);
 		navigation_goalrating_end(this);
 		navigation_goalrating_timeout_set(this);
@@ -910,8 +916,11 @@ void payload_DelayedInit(entity this)
 		TeamBalance_Destroy(balance);
 	}
 
+	int pending_carts = 0;
+	for(entity c = findchain(classname, "func_plc_cart"); c; c = c.chain)
+		++pending_carts;
 	ScoreRules_payload(payload_teams);
-	LOG_INFO(strcat("payload: teams ", ftos(payload_teams), ", carts ", ftos(payload_cart_count)));
+	LOG_INFO(strcat("payload: teams ", ftos(payload_teams), ", carts ", ftos(max(payload_cart_count, pending_carts))));
 
 	round_handler_Spawn(Payload_CheckPlayers, Payload_CheckWinner, Payload_RoundStart);
 	round_handler_Init(5, autocvar_g_payload_warmup, 0);

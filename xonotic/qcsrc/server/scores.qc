@@ -143,16 +143,25 @@ int TeamScore_Compare(entity t1, entity t2, bool strict)
 {
 	if(!t1 || !t2) return (!t2) - !t1;
 
-	if (MAX_TEAMSCORE > 2)
-		error("MAX_TEAMSCORE > 2 not supported");
-
 	int result = 0;
-	int i = boolean(teamscores_primary && teamscores_primary == teamscores(1));
-	result = ScoreField_Compare(t1, t2, teamscores(i), teamscores_flags(i), result);
+	int primary = 0;
+	for(int i = 0; i < MAX_TEAMSCORE; ++i)
+	{
+		if(teamscores_primary && teamscores_primary == teamscores(i))
+		{
+			primary = i;
+			break;
+		}
+	}
+	result = ScoreField_Compare(t1, t2, teamscores(primary), teamscores_flags(primary), result);
 	if (result == 0 && strict)
 	{
-		i = (i + 1) % MAX_TEAMSCORE;
-		result = ScoreField_Compare(t1, t2, teamscores(i), teamscores_flags(i), result);
+		for(int i = 0; i < MAX_TEAMSCORE && result == 0; ++i)
+		{
+			if(i == primary)
+				continue;
+			result = ScoreField_Compare(t1, t2, teamscores(i), teamscores_flags(i), result);
+		}
 		if (result == 0)
 			result = t1.team - t2.team;
 	}

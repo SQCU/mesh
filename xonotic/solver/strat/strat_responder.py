@@ -475,14 +475,16 @@ def main():
             reporting_started = time.perf_counter()
             assignments, decisions = history.assignments(rows, applied_sequences, request, velocity, integrated,
                                                          behavior_logp, arms, versions, provenance)
-            labels = [f'page_word.{index}' for index in range(state_rows.shape[1])]
-            participant_labels = [state_labels(layout) for layout in view_pages.layout]
+            sampled = args.model_sample_every > 0 and (count + 1) % args.model_sample_every == 0
+            detailed_reporting = bool(reporter.enabled or sampled)
+            labels = [f'page_word.{index}' for index in range(state_rows.shape[1])] if detailed_reporting else []
+            participant_labels = [state_labels(layout) for layout in view_pages.layout] if detailed_reporting else []
             model_output = outputs[args.policy_arm] if args.policy_arm in outputs else next(iter(outputs.values()))
             ir = np.asarray(model_output.ir)
-            input_features, input_labels = source_features(chorus)
+            input_features, input_labels = source_features(chorus) if detailed_reporting else (np.empty((0,), np.float32), [])
             model_record = {'x': state_rows, 'x_labels': labels, 'server_state': state_rows,
                             'source_features': input_features, 'source_labels': input_labels,
-                            'j': ir, 'j_labels': [f'ir.{index}' for index in range(ir.shape[1])],
+                            'j': ir, 'j_labels': [f'ir.{index}' for index in range(ir.shape[1])] if detailed_reporting else [],
                             'coupling': np.asarray(model_output.coupling),
                             'local_neighborhood': np.asarray(model_output.local_neighborhood), 'hierarchy': tick.semantics,
                             'input_residual': residual_rows, 'state_layout': view_pages.layout,
@@ -496,24 +498,27 @@ def main():
                                          'balance': float(output.scale_balance)} for arm, output in outputs.items()},
                             'team_ids': teams, 'delta': interval,
                             'relaxation_time': relaxation, 'rate': velocity, 'residual': integrated}
-            for index, item in enumerate(assignments):
-                observed_state, observed_labels = view_observation(chorus, index)
-                item['successor_state'] = observed_state.tolist()
-                item['successor_state_labels'] = observed_labels
-                own_ir = np.asarray(outputs[str(arms[index])].ir)[index]
-                pages = view_pages.layout.shape[1]
-                latent_width = len(own_ir) // (1 + pages)
-                own_labels = latent_labels(view_pages.layout[index], latent_width, pages)
-                latent_present = np.flatnonzero(np.asarray(own_labels, dtype=bool))
-                own_ir = own_ir[latent_present]
-                own_labels = [f'{arms[index]}.{own_labels[coordinate]}' for coordinate in latent_present]
-                decisions[item['edict']].update(j=own_ir.copy(), j_labels=own_labels, episode_id=current_episode,
-                                               features=input_features, feature_labels=input_labels,
-                                               server_state=observed_state, state_labels=observed_labels)
-            sources = [{"response_seq": sequence, "edict": participant, **decision,
-                        "action": {"velocity": decision["velocity"], "residual": decision["residual"]}}
-                       for sequence, saved in (*history.items(), (request, decisions))
-                       for participant, decision in saved.items()]
+            if detailed_reporting:
+                for index, item in enumerate(assignments):
+                    observed_state, observed_labels = view_observation(chorus, index)
+                    item['successor_state'] = observed_state.tolist()
+                    item['successor_state_labels'] = observed_labels
+                    own_ir = np.asarray(outputs[str(arms[index])].ir)[index]
+                    pages = view_pages.layout.shape[1]
+                    latent_width = len(own_ir) // (1 + pages)
+                    own_labels = latent_labels(view_pages.layout[index], latent_width, pages)
+                    latent_present = np.flatnonzero(np.asarray(own_labels, dtype=bool))
+                    own_ir = own_ir[latent_present]
+                    own_labels = [f'{arms[index]}.{own_labels[coordinate]}' for coordinate in latent_present]
+                    decisions[item['edict']].update(j=own_ir.copy(), j_labels=own_labels, episode_id=current_episode,
+                                                   features=input_features, feature_labels=input_labels,
+                                                   server_state=observed_state, state_labels=observed_labels)
+                sources = [{"response_seq": sequence, "edict": participant, **decision,
+                            "action": {"velocity": decision["velocity"], "residual": decision["residual"]}}
+                           for sequence, saved in (*history.items(), (request, decisions))
+                           for participant, decision in saved.items()]
+            else:
+                sources = []
             issued = dict(request_seq=request, participant_ids=participant_ids, context=tick.context,
                           snapshot=tick.cartstate, frame=frame, engine_time=float(np.median(rows[:, OBS['ENGINE_TIME']])),
                           velocity=velocity.copy(), behavior_logp=behavior_logp.copy(), behavior_arms=arms.copy(),
@@ -580,9 +585,10 @@ def main():
                     'distributed_scale': {name: remote.last for name, remote in remotes.items()},
                     'world': world.report(), 'transport_local': engine.report()}
             line['execution'] = {arm: program.report() for arm, program in programs.items()}
-            model_record['row_outputs'] = [{'row': index, 'arm': str(arms[index]),
+            model_record['row_outputs'] = ([{'row': index, 'arm': str(arms[index]),
                                            'j': decisions[int(participant)]['j'].tolist()}
                                           for index, participant in enumerate(participant_ids)]
+                                          if detailed_reporting else [])
             reporter.ingest(dict(line))
             _, line['j_measures'] = reporter.snapshot()
             numeric = lambda value: np.asarray(value).tolist()

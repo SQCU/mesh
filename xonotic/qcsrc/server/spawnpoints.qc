@@ -218,6 +218,13 @@ spawnfunc(info_player_team8)
 	spawnfunc_info_player_deathmatch(this);
 }
 
+spawnfunc(info_player_team)
+{
+	int idx = this.team > 0 ? this.team : (this.cnt > 0 ? this.cnt : 1);
+	this.team = Team_IndexToTeam(bound(1, idx, NUM_TEAMS));
+	spawnfunc_info_player_deathmatch(this);
+}
+
 vector Spawn_Score(entity this, entity spot, float mindist, float teamcheck, bool targetcheck)
 {
 

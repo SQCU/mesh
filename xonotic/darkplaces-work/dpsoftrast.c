@@ -59,25 +59,49 @@ typedef qboolean bool;
 #endif
 
 #ifndef ALIGN
+#if defined(__GNUC__) || defined(__clang__)
+#define ALIGN(var) var __attribute__((__aligned__(16)))
+#else
 #define ALIGN(var) var
 #endif
+#endif
 #ifndef ATOMIC
+#if defined(__GNUC__) || defined(__clang__)
+#define ATOMIC(var) var __attribute__((__aligned__(4)))
+#else
 #define ATOMIC(var) var
 #endif
+#endif
 #ifndef MEMORY_BARRIER
+#if defined(__GNUC__) || defined(__clang__)
+#define MEMORY_BARRIER (__sync_synchronize())
+#else
 #define MEMORY_BARRIER ((void)0)
 #endif
+#endif
 #ifndef ATOMIC_COUNTER
-#define ATOMIC_COUNTER int
+#define ATOMIC_COUNTER volatile int
 #endif
 #ifndef ATOMIC_INCREMENT
+#if defined(__GNUC__) || defined(__clang__)
+#define ATOMIC_INCREMENT(counter) (__sync_add_and_fetch(&(counter), 1))
+#else
 #define ATOMIC_INCREMENT(counter) (++(counter))
 #endif
+#endif
 #ifndef ATOMIC_DECREMENT
+#if defined(__GNUC__) || defined(__clang__)
+#define ATOMIC_DECREMENT(counter) (__sync_add_and_fetch(&(counter), -1))
+#else
 #define ATOMIC_DECREMENT(counter) (--(counter))
 #endif
+#endif
 #ifndef ATOMIC_ADD
+#if defined(__GNUC__) || defined(__clang__)
+#define ATOMIC_ADD(counter, val) ((void)__sync_add_and_fetch(&(counter), (val)))
+#else
 #define ATOMIC_ADD(counter, val) ((void)((counter) += (val)))
+#endif
 #endif
 
 #ifdef SSE_POSSIBLE

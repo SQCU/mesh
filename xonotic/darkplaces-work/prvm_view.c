@@ -190,12 +190,9 @@ static inline prvm_eval_t PRVM_ViewReadFast(prvm_prog_t *prog, int entity, int o
 		page->integer_state[slot] = source->_int;
 		page->read_time[slot] = PRVM_serverglobalfloat(time);
 		result.ivector[i] = source->_int;
-		if (residual != 0)
+		if (residual != 0 && scalar_type == ev_float)
 		{
-			if (scalar_type == ev_float)
-				result.vector[i] = source->_float + residual;
-			else
-				result.ivector[i] = (prvm_uint_t)source->_int + (prvm_uint_t)page->integer_applied[slot];
+			result.vector[i] = source->_float + residual;
 			++view->reads_modified;
 		}
 		++view->reads;
@@ -282,8 +279,7 @@ static inline prvm_eval_t *PRVM_ViewOperand(prvm_prog_t *prog, int offset, int t
 		}
 		else
 		{
-			view->integer_view[word] = (prvm_uint_t)prog->globals.ip[word] + (prvm_uint_t)page->integer_applied[slot];
-			modified |= page->integer_applied[slot] != 0;
+			view->integer_view[word] = prog->globals.ip[word];
 		}
 	}
 	return (prvm_eval_t *)(!modified ? prog->globals.fp + offset : type == ev_float || type == ev_vector ?

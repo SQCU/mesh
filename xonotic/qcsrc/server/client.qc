@@ -417,7 +417,8 @@ void FixPlayermodel(entity player)
 	{
 		if(teamplay)
 		{
-			switch(player.team)
+			int model_team = Team_IsValidTeam(player.team) ? Team_IndexToTeam(((Team_TeamToIndex(player.team) - 1) % 5) + 1) : player.team;
+			switch(model_team)
 			{
 				case NUM_TEAM_1: defaultmodel = autocvar_sv_defaultplayermodel_red; defaultskin = autocvar_sv_defaultplayerskin_red; break;
 				case NUM_TEAM_2: defaultmodel = autocvar_sv_defaultplayermodel_blue; defaultskin = autocvar_sv_defaultplayerskin_blue; break;
