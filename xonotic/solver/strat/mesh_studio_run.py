@@ -180,45 +180,40 @@ def _rdma_mccandlish_from_flat(
     mean_g = sum_g / r
 
     def _pair_from_sums(mean_sq_norm: float, sum_rank_sq_norms: float) -> dict:
+        mean_local_sq = sum_rank_sq_norms / r
         if world_size <= 1:
             return {
                 "generation": step_id,
                 "replicas": 1,
-                "b0_transitions": b0_transitions,
-                "b0_rows": b0_transitions * 9.0,
-                "b_eff_transitions": b0_transitions,
-                "b_eff_rows": b0_transitions * 9.0,
+                "mean_local_norm": math.sqrt(max(0.0, mean_local_sq)),
+                "global_norm": math.sqrt(max(0.0, mean_sq_norm)),
                 "signal_sq": mean_sq_norm,
-                "noise_var": 0.0,
-                "b_noise_transitions": 0.0,
-                "b_noise_rows": 0.0,
-                "step_efficiency": 1.0,
+                "noise_sq": 0.0,
                 "cosine": 1.0,
+                "b0_transitions": float(b0_transitions),
+                "b0_rows": float(b0_transitions * 9.0),
+                "step_efficiency": 1.0,
             }
-        var_per_rank = max(0.0, (sum_rank_sq_norms - r * mean_sq_norm) / (r - 1.0))
-        signal_sq = mean_sq_norm - var_per_rank / r
+        noise_sq = max(0.0, (r / (r - 1.0)) * (mean_local_sq - mean_sq_norm))
+        signal_sq = (r * mean_sq_norm - mean_local_sq) / (r - 1.0)
         b_eff = r * b0_transitions
         if signal_sq > 1e-18:
-            b_noise = b0_transitions * var_per_rank / signal_sq
+            b_noise = b0_transitions * noise_sq / signal_sq
             eff = b_eff / (b_eff + b_noise)
         else:
-            b_noise = float("inf")
             eff = 0.0
-        # Average pairwise cosine across R ranks: (||sum g||^2 - sum ||g_k||^2) / ((R-1) sum ||g_k||^2)
-        cos = (r * r * mean_sq_norm - sum_rank_sq_norms) / max((r - 1.0) * sum_rank_sq_norms, 1e-18)
+        cos = signal_sq / mean_local_sq if mean_local_sq > 1e-18 else 0.0
         return {
             "generation": step_id,
             "replicas": int(world_size),
+            "mean_local_norm": math.sqrt(max(0.0, mean_local_sq)),
+            "global_norm": math.sqrt(max(0.0, mean_sq_norm)),
+            "signal_sq": float(signal_sq),
+            "noise_sq": float(noise_sq),
+            "cosine": float(max(-1.0, min(1.0, cos))),
             "b0_transitions": float(b0_transitions),
             "b0_rows": float(b0_transitions * 9.0),
-            "b_eff_transitions": float(b_eff),
-            "b_eff_rows": float(b_eff * 9.0),
-            "signal_sq": float(signal_sq),
-            "noise_var": float(var_per_rank),
-            "b_noise_transitions": float(b_noise) if math.isfinite(b_noise) else None,
-            "b_noise_rows": float(b_noise * 9.0) if math.isfinite(b_noise) else None,
             "step_efficiency": float(eff),
-            "cosine": float(max(-1.0, min(1.0, cos))),
         }
 
     sq_cpu = local_sq.cpu().tolist()
@@ -539,7 +534,7 @@ def _run_sync_wave(
                         nwm = np.asarray([
                             (int(tick.context.team_of[idx]) == w_after) if idx >= 0 else False for idx in succ
                         ], dtype=bool)
-                        disc = np.where((succ >= 0) & (~tick.cartstate.finished), gamma, 0.0).astype(np.float32)
+                        disc = np.where((succ >= 0) & (not tick.cartstate.finished), gamma, 0.0).astype(np.float32)
                         actor_mask = (prev["arms"] == train_arm) & (succ >= 0)
                         if np.any(actor_mask):
                             tr = PlanTransition(
