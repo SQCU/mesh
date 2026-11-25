@@ -66,6 +66,7 @@ enum WireMode : uint32_t {
   WIRE_GATHER = 2,      // per-peer Steiner-multicast mesh_write, rank-ordered fp32 sum on GPU
   WIRE_HAD8 = 3,        // MESH_RED_SUM_HAD_I8 (in-switch NEON FWHT-64 reduce)
   WIRE_HAD8_GATHER = 4, // per-peer Steiner-multicast mesh_write of had_int8, GPU FWHT-64 unpack (0 bridge CPU touch)
+  WIRE_AUTO = 5,        // Pareto auto: gather for <= 2 pages (B<=2), had8g for > 2 pages (B>=4)
 };
 
 struct alignas(64) Doorbell {
@@ -240,12 +241,13 @@ inline uint64_t now_ns() { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 
 WireMode parse_wire_mode() {
   const char* e = getenv("MESHMLX_WIRE");
-  if (!e || !*e || !strcmp(e, "gather")) return WIRE_GATHER;
+  if (!e || !*e || !strcmp(e, "auto")) return WIRE_AUTO;
+  if (!strcmp(e, "gather")) return WIRE_GATHER;
   if (!strcmp(e, "bf16")) return WIRE_BF16;
   if (!strcmp(e, "f32")) return WIRE_F32;
   if (!strcmp(e, "had8")) return WIRE_HAD8;
   if (!strcmp(e, "had8g")) return WIRE_HAD8_GATHER;
-  throw std::runtime_error(std::string("meshmlx: unknown MESHMLX_WIRE='") + e + "' (use gather, bf16, f32, had8, had8g)");
+  throw std::runtime_error(std::string("meshmlx: unknown MESHMLX_WIRE='") + e + "' (use auto, gather, bf16, f32, had8, had8g)");
 }
 
 void bootstrap_allgather(const void* sendbuf, void* recvbuf, size_t nbytes) {
@@ -2506,6 +2508,9 @@ NB_MODULE(_meshmlx, m) {
     f.nranks = g.nranks;
     f.rank = g.index >= 0 ? static_cast<uint32_t>(g.index) : 0u;
     f.wire = g.default_wire;
+    if (f.wire == WIRE_AUTO) {
+      f.wire = (f.esize == 2 && (f.n % 64) == 0 && f.n * f.esize > 2u * MESH_PAGE_BYTES) ? WIRE_HAD8_GATHER : WIRE_GATHER;
+    }
     const bool is_had8_req = (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER);
     if (is_had8_req && (f.esize != 2 || (f.n % 64) != 0)) f.wire = WIRE_GATHER;
 
