@@ -587,7 +587,7 @@ def _run_sync_wave(
 
             # All 4 Studios have collected local_batch_size transitions -> Synchronous RDMA Aurora Step!
             batch = fresh_buf[:local_batch_size]
-            fresh_buf = fresh_buf[local_batch_size:]
+            fresh_buf = []
             if not batch:
                 break
 
@@ -639,8 +639,7 @@ def _run_sync_wave(
                         grp_scales[gi] = 0.0
                     else:
                         eff_g = float(gp.get("step_efficiency") or 0.0)
-                        # Minimum floor 0.0 when signal_sq <= 0; sqrt(eff) scaling when positive signal exists
-                        grp_scales[gi] = math.sqrt(eff_g) if float(gp.get("signal_sq") or 0.0) > 0.0 else 0.0
+                        grp_scales[gi] = max(0.15, math.sqrt(eff_g)) if float(gp.get("signal_sq") or 0.0) > 0.0 else 0.0
 
                 if all(v <= 0.0 for v in grp_scales.values()):
                     deferred += 1
@@ -1008,8 +1007,8 @@ def main():
     ap.add_argument("--steps-per-wave", type=int, default=18)
     ap.add_argument("--local-batch", type=int, default=32)
     ap.add_argument("--ppo-epochs", type=int, default=1)
-    ap.add_argument("--lr", type=float, default=0.005)
-    ap.add_argument("--scalar-lr", type=float, default=1.5e-3)
+    ap.add_argument("--lr", type=float, default=0.008)
+    ap.add_argument("--scalar-lr", type=float, default=4e-3)
     ap.add_argument("--base-port", type=int, default=26000)
     ap.add_argument("--elo-duration-s", type=float, default=35.0)
     args = ap.parse_args()

@@ -206,8 +206,8 @@ class FSQBottleneck(nn.Module):
         z = torch.tanh(g * z_raw) * self.half_levels
         q = torch.round(z)
         z_ste = z + (q - z).detach()
-        norm_q = mp_norm(z_ste / torch.clamp(self.half_levels, min=1.0))
-        out = mp_lerp(x, mp_norm(self.proj_out(norm_q)), torch.sigmoid(self.blend_logit))
+        scaled_q = z_ste / torch.clamp(self.half_levels, min=1.0)
+        out = mp_lerp(x, self.proj_out(scaled_q), torch.sigmoid(self.blend_logit))
         return mp_norm(out), q.detach()
 
 
