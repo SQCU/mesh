@@ -99,6 +99,75 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
     for(;i<n;i++)d[i]+=s[i];
     return;
   }
+  case MESH_RED_SUM_F16:
+  case MESH_RED_MAX_F16:
+  case MESH_RED_MIN_F16:{
+    /* FP16 with exact FP32 widening accumulation inside each 4 KiB page fold. */
+    __fp16 *d=(__fp16 *)dst_v;
+    const __fp16 *s=(const __fp16 *)src_v;
+    uint32_t n=bytes>>1,i=0;
+#if defined(__ARM_NEON)
+    if(op==MESH_RED_SUM_F16){
+      for(;i+8u<=n;i+=8u){
+        const float16x8_t vd=vld1q_f16(d+i),vs=vld1q_f16(s+i);
+        const float32x4_t lo=vaddq_f32(vcvt_f32_f16(vget_low_f16(vd)),vcvt_f32_f16(vget_low_f16(vs)));
+        const float32x4_t hi=vaddq_f32(vcvt_f32_f16(vget_high_f16(vd)),vcvt_f32_f16(vget_high_f16(vs)));
+        vst1q_f16(d+i,vcombine_f16(vcvt_f16_f32(lo),vcvt_f16_f32(hi)));
+      }
+    }else if(op==MESH_RED_MAX_F16){
+      for(;i+8u<=n;i+=8u){
+        const float16x8_t vd=vld1q_f16(d+i),vs=vld1q_f16(s+i);
+        const float32x4_t lo=vmaxq_f32(vcvt_f32_f16(vget_low_f16(vd)),vcvt_f32_f16(vget_low_f16(vs)));
+        const float32x4_t hi=vmaxq_f32(vcvt_f32_f16(vget_high_f16(vd)),vcvt_f32_f16(vget_high_f16(vs)));
+        vst1q_f16(d+i,vcombine_f16(vcvt_f16_f32(lo),vcvt_f16_f32(hi)));
+      }
+    }else{
+      for(;i+8u<=n;i+=8u){
+        const float16x8_t vd=vld1q_f16(d+i),vs=vld1q_f16(s+i);
+        const float32x4_t lo=vminq_f32(vcvt_f32_f16(vget_low_f16(vd)),vcvt_f32_f16(vget_low_f16(vs)));
+        const float32x4_t hi=vminq_f32(vcvt_f32_f16(vget_high_f16(vd)),vcvt_f32_f16(vget_high_f16(vs)));
+        vst1q_f16(d+i,vcombine_f16(vcvt_f16_f32(lo),vcvt_f16_f32(hi)));
+      }
+    }
+#endif
+    for(;i<n;i++){
+      const float a=(float)d[i],b=(float)s[i];
+      d[i]=(__fp16)(op==MESH_RED_SUM_F16?(a+b):(op==MESH_RED_MAX_F16?(a>b?a:b):(a<b?a:b)));
+    }
+    return;
+  }
+  case MESH_RED_SUM_BF16:
+  case MESH_RED_MAX_BF16:
+  case MESH_RED_MIN_BF16:{
+    /* BF16 with exact FP32 widening accumulation + RNE round-to-bf16. */
+    uint16_t *d=(uint16_t *)dst_v;
+    const uint16_t *s=(const uint16_t *)src_v;
+    uint32_t n=bytes>>1,i=0;
+#if defined(__ARM_NEON)
+    const uint32x4_t rbias=vdupq_n_u32(0x7fffu);
+    const uint32x4_t one=vdupq_n_u32(1u);
+    for(;i+4u<=n;i+=4u){
+      const uint32x4_t ud=vshlq_n_u32(vmovl_u16(vld1_u16(d+i)),16);
+      const uint32x4_t us=vshlq_n_u32(vmovl_u16(vld1_u16(s+i)),16);
+      const float32x4_t fd=vreinterpretq_f32_u32(ud),fs=vreinterpretq_f32_u32(us);
+      const float32x4_t fr=op==MESH_RED_SUM_BF16?vaddq_f32(fd,fs):
+                           (op==MESH_RED_MAX_BF16?vmaxq_f32(fd,fs):vminq_f32(fd,fs));
+      const uint32x4_t ur=vreinterpretq_u32_f32(fr);
+      const uint32x4_t rnd=vaddq_u32(ur,vaddq_u32(rbias,vandq_u32(vshrq_n_u32(ur,16),one)));
+      vst1_u16(d+i,vmovn_u32(vshrq_n_u32(rnd,16)));
+    }
+#endif
+    for(;i<n;i++){
+      uint32_t ua=(uint32_t)d[i]<<16,ub=(uint32_t)s[i]<<16,ur;
+      float fa,fb,fr;
+      memcpy(&fa,&ua,4);memcpy(&fb,&ub,4);
+      fr=op==MESH_RED_SUM_BF16?(fa+fb):(op==MESH_RED_MAX_BF16?(fa>fb?fa:fb):(fa<fb?fa:fb));
+      memcpy(&ur,&fr,4);
+      ur+=0x7fffu+((ur>>16)&1u);
+      d[i]=(uint16_t)(ur>>16);
+    }
+    return;
+  }
   case MESH_RED_ONLINE_SOFTMAX_F32:{
     /* C1 lifted commutative monoid: 8 rows of 128 floats [m, l, o_0..o_125] per 4 KiB page. */
     float *d=(float *)dst_v;
