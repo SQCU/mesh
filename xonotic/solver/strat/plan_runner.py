@@ -140,7 +140,8 @@ class MultiServerPlanHarness:
                 cmd.extend(["+slowmo", str(self.slowmo)])
             cmd.extend(["+map", str(mname)])
             procs.append(subprocess.Popen(cmd, cwd=self.basedir, env=env, stdout=logf, stderr=subprocess.STDOUT))
-            self._browser_notify("register", f"{os.getpid()}-{idx}", {"node": os.uname().nodename, "host": "127.0.0.1", "port": base_port + idx, "map": str(mname)})
+            pub_host = os.environ.get("MESH_PUBLIC_HOST", "127.0.0.1")
+            self._browser_notify("register", f"{os.uname().nodename}-{os.getpid()}-{idx}", {"node": os.uname().nodename, "host": pub_host, "port": base_port + idx, "map": str(mname)})
             time.sleep(0.15)
         return procs, logs
 

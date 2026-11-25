@@ -232,9 +232,23 @@ class ServerRegistry:
             with self._lock:
                 self._procs[sid] = proc
         else:
+            r_dp = str(req.get("dp_bin", "$HOME/xonotic-stage/darkplaces-dedicated"))
+            r_base = str(req.get("basedir", "$HOME/xonotic-stage/Xonotic"))
+            r_src = str(req.get("src_data", "$HOME/xonotic-stage/userdir/data"))
+            r_args = [
+                r_dp, "-xonotic", "-basedir", r_base, "-userdir", userdir,
+                "+exec", "gamemodes-payload.cfg", "+sv_public", "0",
+                "+hostname", f"Mesh Payload [{mapname} @ {host}]",
+                "+port", str(port), "+maxplayers", "16",
+                "+g_payload", "1", "+g_payload_teams_override", "3",
+                "+g_payload_plan_only", "1", "+g_warmup", "0", "+g_start_delay", "0",
+                "+bot_join_empty", "1", "+bot_number", str(bots), "+skill", "5",
+                "+map", mapname,
+            ]
             remote_cmd = (
                 f"mkdir -p {shlex.quote(userdir)}/data && "
-                f"nohup {' '.join(shlex.quote(a) for a in dp_args)} > {shlex.quote(userdir)}/server.log 2>&1 < /dev/null &"
+                f"for f in {r_src}/*; do ln -sfn \"$f\" {shlex.quote(userdir)}/data/; done && "
+                f"nohup {' '.join(a if a.startswith('$HOME') else shlex.quote(a) for a in r_args)} > {shlex.quote(userdir)}/server.log 2>&1 < /dev/null &"
             )
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=5",
