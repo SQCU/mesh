@@ -109,13 +109,26 @@ def emit_policies(programs, prepared, frame, arms, key, recorded=None):
         preparation, time.perf_counter() - started)
 
 
-LOSS_WEIGHTS = {"actor": POLICY_ACTOR_WEIGHT, "winnie": 0.5, "lou": 0.5, "moe_balance": POLICY_MOE_BALANCE_WEIGHT}
+LOSS_WEIGHTS = {"actor": POLICY_ACTOR_WEIGHT, "winnie": 0.5, "lou": 0.5, "moe_balance": POLICY_MOE_BALANCE_WEIGHT, "dynamics": 0.25}
+
+
+def _team_finish_rates(frame):
+    from payload.tools.strategy_io_schema import TS
+    t_valid = frame.team_present.to(torch.bool)
+    scores = frame.teams[:, TS["SCORE"]].to(torch.float32)
+    held = frame.teams[:, TS["CHECKPOINTS_HELD"]].to(torch.float32)
+    rate = frame.teams[:, TS["CHECKPOINT_RATE"]].to(torch.float32)
+    limit = torch.clamp(frame.teams[:, TS["SCORE_LIMIT"]].to(torch.float32), min=1e-6)
+    rem = torch.clamp(limit - scores, min=1e-6)
+    rho = torch.where(t_valid & (held > 0), (rate * held) / rem, torch.zeros_like(scores))
+    mem = (frame.team_ids[:, None].to(rho.dtype) == frame.teams[None, :, TS["ID"]].to(rho.dtype)) & t_valid[None, :]
+    return (mem.to(rho.dtype) @ rho)
 
 
 def tensor_loss(model, forward, policy_arm, current_inputs, next_inputs, item):
     """1e1d8fb5^:online.OnlineLearner._tensor_loss on torch: the decoupled PPO actor term with rollout importance
     weights, the winner and loser value regressions to the bootstrapped (or observed) return, the scale experts'
-    balance term; its 16 metrics.  autograd derives its gradient."""
+    balance term, and the local action-linear dynamics regression; autograd derives its gradient."""
     from .policy_math import clipped_policy_surrogate, rollout_importance_weights
     from .strategy import logp_of
     value_scale, actor_scale = item['value_scale'], item['actor_scale']
@@ -159,11 +172,22 @@ def tensor_loss(model, forward, policy_arm, current_inputs, next_inputs, item):
     loser_weight = (~winner_mask).to(torch.float32) * train_weight
     winner_loss = ((current.value_winnie - target).square() * winner_weight).sum() / torch.clamp(winner_weight.sum(), min=1.0)
     loser_loss = ((current.value_lou - target).square() * loser_weight).sum() / torch.clamp(loser_weight.sum(), min=1.0)
+    if current.dyn_drift is not None and current.dyn_action is not None:
+        with torch.no_grad():
+            rho_curr = _team_finish_rates(current_inputs)
+            rho_next = _team_finish_rates(next_inputs)[successor_rows]
+            obs_delta_rho = torch.asinh(rho_next - rho_curr)
+            dyn_valid = (item["successor_rows"] >= 0).to(torch.float32) * train_weight
+        pred_delta_rho = current.dyn_drift + (current.dyn_action * velocity * present).sum(dim=-1)
+        dyn_loss = ((pred_delta_rho - obs_delta_rho).square() * dyn_valid).sum() / torch.clamp(dyn_valid.sum(), min=1.0)
+    else:
+        dyn_loss = torch.zeros((), dtype=actor.dtype, device=actor.device)
 
     total = (
         actor_scale * LOSS_WEIGHTS["actor"] * actor
         + value_scale * (LOSS_WEIGHTS["winnie"] * winner_loss
         + LOSS_WEIGHTS["lou"] * loser_loss
+        + LOSS_WEIGHTS["dynamics"] * dyn_loss
         + LOSS_WEIGHTS["moe_balance"] * current.scale_balance)
     )
 
@@ -184,7 +208,7 @@ def tensor_loss(model, forward, policy_arm, current_inputs, next_inputs, item):
         metrics = torch.stack([actor, winner_loss, loser_loss, (ratio * train_weight).sum() / train_count,
             advantage, weighted_advantage, winner_advantage, loser_advantage, winner_reward,
             loser_reward, winner_count, loser_count, role_change,
-            state_entropy, target_variance, current.scale_balance.reshape(())]).detach()
+            state_entropy, target_variance, current.scale_balance.reshape(()), dyn_loss.reshape(())]).detach()
     return total, (metrics, rollout_log_ratio, ratio, actor_active)
 
 
@@ -382,11 +406,15 @@ class PolicyProgram:
         ir = host(out.ir)
         latent_width = ir.shape[-1] // (1 + self.capacity[1])
         ir = ir[:n].reshape(n, 1 + self.capacity[1], latent_width)[:, :pages].reshape(n, pages * latent_width)
+        factor = None if out.rate.factor is None else host(out.rate.factor)[:n, :width].copy()
+        dyn_drift = None if out.dyn_drift is None else host(out.dyn_drift)[:n].copy()
+        dyn_action = None if out.dyn_action is None else host(out.dyn_action)[:n, :width].copy()
         return Strategy(StateRate(host(out.rate.mean)[:n, :width].copy(), host(out.rate.log_scale)[:n, :width].copy(),
-            host(out.rate.density)[:n].copy(), host(out.rate.present)[:n, :width].copy()), ir.copy(),
+            host(out.rate.density)[:n].copy(), host(out.rate.present)[:n, :width].copy(), factor), ir.copy(),
             host(out.value_winnie)[:n].copy(), host(out.value_lou)[:n].copy(), host(out.coupling)[:n, :pages].copy(),
             host(out.local_neighborhood)[:n].copy(),
-            host(out.scale_residual_stats).copy(), host(out.scale_expert_load).copy(), host(out.scale_balance).copy())
+            host(out.scale_residual_stats).copy(), host(out.scale_expert_load).copy(), host(out.scale_balance).copy(),
+            dyn_drift, dyn_action)
 
     def report(self):
         return {'capacity': dict(zip(('participants', 'state_pages', 'events', 'observations', 'carts', 'teams', 'navigation_nodes', 'navigation_edges', 'navigation_cells', 'neighbors'), self.capacity)),

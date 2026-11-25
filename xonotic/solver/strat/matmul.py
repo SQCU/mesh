@@ -4,14 +4,20 @@ import torch
 
 
 def matrix_multiply(lhs, rhs):
+    if lhs.numel() == 0 or rhs.numel() == 0:
+        return lhs.new_zeros((*torch.broadcast_shapes(lhs.shape[:-2], rhs.shape[:-2]), lhs.shape[-2], rhs.shape[-1]))
     return lhs @ rhs
 
 
 def matrix_multiply_transpose_left(lhs, rhs):
+    if lhs.numel() == 0 or rhs.numel() == 0:
+        return lhs.new_zeros((*torch.broadcast_shapes(lhs.shape[:-2], rhs.shape[:-2]), lhs.shape[-1], rhs.shape[-1]))
     return lhs.transpose(-2, -1) @ rhs
 
 
 def matrix_multiply_transpose_right(lhs, rhs):
+    if lhs.numel() == 0 or rhs.numel() == 0:
+        return lhs.new_zeros((*torch.broadcast_shapes(lhs.shape[:-2], rhs.shape[:-2]), lhs.shape[-2], rhs.shape[-2]))
     return lhs @ rhs.transpose(-2, -1)
 
 

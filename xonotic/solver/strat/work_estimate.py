@@ -52,17 +52,20 @@ def strategy_work(arm, widths, players, events, baseline_hidden=256,
     main = is_matrix_fusion_arm(arm)
     hidden, d = (w.d_ir, w.d) if main else (int(baseline_hidden), int(baseline_hidden))
     page_features = 6 * w.d_x + 20
+    head_width = ((2 + w.k_cov) * w.d_x + 2) if main else (2 * w.d_x + 2)
+    cart_width = 22 if main else 18
+    team_width = 9 if main else 7
     terms = {"raw_projections": mm(o, w.d_obs + 2, d) + mm(p, page_features, d)
-        + mm(j, 18, d) + mm(k, 7, d) + mm(e, w.d_c, d)
+        + mm(j, cart_width, d) + mm(k, team_width, d) + mm(e, w.d_c, d)
         + mm(vn, 4, d) + mm(ve, 3, d) + mm(vc, 2, d),
         "local_values_output": mm(sources + 1, d, d) + mm(o, d, d),
         "local_value_contraction": mm(o, slots, d),
-        "common_heads": mm(common_rows, hidden, 2 * w.d_x + 2),
+        "common_heads": mm(common_rows, hidden, head_width),
         "rate_owner_contribution": 2 * p * w.d_x,
         "value_scalar_readout": 2 * p}
     neighborhood_parameters = 9 * d + (3 if main else 2) * d * d + 1
-    raw_parameters = (w.d_obs + 2 + page_features + 18 + 7 + w.d_c) * d
-    readout_parameters = hidden * (2 * w.d_x + 2)
+    raw_parameters = (w.d_obs + 2 + page_features + cart_width + team_width + w.d_c) * d
+    readout_parameters = hidden * head_width
     parameters = raw_parameters + neighborhood_parameters + readout_parameters
     scale = scale_work(w, tokens, gradient_steps, gradient_batch) if main else _envelope(0, 0, 0, 0, 0)
     cross = cross_work(w.r_e, w.d_ir, tokens, gradient_steps, gradient_batch) if main else _envelope(0, 0, 0, 0, 0)
@@ -71,15 +74,17 @@ def strategy_work(arm, widths, players, events, baseline_hidden=256,
             "local_gram_contraction": mm(o, slots, d),
             "input_swiglu": 3 * mm(tokens, d, w.h),
             "ir_projection": mm(tokens, d, w.d_ir),
-            "gram_projections": mm(tokens, d, w.r + w.r_e),
+            "gram_projections": mm(tokens, d, w.r + w.r_e + w.r_dpp + 1),
+            "dpp_dual_gram": mm(w.r_dpp, tokens, w.r_dpp) + mm(w.r_dpp, tokens, w.d_ir) + mm(tokens, w.r_dpp, w.d_ir) + mm(tokens, w.d_ir, w.d_ir),
             "global_cross": cross["forward_flops"],
             "global_apply": mm(tokens, w.r_e, w.d_ir),
             "team_page_cross": mm(p, w.r, w.d_ir),
             "team_outer_products": (o + j + k) * w.r * w.d_ir,
             "team_membership": 2 * mm(k, groups, w.r * w.d_ir),
             "team_apply": mm(tokens, w.r, w.d_ir),
+            "dynamics_head": mm(common_rows, w.d_ir, w.d_x + 1),
             "output_swiglu": 3 * mm(tokens, w.d_ir, w.h)})
-        parameters += 3 * d * w.h + d * (w.r + w.r_e + w.d_ir) + 3 * w.d_ir * w.h
+        parameters += 3 * d * w.h + d * (w.r + w.r_e + w.r_dpp + 1 + w.d_ir) + w.d_ir * w.d_ir + w.d_ir * (w.d_x + 1) + 3 * w.d_ir * w.h
     else:
         terms.update({"baseline_global_sum": max(tokens - 1, 0) * hidden})
         parameters += 5 * hidden

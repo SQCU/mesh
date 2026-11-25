@@ -33,6 +33,8 @@ class Widths:
     h: int = 341
     r: int = 128
     r_e: int = 128
+    r_dpp: int = 32
+    k_cov: int = 4
     d_scale: int = 128
     scale_h: int = 341
     scale_experts: int = 8
@@ -52,8 +54,8 @@ class Wally(nn.Module):
 
         self.quinn = nn.Linear(6 * w.d_x + 20, w.d, bias=False)
         self.participant = nn.Linear(w.d_obs + 2, w.d, bias=False)
-        self.cart = nn.Linear(18, w.d, bias=False)
-        self.team = nn.Linear(7, w.d, bias=False)
+        self.cart = nn.Linear(22, w.d, bias=False)
+        self.team = nn.Linear(9, w.d, bias=False)
         from .neighborhood import LocalNeighborhood
         self.neighborhood = LocalNeighborhood(w.d)
         self.input_gate = nn.Linear(w.d, w.h, bias=False)
@@ -65,11 +67,16 @@ class Wally(nn.Module):
         self.team_metric = nn.Linear(w.d, w.r, bias=False)
 
         self.rival_metric = nn.Linear(w.d, w.r_e, bias=False)
+        self.dpp_metric = nn.Linear(w.d, w.r_dpp, bias=False)
+        self.dpp_quality = nn.Linear(w.d, 1, bias=False)
+        self.dpp_out = nn.Linear(w.d_ir, w.d_ir, bias=False)
 
         self.gia = nn.Linear(w.d_ir, w.h, bias=False)
         self.uma = nn.Linear(w.d_ir, w.h, bias=False)
         self.dov = nn.Linear(w.h, w.d_ir, bias=False)
-        self.heads = nn.Linear(w.d_ir, 2 * w.d_x + 2, bias=False)
+        self.heads = nn.Linear(w.d_ir, (2 + w.k_cov) * w.d_x + 2, bias=False)
+        self.dyn_drift = nn.Linear(w.d_ir, 1, bias=False)
+        self.dyn_action = nn.Linear(w.d_ir, w.d_x, bias=False)
 
         self.scale_in = nn.Linear(w.d_ir, w.d_scale, bias=False)
         self.scale_router = nn.Linear(w.d_scale, w.scale_experts, bias=False)

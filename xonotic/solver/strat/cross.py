@@ -92,9 +92,16 @@ def functional(output, seed):
     """One fixed scalar of the policy's outputs, its weights drawn from `seed` on the host (every rank the same)."""
     g = torch.Generator().manual_seed(seed)
     draw = lambda value: torch.randn(tuple(value.shape), generator=g).to(value.device)
-    return ((output.rate.mean * draw(output.rate.mean)).sum() + (output.rate.log_scale * draw(output.rate.log_scale)).sum()
-            + (output.value_winnie * draw(output.value_winnie)).sum() + (output.value_lou * draw(output.value_lou)).sum()
-            + output.scale_balance)
+    total = ((output.rate.mean * draw(output.rate.mean)).sum() + (output.rate.log_scale * draw(output.rate.log_scale)).sum()
+             + (output.value_winnie * draw(output.value_winnie)).sum() + (output.value_lou * draw(output.value_lou)).sum()
+             + output.scale_balance)
+    if output.rate.factor is not None:
+        total = total + (output.rate.factor * draw(output.rate.factor)).sum()
+    if output.dyn_drift is not None:
+        total = total + (output.dyn_drift * draw(output.dyn_drift)).sum()
+    if output.dyn_action is not None:
+        total = total + (output.dyn_action * draw(output.dyn_action)).sum()
+    return total
 
 
 def gradients(model, frame, seed):

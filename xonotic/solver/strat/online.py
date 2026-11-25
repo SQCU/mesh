@@ -27,7 +27,7 @@ OPTIMIZER_WEIGHT_DECAY = 1e-4
 METRIC_NAMES = ("loss_pg", "loss_w", "loss_l", "importance_mean",
     "advantage", "advantage_importance_weighted", "advantage_w", "advantage_l",
     "reward_w", "reward_l", "winner_rows", "loser_rows", "role_change_fraction",
-    "state_entropy", "fresh_value_target_variance", "loss_moe_balance")
+    "state_entropy", "fresh_value_target_variance", "loss_moe_balance", "loss_dynamics")
 ACTOR_METRIC_INDICES = [METRIC_NAMES.index(name) for name in
     ("loss_pg", "importance_mean", "state_entropy")]
 

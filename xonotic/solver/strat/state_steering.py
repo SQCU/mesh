@@ -32,6 +32,7 @@ class StateRate(NamedTuple):
     log_scale: torch.Tensor
     density: torch.Tensor
     present: torch.Tensor | None = None
+    factor: torch.Tensor | None = None
 
 
 def relaxation_coefficients(delta, tau):
@@ -39,22 +40,72 @@ def relaxation_coefficients(delta, tau):
     return torch.exp(-elapsed), -torch.as_tensor(tau) * torch.expm1(-elapsed)
 
 
-# 9855a829^:estimator.py strategy_forward (the anticipatory update, AGENDA C6): the imposed residual is the integrated
-# one plus `lead` times its rate, z = w_next + lead dw/dt, where lead 0 is the plain integrator.
-def integrate(residual, velocity, delta, tau, lead=0.0):
+def integrate_anticipatory(residual, fast_state, velocity, delta, tau, lead=0.0, tau_fast=None):
     decay, gain = relaxation_coefficients(delta, tau)
-    integrated = decay * residual + gain * velocity
-    return integrated + lead * velocity if lead else integrated
+    slow_next = decay * residual + gain * velocity
+    if not lead:
+        fast_next = torch.zeros_like(slow_next) if fast_state is None else fast_state
+        return slow_next, slow_next, fast_next
+    tf = torch.as_tensor(0.25 * tau if tau_fast is None else tau_fast, dtype=slow_next.dtype, device=slow_next.device)
+    elapsed_f = torch.as_tensor(delta, dtype=slow_next.dtype, device=slow_next.device) / tf
+    m_decay = torch.exp(-elapsed_f)
+    m_gain = float(lead) * (-torch.expm1(-elapsed_f))
+    prev_fast = torch.zeros_like(slow_next) if fast_state is None else fast_state
+    fast_next = m_decay * prev_fast + m_gain * velocity
+    return slow_next + fast_next, slow_next, fast_next
 
 
-def rate_distribution(coordinates, layout, participant_present):
+def integrate(residual, velocity, delta, tau, lead=0.0, fast_state=None, tau_fast=None):
+    imposed, _, _ = integrate_anticipatory(residual, fast_state, velocity, delta, tau, lead, tau_fast)
+    return imposed
+
+
+def _spd_cholesky_logdet_solve(matrix, rhs, eps=1e-6):
+    k = matrix.shape[-1]
+    cols = []
+    for j in range(k):
+        if j == 0:
+            diag = torch.sqrt(torch.clamp(matrix[..., 0, 0], min=eps))
+            col = [diag] + [matrix[..., i, 0] / diag for i in range(1, k)]
+        else:
+            prev = torch.stack(cols, dim=-1)
+            diag_sq = matrix[..., j, j] - (prev[..., j, :] * prev[..., j, :]).sum(dim=-1)
+            diag = torch.sqrt(torch.clamp(diag_sq, min=eps))
+            col = [torch.zeros_like(diag) for _ in range(j)] + [diag]
+            for i in range(j + 1, k):
+                dot = (prev[..., i, :] * prev[..., j, :]).sum(dim=-1)
+                col.append((matrix[..., i, j] - dot) / diag)
+        cols.append(torch.stack(col, dim=-1))
+    lower = torch.stack(cols, dim=-1)
+    logdet = 2.0 * torch.diagonal(lower, dim1=-2, dim2=-1).log().sum(dim=-1)
+    ys = []
+    for i in range(k):
+        acc = rhs[..., i]
+        for j in range(i):
+            acc = acc - lower[..., i, j] * ys[j]
+        ys.append(acc / lower[..., i, i])
+    xs = [None] * k
+    for i in range(k - 1, -1, -1):
+        acc = ys[i]
+        for j in range(i + 1, k):
+            acc = acc - lower[..., j, i] * xs[j]
+        xs[i] = acc / lower[..., i, i]
+    return logdet, torch.stack(xs, dim=-1)
+
+
+def rate_distribution(coordinates, layout, participant_present, k_cov=0):
     width = layout.shape[-1] - 3
     shape = (layout.shape[0], layout.shape[1] * width)
     present = (writable_words(layout) & participant_present[:, None, None]).reshape(shape)
     mean = (0.01 * coordinates[..., :width]).reshape(shape)
-    log_scale = (math.log(0.01) + control_log_scale(coordinates[..., width:])).reshape(shape)
+    log_scale = (math.log(0.01) + control_log_scale(coordinates[..., width:2 * width])).reshape(shape)
+    factor = None
+    if k_cov > 0:
+        raw_factor = (0.01 / math.sqrt(max(1, shape[1] * k_cov))) * coordinates[..., 2 * width:(2 + k_cov) * width]
+        factor = raw_factor.reshape(shape[0], shape[1], k_cov)
+        factor = torch.where(present.unsqueeze(-1), factor, 0.0)
     return StateRate(torch.where(present, mean, 0.0), torch.where(present, log_scale, 0.0),
-        participant_present.to(mean.dtype), present)
+        participant_present.to(mean.dtype), present, factor)
 
 
 def policy_inputs(frame, width):
@@ -74,9 +125,25 @@ def logp_of(rate, velocity, active=None):
     present = torch.ones_like(rate.mean) if rate.present is None else rate.present.to(rate.mean.dtype)
     mass = present * active.to(rate.mean.dtype)[:, None]
     scale = torch.where(mass > 0, rate.log_scale, 0.0)
-    error = torch.where(mass > 0, velocity - rate.mean, 0.0) * torch.exp(-scale)
-    terms = error.square() + 2 * scale + math.log(2 * math.pi)
-    return -0.5 * (terms * mass).sum(dim=-1) * rate.density
+    delta = torch.where(mass > 0, velocity - rate.mean, 0.0)
+    if rate.factor is None:
+        error = delta * torch.exp(-scale)
+        terms = error.square() + 2 * scale + math.log(2 * math.pi)
+        return -0.5 * (terms * mass).sum(dim=-1) * rate.density
+    inv_var = torch.where(mass > 0, torch.exp(-2.0 * scale), 0.0)
+    factor = rate.factor * mass.unsqueeze(-1)
+    k = factor.shape[-1]
+    eye = torch.eye(k, dtype=rate.mean.dtype, device=rate.mean.device)
+    scaled_f = factor * inv_var.unsqueeze(-1)
+    capacitance = eye + (factor.unsqueeze(-1) * scaled_f.unsqueeze(-2)).sum(dim=-3)
+    u = delta * inv_var
+    ft_u = (factor * u.unsqueeze(-1)).sum(dim=-2)
+    logdet_m, solved = _spd_cholesky_logdet_solve(capacitance, ft_u)
+    quad = (delta * u).sum(dim=-1) - (ft_u * solved).sum(dim=-1)
+    logdet_d = (2.0 * scale * mass).sum(dim=-1)
+    dim = mass.sum(dim=-1)
+    row_active = active.to(rate.mean.dtype)
+    return -0.5 * (quad + logdet_d + logdet_m * row_active + dim * math.log(2 * math.pi)) * rate.density
 
 
 def normal(shape, key, device):
@@ -89,8 +156,13 @@ def normal(shape, key, device):
 def sample(rate, key):
     present = torch.ones_like(rate.mean) if rate.present is None else rate.present.to(rate.mean.dtype)
     active = (rate.density > 0).to(rate.mean.dtype)[:, None] * present
-    value = torch.where(active > 0, rate.mean + torch.exp(torch.where(active > 0, rate.log_scale, 0.0)) *
-                        normal(rate.mean.shape, key, rate.mean.device), 0.0)
+    eps1 = normal(rate.mean.shape, key, rate.mean.device)
+    raw = rate.mean + torch.exp(torch.where(active > 0, rate.log_scale, 0.0)) * eps1
+    if rate.factor is not None:
+        key2 = (int(key[0]) ^ 0x9e3779b9, (int(key[1]) + 0x85ebca6b) & 0xffffffff)
+        eps2 = normal((rate.mean.shape[0], rate.factor.shape[-1]), key2, rate.mean.device)
+        raw = raw + (rate.factor * eps2.unsqueeze(-2)).sum(dim=-1)
+    value = torch.where(active > 0, raw, 0.0)
     return value, logp_of(rate, value)
 
 
@@ -111,14 +183,22 @@ class StatePages(NamedTuple):
     held_velocity: np.ndarray
     command_residual: np.ndarray
 
-    def response(self, velocity, duration, relaxation_time, lead=0.0):
+    def response(self, velocity, duration, relaxation_time, lead=0.0, fast_state=None):
         source = self.page_headers
         metadata = np.column_stack((source[:, 0:3], np.full(len(source), duration),
                                     np.full(len(source), relaxation_time), source[:, 4:10], source[:, 3]))
         residual_pages = self.residual.reshape(len(self.state), -1, PAGE_WIDTH)
         velocity_pages = np.asarray(velocity).reshape(residual_pages.shape)
         writable = writable_words(self.layout, np)
-        residual_pages = np.where(writable, residual_pages + lead * velocity_pages, 0)
+        if lead:
+            tf = max(1e-6, 0.25 * float(relaxation_time))
+            m_decay = math.exp(-float(duration) / tf)
+            m_gain = float(lead) * (-math.expm1(-float(duration) / tf))
+            prev_m = np.zeros_like(residual_pages) if fast_state is None else np.asarray(fast_state).reshape(residual_pages.shape)
+            lead_term = m_decay * prev_m + m_gain * velocity_pages
+        else:
+            lead_term = 0.0
+        residual_pages = np.where(writable, residual_pages + lead_term, 0)
         velocity_pages = np.where(writable, velocity_pages, 0)
         bots, pages = self.locations.T
         return np.concatenate((metadata, residual_pages[bots, pages], velocity_pages[bots, pages]), axis=-1).astype(np.float32)

@@ -5,6 +5,8 @@ from typing import NamedTuple
 import torch
 
 from .cast_header import Wally, encode_rows, gia_uma_dov, ir_query, norm, scale_fuse
+from .dpp import dpp_gram_operator
+from .game_value import cgt_tensor_features
 from .inputs import ChorusArrays
 from .matmul import matrix_multiply, matrix_multiply_transpose_left, linear
 from .state_steering import StateRate, rate_distribution, logp_of as rate_logp, sample, policy_inputs
@@ -20,6 +22,8 @@ class Strategy(NamedTuple):
     scale_residual_stats: torch.Tensor
     scale_expert_load: torch.Tensor
     scale_balance: torch.Tensor
+    dyn_drift: torch.Tensor | None = None
+    dyn_action: torch.Tensor | None = None
 
 
 class Encoded(NamedTuple):
@@ -36,8 +40,13 @@ def embedded_rows(model, frame, width, nonlinear=True):
     valid = torch.cat((frame.observation_present,
         (present.any(dim=-1) & frame.participant_present[:, None]).reshape(-1),
         frame.cart_present, frame.team_present))
+    carts_in, teams_in = frame.carts, frame.teams
+    if model.cart.in_features > frame.carts.shape[-1] and model.team.in_features > frame.teams.shape[-1]:
+        cart_extra, team_extra = cgt_tensor_features(frame.carts, frame.teams, frame.cart_present, frame.team_present)
+        carts_in = torch.cat((carts_in, cart_extra), dim=-1)
+        teams_in = torch.cat((teams_in, team_extra), dim=-1)
     rows = torch.cat((linear(model.participant, observations), linear(model.quinn, pages).reshape(-1, model.participant.weight.shape[0]),
-        linear(model.cart, frame.carts), linear(model.team, frame.teams)))
+        linear(model.cart, carts_in), linear(model.team, teams_in)))
     source_valid = torch.cat((frame.context_present, frame.navigation_node_present,
         frame.navigation_edge_present, frame.navigation_cell_present))
     sources = torch.cat((linear(model.phil, frame.context),
@@ -87,14 +96,20 @@ def encode_source(wally, *values):
     query = torch.where(valid[:, None], encode_rows(wally, rows), 0.0)
     projected = ir_query(wally, query)
     normalized = norm(query)
-    return projected, local, valid, linear(wally.team_metric, normalized), linear(wally.rival_metric, normalized), norm(projected)
+    dpp_basis = torch.where(
+        valid[:, None],
+        torch.nn.functional.softplus(linear(wally.dpp_quality, normalized)) * norm(linear(wally.dpp_metric, normalized)),
+        0.0,
+    )
+    return projected, local, valid, linear(wally.team_metric, normalized), dpp_basis, linear(wally.rival_metric, normalized), norm(projected)
 
 
 def encode_finish(wally, source, values, strength, global_context):
     frame = ChorusArrays(*values)
-    projected, local, valid, teams, rivals, payload = source
+    projected, local, valid, teams, dpp_basis, rivals, payload = source
     fused, coupling = row_gram_context(wally, teams, rivals, payload, frame, global_context)
-    ir = torch.where(valid[:, None], projected + norm(fused) * strength, 0.0)
+    dpp_context = linear(wally.dpp_out, dpp_gram_operator(dpp_basis, payload))
+    ir = torch.where(valid[:, None], projected + norm(fused + dpp_context) * strength, 0.0)
     o = frame.observations.shape[0]
     pages = torch.arange(o, o + frame.layout.shape[0] * frame.layout.shape[1], device=ir.device).reshape(frame.layout.shape[:2])
     participant_rows = frame.participant_rows.long()
@@ -111,13 +126,24 @@ def read_heads(model, encoded, rows, frame, statistics, load, balance):
     own = torch.cat((encoded.own_rows[:, None], encoded.page_rows), dim=1)
     valid = encoded.valid[own] & frame.participant_present[:, None]
     ir = torch.where(valid[..., None], rows[own], 0.0)
-    projected = linear(model.heads, ir)
+    ir_norm = torch.where(valid[..., None], norm(ir), 0.0)
+    projected = linear(model.heads, ir_norm)
     coordinates = projected[:, 1:, :-2] + projected[:, :1, :-2]
-    values = projected[..., -2:].sum(dim=1)
-    rate = rate_distribution(coordinates, frame.layout, frame.participant_present)
+    page_count = torch.clamp(valid.to(ir.dtype).sum(dim=1, keepdim=True), min=1.0)
+    values = (projected[..., -2:] * valid[..., None].to(ir.dtype)).sum(dim=1) / page_count
+    k_cov = getattr(getattr(model, 'w', None), 'k_cov', 0)
+    rate = rate_distribution(coordinates, frame.layout, frame.participant_present, k_cov=k_cov)
+    dyn_drift = None
+    dyn_action = None
+    if hasattr(model, 'dyn_drift') and hasattr(model, 'dyn_action'):
+        dyn_drift = (0.1 * linear(model.dyn_drift, ir_norm).squeeze(-1) * valid.to(ir.dtype)).sum(dim=1) / page_count.squeeze(-1)
+        page_act = 0.1 * (linear(model.dyn_action, ir_norm[:, 1:, :]) + linear(model.dyn_action, ir_norm[:, :1, :]))
+        act_scale = torch.rsqrt(torch.clamp(rate.present.to(ir.dtype).sum(dim=-1, keepdim=True), min=1.0))
+        dyn_action = torch.where(rate.present, page_act.reshape(rate.mean.shape) * act_scale, 0.0)
     return Strategy(rate, ir.reshape(frame.state.shape[0], -1), values[:, 0], values[:, 1],
         torch.where(valid[..., None], encoded.coupling[own], 0.0),
-        encoded.local * frame.participant_present[:, None].to(encoded.local.dtype), statistics, load, balance)
+        encoded.local * frame.participant_present[:, None].to(encoded.local.dtype), statistics, load, balance,
+        dyn_drift, dyn_action)
 
 
 def decode(wally, encoded, scale_delta, statistics, load, balance, frame):

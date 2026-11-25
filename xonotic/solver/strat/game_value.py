@@ -5,6 +5,152 @@ import math
 import numpy as np
 
 GAME_CONTRACT = "checkpoint-control-integral-v1"
+WINNER_BARRIER_MARGIN = 0.25
+WINNER_BARRIER_WEIGHT = 0.5
+NIM_BOUNDED_STEP = 2
+
+
+def finish_rates(scores, held, rate, limit, eps=1e-12):
+    scores = np.asarray(scores, dtype=np.float64)
+    held = np.asarray(held, dtype=np.float64)
+    remaining = np.maximum(float(limit) - scores, eps)
+    return np.where(held > 0, (float(rate) * held) / remaining, 0.0)
+
+
+def winning_margin(rho, eps=1e-12):
+    rho = np.asarray(rho, dtype=np.float64)
+    k = len(rho)
+    out = np.zeros(k, dtype=np.float64)
+    for i in range(k):
+        best_other = float(np.max(np.delete(rho, i))) if k > 1 else 0.0
+        out[i] = (rho[i] - best_other) / (rho[i] + best_other + eps)
+    return out
+
+
+def bounded_nim_sum(heaps, max_take=NIM_BOUNDED_STEP):
+    mod = int(max_take) + 1
+    nimbers = [max(0, int(h)) % mod for h in heaps]
+    total = 0
+    for val in nimbers:
+        total ^= val
+    winning = [
+        1.0 if (total != 0 and (v ^ total) < v and (v - (v ^ total)) <= max(0, int(h))) else 0.0
+        for h, v in zip(heaps, nimbers)
+    ]
+    return int(total), np.asarray(winning, dtype=np.float32)
+
+
+def lane_thermographs(snapshot, eps_dist=0.05):
+    scores = np.asarray(snapshot.scores, dtype=np.float64)
+    held = np.asarray(snapshot.held, dtype=np.float64)
+    rate = float(snapshot.checkpoint_rate)
+    limit = float(snapshot.score_limit)
+    k = len(scores)
+    j = len(snapshot.depths)
+    base_rho = finish_rates(scores, held, rate, limit)
+    base_m = winning_margin(base_rho)
+    pos = np.clip(np.asarray(snapshot.pos, dtype=np.float64), 0.0, 1.0)
+    cp_max = np.maximum(np.asarray(snapshot.checkpoints, dtype=np.float64), 1.0)
+    seg = pos * cp_max
+    dist_push = np.maximum(np.ceil(seg + 1e-9) - seg, eps_dist)
+    dist_deny = np.maximum(seg - np.floor(seg - 1e-9), eps_dist)
+    deny = np.zeros(j, dtype=np.float32)
+    push = np.zeros(j, dtype=np.float32)
+    for idx in range(j):
+        owner = int(snapshot.control[idx])
+        depth = int(snapshot.depths[idx])
+        if 0 <= owner < k and depth > 0 and held[owner] > 0:
+            h_mod = held.copy()
+            h_mod[owner] -= 1.0
+            m_mod = winning_margin(finish_rates(scores, h_mod, rate, limit))
+            deny[idx] = float(np.max(np.abs(m_mod - base_m)) / dist_deny[idx])
+        if depth < int(cp_max[idx]):
+            best_gain = 0.0
+            for team in range(k):
+                h_mod = held.copy()
+                h_mod[team] += 1.0
+                m_mod = winning_margin(finish_rates(scores, h_mod, rate, limit))
+                best_gain = max(best_gain, float(m_mod[team] - base_m[team]))
+            push[idx] = float(best_gain / dist_push[idx])
+    rem_heaps = [max(0, int(c) - int(d)) for c, d in zip(snapshot.checkpoints, snapshot.depths)]
+    nim_val, nim_win = bounded_nim_sum(rem_heaps)
+    return {
+        "finish_rates": base_rho.astype(np.float32),
+        "winning_margins": base_m.astype(np.float32),
+        "deny": deny,
+        "push": push,
+        "nim_sum": nim_val,
+        "nim_winning": nim_win,
+    }
+
+
+def cgt_tensor_features(carts, teams, cart_present, team_present, eps_dist=0.05):
+    import torch
+    from payload.tools.strategy_io_schema import CS, TS
+
+    with torch.no_grad():
+        device, dtype = carts.device, carts.dtype
+        k = teams.shape[0]
+        j = carts.shape[0]
+        t_valid = team_present.to(torch.bool)
+        scores = teams[:, TS["SCORE"]].to(torch.float32)
+        held = teams[:, TS["CHECKPOINTS_HELD"]].to(torch.float32)
+        rate = teams[:, TS["CHECKPOINT_RATE"]].to(torch.float32)
+        limit = torch.clamp(teams[:, TS["SCORE_LIMIT"]].to(torch.float32), min=1e-6)
+        rem = torch.clamp(limit - scores, min=1e-6)
+        rho = torch.where(t_valid & (held > 0), (rate * held) / rem, torch.zeros_like(scores))
+        if k > 1:
+            eye_mask = torch.eye(k, device=device, dtype=torch.bool)
+            other_rho = rho[None, :].expand(k, k).masked_fill(eye_mask, -1.0)
+            best_other = other_rho.amax(dim=1).clamp(min=0.0)
+        else:
+            best_other = torch.zeros_like(rho)
+        margins = torch.where(t_valid, (rho - best_other) / (rho + best_other + 1e-6), torch.zeros_like(rho))
+        rho_norm = torch.where(t_valid, torch.tanh(rho), torch.zeros_like(rho))
+        team_extra = torch.stack((rho_norm, margins), dim=-1).to(dtype)
+
+        c_valid = cart_present.to(torch.bool)
+        path_len = torch.clamp(carts[:, CS["PATH_LENGTH"]].to(torch.float32), min=1e-6)
+        pos_frac = torch.clamp(carts[:, CS["PATH_POSITION"]].to(torch.float32) / path_len, 0.0, 1.0)
+        cp_count = torch.clamp(carts[:, CS["CHECKPOINT_COUNT"]].to(torch.float32), min=1.0)
+        cp_depth = torch.clamp(carts[:, CS["CHECKPOINT_DEPTH"]].to(torch.float32), min=0.0)
+        seg = pos_frac * cp_count
+        dist_push = torch.clamp(torch.ceil(seg + 1e-6) - seg, min=eps_dist)
+        dist_deny = torch.clamp(seg - torch.floor(seg - 1e-6), min=eps_dist)
+
+        owner_ids = carts[:, CS["CONTROL_TEAM"]].to(torch.float32)
+        team_ids = teams[:, TS["ID"]].to(torch.float32)
+        owner_match = (owner_ids[:, None] == team_ids[None, :]) & t_valid[None, :]
+        has_owner = owner_match.any(dim=1)
+        owner_idx = owner_match.to(torch.int64).argmax(dim=1)
+        owner_held = held[owner_idx]
+        owner_rho = rho[owner_idx]
+        # Marginal finish-rate shift on +/-1 checkpoint flip (exact closed form)
+        delta_rho_deny = torch.where(
+            c_valid & has_owner & (cp_depth > 0) & (owner_held > 0),
+            owner_rho / torch.clamp(owner_held, min=1.0),
+            torch.zeros_like(owner_rho),
+        )
+        t_deny = torch.tanh(delta_rho_deny / (owner_rho + best_other[owner_idx] + 1e-6) / dist_deny)
+        max_rho = rho.amax().clamp(min=1e-6)
+        delta_rho_push = torch.where(
+            c_valid & (cp_depth < cp_count),
+            (rate.amax().clamp(min=0.0) / rem.amin().clamp(min=1e-6)),
+            torch.zeros_like(owner_rho),
+        )
+        t_push = torch.tanh((delta_rho_push / (max_rho + delta_rho_push + 1e-6)) / dist_push)
+
+        rem_heaps = torch.where(c_valid, torch.clamp((cp_count - cp_depth).round().to(torch.int64), min=0), torch.zeros(j, device=device, dtype=torch.int64))
+        mod = NIM_BOUNDED_STEP + 1
+        nimbers = rem_heaps % mod
+        nim_total = torch.zeros((), device=device, dtype=torch.int64)
+        for idx in range(j):
+            nim_total = torch.bitwise_xor(nim_total, nimbers[idx])
+        target_nim = torch.bitwise_xor(nimbers, nim_total)
+        nim_move = ((nim_total != 0) & (target_nim < nimbers) & ((nimbers - target_nim) <= rem_heaps) & c_valid).to(torch.float32)
+        nim_mod = torch.where(c_valid, nimbers.to(torch.float32) / float(mod), torch.zeros_like(t_deny))
+        cart_extra = torch.stack((t_deny, t_push, nim_move, nim_mod), dim=-1).to(dtype)
+        return cart_extra, team_extra
 
 def checkpoint_ownership(distances, control, position):
     return np.where(np.asarray(distances, dtype=np.float32) <= np.float32(position), control, -1)
@@ -85,6 +231,7 @@ SPARSE_REWARD_CONTRACT = {
     "game": GAME_CONTRACT,
     "source": "cart_state_transition",
     "winner_rows": {"event": "projected_winner_loses_role", "value": -1.0},
+    "winner_boundary_barrier": {"margin": WINNER_BARRIER_MARGIN, "weight": WINNER_BARRIER_WEIGHT},
     "loser_rows": {"event": "upward_loser_rank_flip", "value": 1.0},
     "otherwise": 0.0,
     "terminal_reward": None,
@@ -135,6 +282,7 @@ def formal_game_value(context: GameContext, snapshot: CartSnapshot):
                               snapshot.score_limit, snapshot.checkpoint_rate)
 
 def formal_value_record(value, snapshot):
+    lanes = lane_thermographs(snapshot)
     return {
         "contract": GAME_CONTRACT,
         "projected_role": None if value.projected_role is None else int(value.projected_role),
@@ -143,6 +291,12 @@ def formal_value_record(value, snapshot):
         "score_limit": value.score_limit,
         "checkpoint_rate": value.checkpoint_rate,
         "time_to_win": [float(t) if np.isfinite(t) else None for t in value.time_to_win],
+        "finish_rates": lanes["finish_rates"].tolist(),
+        "winning_margins": lanes["winning_margins"].tolist(),
+        "lane_thermograph_deny": lanes["deny"].tolist(),
+        "lane_thermograph_push": lanes["push"].tolist(),
+        "lane_nim_sum": lanes["nim_sum"],
+        "lane_nim_winning": lanes["nim_winning"].tolist(),
         "tied_roles": list(value.tied_roles),
         "rank_tiers": [list(tier) for tier in value.rank_tiers],
         "role_ranks": {
@@ -212,12 +366,20 @@ def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot
     after_winner = after_value.projected_role
     before_ranks = loser_ranks(context, before, before_value)
     after_ranks = loser_ranks(context, after, after_value)
+    after_margins = winning_margin(
+        finish_rates(after_value.scores, after_value.checkpoints_held, after.checkpoint_rate, after.score_limit)
+    )
     teams = np.asarray(context.teams, dtype=np.int64)
     winner_mask = teams == before_winner
     rank_flip = after_ranks[teams] > before_ranks[teams]
+    if before_winner is not None and after_winner == before_winner:
+        deficit = max(0.0, WINNER_BARRIER_MARGIN - float(after_margins[before_winner]))
+        winner_reward = -WINNER_BARRIER_WEIGHT * (deficit * deficit)
+    else:
+        winner_reward = -float(after_winner != before_winner)
     team_rewards = np.where(
         winner_mask,
-        -float(after_winner != before_winner),
+        winner_reward,
         rank_flip.astype(np.float32),
     ).astype(np.float32)
     return team_rewards[np.asarray(context.team_of, dtype=np.int64)]

@@ -219,6 +219,7 @@ def main():
                             os.path.abspath(args.online_checkpoint or CKPT) + '.actions', interval)
     episode_key = None
     observation_memory = ObservationMemory()
+    anticipatory_fast = {}
     remotes = {}
     count = 0
     started = time.monotonic()
@@ -453,7 +454,17 @@ def main():
             velocity, behavior_logp, integrated = emission.velocity, emission.logp, emission.residual
             preparation_elapsed, inference_elapsed = emission.preparation_seconds, emission.inference_seconds
             request = records[STATE_KIND][0]['req_id']
-            response = view_pages.response(velocity, interval, relaxation, lead)
+            prev_fast = np.zeros_like(velocity)
+            if lead:
+                tf = max(1e-6, 0.25 * float(relaxation))
+                m_decay = np.exp(-float(interval) / tf)
+                m_gain = float(lead) * (-np.expm1(-float(interval) / tf))
+                for idx, pid in enumerate(participant_ids):
+                    old = anticipatory_fast.get(int(pid))
+                    if old is not None and old.shape == velocity[idx].shape:
+                        prev_fast[idx] = old
+                    anticipatory_fast[int(pid)] = (m_decay * prev_fast[idx] + m_gain * velocity[idx]).astype(np.float32)
+            response = view_pages.response(velocity, interval, relaxation, lead, fast_state=prev_fast)
             if not replaying:
                 journal_offset = journal.append({'key': (session, tick_id), 'records': records, 'event_frames': event_batches,
                     'outcomes': inbox.outcomes, 'velocity': velocity, 'behavior_logp': behavior_logp})

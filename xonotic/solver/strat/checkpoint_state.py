@@ -19,8 +19,8 @@ POLICY_KEY = "__policy_arm__"
 POLICY_VERSION_KEY = "__policy_version__"
 REWARD_CONTRACT_KEY = "__reward_contract__"
 LINEAGE_INITIAL_KEY = "__initial_checkpoint_sha256__"
-POLICY_VERSIONS = {arm: 21 if is_matrix_fusion_arm(arm) else 19 for arm in PARAMETERIZED_ARMS}
-ARCHITECTURE_VERSION = 12
+POLICY_VERSIONS = {arm: 22 if is_matrix_fusion_arm(arm) else 19 for arm in PARAMETERIZED_ARMS}
+ARCHITECTURE_VERSION = 13
 
 class Payload(dict):
     @property

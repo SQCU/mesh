@@ -49,7 +49,21 @@ def dpp_marginals(quality, features, normalize=True, eps=1e-12):
     dual = positive_definite_conjugate_gradient(covariance, weighted.T).T
     return torch.clamp((weighted * dual).sum(dim=1), 0, 1)
 
+def dpp_gram_operator(basis, values):
+    basis = _as_f32(basis)
+    values = _as_f32(values)
+    r = basis.shape[1]
+    covariance = torch.eye(r, dtype=basis.dtype, device=basis.device) + matrix_multiply_transpose_left(basis, basis)
+    rhs = matrix_multiply_transpose_left(basis, values)
+    if basis.device.type == "mps":
+        solved = torch.linalg.solve(covariance.cpu(), rhs.cpu()).to(basis.device)
+    else:
+        solved = torch.linalg.solve(covariance, rhs)
+    return matrix_multiply(basis, solved)
+
+
 __all__ = [
+    "dpp_gram_operator",
     "dpp_marginals",
     "positive_definite_conjugate_gradient",
 ]
