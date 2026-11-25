@@ -35,7 +35,7 @@ from payload.tools.strategy_io_schema import CS, EVT, OBS, TS
 from solver.strat.buffers import ObservationMemory
 from solver.strat.game_value import effective_leader, formal_value_record, role_rewards
 from solver.strat.grad_snr import summarize_mccandlish_pairs
-from solver.strat.outer_validation import extract_behavioral_motifs, fit_plackett_luce_elo
+from solver.strat.outer_validation import compute_multiteam_elo, extract_behavioral_motifs
 from solver.strat.plan_policy import (
     PLAN_CONT_DIM,
     PLAN_WIDTH,
@@ -889,11 +889,12 @@ def run_train_and_elo(args):
             per_map_elo[g["map"]] = {
                 "host": g["host"],
                 "matches": len(g["score_matches"]),
-                "score_elo": fit_plackett_luce_elo(g["score_matches"], anchor="default"),
-                "composite_elo": fit_plackett_luce_elo(g["composite_matches"], anchor="default"),
+                "score_elo": compute_multiteam_elo(g["score_matches"], anchor_arm="default"),
+                "composite_elo": compute_multiteam_elo(g["composite_matches"], anchor_arm="default"),
             }
-        overall_sc_elo = fit_plackett_luce_elo(all_sc, anchor="default")
-        overall_comp_elo = fit_plackett_luce_elo(all_comp, anchor="default")
+        overall_sc_elo = compute_multiteam_elo(all_sc, anchor_arm="default")
+        overall_comp_elo = compute_multiteam_elo(all_comp, anchor_arm="default")
+        comp_ratings = overall_comp_elo.get("ratings") or {}
 
         # McCandlish S_eff vs EMA Checkpoint Elo correlation
         cum_seff = []
@@ -904,9 +905,9 @@ def run_train_and_elo(args):
             eff = float(snr.get("step_efficiency") or 0.0)
             running += eff * float(wrep.get("updates_applied", 0))
             ck = f"aur_w{wi}"
-            if ck in overall_comp_elo:
+            if ck in comp_ratings:
                 cum_seff.append(running)
-                elo_pts.append(float(overall_comp_elo[ck]))
+                elo_pts.append(float(comp_ratings[ck]["elo"]))
         corr_r = None
         if len(cum_seff) >= 3 and np.std(cum_seff) > 1e-9 and np.std(elo_pts) > 1e-9:
             corr_r = round(float(np.corrcoef(cum_seff, elo_pts)[0, 1]), 4)
