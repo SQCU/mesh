@@ -717,11 +717,12 @@ void VM_find(prvm_prog_t *prog)
 		ed = PRVM_EDICT_NUM(e);
 		if (ed->priv.required->free)
 			continue;
-		t = PRVM_GetString(prog, PRVM_EDICTREADINT(ed,f,ev_string));
+		t = PRVM_GetString(prog, PRVM_EDICTFIELDSTRING(ed,f));
 		if (!t)
 			t = "";
 		if (!strcmp(t,s))
 		{
+			PRVM_EDICTREADINT(ed,f,ev_string);
 			VM_RETURN_EDICT(ed);
 			return;
 		}
@@ -749,8 +750,9 @@ void VM_findfloat(prvm_prog_t *prog)
 		ed = PRVM_EDICT_NUM(e);
 		if (ed->priv.required->free)
 			continue;
-		if (PRVM_EDICTREADFLOAT(ed,f) == s)
+		if (PRVM_EDICTFIELDFLOAT(ed,f) == s)
 		{
+			PRVM_EDICTREADFLOAT(ed,f);
 			VM_RETURN_EDICT(ed);
 			return;
 		}
@@ -787,12 +789,13 @@ void VM_findchain(prvm_prog_t *prog)
 		prog->xfunction->builtinsprofile++;
 		if (ent->priv.required->free)
 			continue;
-		t = PRVM_GetString(prog, PRVM_EDICTREADINT(ent,f,ev_string));
+		t = PRVM_GetString(prog, PRVM_EDICTFIELDSTRING(ent,f));
 		if (!t)
 			t = "";
 		if (strcmp(t,s))
 			continue;
 
+		PRVM_EDICTREADINT(ent,f,ev_string);
 		PRVM_EDICTFIELDEDICT(ent,chainfield) = PRVM_NUM_FOR_EDICT(chain);
 		chain = ent;
 	}
@@ -828,9 +831,10 @@ void VM_findchainfloat(prvm_prog_t *prog)
 		prog->xfunction->builtinsprofile++;
 		if (ent->priv.required->free)
 			continue;
-		if (PRVM_EDICTREADFLOAT(ent,f) != s)
+		if (PRVM_EDICTFIELDFLOAT(ent,f) != s)
 			continue;
 
+		PRVM_EDICTREADFLOAT(ent,f);
 		PRVM_EDICTFIELDEDICT(ent,chainfield) = PRVM_EDICT_TO_PROG(chain);
 		chain = ent;
 	}
@@ -857,10 +861,11 @@ void VM_findflags(prvm_prog_t *prog)
 		ed = PRVM_EDICT_NUM(e);
 		if (ed->priv.required->free)
 			continue;
-		if (!PRVM_EDICTREADFLOAT(ed,f))
+		if (!PRVM_EDICTFIELDFLOAT(ed,f))
 			continue;
-		if ((prvm_int_t)PRVM_EDICTREADFLOAT(ed,f) & s)
+		if ((prvm_int_t)PRVM_EDICTFIELDFLOAT(ed,f) & s)
 		{
+			PRVM_EDICTREADFLOAT(ed,f);
 			VM_RETURN_EDICT(ed);
 			return;
 		}
@@ -897,11 +902,12 @@ void VM_findchainflags(prvm_prog_t *prog)
 		prog->xfunction->builtinsprofile++;
 		if (ent->priv.required->free)
 			continue;
-		if (!PRVM_EDICTREADFLOAT(ent,f))
+		if (!PRVM_EDICTFIELDFLOAT(ent,f))
 			continue;
-		if (!((prvm_int_t)PRVM_EDICTREADFLOAT(ent,f) & s))
+		if (!((prvm_int_t)PRVM_EDICTFIELDFLOAT(ent,f) & s))
 			continue;
 
+		PRVM_EDICTREADFLOAT(ent,f);
 		PRVM_EDICTFIELDEDICT(ent,chainfield) = PRVM_EDICT_TO_PROG(chain);
 		chain = ent;
 	}

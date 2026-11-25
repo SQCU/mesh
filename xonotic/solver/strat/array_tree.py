@@ -8,7 +8,7 @@ import numpy as np
 
 
 def write_payload(target, payload):
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, value in payload.items():
             with archive.open(name + ".npy", "w", force_zip64=True) as member:
                 np.lib.format.write_array(member, np.asarray(value), allow_pickle=False)

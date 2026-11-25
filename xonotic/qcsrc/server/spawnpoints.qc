@@ -460,11 +460,32 @@ entity Spawn_SwizzledPoint(entity firstspot, entity player)
 	int generation = floor(player.spawn_swizzle_generation);
 	int ticket = floor(player.spawn_swizzle_ticket);
 	int lane = floor(player.spawn_swizzle_lane) % slots;
-	int slot = (generation + lane) % count;
-	int selected = slot;
+	int base_slot = (generation + lane) % count;
+	int selected = base_slot;
 	entity spot = firstspot;
-	while(slot-- > 0 && spot.chain)
-		spot = spot.chain;
+	float step = Spawn_SwizzleStep();
+	for(int attempt = 0; attempt < count; ++attempt)
+	{
+		int cand_idx = (base_slot + attempt) % count;
+		entity cand = firstspot;
+		int walk = cand_idx;
+		while(walk-- > 0 && cand.chain)
+			cand = cand.chain;
+		bool busy = false;
+		FOREACH_CLIENT(it != player && IS_PLAYER(it) && !IS_DEAD(it),
+		{
+			if(vdist(it.origin - cand.origin, <, 64)
+				|| (it.spawn_swizzle_spot == etof(cand) && time - it.spawn_swizzle_actual_time < step))
+			{
+				busy = true;
+				break;
+			}
+		});
+		spot = cand;
+		selected = cand_idx;
+		if(!busy)
+			break;
+	}
 	player.spawn_swizzle_actual_time = time;
 	player.spawn_swizzle_lane = lane;
 	player.spawn_swizzle_spot = etof(spot);

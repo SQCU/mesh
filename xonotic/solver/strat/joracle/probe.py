@@ -1131,20 +1131,26 @@ class LiteralJReporter:
         self.ingested_transition_row_mass = 0
         self.evicted_pending_coordinate_row_mass = 0
         self.evicted_pending_transition_row_mass = 0
+        self.enabled = int(max_rows) > 0
         self.stop_event = threading.Event()
         self.measure_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="literal-j-measures", daemon=True)
 
     def start(self):
-        self.thread.start()
+        if self.enabled:
+            self.thread.start()
         return self
 
     def stop(self):
+        if not self.enabled:
+            return
         self.stop_event.set()
         self.measure_event.set()
-        self.thread.join()
+        self.thread.join(timeout=5.0)
 
     def reset(self):
+        if not self.enabled:
+            return
         with self.lock:
             self.pending.clear()
             self.generation += 1
@@ -1158,6 +1164,8 @@ class LiteralJReporter:
             self.evicted_pending_transition_row_mass = 0
 
     def ingest(self, frame):
+        if not self.enabled:
+            return
         sequence = int(frame.get("request_seq") or 0)
         coordinate_mass = sum(
             int(source.get("response_seq") or 0) == sequence

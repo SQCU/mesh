@@ -961,9 +961,29 @@ void VM_mesh_round_outcome(prvm_prog_t *prog)
 	meshx_publish(m, 0, 1);
 }
 
+static int meshx_view_page_active(prvm_prog_t *prog, prvm_view_page_t *page, double cutoff)
+{
+	if (page->entity >= 0 && (page->entity >= prog->num_edicts || prog->edicts[page->entity].priv.required->free))
+		return 0;
+	int any = 0;
+	for (int i = 0; i < PRVM_VIEW_PAGE; ++i)
+	{
+		if (!page->present[i])
+			continue;
+		if (!page->forcing && page->read_time[i] < cutoff)
+		{
+			page->present[i] = 0;
+			continue;
+		}
+		any = 1;
+	}
+	return any;
+}
+
 void VM_mesh_view_publish(prvm_prog_t *prog)
 {
 	int node = PRVM_G_READFLOAT(OFS_PARM0), tick = PRVM_G_READFLOAT(OFS_PARM1);
+	double cutoff = PRVM_serverglobalfloat(time) - 2.0;
 	prvm_view_t *view;
 	prvm_view_page_t *page;
 	meshxhandle_t *m;
@@ -981,10 +1001,16 @@ void VM_mesh_view_publish(prvm_prog_t *prog)
 	m->session = prog->view_session;
 	for (view = prog->views; view; view = view->next)
 	{
+		if (view->owner <= 0 || view->owner >= prog->num_edicts || prog->edicts[view->owner].priv.required->free)
+			continue;
 		PRVM_ViewFor(prog, view->owner);
 		for (page = view->pages; page; page = page->next)
 		{
+			if (page->entity >= 0 && (page->entity >= prog->num_edicts || prog->edicts[page->entity].priv.required->free))
+				continue;
 			PRVM_ViewPage(prog, view, page->entity, page->offset);
+			if (!meshx_view_page_active(prog, page, cutoff))
+				continue;
 			++rows;
 		}
 	}
@@ -993,9 +1019,13 @@ void VM_mesh_view_publish(prvm_prog_t *prog)
 	rows = 0;
 	for (view = prog->views; view; view = view->next)
 	{
+		if (view->owner <= 0 || view->owner >= prog->num_edicts || prog->edicts[view->owner].priv.required->free)
+			continue;
 		PRVM_ViewTime(view, PRVM_serverglobalfloat(time));
 		for (page = view->pages; page; page = page->next)
 		{
+			if (!meshx_view_page_active(prog, page, cutoff))
+				continue;
 			float *data = m->req + (size_t)rows++ * m->width;
 			data[0] = view->owner;
 			data[1] = MeshX_ViewSchema(prog);

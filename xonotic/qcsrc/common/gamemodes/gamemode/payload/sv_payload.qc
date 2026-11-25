@@ -8,6 +8,7 @@
 #include <common/mapobjects/triggers.qh>
 #include <common/mutators/mutator/waypoints/waypointsprites.qh>
 #include <server/bot/api.qh>
+#include <server/bot/default/waypoints.qh>
 #include <server/mutators/_mod.qh>
 #include <server/client.qh>
 #include <server/command/vote.qh>
@@ -434,6 +435,9 @@ void payload_think(entity this)
 
 	if(this.plc_state)
 		this.plc_state.SendFlags |= 1;
+	vector cart_center = this.origin + this.view_ofs;
+	if(!this.plc_wp || wasfreed(this.plc_wp) || vdist(this.plc_wp.origin - cart_center, >, 160))
+		this.plc_wp = payload_nearest_waypoint(cart_center);
 	WaypointSprite_UpdateHealth(this.sprite, s_new);
 	payload_update_links(this);
 
@@ -754,6 +758,70 @@ MUTATOR_HOOKFUNCTION(plc, ItemTouched)
 		payload_str_measure(player, PLC_OUTCOME_PICKUPS, 1);
 		payload_str_outcome(player, PLC_EVT_KIND_PICKUP, item, 1);
 	}
+}
+
+entity payload_nearest_waypoint(vector cpos)
+{
+	entity best_wp = NULL;
+	float best_dist = 1000000000;
+	IL_EACH(g_waypoints, !(it.wpflags & WAYPOINTFLAG_TELEPORT) && vdist(it.origin - cpos, <, 800),
+	{
+		float d = vlen2(it.origin - cpos);
+		if (d < best_dist)
+		{
+			best_wp = it;
+			best_dist = d;
+		}
+	});
+	return best_wp;
+}
+
+void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector org, float sradius)
+{
+	int myteam = Team_TeamToIndex(this.team);
+	IL_EACH(g_payload_carts, true,
+	{
+		vector cpos = it.origin + it.view_ofs;
+		if (vdist(cpos - org, >, sradius))
+			continue;
+		float weight = 1.5;
+		if (it.plc_ctrl == myteam)
+			weight = (it.plc_s < it.plc_length * 0.98) ? 1.4 : 0.4;
+		else if (it.plc_ctrl > 0)
+			weight = 1.8;
+		entity goal = it;
+		if (vdist(cpos - org, >, autocvar_g_payload_push_radius * 1.5))
+		{
+			entity best_wp = it.plc_wp;
+			if (best_wp && !wasfreed(best_wp))
+				goal = best_wp;
+		}
+		navigation_routerating(this, goal, ratingscale * weight, 10000);
+	});
+}
+
+void havocbot_role_payload(entity this)
+{
+	if (IS_DEAD(this))
+		return;
+	if (navigation_goalrating_timeout(this))
+	{
+		navigation_goalrating_start(this);
+		havocbot_goalrating_payload_carts(this, 30000, this.origin, 15000);
+		havocbot_goalrating_items(this, 10000, this.origin, 8000);
+		havocbot_goalrating_enemyplayers(this, 10000, this.origin, 10000);
+		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);
+		navigation_goalrating_end(this);
+		navigation_goalrating_timeout_set(this);
+	}
+}
+
+MUTATOR_HOOKFUNCTION(plc, HavocBot_ChooseRole)
+{
+	entity bot = M_ARGV(0, entity);
+
+	bot.havocbot_role = havocbot_role_payload;
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(plc, ClientConnect)

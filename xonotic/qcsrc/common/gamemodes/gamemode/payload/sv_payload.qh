@@ -61,6 +61,7 @@ const float PLC_CURVE_STEPS = 16;
 .int plc_checkpoint_depth;
 .int plc_checkpoint_count;
 .entity plc_state;
+.entity plc_wp;
 .int plc_lead;
 .int plc_second;
 .int plc_home;
@@ -86,6 +87,7 @@ IntrusiveList g_payload_carts;
 int payload_cart_count;
 
 vector payload_pos(entity cart, float s);
+entity payload_nearest_waypoint(vector cpos);
 bool payload_cart_supports_player(entity cart);
 void payload_think(entity this);
 entity payload_cart_by_id(int id);

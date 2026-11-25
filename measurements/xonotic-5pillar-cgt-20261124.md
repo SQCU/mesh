@@ -40,3 +40,25 @@ All five motivating theoretical strands audited from the Aug 29–Sep 7 transcri
 1. **QuakeC event edict leak (`sv_payload_strategy_io.qc:payload_str_deposit`):** Spawning event edicts faster than they are reaped under 12–15 bots bloated `StateWidth` from `3,840 → 44,288` (`173` VM pages/bot) and hit `Host_Error: PRVM_ED_Alloc: no free edicts` at `t = 87.1 s`.
 2. **Background `LiteralJReporter` shutdown stall (`joracle/probe.py`):** Even with `--measure-rows 0`, `LiteralJReporter` still serialized `275 MB` (`2.8M`-entry arrays) and blocked `SIGTERM` exit while waiting on its worker thread.
 3. **Headless userspace probe client (`xonotic-osx-sdl-bin`):** Connected cleanly over UDP (`PerturbProbe1 connected` in `server.log`) with `SDL_VIDEODRIVER=dummy +vid_soft 1`, then dropped in `_CSQC_Ent_Update` because stock 2023 `csprogs.dat` lacks our custom `ENT_CLIENT_PAYLOAD_CART` entity while custom `darkplaces-sdl` is built without DPSOFTRAST (`vid_soft`).
+
+## 4. Post-Patch Live Match Verification (`live10`, `boil`, 3 teams × 3 bots × 3 carts)
+
+Unilateral engine, QuakeC, and responder patches landed and rebuilt cleanly (`darkplaces-dedicated` + `progs.dat` build set `4019066892`):
+- **Event edict leak fix** (`sv_payload_strategy_io.qc`): gated `payload_perceive` on `MESH_STAT_PENDING == 0` and capped queued event edicts at `PLC_STR_EVT_CAP = 512` (never evicting `PLC_EVT_KIND_ROUND`). Eliminated `PRVM_ED_Alloc: no free edicts`.
+- **Payload HavocBot role** (`sv_payload.qc`, `sv_payload.qh`): added `havocbot_role_payload` + `havocbot_goalrating_payload_carts` + `MUTATOR_HOOKFUNCTION(plc, HavocBot_ChooseRole)` with outside-view cached `cart.plc_wp`.
+- **`PRVM_View` page footprint & `VM_find*` scan fix** (`mesh_ipc.c`, `prvm_cmds.c`): pruned freed-entity and >2.0s stale unread pages in `VM_mesh_view_publish`, and filtered `VM_find`/`VM_findfloat`/`VM_findchain`/`VM_findchainfloat`/`VM_findflags`/`VM_findchainflags` with raw field predicates before recording `PRVM_EDICTREAD*` (cutting `StateWidth` from `1,256,448` / `27.1 TFLOP` per frame down to `38,144`–`38,784` median).
+- **Cross-team `g_spawn_swizzle` collision avoidance** (`spawnpoints.qc`): `Spawn_SwizzledPoint` now skips spawnpoints occupied within 64u or used within `Spawn_SwizzleStep()`.
+- **Responder shutdown & checkpoint latency** (`joracle/probe.py`, `array_tree.py`, `policy_reports.py`): honored `--measure-rows 0` + bounded `join(timeout=5.0)`, switched float32 checkpoint `.npz` writes from `ZIP_DEFLATED` to `ZIP_STORED` (eliminating an 80s frame-0 save stall), and guarded `publish_active_run` against unwritable parent directories.
+
+### Verified `live10` Metrics (40s live `boil` match, `g_spawn_swizzle 1`, `skill 5`, MPS)
+
+| Metric | Pre-Patch (`live1`/`live2`) | Post-Patch (`live10`) |
+|---|---|---|
+| Server stability | Crashed at `t=87.1s` (`no free edicts`) | Clean 40s run, `0` crashes, `0` view faults |
+| Responder shutdown (`SIGTERM`) | Hung indefinitely in `LiteralJReporter` | Clean `rc=0` |
+| Peak team speed (`mean_speed`) | `0.0–53.3` u/s (spawn drop only) | **`199.4` u/s** |
+| Cart push & contest | `0.0` push / `0.0` cart pos | **`391.3` push**, **`24.5` contest**, **`max_cart_pos = 276.9` u** (`cart 1` & `cart 2` actively contested/reversed) |
+| Checkpoints & score | `0` checkpoints, `0.0` score | **`1` checkpoint captured (`cart 1 node 4 owner 2` -> contested back to `owner 0`)**, **`max_score = 14.10`** |
+| Combat & pickups | `0–38` dmg, `0–1` kill | **`1,321` dmg**, **`11` kills**, **`14` pickups** |
+| 5-pillar CGT MPS learning | `loss_w = 0.0` (no cart/checkpoint signal) | **`loss_w = 0.1247`**, **`loss_l = 0.6957`**, **`loss_dyn = 0.00000`**, **`adv = +0.4201`**, **`imp = 0.667`** |
+| Median `StateWidth` | `44,288` (grew to `1,256,448` w/ `skill 5`) | **`38,784`** (transient spike `216,320` on replan, auto-pruned back to `38,144`) |
