@@ -14,30 +14,36 @@ extern "C" {
 #define MESH_DESTS 8u
 #define MESH_WIRE_SAME_DATA 1u
 
-/* Algebraic classes for switch-side page morphisms (Pages^k -> Pages^m) */
-#define MESH_ALG_NONE         0u
-#define MESH_ALG_C0_COMM      1u
-#define MESH_ALG_C1_LIFTED    2u
-#define MESH_ALG_C2_INTERVAL  3u
+/* Algebraic classes for switch-side page morphisms (Pages^k -> Pages^m).
+   Declared as an enum so mesh_c_build.py exports every op constant to CFFI (_mesh_c.lib). */
+enum mesh_alg_class {
+  MESH_ALG_NONE        = 0,
+  MESH_ALG_C0_COMM     = 1,
+  MESH_ALG_C1_LIFTED   = 2,
+  MESH_ALG_C2_INTERVAL = 3
+};
+
+enum mesh_red_op {
+  MESH_RED_NONE               = 0x00,
+  MESH_RED_SUM_F32            = 0x41,
+  MESH_RED_MAX_F32            = 0x42,
+  MESH_RED_MIN_F32            = 0x43,
+  MESH_RED_SUM_I32            = 0x44,
+  MESH_RED_SUM_I64            = 0x45,
+  MESH_RED_SUM_F16            = 0x46,
+  MESH_RED_MAX_F16            = 0x47,
+  MESH_RED_MIN_F16            = 0x48,
+  MESH_RED_SUM_BF16           = 0x49,
+  MESH_RED_MAX_BF16           = 0x4a,
+  MESH_RED_MIN_BF16           = 0x4b,
+  MESH_RED_SUM_HAD_I8         = 0x4c,
+  MESH_RED_SUM_HAD_I6         = 0x4d,
+  MESH_RED_ONLINE_SOFTMAX_F32 = 0x81,
+  MESH_RED_AFFINE_SCAN_F32    = 0xc1
+};
 
 #define MESH_RED_OP(alg, id)        ((uint8_t)(((alg)<<6)|((id)&0x3fu)))
 #define MESH_RED_ALG(op)            ((uint8_t)((op)>>6))
-#define MESH_RED_NONE               0u
-#define MESH_RED_SUM_F32            MESH_RED_OP(MESH_ALG_C0_COMM, 1u)
-#define MESH_RED_MAX_F32            MESH_RED_OP(MESH_ALG_C0_COMM, 2u)
-#define MESH_RED_MIN_F32            MESH_RED_OP(MESH_ALG_C0_COMM, 3u)
-#define MESH_RED_SUM_I32            MESH_RED_OP(MESH_ALG_C0_COMM, 4u)
-#define MESH_RED_SUM_I64            MESH_RED_OP(MESH_ALG_C0_COMM, 5u)
-#define MESH_RED_SUM_F16            MESH_RED_OP(MESH_ALG_C0_COMM, 6u)
-#define MESH_RED_MAX_F16            MESH_RED_OP(MESH_ALG_C0_COMM, 7u)
-#define MESH_RED_MIN_F16            MESH_RED_OP(MESH_ALG_C0_COMM, 8u)
-#define MESH_RED_SUM_BF16           MESH_RED_OP(MESH_ALG_C0_COMM, 9u)
-#define MESH_RED_MAX_BF16           MESH_RED_OP(MESH_ALG_C0_COMM, 10u)
-#define MESH_RED_MIN_BF16           MESH_RED_OP(MESH_ALG_C0_COMM, 11u)
-#define MESH_RED_SUM_HAD_I8         MESH_RED_OP(MESH_ALG_C0_COMM, 12u)
-#define MESH_RED_SUM_HAD_I6         MESH_RED_OP(MESH_ALG_C0_COMM, 13u)
-#define MESH_RED_ONLINE_SOFTMAX_F32 MESH_RED_OP(MESH_ALG_C1_LIFTED, 1u)
-#define MESH_RED_AFFINE_SCAN_F32    MESH_RED_OP(MESH_ALG_C2_INTERVAL, 1u)
 
 #define MESH_TAG_WEIGHT(w)          ((uint16_t)(w))
 #define MESH_TAG_INTERVAL(lo, hi)   ((uint16_t)(((uint16_t)(lo)&0xffu)|(((uint16_t)(hi)&0xffu)<<8)))

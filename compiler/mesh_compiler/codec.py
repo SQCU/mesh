@@ -32,6 +32,7 @@ class CodecSpec:
     hdr_bytes_fixed: float
     enc_gbps_bf16: float
     dec_gbps_bf16: float
+    sw_red_gbps_bf16: float
     alpha_enc_us: float
     alpha_dec_us: float
     kl_act: float
@@ -41,17 +42,17 @@ class CodecSpec:
 
 
 M5_CODEC_TABLE: tuple[CodecSpec, ...] = (
-    CodecSpec(CODEC_BF16, "bf16", 16.00, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00000, 0.00000, False, RED_SUM_F16),
-    CodecSpec(CODEC_HAD_INT8, "had_int8", 8.50, 0.0, 238.3, 262.1, 3.0, 3.0, 0.00103, 0.00083, False, RED_SUM_HAD_I8),
-    CodecSpec(CODEC_HAD_INT6_PK, "had_int6_pk", 6.50, 0.0, 117.4, 231.9, 3.0, 3.0, 0.00420, 0.00150, False, RED_SUM_HAD_I6),
-    CodecSpec(CODEC_HAD_INT6_ANS, "had_int6_ans", 5.28, 160.0, 118.5, 83.3, 7.0, 7.0, 0.00420, 0.00150, True, None),
-    CodecSpec(CODEC_CHSPLIT_ANS, "chsplit_ans", 3.55, 224.0, 83.3, 88.3, 9.0, 9.0, 0.00450, 0.00200, False, None),
-    CodecSpec(CODEC_MST_MEALY, "mst_mealy", 3.20, 320.0, 53.0, 33.5, 14.0, 14.0, 0.02500, 0.00669, False, None),
-    CodecSpec(CODEC_RVQ4_LUT2S, "rvq4_lut2s", 4.00, 0.0, 2.0, 551.8, 12.0, 5.0, 0.03000, 0.01176, True, None),
-    CodecSpec(CODEC_RVQ4_B8_3S, "rvq4_b8_3s", 7.25, 0.0, 1.5, 175.0, 30.0, 16.0, 0.00900, 0.00263, True, None),
-    CodecSpec(CODEC_KALOMAZE_27B_DRAM, "kalomaze_27b_dram", 3.75, 0.0, 2.0, 245.0, 14.0, 6.0, 0.02500, 0.00633, True, None),
-    CodecSpec(CODEC_KALOMAZE_27B_ADC, "kalomaze_27b_adc", 3.75, 0.0, 2.0, 810.3, 14.0, 6.0, 0.02500, 0.00633, True, None),
-    CodecSpec(CODEC_KALOMAZE_27B_G4, "kalomaze_27b_g4", 2.52, 0.0, 2.0, 810.3, 14.0, 6.0, 0.02500, 0.00633, True, None),
+    CodecSpec(CODEC_BF16, "bf16", 16.00, 0.0, 0.0, 0.0, 45.0, 0.0, 0.0, 0.00000, 0.00000, False, RED_SUM_F16),
+    CodecSpec(CODEC_HAD_INT8, "had_int8", 8.50, 0.0, 238.3, 262.1, 35.0, 3.0, 3.0, 0.00103, 0.00083, False, RED_SUM_HAD_I8),
+    CodecSpec(CODEC_HAD_INT6_PK, "had_int6_pk", 6.50, 0.0, 117.4, 231.9, 8.0, 3.0, 3.0, 0.00420, 0.00150, False, RED_SUM_HAD_I6),
+    CodecSpec(CODEC_HAD_INT6_ANS, "had_int6_ans", 5.28, 160.0, 118.5, 83.3, 0.0, 7.0, 7.0, 0.00420, 0.00150, True, None),
+    CodecSpec(CODEC_CHSPLIT_ANS, "chsplit_ans", 3.55, 224.0, 83.3, 88.3, 0.0, 9.0, 9.0, 0.00450, 0.00200, False, None),
+    CodecSpec(CODEC_MST_MEALY, "mst_mealy", 3.20, 320.0, 53.0, 33.5, 0.0, 14.0, 14.0, 0.02500, 0.00669, False, None),
+    CodecSpec(CODEC_RVQ4_LUT2S, "rvq4_lut2s", 4.00, 0.0, 2.0, 551.8, 0.0, 12.0, 5.0, 0.03000, 0.01176, True, None),
+    CodecSpec(CODEC_RVQ4_B8_3S, "rvq4_b8_3s", 7.25, 0.0, 1.5, 175.0, 0.0, 30.0, 16.0, 0.00900, 0.00263, True, None),
+    CodecSpec(CODEC_KALOMAZE_27B_DRAM, "kalomaze_27b_dram", 3.75, 0.0, 2.0, 245.0, 0.0, 14.0, 6.0, 0.02500, 0.00633, True, None),
+    CodecSpec(CODEC_KALOMAZE_27B_ADC, "kalomaze_27b_adc", 3.75, 0.0, 2.0, 810.3, 0.0, 14.0, 6.0, 0.02500, 0.00633, True, None),
+    CodecSpec(CODEC_KALOMAZE_27B_G4, "kalomaze_27b_g4", 2.52, 0.0, 2.0, 810.3, 0.0, 14.0, 6.0, 0.02500, 0.00633, True, None),
 )
 
 
@@ -89,6 +90,7 @@ def codec_time_us(
     link_gbps: float,
     slack_us: float = 0.0,
     pipelined_rx: bool = False,
+    in_switch_reduce: bool = False,
     rtt_us: float = 0.0,
 ) -> float:
     bf16_b = float(nbytes_bf16)
@@ -97,6 +99,10 @@ def codec_time_us(
     wire_b = spec.hdr_bytes_fixed + bf16_b * (spec.bpe_inf / 16.0)
     link_Bps = max(link_gbps, 1.0) * 1e9 / 8.0
     t_wire = (wire_b / link_Bps) * 1e6
+    if in_switch_reduce and spec.sw_red_gbps_bf16 > 0.0:
+        t_sw = (bf16_b / (spec.sw_red_gbps_bf16 * 1e9)) * 1e6
+        if t_sw > t_wire:
+            t_wire = t_sw
     exposed_enc = max(0.0, t_enc - slack_us)
     if pipelined_rx:
         return rtt_us + exposed_enc + max(t_wire, t_dec)
@@ -137,7 +143,7 @@ def select_codec_route(
         spec = by_id[policy.force_codec]
         pipelined = policy.mode == "async"
         chunks = 4 if (pipelined and nbytes_bf16 >= 524288 and spec.codec_id != CODEC_BF16) else 1
-        t = codec_time_us(spec, nbytes_bf16, link_gbps, slack_us if pipelined else 0.0, pipelined)
+        t = codec_time_us(spec, nbytes_bf16, link_gbps, slack_us if pipelined else 0.0, pipelined, policy.require_in_switch_reduce)
         return CodecRouteDecision(
             spec.codec_id, spec.name, policy.mode, spec.bpe_inf, spec.bpe_inf / 16.0,
             chunks, policy.preserve_bos and spec.codec_id != CODEC_BF16, round(t, 3), _resolve_op(spec),
@@ -156,14 +162,14 @@ def select_codec_route(
     best = by_id[CODEC_BF16]
     best_t = math.inf
     for spec in table:
-        if policy.require_in_switch_reduce and spec.in_switch_op is None:
+        if policy.require_in_switch_reduce and (spec.in_switch_op is None or spec.sw_red_gbps_bf16 <= 0.0):
             continue
         if spec.requires_aot and not policy.allow_aot:
             continue
         kl = (spec.kl_act if policy.workload == WORKLOAD_ACT else spec.kl_kv) * kl_scale
         if not policy.allow_error_feedback and kl > policy.max_kl:
             continue
-        t = codec_time_us(spec, nbytes_bf16, link_gbps, eff_slack, pipelined)
+        t = codec_time_us(spec, nbytes_bf16, link_gbps, eff_slack, pipelined, policy.require_in_switch_reduce)
         if t < best_t:
             best_t = t
             best = spec

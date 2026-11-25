@@ -66,7 +66,11 @@ REGISTRY = {
     RED_SUM_I32: AlgebraicOp("sum_i32", RED_SUM_I32, ALG_C0_COMM, torch.int32, (0,), 1.0),
     RED_SUM_I64: AlgebraicOp("sum_i64", RED_SUM_I64, ALG_C0_COMM, torch.int64, (0,), 1.0),
     RED_SUM_F16: AlgebraicOp("sum_f16", RED_SUM_F16, ALG_C0_COMM, torch.float16, (0.0,), 1.0),
+    RED_MAX_F16: AlgebraicOp("max_f16", RED_MAX_F16, ALG_C0_COMM, torch.float16, (-math.inf,), 1.0),
+    RED_MIN_F16: AlgebraicOp("min_f16", RED_MIN_F16, ALG_C0_COMM, torch.float16, (math.inf,), 1.0),
     RED_SUM_BF16: AlgebraicOp("sum_bf16", RED_SUM_BF16, ALG_C0_COMM, torch.bfloat16, (0.0,), 1.0),
+    RED_MAX_BF16: AlgebraicOp("max_bf16", RED_MAX_BF16, ALG_C0_COMM, torch.bfloat16, (-math.inf,), 1.0),
+    RED_MIN_BF16: AlgebraicOp("min_bf16", RED_MIN_BF16, ALG_C0_COMM, torch.bfloat16, (math.inf,), 1.0),
     RED_SUM_HAD_I8: AlgebraicOp("sum_had_i8", RED_SUM_HAD_I8, ALG_C0_COMM, torch.int8, (0,), 8.5 / 16.0),
     RED_SUM_HAD_I6: AlgebraicOp("sum_had_i6", RED_SUM_HAD_I6, ALG_C0_COMM, torch.uint8, (0,), 6.5 / 16.0),
     RED_ONLINE_SOFTMAX_F32: AlgebraicOp(
@@ -83,14 +87,28 @@ def op_for_aten(target, dtype: torch.dtype) -> int | None:
     if target in (aten.add.Tensor, aten.sum.dim_IntList, aten.mm.default, aten.bmm.default, aten.addmm.default):
         if dtype == torch.float32:
             return RED_SUM_F32
+        if dtype == torch.float16:
+            return RED_SUM_F16
+        if dtype == torch.bfloat16:
+            return RED_SUM_BF16
         if dtype == torch.int32:
             return RED_SUM_I32
         if dtype == torch.int64:
             return RED_SUM_I64
-    if target in (aten.maximum.default, aten.amax.default) and dtype == torch.float32:
-        return RED_MAX_F32
-    if target in (aten.minimum.default, aten.amin.default) and dtype == torch.float32:
-        return RED_MIN_F32
+    if target in (aten.maximum.default, aten.amax.default):
+        if dtype == torch.float32:
+            return RED_MAX_F32
+        if dtype == torch.float16:
+            return RED_MAX_F16
+        if dtype == torch.bfloat16:
+            return RED_MAX_BF16
+    if target in (aten.minimum.default, aten.amin.default):
+        if dtype == torch.float32:
+            return RED_MIN_F32
+        if dtype == torch.float16:
+            return RED_MIN_F16
+        if dtype == torch.bfloat16:
+            return RED_MIN_BF16
     return None
 
 
@@ -111,12 +129,17 @@ def apply_reference(op: int, parts: list[Tensor]) -> Tensor:
         for p in parts[1:]:
             out = out + p
         return out
-    if op == RED_MAX_F32:
+    if op in (RED_SUM_F16, RED_SUM_BF16):
+        out = parts[0].to(torch.float32)
+        for p in parts[1:]:
+            out = (out + p.to(torch.float32)).to(parts[0].dtype).to(torch.float32)
+        return out.to(parts[0].dtype)
+    if op in (RED_MAX_F32, RED_MAX_F16, RED_MAX_BF16):
         out = parts[0].clone()
         for p in parts[1:]:
             out = torch.maximum(out, p)
         return out
-    if op == RED_MIN_F32:
+    if op in (RED_MIN_F32, RED_MIN_F16, RED_MIN_BF16):
         out = parts[0].clone()
         for p in parts[1:]:
             out = torch.minimum(out, p)

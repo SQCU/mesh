@@ -68,6 +68,7 @@ struct mesh_codec_spec {
   float hdr_bytes_fixed;
   float enc_gbps_bf16;
   float dec_gbps_bf16;
+  float sw_red_gbps_bf16; /* Switch-CPU in-flight reduction throughput (BF16-eq GB/s; 0 if no in-switch op) */
   float alpha_enc_us;
   float alpha_dec_us;
   float kl_act;
@@ -84,19 +85,20 @@ struct mesh_codec_decision {
   double predicted_us;
 };
 
-/* Empirically calibrated M5 silicon hull (metal-microbench/had_int8_metal/pareto_codec_selector.h). */
+/* Empirically calibrated M5 silicon hull (metal-microbench/had_int8_metal + live 5-node M5 Ultra switch measurements).
+   Switch-CPU reduction rates: byte-aligned NEON bf16 (45 GB/s) & had_int8 (35 GB/s) vs bit-packed had_int6_pk (8 GB/s). */
 static const struct mesh_codec_spec MESH_M5_CODEC_TABLE[] = {
-  {MESH_CODEC_BF16,              16.00f,   0.0f,   0.0f,   0.0f,  0.0f,  0.0f, 0.00000f, 0.00000f, false},
-  {MESH_CODEC_HAD_INT8,           8.50f,   0.0f, 238.3f, 262.1f,  3.0f,  3.0f, 0.00103f, 0.00083f, false},
-  {MESH_CODEC_HAD_INT6_PK,        6.50f,   0.0f, 117.4f, 231.9f,  3.0f,  3.0f, 0.00420f, 0.00150f, false},
-  {MESH_CODEC_HAD_INT6_ANS,       5.28f, 160.0f, 118.5f,  83.3f,  7.0f,  7.0f, 0.00420f, 0.00150f, true},
-  {MESH_CODEC_CHSPLIT_ANS,        3.55f, 224.0f,  83.3f,  88.3f,  9.0f,  9.0f, 0.00450f, 0.00200f, false},
-  {MESH_CODEC_MST_MEALY,          3.20f, 320.0f,  53.0f,  33.5f, 14.0f, 14.0f, 0.02500f, 0.00669f, false},
-  {MESH_CODEC_RVQ4_LUT2S,         4.00f,   0.0f,   2.0f, 551.8f, 12.0f,  5.0f, 0.03000f, 0.01176f, true},
-  {MESH_CODEC_RVQ4_B8_3S,         7.25f,   0.0f,   1.5f, 175.0f, 30.0f, 16.0f, 0.00900f, 0.00263f, true},
-  {MESH_CODEC_KALOMAZE_27B_DRAM,  3.75f,   0.0f,   2.0f, 245.0f, 14.0f,  6.0f, 0.02500f, 0.00633f, true},
-  {MESH_CODEC_KALOMAZE_27B_ADC,   3.75f,   0.0f,   2.0f, 810.3f, 14.0f,  6.0f, 0.02500f, 0.00633f, true},
-  {MESH_CODEC_KALOMAZE_27B_G4,    2.52f,   0.0f,   2.0f, 810.3f, 14.0f,  6.0f, 0.02500f, 0.00633f, true},
+  {MESH_CODEC_BF16,              16.00f,   0.0f,   0.0f,   0.0f, 45.0f,  0.0f,  0.0f, 0.00000f, 0.00000f, false},
+  {MESH_CODEC_HAD_INT8,           8.50f,   0.0f, 238.3f, 262.1f, 35.0f,  3.0f,  3.0f, 0.00103f, 0.00083f, false},
+  {MESH_CODEC_HAD_INT6_PK,        6.50f,   0.0f, 117.4f, 231.9f,  8.0f,  3.0f,  3.0f, 0.00420f, 0.00150f, false},
+  {MESH_CODEC_HAD_INT6_ANS,       5.28f, 160.0f, 118.5f,  83.3f,  0.0f,  7.0f,  7.0f, 0.00420f, 0.00150f, true},
+  {MESH_CODEC_CHSPLIT_ANS,        3.55f, 224.0f,  83.3f,  88.3f,  0.0f,  9.0f,  9.0f, 0.00450f, 0.00200f, false},
+  {MESH_CODEC_MST_MEALY,          3.20f, 320.0f,  53.0f,  33.5f,  0.0f, 14.0f, 14.0f, 0.02500f, 0.00669f, false},
+  {MESH_CODEC_RVQ4_LUT2S,         4.00f,   0.0f,   2.0f, 551.8f,  0.0f, 12.0f,  5.0f, 0.03000f, 0.01176f, true},
+  {MESH_CODEC_RVQ4_B8_3S,         7.25f,   0.0f,   1.5f, 175.0f,  0.0f, 30.0f, 16.0f, 0.00900f, 0.00263f, true},
+  {MESH_CODEC_KALOMAZE_27B_DRAM,  3.75f,   0.0f,   2.0f, 245.0f,  0.0f, 14.0f,  6.0f, 0.02500f, 0.00633f, true},
+  {MESH_CODEC_KALOMAZE_27B_ADC,   3.75f,   0.0f,   2.0f, 810.3f,  0.0f, 14.0f,  6.0f, 0.02500f, 0.00633f, true},
+  {MESH_CODEC_KALOMAZE_27B_G4,    2.52f,   0.0f,   2.0f, 810.3f,  0.0f, 14.0f,  6.0f, 0.02500f, 0.00633f, true},
 };
 
 static inline double mesh_codec_time_us(
@@ -105,6 +107,7 @@ static inline double mesh_codec_time_us(
     double link_gbps,
     double slack_us,
     bool pipelined_rx,
+    bool in_switch_reduce,
     double rtt_us) {
   const double bf16_bytes = (double)nbytes_bf16;
   const double t_enc = (c->enc_gbps_bf16 > 0.0f)
@@ -115,7 +118,11 @@ static inline double mesh_codec_time_us(
       : 0.0;
   const double wire_bytes = (double)c->hdr_bytes_fixed + bf16_bytes * ((double)c->bpe_inf / 16.0);
   const double link_Bps = (link_gbps > 0.0 ? link_gbps : 1.0) * 1e9 / 8.0;
-  const double t_wire = (wire_bytes / link_Bps) * 1e6;
+  double t_wire = (wire_bytes / link_Bps) * 1e6;
+  if (in_switch_reduce && c->sw_red_gbps_bf16 > 0.0f) {
+    const double t_sw = (bf16_bytes / ((double)c->sw_red_gbps_bf16 * 1e9)) * 1e6;
+    if (t_sw > t_wire) t_wire = t_sw;
+  }
   const double exposed_enc = (t_enc > slack_us) ? (t_enc - slack_us) : 0.0;
   if (pipelined_rx) {
     const double rx = (t_wire > t_dec) ? t_wire : t_dec;
@@ -138,7 +145,8 @@ static inline struct mesh_codec_decision mesh_select_codec(
     int n_layers,
     bool allow_aot,
     bool allow_error_feedback,
-    bool preserve_bos) {
+    bool preserve_bos,
+    bool require_in_switch_reduce) {
   struct mesh_codec_decision dec = {
     .id = MESH_CODEC_BF16,
     .mode = mode,
@@ -168,10 +176,11 @@ static inline struct mesh_codec_decision mesh_select_codec(
   double best_t = DBL_MAX;
   for (size_t i = 0; i < count; i++) {
     const struct mesh_codec_spec *c = &table[i];
+    if (require_in_switch_reduce && c->sw_red_gbps_bf16 <= 0.0f) continue;
     const double kl = (workload == MESH_WORKLOAD_ACT ? (double)c->kl_act : (double)c->kl_kv) * kl_scale;
     if (!allow_error_feedback && kl > max_kl) continue;
     if (c->requires_aot && !allow_aot) continue;
-    const double t = mesh_codec_time_us(c, nbytes_bf16, link_gbps, eff_slack, pipelined, 0.0);
+    const double t = mesh_codec_time_us(c, nbytes_bf16, link_gbps, eff_slack, pipelined, require_in_switch_reduce, 0.0);
     if (t < best_t) {
       best_t = t;
       dec.id = c->id;

@@ -147,6 +147,9 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
 #if defined(__ARM_NEON)
     const uint32x4_t rbias=vdupq_n_u32(0x7fffu);
     const uint32x4_t one=vdupq_n_u32(1u);
+    const uint32x4_t absmask=vdupq_n_u32(0x7fffffffu);
+    const uint32x4_t inf_u=vdupq_n_u32(0x7f800000u);
+    const uint32x4_t qnan_bit=vdupq_n_u32(0x40u);
     for(;i+4u<=n;i+=4u){
       const uint32x4_t ud=vshlq_n_u32(vmovl_u16(vld1_u16(d+i)),16);
       const uint32x4_t us=vshlq_n_u32(vmovl_u16(vld1_u16(s+i)),16);
@@ -154,8 +157,10 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
       const float32x4_t fr=op==MESH_RED_SUM_BF16?vaddq_f32(fd,fs):
                            (op==MESH_RED_MAX_BF16?vmaxq_f32(fd,fs):vminq_f32(fd,fs));
       const uint32x4_t ur=vreinterpretq_u32_f32(fr);
+      const uint32x4_t isnan_m=vcgtq_u32(vandq_u32(ur,absmask),inf_u);
       const uint32x4_t rnd=vaddq_u32(ur,vaddq_u32(rbias,vandq_u32(vshrq_n_u32(ur,16),one)));
-      vst1_u16(d+i,vmovn_u32(vshrq_n_u32(rnd,16)));
+      const uint32x4_t res32=vbslq_u32(isnan_m,vorrq_u32(vshrq_n_u32(ur,16),qnan_bit),vshrq_n_u32(rnd,16));
+      vst1_u16(d+i,vmovn_u32(res32));
     }
 #endif
     for(;i<n;i++){
@@ -164,8 +169,12 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
       memcpy(&fa,&ua,4);memcpy(&fb,&ub,4);
       fr=op==MESH_RED_SUM_BF16?(fa+fb):(op==MESH_RED_MAX_BF16?(fa>fb?fa:fb):(fa<fb?fa:fb));
       memcpy(&ur,&fr,4);
-      ur+=0x7fffu+((ur>>16)&1u);
-      d[i]=(uint16_t)(ur>>16);
+      if((ur&0x7fffffffu)>0x7f800000u){
+        d[i]=(uint16_t)((ur>>16)|0x40u);
+      }else{
+        ur+=0x7fffu+((ur>>16)&1u);
+        d[i]=(uint16_t)(ur>>16);
+      }
     }
     return;
   }
@@ -389,9 +398,12 @@ static inline int mesh_page_run_exclusive(struct hdr *m,uint32_t p0,uint32_t cou
 }
 
 static inline void mesh_red_apply_run(struct hdr *m,uint8_t op,uint32_t dst_p0,uint32_t src_p0,
-                                      const struct mesh_wire_entry *ge,int src_is_left){
+                                      struct mesh_wire_entry *ye,const struct mesh_wire_entry *xe,int src_is_left){
   for(uint32_t k=0;k<8u;k++){
-    const uint32_t b=ge[k].bytes<=MESH_PAGE_BYTES?ge[k].bytes:MESH_PAGE_BYTES;
+    const uint32_t yb=ye[k].bytes<=MESH_PAGE_BYTES?ye[k].bytes:MESH_PAGE_BYTES;
+    const uint32_t xb=xe[k].bytes<=MESH_PAGE_BYTES?xe[k].bytes:MESH_PAGE_BYTES;
+    const uint32_t b=yb>xb?yb:xb;
+    if(b>ye[k].bytes)ye[k].bytes=(uint16_t)b;
     mesh_red_apply_page(op,mesh_page_at(m,dst_p0+k),mesh_page_at(m,src_p0+k),b,src_is_left);
   }
 }

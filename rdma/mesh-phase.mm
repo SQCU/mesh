@@ -77,18 +77,25 @@ struct mesh_phase_group {
   struct mesh_ctx ctx;
   id<MTLDevice> dev;
   id<MTLCommandQueue> q;
+  id<MTLBuffer> buf_arena;
+  uintptr_t arena_base;
   id<MTLComputePipelineState> pso_flash_c1;
   id<MTLComputePipelineState> pso_scan_c2;
   id<MTLComputePipelineState> pso_had8_pack_f32;
   id<MTLComputePipelineState> pso_had8_unpack_f32;
+  id<MTLComputePipelineState> pso_had8_unpack_ind_f32;
   id<MTLComputePipelineState> pso_had8_pack_f16;
   id<MTLComputePipelineState> pso_had8_unpack_f16;
+  id<MTLComputePipelineState> pso_had8_unpack_ind_f16;
   id<MTLComputePipelineState> pso_had6_pack_f32;
   id<MTLComputePipelineState> pso_had6_unpack_f32;
+  id<MTLComputePipelineState> pso_had6_unpack_ind_f32;
   id<MTLComputePipelineState> pso_had6_pack_f16;
   id<MTLComputePipelineState> pso_had6_unpack_f16;
+  id<MTLComputePipelineState> pso_had6_unpack_ind_f16;
   id<MTLComputePipelineState> pso_kalo27_pack_f16;
   id<MTLComputePipelineState> pso_kalo27_adc_qk;
+  id<MTLComputePipelineState> pso_kalo27_adc_qk_ind;
 };
 
 static const char *kPhaseMSL = R"MSL(
@@ -533,6 +540,177 @@ kernel void kalomaze_27b_adc_qk_sram(
     if (lv == 0u) out_scores[r * ((vecs8_per_row + 15u) / 16u) + tgid.x] = s_sum;
   }
 }
+
+/* ---- Ticket F: 100% Zero-Copy Indirect-Page Receive Kernels Directly Over Borrowed /mesh0 Arena ---- */
+kernel void fwht64_had_int8_unpack_ind_f32(
+    device const uchar *arena     [[buffer(0)]],
+    device const ulong *page_offs [[buffer(1)]],
+    device float       *y         [[buffer(2)]],
+    constant uint      &n_blks    [[buffer(3)]],
+    uint3 tg                      [[threadgroup_position_in_grid]],
+    uint lane                     [[thread_index_in_simdgroup]],
+    uint sg                       [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = page_offs[blk / 60u] + ulong(blk % 60u) * 68ul;
+  device const half *ds = (device const half *)(arena + src_off);
+  device const char *sq = (device const char *)(arena + src_off + 4ul);
+  const float sc = float(ds[lane >= 16u ? 1u : 0u]);
+  float a = float(sq[lane * 2u]) * sc;
+  float b = float(sq[lane * 2u + 1u]) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = a;
+  y[base + lane * 2u + 1u] = b;
+}
+
+kernel void fwht64_had_int8_unpack_ind_f16(
+    device const uchar *arena     [[buffer(0)]],
+    device const ulong *page_offs [[buffer(1)]],
+    device half        *y         [[buffer(2)]],
+    constant uint      &n_blks    [[buffer(3)]],
+    uint3 tg                      [[threadgroup_position_in_grid]],
+    uint lane                     [[thread_index_in_simdgroup]],
+    uint sg                       [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = page_offs[blk / 60u] + ulong(blk % 60u) * 68ul;
+  device const half *ds = (device const half *)(arena + src_off);
+  device const char *sq = (device const char *)(arena + src_off + 4ul);
+  const float sc = float(ds[lane >= 16u ? 1u : 0u]);
+  float a = float(sq[lane * 2u]) * sc;
+  float b = float(sq[lane * 2u + 1u]) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = half(a);
+  y[base + lane * 2u + 1u] = half(b);
+}
+
+kernel void fwht64_had_int6_unpack_ind_f32(
+    device const uchar *arena     [[buffer(0)]],
+    device const ulong *page_offs [[buffer(1)]],
+    device float       *y         [[buffer(2)]],
+    constant uint      &n_blks    [[buffer(3)]],
+    uint3 tg                      [[threadgroup_position_in_grid]],
+    uint lane                     [[thread_index_in_simdgroup]],
+    uint sg                       [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = page_offs[blk / 78u] + ulong(blk % 78u) * 52ul;
+  const float sc = *(device const float *)(arena + src_off);
+  device const uint *sw = (device const uint *)(arena + src_off + 4ul);
+  const uint g = lane >> 3u;
+  const uint sub = lane & 7u;
+  const uint w0 = sw[g * 3u + 0u], w1 = sw[g * 3u + 1u], w2 = sw[g * 3u + 2u];
+  uint u12 = 0u;
+  switch (sub) {
+    case 0u: u12 = w0 & 0xFFFu; break;
+    case 1u: u12 = (w0 >> 12u) & 0xFFFu; break;
+    case 2u: u12 = (w0 >> 24u) | ((w1 & 0xFu) << 8u); break;
+    case 3u: u12 = (w1 >> 4u) & 0xFFFu; break;
+    case 4u: u12 = (w1 >> 16u) & 0xFFFu; break;
+    case 5u: u12 = (w1 >> 28u) | ((w2 & 0xFFu) << 4u); break;
+    case 6u: u12 = (w2 >> 8u) & 0xFFFu; break;
+    default: u12 = (w2 >> 20u) & 0xFFFu; break;
+  }
+  float a = float(int(u12 & 63u) - 31) * sc;
+  float b = float(int((u12 >> 6u) & 63u) - 31) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = a;
+  y[base + lane * 2u + 1u] = b;
+}
+
+kernel void fwht64_had_int6_unpack_ind_f16(
+    device const uchar *arena     [[buffer(0)]],
+    device const ulong *page_offs [[buffer(1)]],
+    device half        *y         [[buffer(2)]],
+    constant uint      &n_blks    [[buffer(3)]],
+    uint3 tg                      [[threadgroup_position_in_grid]],
+    uint lane                     [[thread_index_in_simdgroup]],
+    uint sg                       [[simdgroup_index_in_threadgroup]])
+{
+  const uint blk = tg.x * 4u + sg;
+  if (blk >= n_blks) return;
+  const ulong src_off = page_offs[blk / 78u] + ulong(blk % 78u) * 52ul;
+  const float sc = *(device const float *)(arena + src_off);
+  device const uint *sw = (device const uint *)(arena + src_off + 4ul);
+  const uint g = lane >> 3u;
+  const uint sub = lane & 7u;
+  const uint w0 = sw[g * 3u + 0u], w1 = sw[g * 3u + 1u], w2 = sw[g * 3u + 2u];
+  uint u12 = 0u;
+  switch (sub) {
+    case 0u: u12 = w0 & 0xFFFu; break;
+    case 1u: u12 = (w0 >> 12u) & 0xFFFu; break;
+    case 2u: u12 = (w0 >> 24u) | ((w1 & 0xFu) << 8u); break;
+    case 3u: u12 = (w1 >> 4u) & 0xFFFu; break;
+    case 4u: u12 = (w1 >> 16u) & 0xFFFu; break;
+    case 5u: u12 = (w1 >> 28u) | ((w2 & 0xFFu) << 4u); break;
+    case 6u: u12 = (w2 >> 8u) & 0xFFFu; break;
+    default: u12 = (w2 >> 20u) & 0xFFFu; break;
+  }
+  float a = float(int(u12 & 63u) - 31) * sc;
+  float b = float(int((u12 >> 6u) & 63u) - 31) * sc;
+  fwht64_simd_pair(a, b, lane);
+  const ulong base = ulong(blk) * 64ul;
+  y[base + lane * 2u]      = half(a);
+  y[base + lane * 2u + 1u] = half(b);
+}
+
+kernel void kalomaze_27b_adc_qk_ind_sram(
+    device const uchar    *arena      [[buffer(0)]],
+    device const ulong    *page_offs  [[buffer(1)]],
+    device const uint16_t *row_src    [[buffer(2)]],
+    device const half     *adc_lut    [[buffer(3)]],
+    device float          *out_scores [[buffer(4)]],
+    constant uint4        &dims       [[buffer(5)]], /* x=rows, y=vecs8_per_row, z=words_per_row, w=rows_per_tg */
+    uint2 tgid                        [[threadgroup_position_in_grid]],
+    uint2 ltid                        [[thread_position_in_threadgroup]],
+    uint  tid                         [[thread_index_in_threadgroup]],
+    uint2 tgs                         [[threads_per_threadgroup]])
+{
+  const uint rows = dims.x, vecs8_per_row = dims.y, words_per_row = dims.z, rows_per_tg = dims.w;
+  const uint v_base = tgid.x * 16u;
+  const uint v_cnt = min(16u, vecs8_per_row - v_base);
+
+  threadgroup half tg_adc[16 * 448];
+  const uint total_lut = v_cnt * 448u;
+  const uint stride = tgs.x * tgs.y;
+  device const half *src_lut = adc_lut + ulong(v_base) * 448ul;
+  for (uint i = tid; i < total_lut; i += stride) tg_adc[i] = src_lut[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const uint lv = ltid.x;
+  if (lv >= v_cnt) return;
+  const uint v = v_base + lv;
+  const uint bit_pos = v * 27u;
+  const uint w_idx = bit_pos >> 5u;
+  const uint sh = bit_pos & 31u;
+  const uint lbase = lv * 448u;
+
+  const uint r_start = tgid.y * rows_per_tg + ltid.y;
+  const uint r_end = min((tgid.y + 1u) * rows_per_tg, rows);
+  for (uint r = r_start; r < r_end; r += tgs.y) {
+    const uint src_r = uint(row_src[r]);
+    const ulong b0 = (ulong(src_r) * ulong(words_per_row) + ulong(w_idx)) * 4ul;
+    const uint w_lo = *(device const uint *)(arena + page_offs[b0 >> 12u] + (b0 & 4095ul));
+    uint w_hi = 0u;
+    if (sh > 5u) {
+      const ulong b1 = b0 + 4ul;
+      w_hi = *(device const uint *)(arena + page_offs[b1 >> 12u] + (b1 & 4095ul));
+    }
+    const uint u27 = ((w_lo >> sh) | (sh > 5u ? (w_hi << (32u - sh)) : 0u)) & 0x7FFFFFFu;
+    const float s = float(tg_adc[lbase + (u27 & 63u)])
+                  + float(tg_adc[lbase + 64u + ((u27 >> 6u) & 127u)])
+                  + float(tg_adc[lbase + 192u + ((u27 >> 13u) & 127u)])
+                  + float(tg_adc[lbase + 320u + ((u27 >> 20u) & 127u)]);
+    const float s_sum = simd_sum(s);
+    if (lv == 0u) out_scores[r * ((vecs8_per_row + 15u) / 16u) + tgid.x] = s_sum;
+  }
+}
 )MSL";
 
 extern "C" {
@@ -585,13 +763,27 @@ struct mesh_phase_group *mesh_phase_open(int rank, int ranks, const char *master
   g->rank = rank;
   g->ranks = ranks;
   g->listen_fd = -1;
+  g->bar_src_page = MESH_PAGE_NONE;
+  g->bar_idx[0] = g->bar_idx[1] = UINT32_MAX;
   for (int i = 0; i < 8; i++) g->peer_fd[i] = -1;
+  int have_bar_idx = 0;
 
-  if (mesh_attach(&g->ctx)) { delete g; return NULL; }
+  auto cleanup = [&]() -> struct mesh_phase_group * {
+    if (have_bar_idx) mesh_free_indices(&g->ctx, g->bar_idx, 2u);
+    if (g->bar_src_page != MESH_PAGE_NONE) mesh_release(&g->ctx, g->bar_src_page);
+    for (int i = 0; i < 8; i++) if (g->peer_fd[i] >= 0) close(g->peer_fd[i]);
+    if (g->listen_fd >= 0) close(g->listen_fd);
+    if (g->ctx.M) mesh_detach(&g->ctx);
+    delete g;
+    return NULL;
+  };
+
+  if (mesh_attach(&g->ctx)) return cleanup();
   g->my_node = *(const uint32_t *)((const unsigned char *)g->ctx.M + 20);
 
   if (rank == 0) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return cleanup();
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in addr = {};
@@ -599,16 +791,16 @@ struct mesh_phase_group *mesh_phase_open(int rank, int ranks, const char *master
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(fd, 16)) {
-      close(fd); mesh_detach(&g->ctx); delete g; return NULL;
+      close(fd); return cleanup();
     }
     g->listen_fd = fd;
     for (int i = 1; i < ranks; i++) {
       int cfd = accept(fd, NULL, NULL);
-      if (cfd < 0) { delete g; return NULL; }
+      if (cfd < 0) return cleanup();
       setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
       int peer_r = -1;
       if (recv_all(cfd, &peer_r, sizeof(peer_r)) || peer_r <= 0 || peer_r >= ranks) {
-        close(cfd); delete g; return NULL;
+        close(cfd); return cleanup();
       }
       g->peer_fd[peer_r] = cfd;
     }
@@ -624,47 +816,64 @@ struct mesh_phase_group *mesh_phase_open(int rank, int ranks, const char *master
       close(cfd); cfd = -1;
       usleep(25000);
     }
-    if (cfd < 0) { mesh_detach(&g->ctx); delete g; return NULL; }
+    if (cfd < 0) return cleanup();
     int yes = 1;
     setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
-    if (send_all(cfd, &rank, sizeof(rank))) { close(cfd); mesh_detach(&g->ctx); delete g; return NULL; }
+    if (send_all(cfd, &rank, sizeof(rank))) { close(cfd); return cleanup(); }
     g->peer_fd[0] = cfd;
   }
 
-  if (group_allgather(g, &g->my_node, g->nodes, sizeof(uint32_t))) {
-    mesh_detach(&g->ctx); delete g; return NULL;
-  }
+  if (group_allgather(g, &g->my_node, g->nodes, sizeof(uint32_t))) return cleanup();
   /* Allocate 1 pinned source page + 2 landing indices for pure-RDMA barriers (~10 us, zero TCP in hot loop) */
   void *bar_base = NULL;
-  if (mesh_alloc_contiguous(&g->ctx, 1u, NULL, &bar_base)) { mesh_detach(&g->ctx); delete g; return NULL; }
+  if (mesh_alloc_contiguous(&g->ctx, 1u, NULL, &bar_base)) return cleanup();
   const uint64_t data_off = *(const uint64_t *)((const unsigned char *)g->ctx.M + 88);
+  const uint64_t region_len = *(const uint64_t *)((const unsigned char *)g->ctx.M + 96);
   g->bar_src_page = (uint32_t)(((unsigned char *)bar_base - ((unsigned char *)g->ctx.M + data_off)) / MESH_PAGE_BYTES);
   *(int32_t *)bar_base = 1;
-  if (mesh_alloc(&g->ctx, 2u, 0, g->bar_idx, NULL)) { mesh_release(&g->ctx, g->bar_src_page); mesh_detach(&g->ctx); delete g; return NULL; }
-  if (group_allgather(g, g->bar_idx, g->bar_all, 2u * sizeof(uint32_t))) { mesh_detach(&g->ctx); delete g; return NULL; }
+  if (mesh_alloc(&g->ctx, 2u, 0, g->bar_idx, NULL)) return cleanup();
+  have_bar_idx = 1;
+  if (group_allgather(g, g->bar_idx, g->bar_all, 2u * sizeof(uint32_t))) return cleanup();
   g->bar_gen = 0;
 
   g->dev = MTLCreateSystemDefaultDevice();
   g->q = [g->dev newCommandQueue];
+  /* Borrow the entire 16 KiB-aligned /mesh0 data arena zero-copy for indirect GPU receive unpack/ADC! */
+  const uintptr_t data_addr = (uintptr_t)g->ctx.M + (uintptr_t)data_off;
+  const uintptr_t arena_aligned = data_addr & ~(uintptr_t)16383u;
+  const uintptr_t region_end = (uintptr_t)g->ctx.M + (uintptr_t)region_len;
+  const size_t arena_bytes = (region_end > arena_aligned) ? ((size_t)(region_end - arena_aligned) & ~(size_t)16383u) : 0u;
+  g->arena_base = arena_aligned;
+  g->buf_arena = nil;
+  if (arena_bytes > 0u && arena_bytes <= (size_t)g->dev.maxBufferLength) {
+    g->buf_arena = [g->dev newBufferWithBytesNoCopy:(void *)arena_aligned length:arena_bytes
+                                            options:MTLResourceStorageModeShared deallocator:nil];
+  }
+
   NSError *err = nil;
   NSString *src = [NSString stringWithUTF8String:kPhaseMSL];
   id<MTLLibrary> lib = [g->dev newLibraryWithSource:src options:nil error:&err];
   if (!lib) {
     fprintf(stderr, "mesh_phase MSL compile error: %s\n", err.localizedDescription.UTF8String);
-    mesh_detach(&g->ctx); delete g; return NULL;
+    return cleanup();
   }
   g->pso_flash_c1 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"flash_c1_packed"] error:&err];
   g->pso_scan_c2  = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"affine_scan_c2_packed"] error:&err];
-  g->pso_had8_pack_f32   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_pack_wire_f32"] error:&err];
-  g->pso_had8_unpack_f32 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_wire_f32"] error:&err];
-  g->pso_had8_pack_f16   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_pack_wire_f16"] error:&err];
-  g->pso_had8_unpack_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_wire_f16"] error:&err];
-  g->pso_had6_pack_f32   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_pack_wire_f32"] error:&err];
-  g->pso_had6_unpack_f32 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_wire_f32"] error:&err];
-  g->pso_had6_pack_f16   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_pack_wire_f16"] error:&err];
-  g->pso_had6_unpack_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_wire_f16"] error:&err];
-  g->pso_kalo27_pack_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_pack_wire_f16"] error:&err];
-  g->pso_kalo27_adc_qk   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_adc_qk_sram"] error:&err];
+  g->pso_had8_pack_f32       = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_pack_wire_f32"] error:&err];
+  g->pso_had8_unpack_f32     = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_wire_f32"] error:&err];
+  g->pso_had8_unpack_ind_f32 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_ind_f32"] error:&err];
+  g->pso_had8_pack_f16       = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_pack_wire_f16"] error:&err];
+  g->pso_had8_unpack_f16     = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_wire_f16"] error:&err];
+  g->pso_had8_unpack_ind_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int8_unpack_ind_f16"] error:&err];
+  g->pso_had6_pack_f32       = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_pack_wire_f32"] error:&err];
+  g->pso_had6_unpack_f32     = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_wire_f32"] error:&err];
+  g->pso_had6_unpack_ind_f32 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_ind_f32"] error:&err];
+  g->pso_had6_pack_f16       = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_pack_wire_f16"] error:&err];
+  g->pso_had6_unpack_f16     = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_wire_f16"] error:&err];
+  g->pso_had6_unpack_ind_f16 = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fwht64_had_int6_unpack_ind_f16"] error:&err];
+  g->pso_kalo27_pack_f16     = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_pack_wire_f16"] error:&err];
+  g->pso_kalo27_adc_qk       = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_adc_qk_sram"] error:&err];
+  g->pso_kalo27_adc_qk_ind   = [g->dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kalomaze_27b_adc_qk_ind_sram"] error:&err];
   return g;
 }
 
@@ -1495,6 +1704,7 @@ int mesh_phase_run_coded(struct mesh_phase_group *grp,
   const uint8_t red_op = (codec_id == MESH_CODEC_HAD_INT8) ? MESH_RED_SUM_HAD_I8 : MESH_RED_SUM_HAD_I6;
   id<MTLComputePipelineState> pso_pack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_pack_f32 : grp->pso_had6_pack_f32;
   id<MTLComputePipelineState> pso_unpack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_f32 : grp->pso_had6_unpack_f32;
+  id<MTLComputePipelineState> pso_unpack_ind = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_ind_f32 : grp->pso_had6_unpack_ind_f32;
 
   const uint32_t tile_wire_pages = (tile_blks + blks_per_page - 1u) / blks_per_page;
   const uint32_t sh_wire_pages = tiles * tile_wire_pages;
@@ -1542,7 +1752,9 @@ int mesh_phase_run_coded(struct mesh_phase_group *grp,
   for (int d = 0; d < ranks; d++) matB[d] = [[MPSMatrix alloc] initWithBuffer:bufB[d] descriptor:descB];
   for (uint32_t i = 0; i < nph; i++) matTmp[i] = [[MPSMatrix alloc] initWithBuffer:bufTmp[i] descriptor:descC];
 
-  id<MTLBuffer> bufRecvWire = [grp->dev newBufferWithLength:(size_t)sh_wire_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
+  const int use_zc_rx = (grp->buf_arena != nil);
+  id<MTLBuffer> bufRecvWire = use_zc_rx ? nil : [grp->dev newBufferWithLength:(size_t)sh_wire_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bufPageOffs = use_zc_rx ? [grp->dev newBufferWithLength:(size_t)sh_wire_pages * sizeof(uint64_t) options:MTLResourceStorageModeShared] : nil;
   id<MTLBuffer> bufOutF32 = [grp->dev newBufferWithLength:(size_t)tiles * tile_elems * sizeof(float) options:MTLResourceStorageModeShared];
 
   const uint32_t slots = 2u;
@@ -1613,25 +1825,48 @@ int mesh_phase_run_coded(struct mesh_phase_group *grp,
       }
       if (!standalone) {
         const uint32_t *ridx = my_idx.data() + sl * sh_wire_pages;
-        unsigned char *rw = (unsigned char *)bufRecvWire.contents;
-        for (uint32_t pi = 0; pi < sh_wire_pages; pi++) {
-          struct mesh_entry_info e; uint16_t tag = 0;
-          for (;;) { mesh_entry_red(&grp->ctx, ridx[pi], &e, &tag); if (e.data && tag == done_tag) break; }
-          memcpy(rw + (size_t)pi * MESH_PAGE_BYTES, e.data, e.bytes);
+        if (use_zc_rx) {
+          uint64_t *poffs = (uint64_t *)bufPageOffs.contents;
+          for (uint32_t pi = 0; pi < sh_wire_pages; pi++) {
+            struct mesh_entry_info e; uint16_t tag = 0;
+            for (;;) { mesh_entry_red(&grp->ctx, ridx[pi], &e, &tag); if (e.data && tag == done_tag) break; }
+            poffs[pi] = (uint64_t)((uintptr_t)e.data - grp->arena_base);
+          }
+          id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
+          id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
+          [uenc setComputePipelineState:pso_unpack_ind];
+          for (uint32_t t = 0; t < tiles; t++) {
+            [uenc setBuffer:grp->buf_arena offset:0 atIndex:0];
+            [uenc setBuffer:bufPageOffs offset:(size_t)t * tile_wire_pages * sizeof(uint64_t) atIndex:1];
+            [uenc setBuffer:bufOutF32 offset:(size_t)t * tile_elems * sizeof(float) atIndex:2];
+            [uenc setBytes:&tile_blks length:sizeof(tile_blks) atIndex:3];
+            [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          }
+          [uenc endEncoding];
+          [ucb commit];
+          [ucb waitUntilCompleted];
+          mesh_clear_indices(&grp->ctx, ridx, sh_wire_pages);
+        } else {
+          unsigned char *rw = (unsigned char *)bufRecvWire.contents;
+          for (uint32_t pi = 0; pi < sh_wire_pages; pi++) {
+            struct mesh_entry_info e; uint16_t tag = 0;
+            for (;;) { mesh_entry_red(&grp->ctx, ridx[pi], &e, &tag); if (e.data && tag == done_tag) break; }
+            memcpy(rw + (size_t)pi * MESH_PAGE_BYTES, e.data, e.bytes);
+          }
+          mesh_clear_indices(&grp->ctx, ridx, sh_wire_pages);
+          id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
+          id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
+          [uenc setComputePipelineState:pso_unpack];
+          for (uint32_t t = 0; t < tiles; t++) {
+            [uenc setBuffer:bufRecvWire offset:(size_t)t * tile_wire_pages * MESH_PAGE_BYTES atIndex:0];
+            [uenc setBuffer:bufOutF32 offset:(size_t)t * tile_elems * sizeof(float) atIndex:1];
+            [uenc setBytes:&tile_blks length:sizeof(tile_blks) atIndex:2];
+            [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          }
+          [uenc endEncoding];
+          [ucb commit];
+          [ucb waitUntilCompleted];
         }
-        mesh_clear_indices(&grp->ctx, ridx, sh_wire_pages);
-        id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
-        id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
-        [uenc setComputePipelineState:pso_unpack];
-        for (uint32_t t = 0; t < tiles; t++) {
-          [uenc setBuffer:bufRecvWire offset:(size_t)t * tile_wire_pages * MESH_PAGE_BYTES atIndex:0];
-          [uenc setBuffer:bufOutF32 offset:(size_t)t * tile_elems * sizeof(float) atIndex:1];
-          [uenc setBytes:&tile_blks length:sizeof(tile_blks) atIndex:2];
-          [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        }
-        [uenc endEncoding];
-        [ucb commit];
-        [ucb waitUntilCompleted];
       }
     }
     const double dt = now_us() - t0;
@@ -1967,10 +2202,12 @@ int mesh_phase_kv_handoff_coded(struct mesh_phase_group *grp,
     }
   }
 
-  /* Decode-side buffers: wire staging + unpacked FP16 (had8/had6) OR ADC-LUT Q*K^T (kalomaze_27b_adc) */
-  id<MTLBuffer> bufDecWire = nil, bufDecOut = nil, bufRowSrc = nil, bufAdcLut = nil, bufScores = nil;
+  /* Decode-side buffers: zero-copy indirect /mesh0 page offsets OR fallback staging + unpacked FP16 / ADC Q*K^T */
+  const int use_zc_rx = (grp->buf_arena != nil);
+  id<MTLBuffer> bufDecWire = nil, bufDecPageOffs = nil, bufDecOut = nil, bufRowSrc = nil, bufAdcLut = nil, bufScores = nil;
   if (!is_prefill) {
-    bufDecWire = [grp->dev newBufferWithLength:(size_t)layer_wire_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
+    if (use_zc_rx) bufDecPageOffs = [grp->dev newBufferWithLength:(size_t)layer_wire_pages * sizeof(uint64_t) options:MTLResourceStorageModeShared];
+    else bufDecWire = [grp->dev newBufferWithLength:(size_t)layer_wire_pages * MESH_PAGE_BYTES options:MTLResourceStorageModeShared];
     if (codec_id == MESH_CODEC_KALOMAZE_27B_ADC) {
       bufRowSrc = [grp->dev newBufferWithLength:(size_t)kv_seq * sizeof(uint16_t) options:MTLResourceStorageModeShared];
       uint16_t *rs = (uint16_t *)bufRowSrc.contents;
@@ -2025,6 +2262,9 @@ int mesh_phase_kv_handoff_coded(struct mesh_phase_group *grp,
   id<MTLComputePipelineState> pso_unpack = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_f16
                                          : (codec_id == MESH_CODEC_HAD_INT6_PK) ? grp->pso_had6_unpack_f16
                                          : grp->pso_kalo27_adc_qk;
+  id<MTLComputePipelineState> pso_unpack_ind = (codec_id == MESH_CODEC_HAD_INT8) ? grp->pso_had8_unpack_ind_f16
+                                             : (codec_id == MESH_CODEC_HAD_INT6_PK) ? grp->pso_had6_unpack_ind_f16
+                                             : grp->pso_kalo27_adc_qk_ind;
 
   int ok = 1;
   double sum_us = 0.0;
@@ -2069,32 +2309,50 @@ int mesh_phase_kv_handoff_coded(struct mesh_phase_group *grp,
       if (!standalone) mesh_phase_barrier(grp);
     } else if (!standalone) {
       const uint32_t *ridx = my_idx.data() + sl * total_pages;
-      unsigned char *dw = (unsigned char *)bufDecWire.contents;
+      unsigned char *dw = use_zc_rx ? NULL : (unsigned char *)bufDecWire.contents;
+      uint64_t *poffs = use_zc_rx ? (uint64_t *)bufDecPageOffs.contents : NULL;
       @autoreleasepool {
         for (uint32_t l = 0; l < n_layers; l++) {
           for (uint32_t k = 0; k < layer_wire_pages; k++) {
             struct mesh_entry_info e;
             for (;;) { mesh_entry(&grp->ctx, ridx[l * layer_wire_pages + k], &e); if (e.data) break; }
-            memcpy(dw + (size_t)k * MESH_PAGE_BYTES, e.data, e.bytes);
+            if (use_zc_rx) poffs[k] = (uint64_t)((uintptr_t)e.data - grp->arena_base);
+            else memcpy(dw + (size_t)k * MESH_PAGE_BYTES, e.data, e.bytes);
           }
           id<MTLCommandBuffer> dcb = [grp->q commandBuffer];
           id<MTLComputeCommandEncoder> denc = [dcb computeCommandEncoder];
-          [denc setComputePipelineState:pso_unpack];
+          [denc setComputePipelineState:(use_zc_rx ? pso_unpack_ind : pso_unpack)];
           if (codec_id == MESH_CODEC_KALOMAZE_27B_ADC) {
             const uint32_t rows_per_tg = 64u;
             uint32_t adims[4] = { kv_seq, vecs8_per_row, words_per_row, rows_per_tg };
-            [denc setBuffer:bufDecWire offset:0 atIndex:0];
-            [denc setBuffer:bufRowSrc offset:0 atIndex:1];
-            [denc setBuffer:bufAdcLut offset:0 atIndex:2];
-            [denc setBuffer:bufScores offset:0 atIndex:3];
-            [denc setBytes:adims length:sizeof(adims) atIndex:4];
+            if (use_zc_rx) {
+              [denc setBuffer:grp->buf_arena offset:0 atIndex:0];
+              [denc setBuffer:bufDecPageOffs offset:0 atIndex:1];
+              [denc setBuffer:bufRowSrc offset:0 atIndex:2];
+              [denc setBuffer:bufAdcLut offset:0 atIndex:3];
+              [denc setBuffer:bufScores offset:0 atIndex:4];
+              [denc setBytes:adims length:sizeof(adims) atIndex:5];
+            } else {
+              [denc setBuffer:bufDecWire offset:0 atIndex:0];
+              [denc setBuffer:bufRowSrc offset:0 atIndex:1];
+              [denc setBuffer:bufAdcLut offset:0 atIndex:2];
+              [denc setBuffer:bufScores offset:0 atIndex:3];
+              [denc setBytes:adims length:sizeof(adims) atIndex:4];
+            }
             const uint32_t v_tgs = (vecs8_per_row + 15u) / 16u;
             const uint32_t r_tgs = (kv_seq + rows_per_tg - 1u) / rows_per_tg;
             [denc dispatchThreadgroups:MTLSizeMake(v_tgs, r_tgs, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
           } else {
-            [denc setBuffer:bufDecWire offset:0 atIndex:0];
-            [denc setBuffer:bufDecOut offset:0 atIndex:1];
-            [denc setBytes:&layer_blks length:sizeof(layer_blks) atIndex:2];
+            if (use_zc_rx) {
+              [denc setBuffer:grp->buf_arena offset:0 atIndex:0];
+              [denc setBuffer:bufDecPageOffs offset:0 atIndex:1];
+              [denc setBuffer:bufDecOut offset:0 atIndex:2];
+              [denc setBytes:&layer_blks length:sizeof(layer_blks) atIndex:3];
+            } else {
+              [denc setBuffer:bufDecWire offset:0 atIndex:0];
+              [denc setBuffer:bufDecOut offset:0 atIndex:1];
+              [denc setBytes:&layer_blks length:sizeof(layer_blks) atIndex:2];
+            }
             [denc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
           }
           [denc endEncoding];

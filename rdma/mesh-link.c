@@ -207,12 +207,13 @@ static inline void tx_append_bulk_coalesce(struct link *l,struct mesh_switch *sw
           uint16_t ntag=0;int x_is_left=0;
           if(mesh_red_can_merge(op,ytag,tag,&ntag,&x_is_left)){
             const uint32_t ys=ye[0].src_page,xs=d->e[i].src_page;
+            const struct mesh_wire_entry *xe=d->e+i;
             if(mesh_page_run_exclusive(M,ys,8u)){
-              mesh_red_apply_run(M,op,ys,xs,ye,x_is_left);
+              mesh_red_apply_run(M,op,ys,xs,ye,xe,x_is_left);
               mesh_page_release_run(M,xs,8u);
               merged=1;
             }else if(mesh_page_run_exclusive(M,xs,8u)){
-              mesh_red_apply_run(M,op,xs,ys,ye,!x_is_left);
+              mesh_red_apply_run(M,op,xs,ys,ye,xe,!x_is_left);
               mesh_page_release_run(M,ys,8u);
               for(uint32_t k=0;k<8u;k++)ye[k].src_page=xs+k;
               merged=1;
@@ -220,7 +221,7 @@ static inline void tx_append_bulk_coalesce(struct link *l,struct mesh_switch *sw
               const uint32_t acc=mesh_page_alloc_run(M,8u,poller_seed(l));
               if(acc!=MESH_PAGE_NONE){
                 memcpy(mesh_page_at(M,acc),mesh_page_at(M,ys),8u*MESH_PAGE_BYTES);
-                mesh_red_apply_run(M,op,acc,xs,ye,x_is_left);
+                mesh_red_apply_run(M,op,acc,xs,ye,xe,x_is_left);
                 mesh_page_release_run(M,ys,8u);
                 mesh_page_release_run(M,xs,8u);
                 for(uint32_t k=0;k<8u;k++)ye[k].src_page=acc+k;
