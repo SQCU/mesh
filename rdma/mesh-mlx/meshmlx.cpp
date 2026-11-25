@@ -61,10 +61,11 @@ enum DbKind : uint32_t {
 };
 
 enum WireMode : uint32_t {
-  WIRE_BF16 = 0,   // MESH_RED_SUM_BF16 (or F32 if esize==4)
-  WIRE_F32 = 1,    // MESH_RED_SUM_F32 (widen bf16 -> f32 on publish)
-  WIRE_GATHER = 2, // per-peer mesh_write, rank-ordered fp32 sum on GPU
-  WIRE_HAD8 = 3,   // MESH_RED_SUM_HAD_I8 (GF(2)^6 FWHT-64 1.0625 B/elem)
+  WIRE_BF16 = 0,        // MESH_RED_SUM_BF16 (or F32 if esize==4)
+  WIRE_F32 = 1,         // MESH_RED_SUM_F32 (widen bf16 -> f32 on publish)
+  WIRE_GATHER = 2,      // per-peer Steiner-multicast mesh_write, rank-ordered fp32 sum on GPU
+  WIRE_HAD8 = 3,        // MESH_RED_SUM_HAD_I8 (in-switch NEON FWHT-64 reduce)
+  WIRE_HAD8_GATHER = 4, // per-peer Steiner-multicast mesh_write of had_int8, GPU FWHT-64 unpack (0 bridge CPU touch)
 };
 
 struct alignas(64) Doorbell {
@@ -239,11 +240,12 @@ inline uint64_t now_ns() { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 
 WireMode parse_wire_mode() {
   const char* e = getenv("MESHMLX_WIRE");
-  if (!e || !*e || !strcmp(e, "bf16")) return WIRE_BF16;
+  if (!e || !*e || !strcmp(e, "gather")) return WIRE_GATHER;
+  if (!strcmp(e, "bf16")) return WIRE_BF16;
   if (!strcmp(e, "f32")) return WIRE_F32;
-  if (!strcmp(e, "gather")) return WIRE_GATHER;
   if (!strcmp(e, "had8")) return WIRE_HAD8;
-  throw std::runtime_error(std::string("meshmlx: unknown MESHMLX_WIRE='") + e + "' (use bf16, f32, gather, had8)");
+  if (!strcmp(e, "had8g")) return WIRE_HAD8_GATHER;
+  throw std::runtime_error(std::string("meshmlx: unknown MESHMLX_WIRE='") + e + "' (use gather, bf16, f32, had8, had8g)");
 }
 
 void bootstrap_allgather(const void* sendbuf, void* recvbuf, size_t nbytes) {
@@ -347,19 +349,20 @@ void wake_worker() {
 void submit_doorbell(const Doorbell& d) {
   if (g.nranks <= 1 || g.index < 0) return;
   const uint32_t me = static_cast<uint32_t>(g.index);
+  static thread_local std::vector<struct mesh_red_xfer> rxfers;
+  static thread_local std::vector<struct mesh_xfer> xfers;
   if (d.kind == DB_FUSED_REDUCE) {
     const FusedPlan& f = g.plans[d.pid];
     const uint32_t ppf = d.n_pages;
     const uint32_t src0 = f.src_base_page + (d.g_slot * f.R + d.j) * ppf;
     const size_t idx_off = (static_cast<size_t>(d.g_slot) * (f.R - 1) + d.j) * ppf;
-    std::vector<struct mesh_red_xfer> xfers;
-    xfers.reserve(static_cast<size_t>(f.nranks - 1) * ppf);
+    rxfers.clear();
     for (uint32_t r = 0; r < f.nranks; r++) {
       if (r == me) continue;
       const uint32_t dst_node = g.compute_nodes[r];
       const uint32_t* dland = f.sum_land[r].data() + idx_off;
       for (uint32_t p = 0; p < ppf; p++) {
-        xfers.push_back(mesh_red_xfer{
+        rxfers.push_back(mesh_red_xfer{
             .src_page = src0 + p,
             .bytes = (p + 1 == ppf) ? d.last_bytes : MESH_PAGE_BYTES,
             .dst_node = dst_node,
@@ -370,22 +373,40 @@ void submit_doorbell(const Doorbell& d) {
         });
       }
     }
-    if (!xfers.empty()) mesh_reduce_write(&g.ctx, xfers.data(), static_cast<uint32_t>(xfers.size()));
+    if (!rxfers.empty()) mesh_reduce_write(&g.ctx, rxfers.data(), static_cast<uint32_t>(rxfers.size()));
   } else if (d.kind == DB_FUSED_GATHER) {
+    // Emit xfers chunk-major (8-page bulk8 runs outer, peers inner; tail pages outer, peers inner)
+    // so rdma/mesh-link.c coalesces identical src_pages into MESH_WIRE_SAME_DATA Steiner multicast!
     const FusedPlan& f = g.plans[d.pid];
     const uint32_t ppf = d.n_pages;
     const uint32_t src0 = f.src_base_page + (d.g_slot * f.R + d.j) * ppf;
     const size_t frame_off = (static_cast<size_t>(d.g_slot) * (f.R - 1) + d.j) * f.nranks * ppf + static_cast<size_t>(me) * ppf;
-    std::vector<struct mesh_xfer> xfers;
-    xfers.reserve(static_cast<size_t>(f.nranks - 1) * ppf);
-    for (uint32_t r = 0; r < f.nranks; r++) {
-      if (r == me) continue;
-      const uint32_t dst_node = g.compute_nodes[r];
-      const uint32_t* dland = f.sum_land[r].data() + frame_off;
-      for (uint32_t p = 0; p < ppf; p++) {
+    xfers.clear();
+    uint32_t p = 0;
+    for (; p + 8u <= ppf; p += 8u) {
+      for (uint32_t r = 0; r < f.nranks; r++) {
+        if (r == me) continue;
+        const uint32_t dst_node = g.compute_nodes[r];
+        const uint32_t* dland = f.sum_land[r].data() + frame_off + p;
+        for (uint32_t k = 0; k < 8u; k++) {
+          xfers.push_back(mesh_xfer{
+              .src_page = src0 + p + k,
+              .bytes = (p + k + 1u == ppf) ? d.last_bytes : MESH_PAGE_BYTES,
+              .dst_node = dst_node,
+              .dst_index = dland[k],
+          });
+        }
+      }
+    }
+    for (; p < ppf; p++) {
+      const uint32_t nb = (p + 1u == ppf) ? d.last_bytes : MESH_PAGE_BYTES;
+      for (uint32_t r = 0; r < f.nranks; r++) {
+        if (r == me) continue;
+        const uint32_t dst_node = g.compute_nodes[r];
+        const uint32_t* dland = f.sum_land[r].data() + frame_off;
         xfers.push_back(mesh_xfer{
             .src_page = src0 + p,
-            .bytes = (p + 1 == ppf) ? d.last_bytes : MESH_PAGE_BYTES,
+            .bytes = nb,
             .dst_node = dst_node,
             .dst_index = dland[p],
         });
@@ -395,29 +416,28 @@ void submit_doorbell(const Doorbell& d) {
   } else if (d.kind == DB_FUSED_ARGMAX) {
     const FusedPlan& f = g.plans[d.pid];
     const uint32_t src0 = f.src_base_page + (d.g_slot * f.R + d.j) * f.pages_per_frame;
-    struct mesh_xfer xfers[kMaxRanks];
+    struct mesh_xfer axfers[kMaxRanks];
     uint32_t nx = 0;
     for (uint32_t r = 0; r < f.nranks; r++) {
       if (r == me) continue;
-      xfers[nx++] = mesh_xfer{
+      axfers[nx++] = mesh_xfer{
           .src_page = src0,
           .bytes = d.last_bytes,
           .dst_node = g.compute_nodes[r],
           .dst_index = f.argmax_land[r][d.g_slot * f.nranks + me],
       };
     }
-    if (nx) mesh_write(&g.ctx, xfers, nx);
+    if (nx) mesh_write(&g.ctx, axfers, nx);
   } else if (d.kind == DB_ALLSUM_F32) {
     const AllSumSlot& sl = g.ring[d.extra];
     const uint32_t np = d.n_pages;
-    std::vector<struct mesh_red_xfer> xfers;
-    xfers.reserve(static_cast<size_t>(g.nranks - 1) * np);
+    rxfers.clear();
     for (uint32_t r = 0; r < g.nranks; r++) {
       if (r == me) continue;
       const uint32_t dst_node = g.compute_nodes[r];
       const uint32_t* dland = sl.all_land[r].data();
       for (uint32_t p = 0; p < np; p++) {
-        xfers.push_back(mesh_red_xfer{
+        rxfers.push_back(mesh_red_xfer{
             .src_page = sl.src_base_page + p,
             .bytes = (p + 1 == np) ? d.last_bytes : MESH_PAGE_BYTES,
             .dst_node = dst_node,
@@ -428,7 +448,7 @@ void submit_doorbell(const Doorbell& d) {
         });
       }
     }
-    if (!xfers.empty()) mesh_reduce_write(&g.ctx, xfers.data(), static_cast<uint32_t>(xfers.size()));
+    if (!rxfers.empty()) mesh_reduce_write(&g.ctx, rxfers.data(), static_cast<uint32_t>(rxfers.size()));
   }
 }
 
@@ -1031,7 +1051,7 @@ template [[host_name("fused_sum_norm_half")]] [[kernel]] void fused_sum_norm<hal
 template [[host_name("fused_sum_norm_float")]] [[kernel]] void fused_sum_norm<float>(const device ulong*, const device uchar*, const device uint*, device const float*, device const float*, device const float*, device const float*, device float*, device float*, device const float*, device ulong*, device atomic_uint*, constant uint*, constant float&, uint, uint, uint, uint, uint);
 
 // GF(2)^6 FWHT-64 had_int8 consumer + RMSNorm + residual [+ RMSNorm]:
-// 1 threadgroup per row, 24 simdgroups (768 threads) for dim=1536 (1 simdgroup = 64 elements = 1 FWHT-64 block!).
+// Supports both in-switch reduce (wmode==3) and zero-CPU-touch Steiner multicast gather (wmode==4).
 [[kernel]] void fused_sum_norm_had8_bfloat(const device ulong* W [[buffer(0)]], const device uchar* arena [[buffer(1)]],
     const device uint* land_idx [[buffer(2)]], device const bfloat* own [[buffer(3)]],
     device const bfloat* residual [[buffer(4)]], device const bfloat* w1 [[buffer(5)]], device const bfloat* w2 [[buffer(6)]],
@@ -1040,7 +1060,7 @@ template [[host_name("fused_sum_norm_float")]] [[kernel]] void fused_sum_norm<fl
     constant uint* cfg [[buffer(12)]], constant float& eps [[buffer(13)]],
     uint i [[thread_index_in_threadgroup]], uint row [[threadgroup_position_in_grid]], uint rows [[threadgroups_per_grid]],
     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  const uint ranks = cfg[1], dim = cfg[3], twice = cfg[4], lbase = cfg[8];
+  const uint ranks = cfg[1], me = cfg[2], dim = cfg[3], twice = cfg[4], wmode = cfg[6], ppf = cfg[7], lbase = cfg[8];
   const bool do_wait = (ranks > 1u) && (cfg[12] == 0u);
   const uint bpr = dim / 64u;
   const uint blk0 = row * bpr;
@@ -1059,9 +1079,18 @@ template [[host_name("fused_sum_norm_float")]] [[kernel]] void fused_sum_norm<fl
   float g20   = (k0 < dim && twice) ? float(w2[k0]) : 0.0f;
   float g21   = (k0 + 1u < dim && twice) ? float(w2[k0 + 1u]) : 0.0f;
 
-  threadgroup uint tg_phys[4];
+  threadgroup uint tg_phys[32];
   if (do_wait) {
-    if (i < npg) tg_phys[i] = mesh_poll_land(W, land_idx[lbase + pg0 + i], ranks - 1u);
+    if (wmode == 4u) {
+      const uint total_polls = ranks * npg;
+      for (uint idx = i; idx < total_polls; idx += 32u) {
+        const uint q = idx / npg;
+        const uint po = idx % npg;
+        tg_phys[q * 4u + po] = (q == me) ? 0xffffffffu : mesh_poll_land(W, land_idx[lbase + q * ppf + pg0 + po], 0u);
+      }
+    } else {
+      if (i < npg) tg_phys[i] = mesh_poll_land(W, land_idx[lbase + pg0 + i], ranks - 1u);
+    }
     threadgroup_barrier(mem_flags::mem_device);
     mesh_sys_fence();
   }
@@ -1070,13 +1099,28 @@ template [[host_name("fused_sum_norm_float")]] [[kernel]] void fused_sum_norm<fl
   if (do_wait && sg < bpr) {
     const uint blk = blk0 + sg;
     const uint pg = blk / 60u;
-    const uint phys = tg_phys[pg - pg0];
-    if (phys != 0xffffffffu) {
-      const ulong off = ulong(phys) * 4096ul + ulong(blk % 60u) * 68ul;
-      const float sc = float(mesh_sys_read<half>(arena + off, lane >= 16u ? 1u : 0u));
-      a = float(mesh_sys_read<char>(arena + off + 4ul, lane * 2u)) * sc;
-      b = float(mesh_sys_read<char>(arena + off + 4ul, lane * 2u + 1u)) * sc;
+    const uint blk_in_pg = blk % 60u;
+    if (wmode == 4u) {
+      // Linearity of FWHT-64! Sum all peers in Hadamard domain first, then run ONE inverse FWHT-64!
+      for (uint q = 0; q < ranks; q++) {
+        if (q == me) continue;
+        const uint phys = tg_phys[q * 4u + (pg - pg0)];
+        if (phys == 0xffffffffu) continue;
+        const ulong off = ulong(phys) * 4096ul + ulong(blk_in_pg) * 68ul;
+        const float sc = float(mesh_sys_read<half>(arena + off, lane >= 16u ? 1u : 0u));
+        a += float(mesh_sys_read<char>(arena + off + 4ul, lane * 2u)) * sc;
+        b += float(mesh_sys_read<char>(arena + off + 4ul, lane * 2u + 1u)) * sc;
+      }
       fwht64_simd_pair(a, b, lane);
+    } else {
+      const uint phys = tg_phys[pg - pg0];
+      if (phys != 0xffffffffu) {
+        const ulong off = ulong(phys) * 4096ul + ulong(blk_in_pg) * 68ul;
+        const float sc = float(mesh_sys_read<half>(arena + off, lane >= 16u ? 1u : 0u));
+        a = float(mesh_sys_read<char>(arena + off + 4ul, lane * 2u)) * sc;
+        b = float(mesh_sys_read<char>(arena + off + 4ul, lane * 2u + 1u)) * sc;
+        fwht64_simd_pair(a, b, lane);
+      }
     }
   }
 
@@ -1674,7 +1718,8 @@ NAX_P(1, 4) NAX_P(2, 3) NAX_P(3, 2) NAX_P(4, 2) NAX_P(5, 1) NAX_P(6, 1) NAX_P(7,
 void prepare_fused_frame(FusedPlan& f, int pid, uint32_t j, uint32_t& out_gslot, uint32_t& out_db_slot, uint64_t& out_seq) {
   if (j == 0) f.active_gen = f.next_gen++;
   out_gslot = static_cast<uint32_t>(f.active_gen % kGenSlots);
-  const uint32_t kind = (f.wire == WIRE_GATHER) ? DB_FUSED_GATHER : DB_FUSED_REDUCE;
+  const bool is_gather = (f.wire == WIRE_GATHER || f.wire == WIRE_HAD8_GATHER);
+  const uint32_t kind = is_gather ? DB_FUSED_GATHER : DB_FUSED_REDUCE;
   out_db_slot = alloc_doorbell(kind, static_cast<uint32_t>(pid), out_gslot, j, f.pages_per_frame, f.last_page_bytes,
                                static_cast<uint32_t>(f.red_op), out_seq);
   f.active_db_slot[j & 255] = out_db_slot;
@@ -1688,7 +1733,7 @@ void encode_fused_publish(FusedPlan& f, int pid, mx::metal::Device& d, mx::metal
   auto* lib = d.get_library("meshmlx_fused", []() { return fused_source(); });
   const size_t src_off = g.arena_bias + static_cast<size_t>(f.src_base_page + (gslot * f.R + j) * f.pages_per_frame) * MESH_PAGE_BYTES;
   const size_t done_off = static_cast<size_t>(j & 63) * 64u;
-  if (f.wire == WIRE_HAD8) {
+  if (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER) {
     const uint32_t n_blks = static_cast<uint32_t>(f.n / 64);
     const uint32_t tgs = (n_blks + 3u) / 4u;
     enc.set_compute_pipeline_state(d.get_kernel("fused_had8_pub_bfloat", lib));
@@ -1835,7 +1880,9 @@ class FusedSumNorm : public mx::Primitive {
 
     uint32_t gslot = 0, db_slot = 0;
     uint64_t seq = 0;
-    if (!published_ || f.wire == WIRE_HAD8) {
+    const bool is_had8 = (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER);
+    const bool is_gather = (f.wire == WIRE_GATHER || f.wire == WIRE_HAD8_GATHER);
+    if (!published_ || is_had8) {
       encode_fused_publish(f, pid_, d, enc, y, j_, gslot, db_slot, seq);
     } else {
       gslot = static_cast<uint32_t>(f.active_gen % kGenSlots);
@@ -1845,14 +1892,14 @@ class FusedSumNorm : public mx::Primitive {
 
     const uint32_t dim = static_cast<uint32_t>(y.shape(-1));
     const uint32_t rows = static_cast<uint32_t>(y.size() / dim);
-    const uint32_t lbase = (f.wire == WIRE_GATHER)
+    const uint32_t lbase = is_gather
                                ? (gslot * (f.R - 1) + j_) * f.nranks * f.pages_per_frame
                                : (gslot * (f.R - 1) + j_) * f.pages_per_frame;
     const uint32_t cfg[13] = {static_cast<uint32_t>(f.n), f.nranks, f.rank, dim, twice ? 1u : 0u, 0u,
                               static_cast<uint32_t>(f.wire), f.pages_per_frame, lbase, db_slot,
                               static_cast<uint32_t>(seq), static_cast<uint32_t>(seq >> 32), g.noawait ? 1u : 0u};
 
-    if (f.wire == WIRE_HAD8) {
+    if (is_had8) {
       auto* k = d.get_kernel("fused_sum_norm_had8_bfloat", lib);
       enc.set_compute_pipeline_state(k);
       enc.set_buffer(g.table_buf, 0, g.table_bias);
@@ -1915,7 +1962,8 @@ class GemvPublish : public mx::Primitive {
 
     uint32_t gslot = 0, db_slot = 0;
     uint64_t seq = 0;
-    if (f.wire != WIRE_HAD8) {
+    const bool is_had8 = (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER);
+    if (!is_had8) {
       prepare_fused_frame(f, pid_, j_, gslot, db_slot, seq);
     }
     const uint32_t B = decode_rows(in[0]), K = static_cast<uint32_t>(in[0].shape(-1)), N = static_cast<uint32_t>(in[1].shape(0));
@@ -1930,7 +1978,7 @@ class GemvPublish : public mx::Primitive {
     enc.set_buffer(g.db_buf, 4, 0);
     enc.set_buffer(f.counter_buf, 5, static_cast<size_t>(j_ & 63) * 64u);
     const uint32_t dims[6] = {N, K, db_slot, static_cast<uint32_t>(seq), static_cast<uint32_t>(seq >> 32),
-                              static_cast<uint32_t>(f.wire)};
+                              is_had8 ? 3u : static_cast<uint32_t>(f.wire)};
     enc.set_bytes(dims, 6, 6);
     enc.dispatch_threadgroups(MTL::Size(groups, 1, 1), MTL::Size(32 * l.sg, 1, 1));
   }
@@ -1956,13 +2004,15 @@ class GemmPublish : public mx::Primitive {
 
     uint32_t gslot = 0, db_slot = 0;
     uint64_t seq = 0;
-    if (f.wire != WIRE_HAD8) {
+    const bool is_had8 = (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER);
+    if (!is_had8) {
       prepare_fused_frame(f, pid_, j_, gslot, db_slot, seq);
     }
     const mx::array &x = in[0], &w = in[1];
     const int K = x.shape(-1), N = w.shape(0), M = static_cast<int>(x.size() / K);
     const size_t src_off = g.arena_bias + static_cast<size_t>(f.src_base_page + (gslot * f.R + j_) * f.pages_per_frame) * MESH_PAGE_BYTES;
-    const uint32_t pub_cfg[4] = {db_slot, static_cast<uint32_t>(seq), static_cast<uint32_t>(seq >> 32), static_cast<uint32_t>(f.wire)};
+    const uint32_t pub_cfg[4] = {db_slot, static_cast<uint32_t>(seq), static_cast<uint32_t>(seq >> 32),
+                                 is_had8 ? 3u : static_cast<uint32_t>(f.wire)};
     auto bind_pub = [&]() {
       enc.set_buffer(g.arena_buf, 5, src_off);
       enc.set_buffer(g.db_buf, 6, 0);
@@ -2456,9 +2506,10 @@ NB_MODULE(_meshmlx, m) {
     f.nranks = g.nranks;
     f.rank = g.index >= 0 ? static_cast<uint32_t>(g.index) : 0u;
     f.wire = g.default_wire;
-    if (f.wire == WIRE_HAD8 && (f.esize != 2 || (f.n % 64) != 0)) f.wire = WIRE_BF16;
+    const bool is_had8_req = (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER);
+    if (is_had8_req && (f.esize != 2 || (f.n % 64) != 0)) f.wire = WIRE_GATHER;
 
-    if (f.wire == WIRE_HAD8) {
+    if (f.wire == WIRE_HAD8 || f.wire == WIRE_HAD8_GATHER) {
       f.red_op = MESH_RED_SUM_HAD_I8;
       const uint32_t n_blks = static_cast<uint32_t>(f.n / 64);
       f.pages_per_frame = (n_blks + 59u) / 60u;
@@ -2487,7 +2538,7 @@ NB_MODULE(_meshmlx, m) {
 
     // Allocate landing W[] indices for R-1 sum frames + 1 argmax frame across kGenSlots generations.
     const uint32_t sum_frames = f.R > 1 ? f.R - 1 : 1;
-    const uint32_t mult = (f.wire == WIRE_GATHER) ? f.nranks : 1u;
+    const uint32_t mult = (f.wire == WIRE_GATHER || f.wire == WIRE_HAD8_GATHER) ? f.nranks : 1u;
     f.sum_idx_per_rank = kGenSlots * sum_frames * mult * f.pages_per_frame;
     const uint32_t arg_idx_per_rank = kGenSlots * f.nranks;
 
