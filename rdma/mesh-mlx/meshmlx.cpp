@@ -749,7 +749,7 @@ template <typename T>
   if (widen) {
     const uint base = k * 4u;
     if (base < n) {
-      float4 v(float(x[base]), float(x[base + 1u]), float(x[base + 2u]), float(x[base + 3u]));
+      float4 v = float4(float(x[base]), float(x[base + 1u]), float(x[base + 2u]), float(x[base + 3u]));
       mesh_sys_write<uint4>(send, k, as_type<uint4>(v));
     }
   } else {
