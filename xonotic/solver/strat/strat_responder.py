@@ -142,6 +142,12 @@ def main():
     ap.add_argument("--replay-batch", type=int, default=8,
                     help="historical value examples mixed into each shared fresh-state update")
     ap.add_argument("--replay-weight", type=float, default=0.5)
+    ap.add_argument("--min-fresh-batch", type=int, default=4,
+                    help="minimum fresh transitions accumulated before taking an optimizer step")
+    ap.add_argument("--min-rollout-groups", type=int, default=1,
+                    help="minimum distinct concurrent server sessions required per optimizer step")
+    ap.add_argument("--rotate-team-arms", action="store_true",
+                    help="cyclically rotate --team-policy-arms per concurrent server session to balance map spawns")
     ap.add_argument("--replay-steps", type=int, help="deprecated; both policies take one step per fresh attributed group")
     args = ap.parse_args()
     from solver.strat.online import OnlineLearner, OPTIMIZER_WEIGHT_DECAY
@@ -217,9 +223,34 @@ def main():
     sampling_key = np.empty_like(key)
     history = ActionHistory(args.measure_rows, args.replay_memory_mb * (1 << 20),
                             os.path.abspath(args.online_checkpoint or CKPT) + '.actions', interval)
+    histories = {}
+    observation_memories = {}
+    session_episodes = {}
+    session_order = {}
     episode_key = None
     observation_memory = ObservationMemory()
     anticipatory_fast = {}
+
+    def _session_state(sess):
+        nonlocal history, observation_memory
+        if sess not in session_order:
+            session_order[sess] = len(session_order)
+        if sess not in histories:
+            if not histories:
+                histories[sess] = history
+            else:
+                histories[sess] = ActionHistory(
+                    args.measure_rows,
+                    args.replay_memory_mb * (1 << 20),
+                    os.path.abspath(args.online_checkpoint or CKPT) + f'.s{sess}.actions',
+                    interval,
+                )
+        if sess not in observation_memories:
+            if not observation_memories:
+                observation_memories[sess] = observation_memory
+            else:
+                observation_memories[sess] = ObservationMemory()
+        return histories[sess], observation_memories[sess], session_order[sess]
     remotes = {}
     count = 0
     started = time.monotonic()
@@ -315,6 +346,7 @@ def main():
                     checkpoint=None if resumed else target, load_checkpoint=None if resumed else source or target,
                     replay_capacity=args.replay_capacity, replay_memory_mb=args.replay_memory_mb,
                     replay_precision=args.replay_precision, replay_batch=args.replay_batch,
+                    min_fresh_batch=args.min_fresh_batch, min_rollout_groups=args.min_rollout_groups,
                     seed=seed, policy_forward=forward, policy_arm=arm,
                     match_metadata=json.loads(args.match_metadata), replay_weight=args.replay_weight,
                     world=world, device=device, lead=lead,
@@ -376,8 +408,10 @@ def main():
                     os.read(wake, 64)
                     continue
                 for node, address, buffer in engine.receive():
-                    inbox.feed(buffer)
+                    fed_session = inbox.feed(buffer)
                     route['engine'] = (node, address)
+                    if fed_session is not None:
+                        route[fed_session] = (node, address)
                 ready = inbox.take()
                 if ready is None:
                     resolved = False
@@ -391,17 +425,20 @@ def main():
                     continue
                 (session, tick_id), records, event_batches = ready
             step_complete = False
+            sess_history, sess_obs_memory, sess_idx = _session_state(session)
             obs_rows = records[OBSERVATION_KIND][1]
             cart_rows = records[CART_KIND][1]
             team_rows = records[TEAM_KIND][1]
             current_episode = ObservationMemory.identity(session, team_rows[0, TS['EPISODE']])
-            if observation_memory.observe(current_episode, event_batches):
+            if sess_obs_memory.observe(current_episode, event_batches):
                 for learning in learners.values():
                     learning.switch_episode(current_episode)
-                history.clear()
-                reporter.reset()
+                sess_history.clear()
+                if len(histories) <= 1:
+                    reporter.reset()
+                session_episodes[session] = current_episode
                 episode_key = current_episode
-            event_rows = observation_memory.rows
+            event_rows = sess_obs_memory.rows
             view_pages, chorus = native_inputs(records[STATE_KIND][1], obs_rows, cart_rows, team_rows,
                 event_rows, interval, relaxation, navigation)
             state_header = view_pages.headers
@@ -434,7 +471,7 @@ def main():
                                 "actor": int(row[EVT['OBSERVER']]), "actor_team": int(row[EVT['TEAM']]),
                                 "subject": int(row[EVT['SUBJECT']]), "value": float(row[EVT['AMOUNT']]),
                                 "time": float(row[EVT['TIME']]), "response_seq": int(row[EVT['RESPONSE_SEQ']])}
-                               for owner, arrived in observation_memory.arrivals.items() for row in arrived if row[EVT['KIND']] >= 5]
+                               for owner, arrived in sess_obs_memory.arrivals.items() for row in arrived if row[EVT['KIND']] >= 5]
             outcome = inbox.outcomes.get(current_episode)
             terminal = outcome['actor_team'] if outcome is not None and tick.cartstate.finished else None
             if terminal is not None:
@@ -442,10 +479,16 @@ def main():
                                    or event['kind'] not in ('score_win', 'tie')] + [outcome]
             active_learners = {arm: learning for arm, learning in learners.items() if current_episode not in learning.outcomes}
             terminal_new = terminal is not None and bool(active_learners)
-            attributed = history.advance(tick, frame, participant_ids, rows, applied_sequences, active_learners, terminal)
+            attributed = sess_history.advance(tick, frame, participant_ids, rows, applied_sequences, active_learners, terminal)
+            for arm_records in attributed.values():
+                for rec in arm_records:
+                    rec['rollout_group'] = int(session)
+                    rec['episode_id'] = current_episode
             versions = {arm: learning.updates for arm, learning in learners.items()}
             versions.update({arm: provenance[arm].get('updates') for arm in models if arm not in versions})
-            arms = np.asarray([assigned[(int(team) - 1) % len(assigned)] for team in teams])
+            arm_shift = sess_idx if args.rotate_team_arms and len(assigned) > 1 else 0
+            session_assigned = tuple(assigned[(i + arm_shift) % len(assigned)] for i in range(len(assigned)))
+            arms = np.asarray([session_assigned[(int(team) - 1) % len(session_assigned)] for team in teams])
             advance_key(key, sampling_key)
             response_started = time.perf_counter()
             prepared = prepare_policies(programs, chorus)
@@ -460,20 +503,22 @@ def main():
                 m_decay = np.exp(-float(interval) / tf)
                 m_gain = float(lead) * (-np.expm1(-float(interval) / tf))
                 for idx, pid in enumerate(participant_ids):
-                    old = anticipatory_fast.get(int(pid))
+                    fkey = (int(session), int(pid))
+                    old = anticipatory_fast.get(fkey)
                     if old is not None and old.shape == velocity[idx].shape:
                         prev_fast[idx] = old
-                    anticipatory_fast[int(pid)] = (m_decay * prev_fast[idx] + m_gain * velocity[idx]).astype(np.float32)
+                    anticipatory_fast[fkey] = (m_decay * prev_fast[idx] + m_gain * velocity[idx]).astype(np.float32)
             response = view_pages.response(velocity, interval, relaxation, lead, fast_state=prev_fast)
             if not replaying:
                 journal_offset = journal.append({'key': (session, tick_id), 'records': records, 'event_frames': event_batches,
                     'outcomes': inbox.outcomes, 'velocity': velocity, 'behavior_logp': behavior_logp})
-                if 'engine' in route:
-                    node, address = route['engine']
+                dest = route.get(session) or route.get('engine')
+                if dest is not None:
+                    node, address = dest
                     engine.send(address, node, frames(STRATEGY_KIND, request, tick_id, response, placement["framebytes"], session))
             response_elapsed = time.perf_counter() - response_started
             reporting_started = time.perf_counter()
-            assignments, decisions = history.assignments(rows, applied_sequences, request, velocity, integrated,
+            assignments, decisions = sess_history.assignments(rows, applied_sequences, request, velocity, integrated,
                                                          behavior_logp, arms, versions, provenance)
             sampled = args.model_sample_every > 0 and (count + 1) % args.model_sample_every == 0
             detailed_reporting = bool(reporter.enabled or sampled)
@@ -515,7 +560,7 @@ def main():
                                                    server_state=observed_state, state_labels=observed_labels)
                 sources = [{"response_seq": sequence, "edict": participant, **decision,
                             "action": {"velocity": decision["velocity"], "residual": decision["residual"]}}
-                           for sequence, saved in (*history.items(), (request, decisions))
+                           for sequence, saved in (*sess_history.items(), (request, decisions))
                            for participant, decision in saved.items()]
             else:
                 sources = []
@@ -523,7 +568,7 @@ def main():
                           snapshot=tick.cartstate, frame=frame, engine_time=float(np.median(rows[:, OBS['ENGINE_TIME']])),
                           velocity=velocity.copy(), behavior_logp=behavior_logp.copy(), behavior_arms=arms.copy(),
                           policy_updates=versions)
-            history.put(request, decisions, set(applied_sequences), state=issued)
+            sess_history.put(request, decisions, set(applied_sequences), state=issued)
             source_reporting_elapsed = time.perf_counter() - reporting_started
             optimization_started = time.perf_counter()
             learning = {arm: value for arm, learner in learners.items()
@@ -537,7 +582,7 @@ def main():
                               'training_contract': learner.training_contract,
                               'pending_states': len(learner.episode), 'replay_size': len(learner.replay),
                               'awaiting_outcomes': len(learner.awaiting_outcomes), 'episode_id': current_episode,
-                              'outcome': learner.outcomes.get(current_episode), 'execution': history.measure(),
+                              'outcome': learner.outcomes.get(current_episode), 'execution': sess_history.measure(),
                               'transport': inbox.report(), 'journal_bytes': journal_offset,
                               'view_faults': int(rows[:, OBS['VIEW_FAULTS']].sum()),
                               'snapshots_superseded': int(rows[:, OBS['SNAPSHOTS_SUPERSEDED']].max()),
@@ -559,18 +604,19 @@ def main():
             line = {'at': time.time(), 'resp_id': count, 'request_seq': request,
                     'producer_id': producer_id, 'record_id': f'{producer_id}:{count}',
                     'engine_session': session, 'engine_episode': int(team_rows[0, TS['EPISODE']]),
+                    'rollout_groups_active': len(histories),
                     'match_metadata': json.loads(args.match_metadata),
                     'application': application,
                     'episode_id': current_episode,
                     'interface': 'full_state_rate', 'state_width': state_rows.shape[1], 'state_schema': schema,
-                    'observation_memory': observation_memory.report(),
+                    'observation_memory': sess_obs_memory.report(),
                     'event_arrivals': [{'session': key[0], 'tick': key[1], 'request_seq': key[2], 'rows': rows}
                                        for key, rows in event_batches.items()],
                     'environment': args.environment, 'teams': k, 'players': len(rows), 'j': len(cart_rows),
                     'k': k, 'l': len(rows), 't': time.monotonic() - started,
                     'recorded_at': time.time(), 'producer_pid': os.getpid(),
-                    'policy_arm': 'mixed' if len(assigned) > 1 else args.policy_arm,
-                    'team_policy_arms': assigned, 'policy_provenance': provenance,
+                    'policy_arm': 'mixed' if len(session_assigned) > 1 else args.policy_arm,
+                    'team_policy_arms': session_assigned, 'policy_provenance': provenance,
                     'mode': 'online_train' if learners else 'inference',
                     'updates': sum(learner.updates for learner in learners.values()),
                     'resources': team_resources(rows, k),
@@ -580,7 +626,7 @@ def main():
                     'policy_updates': learning,
                     'game_value': formal_value_record(tick.game_value, tick.cartstate),
                     'policy_comparison': comparison,
-                    'server_state_labels': labels if sampled else [], 'participant_state_labels': participant_labels if sampled else [], 'source_window': history.measure(),
+                    'server_state_labels': labels if sampled else [], 'participant_state_labels': participant_labels if sampled else [], 'source_window': sess_history.measure(),
                     'model': model_record, 'measure_sources': sources, 'moe': model_record['moe'],
                     'distributed_scale': {name: remote.last for name, remote in remotes.items()},
                     'world': world.report(), 'transport_local': engine.report()}

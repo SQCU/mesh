@@ -56,6 +56,7 @@ class OnlineLearner:
         replay_precision: str = "float32",
         replay_batch: int = 8,
         min_fresh_batch: int = 4,
+        min_rollout_groups: int = 1,
         seed: int = 20260831,
         policy_forward=strategy,
         policy_arm: str = "matrix_fusion",
@@ -76,7 +77,8 @@ class OnlineLearner:
         self.updates = 0
         self.replay = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
         self.episode = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
-        self.actor_probe = Replay(64, int(min(replay_memory_mb, 512.0) * (1 << 20)))
+        self.episodes = {}
+        self.actor_probe = Replay(128, int(min(replay_memory_mb, 512.0) * (1 << 20)))
         self.episode_id = None
         self.awaiting_outcomes = {}
         self.outcomes = {}
@@ -87,6 +89,7 @@ class OnlineLearner:
         self.replay_precision = replay_precision
         self.replay_batch = max(1, int(replay_batch))
         self.min_fresh_batch = max(1, int(min_fresh_batch))
+        self.min_rollout_groups = max(1, int(min_rollout_groups))
         self._fresh_buffer = []
         self.rng = np.random.default_rng(seed)
         self.transitions = 0
@@ -240,6 +243,8 @@ class OnlineLearner:
         value_weight,
         request_seq,
         interval_seconds,
+        rollout_group=None,
+        episode_id=None,
     ):
         players = len(frame.chorus.state)
         reward = np.asarray(sparse_return)
@@ -276,6 +281,8 @@ class OnlineLearner:
             "behavior_versions": dict(behavior_versions),
             "configuration": json.dumps(self.match_metadata.get("configuration", {}), sort_keys=True),
             "match_id": self.match_metadata.get("match_id", "unspecified"),
+            "rollout_group": 0 if rollout_group is None else int(rollout_group),
+            "episode_id": episode_id if episode_id is not None else self.episode_id,
         }
 
     def _tensor_loss(self, current_inputs, next_inputs, item):
@@ -338,13 +345,27 @@ class OnlineLearner:
             (item, replay_weight / len(replay_items), 0.0, np.zeros(len(METRIC_NAMES), dtype=np.float32))
             for item in replay_items
         ]
-        half0 = fresh_prepared[0::2] + replay_prepared[0::2]
-        half1 = fresh_prepared[1::2] + replay_prepared[1::2]
+        groups = sorted({int(it.get("rollout_group", 0)) for it in items})
+        if len(groups) >= 2:
+            left_groups = set(groups[0::2])
+            half0_f = [entry for entry in fresh_prepared if int(entry[0].get("rollout_group", 0)) in left_groups]
+            half1_f = [entry for entry in fresh_prepared if int(entry[0].get("rollout_group", 0)) not in left_groups]
+            split_mode = "cross_server_iid"
+        else:
+            half0_f = fresh_prepared[0::2]
+            half1_f = fresh_prepared[1::2]
+            split_mode = "single_server_temporal"
+        half0 = half0_f + replay_prepared[0::2]
+        half1 = half1_f + replay_prepared[1::2]
         prepared = half0 + half1
-        return items, replay_items, prepared, len(half0)
+        return items, replay_items, prepared, len(half0), split_mode, len(groups)
 
     def learn(self, prepared_update):
-        if len(prepared_update) == 4:
+        split_mode = "single_server_temporal"
+        rollout_group_count = 1
+        if len(prepared_update) == 6:
+            items, replay_items, prepared, split_at, split_mode, rollout_group_count = prepared_update
+        elif len(prepared_update) == 4:
             items, replay_items, prepared, split_at = prepared_update
         else:
             items, replay_items, prepared = prepared_update
@@ -379,6 +400,9 @@ class OnlineLearner:
                 b0_transitions=0.5 * len(prepared),
                 b0_rows=0.5 * max(1, actor_rows_total),
             )
+            if grad_snr is not None:
+                grad_snr["split_mode"] = split_mode
+                grad_snr["rollout_groups"] = rollout_group_count
         if ratios:
             self.ratios.append(np.concatenate(ratios))
         total, parts, gradient_norm = self.program.update()
@@ -430,16 +454,19 @@ class OnlineLearner:
                 self.actor_probe.push(dict(item))
         observations = [item for item in fresh if item["value_weight"]]
         for item in observations:
+            ep_id = item.get("episode_id")
+            pool = self._episode_pool(ep_id)
             teams = {int(team): index for index, team in enumerate(item["teams"])}
-            for prior in self.episode.items():
+            for prior in pool.items():
                 indices = np.asarray([teams.get(int(team), -1) for team in prior["teams"]])
                 present = indices >= 0
                 prior["value_target"] += prior["return_factor"] * item["reward"][indices] * present
                 prior["return_factor"] *= item["discount"][indices] * present * ((prior["winner_mask"] == item["next_winner_mask"][indices]) | (self.policy_arm == "terminal_win"))
-            self.episode.push(dict(
+            pool.push(dict(
                 item, value_target=item["reward"].copy(),
                 return_factor=item["discount"] * ((item["winner_mask"] == item["next_winner_mask"]) | (self.policy_arm == "terminal_win")),
             ))
+            self.episode = pool
         self.transitions += len(observations)
         out = self._train_fresh(fresh)
         if out is not None:
@@ -449,18 +476,29 @@ class OnlineLearner:
             ))
         return out
 
+    def _episode_pool(self, identity):
+        if identity is None:
+            return self.episode
+        pool = self.episodes.get(identity)
+        if pool is None:
+            pool = Replay(self.episode.capacity, self.episode.max_bytes)
+            self.episodes[identity] = pool
+        return pool
+
     def switch_episode(self, identity):
-        if identity != self.episode_id:
-            if self.episode_id is not None and len(self.episode):
-                self.awaiting_outcomes[self.episode_id] = self.episode
-            self.episode = Replay(self.episode.capacity, self.episode.max_bytes)
-            self.episode_id = identity
+        if identity is None:
+            return
+        pool = self._episode_pool(identity)
+        self.episode = pool
+        self.episode_id = identity
 
     def end_episode(self, winning_team=None, episode_id=None):
         identity = episode_id if episode_id is not None else self.episode_id
         if identity is not None and identity in self.outcomes:
             return {"outcome": self.outcomes[identity], "duplicate": True, "retained_states": 0}
-        pool = self.episode if identity == self.episode_id else self.awaiting_outcomes.get(identity)
+        pool = self.episodes.get(identity) if identity in self.episodes else (
+            self.episode if identity == self.episode_id else self.awaiting_outcomes.get(identity)
+        )
         if pool is None:
             return {"outcome": winning_team, "unobserved_episode": identity, "retained_states": 0}
         items = list(pool.items())
@@ -477,6 +515,7 @@ class OnlineLearner:
                     item["value_target"] = ((winning_team > 0) & (item["teams"] == winning_team - 1)).astype(np.float32)
             metrics["retained_states"] = self.replay.retain(items)
         pool.clear()
+        self.episodes.pop(identity, None)
         self.awaiting_outcomes.pop(identity, None)
         metrics.update(gradient_steps=0, completed_episodes=self.completed_episodes, truncated_episodes=self.truncated_episodes, replay_size=len(self.replay), replay=self.replay.report(), updates=self.updates)
         return metrics
@@ -487,7 +526,8 @@ class OnlineLearner:
         if not self._fresh_buffer:
             self.replay.release_unreferenced()
             return None
-        if not flush and len(self._fresh_buffer) < self.min_fresh_batch:
+        distinct_groups = len({int(it.get("rollout_group", 0)) for it in self._fresh_buffer})
+        if not flush and (len(self._fresh_buffer) < self.min_fresh_batch or distinct_groups < self.min_rollout_groups):
             return None
         batch_fresh = self._fresh_buffer
         self._fresh_buffer = []
@@ -555,6 +595,9 @@ class OnlineLearner:
         payload.update(self.replay.export_payload())
         payload.update(self.episode.export_payload("__episode__"))
         payload.update(self.actor_probe.export_payload("__actor_probe__"))
+        extra_eps = [pool for eid, pool in self.episodes.items() if pool is not self.episode and len(pool)]
+        for index, pool in enumerate(extra_eps):
+            payload.update(pool.export_payload(f"__concurrent_{index}__"))
         payload["__episodes__"] = np.asarray(json.dumps({"current": self.episode_id,
             "awaiting": list(self.awaiting_outcomes), "outcomes": self.outcomes}))
         for index, pool in enumerate(self.awaiting_outcomes.values()):

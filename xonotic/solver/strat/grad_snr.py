@@ -561,6 +561,91 @@ def probe_batch_mccandlish(
     }
 
 
+def probe_cross_server_mccandlish(
+    learner,
+    items: list[dict],
+    *,
+    components: tuple[str, ...] = LOSS_COMPONENTS,
+    max_per_server: int = 8,
+) -> dict:
+    """True i.i.d. cross-server r=G McCandlish (2018) estimator: each concurrent server
+    session (`rollout_group`) forms one independent gradient replica g_1, ..., g_G,
+    eliminating single-server temporal autocorrelation bias."""
+    mat = [learner.replay.materialize(item) if "chorus_in" not in item else item for item in items]
+    by_server: dict[int, list[dict]] = {}
+    for it in mat:
+        gid = int(it.get("rollout_group", 0))
+        by_server.setdefault(gid, []).append(it)
+    active_servers = [gid for gid, lst in sorted(by_server.items()) if lst]
+    if len(active_servers) < 2:
+        return {"error": f"need >=2 distinct rollout_group servers, found {len(active_servers)}", "servers": len(active_servers)}
+
+    per_srv = min(max_per_server, min(len(by_server[gid]) for gid in active_servers))
+    selected = {gid: by_server[gid][-per_srv:] for gid in active_servers}
+    flat = [it for lst in selected.values() for it in lst]
+    learner.input_arena.reserve(
+        *(frame for item in flat for frame in (item["chorus_in"], item["chorus_out"])),
+        count=2,
+        capacity=learner.program.capacity,
+    )
+    learner.program.bind_capacity(learner.input_arena.capacity)
+    learner.program.reserve(flat[0]["chorus_in"])
+
+    replica_grads_by_comp: dict[str, list[dict[str, torch.Tensor | None]]] = {c: [] for c in components}
+    replica_rows = []
+    all_diags = []
+    for gid in active_servers:
+        sub = selected[gid]
+        v_mass = max(sum(float(it.get("value_weight", 1.0)) for it in sub), 1.0)
+        a_rows = [int(np.count_nonzero(it["actor_mask"] & it["train_mask"])) for it in sub]
+        a_mass = max(sum(a_rows), 1)
+        entries = [(it, float(it.get("value_weight", 1.0)) / v_mass, rows / a_mass) for it, rows in zip(sub, a_rows)]
+        grads, diags = _accumulate_component_grads(learner, entries, components)
+        all_diags.extend(diags)
+        replica_rows.append(sum(a_rows))
+        for c in components:
+            replica_grads_by_comp[c].append(grads[c])
+
+    mean_rows = float(np.mean(replica_rows)) if replica_rows else 1.0
+    by_component = {}
+    by_component_and_group = {}
+    for c in components:
+        pair = mccandlish_pair_from_grads(
+            replica_grads_by_comp[c],
+            b0_transitions=float(per_srv),
+            b0_rows=mean_rows,
+            generation=0,
+        )
+        by_component[c] = summarize_mccandlish_pairs([pair]) if pair is not None else None
+        grouped_reps = [split_named_gradients_by_group(g) for g in replica_grads_by_comp[c]]
+        g_out = {}
+        for grp in MODULE_GROUPS:
+            sub_reps = [gr[grp] for gr in grouped_reps]
+            if not any(sub_reps):
+                continue
+            gp = mccandlish_pair_from_grads(sub_reps, b0_transitions=float(per_srv), b0_rows=mean_rows, generation=0)
+            if gp is not None:
+                g_out[grp] = summarize_mccandlish_pairs([gp])
+        by_component_and_group[c] = g_out
+
+    return {
+        "mode": "cross_server_iid",
+        "servers": len(active_servers),
+        "server_ids": active_servers,
+        "transitions_per_server": per_srv,
+        "total_transitions": len(flat),
+        "by_component": by_component,
+        "by_component_and_group": by_component_and_group,
+        "diagnostics": {
+            "writable_coords_mean": _finite_mean([d["writable_coords_mean"] for d in all_diags]),
+            "rollout_log_ratio_mean": _finite_mean([d["rollout_log_ratio_mean"] for d in all_diags]),
+            "is_ratio_mean": _finite_mean([d["is_ratio_mean"] for d in all_diags]),
+            "is_floor_fraction": _finite_mean([d["is_floor_fraction"] for d in all_diags]),
+            "advantage_abs_mean": _finite_mean([d["advantage_abs_mean"] for d in all_diags]),
+        },
+    }
+
+
 class OnlineMcCandlishTracker:
     """Zero-extra-backward online split-half McCandlish gradient SNR tracker.
     Whenever an update processes >= 2 microbatch items, captures half-0 gradient snapshot

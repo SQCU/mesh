@@ -485,3 +485,128 @@ def grad_signal_outer_correlation(round_rows: list[dict[str, Any]]) -> dict[str,
         "snr_vs_delta_return_spearman": spearman_correlation(snr_vals, delta_ret),
         "cosine_vs_delta_score_rate_spearman": spearman_correlation(cos_vals, delta_score),
     }
+
+
+def _fit_bradley_terry_elo(
+    pairwise: list[tuple[str, str, float]],
+    arms: list[str],
+    *,
+    anchor_arm: str | None = "default",
+    anchor_elo: float = 1500.0,
+    prior: float = 0.25,
+    iters: int = 200,
+) -> dict[str, float]:
+    """Fit regularized Bradley-Terry / Plackett-Luce Elo ratings from pairwise outcomes
+    (winner_arm, loser_arm, outcome_in_0_1), with Laplace smoothing `prior` so unbeaten
+    or winless arms stay finite."""
+    idx = {a: i for i, a in enumerate(arms)}
+    m = len(arms)
+    wins = np.full(m, prior * max(1, m - 1), dtype=np.float64)
+    games = np.full((m, m), 2.0 * prior, dtype=np.float64)
+    np.fill_diagonal(games, 0.0)
+    for a, b, s in pairwise:
+        ia, ib = idx[a], idx[b]
+        if ia == ib:
+            continue
+        wins[ia] += float(s)
+        wins[ib] += 1.0 - float(s)
+        games[ia, ib] += 1.0
+        games[ib, ia] += 1.0
+    strength = np.ones(m, dtype=np.float64)
+    for _ in range(iters):
+        denom = np.zeros(m, dtype=np.float64)
+        for i in range(m):
+            for j in range(m):
+                if i != j and games[i, j] > 0:
+                    denom[i] += games[i, j] / (strength[i] + strength[j])
+        strength = np.where(denom > 0, wins / np.maximum(denom, 1e-12), strength)
+        strength /= np.exp(np.mean(np.log(np.maximum(strength, 1e-12))))
+    elo_raw = 400.0 * np.log10(np.maximum(strength, 1e-12))
+    offset = elo_raw[idx[anchor_arm]] if anchor_arm in idx else float(np.mean(elo_raw))
+    return {a: float(anchor_elo + elo_raw[i] - offset) for i, a in enumerate(arms)}
+
+
+def compute_multiteam_elo(
+    matches: list[dict[str, float]],
+    *,
+    anchor_arm: str = "default",
+    anchor_elo: float = 1500.0,
+    bootstrap_n: int = 400,
+    seed: int = 20261125,
+) -> dict[str, Any]:
+    """Compute multi-team Bradley-Terry Elo ratings with bootstrap 95% CIs and pairwise
+    win-rate matrix from head-to-head live matches.
+
+    Each entry in `matches` maps `arm_name -> scalar_performance` (e.g., match score,
+    or composite strategic score). Ties split 0.5/0.5.
+    """
+    arms = sorted({arm for match in matches for arm in match})
+    if len(arms) < 2 or not matches:
+        return {"error": "need >=2 arms and >=1 match", "arms": arms, "n_matches": len(matches)}
+
+    def _pairs_of(match_list):
+        pairs = []
+        for m in match_list:
+            keys = sorted(m.keys())
+            for i in range(len(keys)):
+                for j in range(i + 1, len(keys)):
+                    a, b = keys[i], keys[j]
+                    va, vb = float(m[a]), float(m[b])
+                    if va > vb + 1e-9:
+                        s = 1.0
+                    elif vb > va + 1e-9:
+                        s = 0.0
+                    else:
+                        s = 0.5
+                    pairs.append((a, b, s))
+        return pairs
+
+    all_pairs = _pairs_of(matches)
+    point = _fit_bradley_terry_elo(all_pairs, arms, anchor_arm=anchor_arm, anchor_elo=anchor_elo)
+
+    # Pairwise win-rate matrix
+    pw_wins = {a: {b: 0.0 for b in arms} for a in arms}
+    pw_games = {a: {b: 0 for b in arms} for a in arms}
+    for a, b, s in all_pairs:
+        pw_wins[a][b] += s
+        pw_wins[b][a] += 1.0 - s
+        pw_games[a][b] += 1
+        pw_games[b][a] += 1
+    win_rates = {
+        a: {b: (pw_wins[a][b] / pw_games[a][b] if pw_games[a][b] > 0 else None) for b in arms}
+        for a in arms
+    }
+
+    # Match-level bootstrap 95% CI & standard error
+    rng = np.random.default_rng(seed)
+    boot_samples = {a: [] for a in arms}
+    n_m = len(matches)
+    for _ in range(bootstrap_n):
+        idxs = rng.integers(0, n_m, size=n_m)
+        sample_matches = [matches[int(i)] for i in idxs]
+        est = _fit_bradley_terry_elo(_pairs_of(sample_matches), arms, anchor_arm=anchor_arm, anchor_elo=anchor_elo)
+        for a in arms:
+            boot_samples[a].append(est[a])
+
+    ratings = {}
+    for a in arms:
+        arr = np.asarray(boot_samples[a], dtype=np.float64)
+        se = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+        ci_lo, ci_hi = np.quantile(arr, [0.025, 0.975]).tolist()
+        # Sample size needed for +-25 Elo 95% CI half-width (1.96 * SE_n <= 25 => n_req = n * (1.96*se/25)^2)
+        n_for_pm25 = int(math.ceil(n_m * ((1.96 * se / 25.0) ** 2))) if se > 0 else 0
+        ratings[a] = {
+            "elo": round(point[a], 1),
+            "se_elo": round(se, 1),
+            "ci95": [round(ci_lo, 1), round(ci_hi, 1)],
+            "mean_score": float(np.mean([m[a] for m in matches if a in m])),
+            "std_score": float(np.std([m[a] for m in matches if a in m])),
+            "matches_for_pm25_elo_ci95": n_for_pm25,
+        }
+
+    return {
+        "n_matches": n_m,
+        "anchor_arm": anchor_arm,
+        "ratings": ratings,
+        "pairwise_win_rates": win_rates,
+    }

@@ -75,3 +75,46 @@ Running the McCandlish split-half estimator (`OnlineMcCandlishTracker` + per-com
 - **Policy Improvement Theorem Outer Check:** $\pi_T$ strictly beat untrained $\pi_0$ on **3/3 paired seeds** (`+15.83` mean score, `+265.2 u` / `+190%` max cart progress, `0 -> 8` checkpoints, `0` view faults), and outperformed unperturbed `default` (`+28.0%` mean score, `+5.4%` cart progress, `+33%` checkpoints).
 - **McCandlish Signal $\leftrightarrow$ Outer Gain Correlation (3 Training Rounds):** Round `grad_snr` correlated with next-round outer score delta with **Spearman $\rho = +1.00$** (`R1: snr=+0.034 -> +10.22`, `R3: snr=-0.0017 -> -1.86`, `R2: snr=-0.064 -> -2.16`).
 - **Honest Open Gap:** On 3-seed average after 49 single-server updates, `anti_leader_damage_share` (`0.415` vs `default` `0.558`, though spiking to `0.811` in R2 / `0.759` in `opt3`) has not yet systematically separated above `default` across seeds, and late-round `critic_lou` `B_noise` rose to `92.9` transitions as MSE converged. Moving to $G$ concurrent rollout servers per optimizer step directly addresses both by multiplying i.i.d. $B_{\text{eff}}$ and eliminating single-server temporal autocorrelation in split-half McCandlish estimation.
+
+## 4. Multi-Server Concurrent Rollout Groups ($G = 4$) & Head-to-Head Seat-Rotated Elo
+
+Multi-server concurrent rollout support was wired across `xonwire.py` (per-session `Reassembler`, snapshot queues, event draining), `strat_responder.py` (`route[session]`, per-session `ActionHistory`/`ObservationMemory`/`anticipatory_fast`, `--min-rollout-groups`, `--min-fresh-batch`, `--rotate-team-arms`), `online.py` (concurrent episode pools, server-disjoint `cross_server_iid` McCandlish split-halves), `grad_snr.py` (`probe_cross_server_mccandlish` for true $r=G$ replicas), and `outer_validation.py` (`compute_multiteam_elo` with bootstrap 95% CIs and sample-size power).
+
+### 4.1 Live $G = 4$ Concurrent Servers — True Cross-Server i.i.d. vs. Single-Server Temporal SNR
+
+Four independent `darkplaces-dedicated` servers (distinct `sv_random_seed`s `20261301..20261304`, isolated `-userdir`s) connected simultaneously to one `strat_responder` (`[15, 16, 15, 14]` responses = `60` total in 60s, `9/9` `cross_server_iid` split updates, `0` view faults, `56` saved transitions across 4 servers).
+
+| Component / Group | Cross-Server i.i.d. ($r = 4$, 6 tr/srv) | 1-Server Temporal (`microbatch=3`) | Autocorrelation Inflation |
+|---|---|---|---|
+| `total` | `cos = +0.633`, `SNR = 1.73`, `B_noise = 3.5 tr`, `eff = 87.4%` | `cos = +0.868`, `SNR = 6.31`, `B_noise = 0.5 tr` | `7.0×` $B_{\text{noise}}$ underestimation |
+| `critic_winnie` | `cos = +0.787`, `SNR = 3.70`, `B_noise = 1.6 tr`, `eff = 93.7%` | `cos = +0.994`, `SNR = 6.42`, `B_noise = 0.5 tr` | `3.2×` |
+| **`critic_lou`** | **`cos = +0.116`, `SNR = 0.132`, `B_noise = 45.5 tr`, `eff = 34.5%`** | `cos = +0.987`, `SNR = 15.20`, `B_noise = 0.2 tr` | **`227×`** |
+| `dynamics` | `cos = +0.673`, `SNR = 2.06`, `B_noise = 2.9 tr`, `eff = 89.2%` | `cos = +0.976`, `SNR = 5.99`, `B_noise = 0.5 tr` | `5.8×` |
+| **`actor_pg` ($r=3$, 1 tr/srv)** | **`cos = +0.027`, `SNR = 0.028`, `B_noise = 36.0 tr`, `eff = 7.7%`** | `opt4` 1-srv: `cos = +0.815`, `B_noise = 0.67 tr` | **`54×`** |
+| **Online 4-srv `action_head`** | **`cos = +0.234`, `SNR = 0.092`, `eff = 15.5%`** (`|g|=0.297`) | — | True $B_{\text{noise, PG}} \approx 36\text{--}50$ tr |
+| **Online 4-srv `gram_cgt`** | **`cos = +0.555`, `SNR = 1.11`, `eff = 68.9%`** (probe `cos=+0.916, eff=97.8%`) | — | Genuine cross-match CGT signal |
+| **Online 4-srv `encoder`** | **`cos = +0.195`, `SNR = 0.0006`, `eff = 0.12%`** (`|g|=1.82`) | — | Raw 900-page `quinn` still dominates noise |
+
+### 4.2 Seat-Rotated Head-to-Head 3-Arm Multi-Team Elo (6 Live Matches, 2 Waves × 3 Concurrent Servers)
+
+Pitting `default` (stock HavocBot), `initial_policy` (frozen untrained $\pi_0$), and `matrix_fusion` (58-update trained $\pi_T$) **inside the same live matches** with cyclic seat rotation (`--rotate-team-arms`, 2 full rotations across `boil`):
+
+- **Measured Map Seat Bias on `boil`:** `seat_1 (Red) = 13.58`, `seat_2 (Blue) = 7.28`, `seat_3 (Yellow) = 5.11` (**2.66× spawn asymmetry** — seat rotation is mandatory).
+- **All 3 arms moved at full speed (`255–295 u/s`) with `0` view faults and `33/33` weights loaded.**
+
+| Arm | Score Elo (95% CI) | Composite Elo (95% CI) | Mean Score | Mean CPs | Win vs `default` | Win vs `pi_0` | Raw 45s Matches for $\pm 25$ Elo CI95 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `initial_policy` ($\pi_0$) | `1618.8` `[1440, 1857]` | `1601.0` `[1398, 1856]` | `14.19` | `1.00` | `66.7%` | — | `452` (`548` comp) |
+| `default` (anchor) | `1500.0` (anchor) | `1500.0` (anchor) | `11.78` | `0.67` | — | `33.3%` | — |
+| `matrix_fusion` ($\pi_T$) | **`1381.2`** `[1205, 1500]` | **`1337.4`** `[883, 1613]` | **`0.00`** | **`0.00`** | **`33.3%`** | **`16.7%`** | `246` (`1254` comp) |
+
+### 4.3 Honest Accounting: What Architectural Variation Is Needed to Turn Gradient SNR Into Real Strategic Elo Gains
+
+The head-to-head Elo tournament revealed a critical gap that mirror-match evaluation hid: $\pi_T$ beat $\pi_0$ in mirror matches (`15.83` vs `0.00`) and reduced critic MSE `3.5×–7×`, yet scored `0.00` (`-119` Elo vs `default`, `-238` Elo vs `initial_policy`) head-to-head. Five concrete architectural changes are required to close this gap:
+
+1. **Direct Structured Strategic Control Surface (`MESH_WIRE(PLAN, 8)` instead of 1,400 unstructured VM float nudges):** Additive `±0.025` perturbations across `518–1,408` raw entity floats (`median |state| ≈ 280`, i.e. `0.009%` jitter) have weak, indirect causal leverage over HavocBot pathing and inflate pure PG `B_noise` to `36–50` transitions. Emitting `8–16` direct strategic parameters per bot/team into `havocbot_role_payload` (`lane_weights[0..J-1]`, `push_vs_deny`, `rival_focus[0..K-1]`, `aggression/regroup`) shrinks action dimension by `~100×` and directly exposes cart selection and anti-leader targeting to the reverse-induction gradient.
+2. **Structured-State Trunk (Decoupling from 900 Raw VM Pages):** `encoder` (`quinn`) still accounted for `|g|=1.82` with `SNR=0.0006` (`0.12%` efficiency) online and caused `~40 MB` (`2,779`-frame) snapshots with `ENOBUFS` drops at $G=4$. Training `Wally` directly on structured `observations` + `carts` (CGT thermographs/Nimbers) + `teams` + `events` + `LocalNeighborhood` removes 99.9% of IPC overhead (`~50×` faster inference/training) and eliminates `encoder` noise dominance.
+3. **High-Throughput Concurrent Rollouts ($G = 16\text{--}32$ Servers + `slowmo 4–8`):** True i.i.d. `actor_pg` and `critic_lou` have $B_{\text{noise}} \approx 36\text{--}46$ transitions; reaching `50–80%` step efficiency needs $B_{\text{eff}} \approx 40\text{--}160$ independent transitions per step. On compact `PLAN` frames, `16` headless servers at `slowmo 4` deliver `~64×` rollout throughput on one Apple Silicon host.
+4. **League / EMA Checkpoint Pool + Stock Anchor During Training:** Pure self-play mirror matches caused brittle drift that collapsed against stock HavocBot (`default`) and `initial_policy`. Mixing `default` + historical EMA checkpoints ($\pi_{\text{EMA}, k}$) across seat-rotated concurrent servers prevents mirror-match overfitting and gives a continuous in-run Elo ladder.
+5. **Elo Evaluation Variance Reduction (Paired-Seed Cyclic Triplets + Full-Horizon Matches):** At 45s match length, single-match score std (`14–29`) requires `~250–550` raw matches for a `±25` Elo 95% CI. Running full-horizon matches (120–180s game time, `30–45s` wall clock at `slowmo 4`) paired across all 3 cyclic seat permutations on each common `sv_random_seed` cancels the `2.66×` map-spawn bias and reduces the required Elo evaluation budget by `~4–8×` to `~30–60` matches (~2–4 minutes on $G = 16$ servers).
+

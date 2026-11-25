@@ -180,51 +180,56 @@ class Reassembler:
 
 
 class RuntimeFrames:
-    """One engine's messages joined into snapshots: OBSERVATION, CART, TEAM and STATE of one (session, tick) make a
-    snapshot, and the latest complete snapshot is the one slot take() empties; EVENT rows and OUTCOME records
-    accumulate until taken (design/TRAINING-CONTINUATION.md)."""
+    """One or more concurrent engines' messages joined into per-session snapshots: OBSERVATION, CART, TEAM and STATE
+    of one (session, tick) make a snapshot, and each session keeps its latest complete snapshot until take() pops it
+    round-robin; EVENT rows and OUTCOME records accumulate per session until taken."""
 
     def __init__(self, usable):
         self.usable = usable
         self.receivers, self.events, self.outcomes = {}, {}, {}
-        self.assembling, self.latest = None, None
+        self.assembling, self.latest = {}, {}
 
     def feed(self, buffer):
         header = parse_hdr(buffer)
         if header is None or header["kind"] not in (OBSERVATION_KIND, CART_KIND, TEAM_KIND, STATE_KIND, EVENT_KIND, OUTCOME_KIND):
-            return
+            return None
         kind = header["kind"]
-        assembly = (kind, header["width"])
+        session = header["session"]
+        assembly = (session, kind, header["width"])
         if assembly not in self.receivers:
             self.receivers[assembly] = Reassembler(kind, header["width"], self.usable)
         receiver = self.receivers[assembly]
         complete = receiver.feed(buffer)
         if complete is None:
-            return
+            return session
         if kind == OUTCOME_KIND:
             for row in receiver.stage:
                 identity = ":".join(str(int(value)) for value in row[:3])
                 self.outcomes[identity] = {"kind": "score_win" if row[3] > 0 else "tie", "actor_team": int(row[3]),
                     "time": float(row[4]), "episode_id": identity, "source": "engine_outcome"}
-            return
+            return session
         key = (complete["session"], complete["tick"])
         if kind == EVENT_KIND:
             self.events[(*key, complete["req_id"])] = receiver.stage.copy()
-            return
-        if self.assembling is None or self.assembling[0] != key:
-            self.assembling = (key, {})
-        self.assembling[1][kind] = (complete, receiver.stage.copy())
-        if len(self.assembling[1]) == 4:
-            self.latest, self.assembling = self.assembling, None
+            return session
+        current = self.assembling.get(session)
+        if current is None or current[0] != key:
+            current = (key, {})
+            self.assembling[session] = current
+        current[1][kind] = (complete, receiver.stage.copy())
+        if len(current[1]) == 4:
+            self.latest[session] = current
+            self.assembling.pop(session, None)
+        return session
 
     def take(self):
-        if self.latest is None:
+        if not self.latest:
             return None
-        (session, tick), records = self.latest
-        self.latest = None
+        session = next(iter(self.latest))
+        (sess, tick), records = self.latest.pop(session)
         events = {entry: self.events.pop(entry) for entry in tuple(self.events)
-                  if entry[0] != session or entry[1] <= tick}
-        return (session, tick), records, events
+                  if entry[0] == sess and entry[1] <= tick}
+        return (sess, tick), records, events
 
     def replay_snapshot(self, event_frames, outcomes):
         self.outcomes.update(outcomes)
@@ -240,7 +245,9 @@ class RuntimeFrames:
         self.events = dict(transport.get('events', transport.get('pending_events', {})))
 
     def report(self):
-        return {"snapshot_ready": self.latest is not None, "pending_event_frames": len(self.events),
+        return {"snapshot_ready": bool(self.latest), "ready_sessions": len(self.latest),
+                "active_sessions": len({r.session for r in self.receivers.values() if r.session}),
+                "pending_event_frames": len(self.events),
                 "pending_event_rows": sum(len(rows) for rows in self.events.values()),
                 "outcomes": len(self.outcomes),
                 "assemblies": [{"kind": receiver.kind, "request": receiver.id, "session": receiver.session, "tick": receiver.tick,
