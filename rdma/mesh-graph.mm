@@ -818,7 +818,7 @@ template [[host_name("mg_sum_norm_f32")]] [[kernel]] void mg_sum_norm<float>(con
   for (uint e = 0; e < READS; e++) {
     const uint k = k0 + e, j = k < half_d ? k : k - half_d;
     const float inv_freq = (rope == 1u) ? metal::exp2(-(float(j) / float(half_d)) * base_log2) : (1.0f / freqs[j]);
-    const float theta = L * inv_freq, c = metal::fast::cos(theta), sn = metal::fast::sin(theta);
+    const float theta = L * inv_freq, c = metal::precise::cos(theta), sn = metal::precise::sin(theta);
     const float a = normed[j], bb = normed[j + half_d];
     y[k] = bfloat(k < half_d ? a * c - bb * sn : a * sn + bb * c);
   }

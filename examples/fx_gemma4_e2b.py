@@ -298,34 +298,41 @@ def main():
         mod = Gemma4DecodeFX(cfg, rank, world, weights, batch_size=B, ctx_len=ctx_len, update_inplace=True)
         mod.eval()
 
-        # Fill KV caches deterministically (same seed across ranks)
-        gen = torch.Generator().manual_seed(1234)
+        # Fill KV caches deterministically when ctx_len > 0 (unit-variance RMS-scaled like real normed K/V)
         n_own = cfg["num_hidden_layers"] - cfg["num_kv_shared_layers"]
-        for i in range(n_own):
-            kc = getattr(mod, f"k_cache_{i}")
-            vc = getattr(mod, f"v_cache_{i}")
-            fill_n = min(ctx_len, kc.shape[2])
-            v = (torch.randn((B, kc.shape[1], fill_n, kc.shape[3]), generator=gen) * 0.5).to(torch.bfloat16)
-            kc[:, :, :fill_n, :].copy_(v)
-            vc[:, :, :fill_n, :].copy_(v)
-
-        ex_tok = torch.tensor([5 + b for b in range(B)], dtype=torch.int32)
-        ex_pos = torch.tensor([ctx_len], dtype=torch.int32)
-
-        # Optional 1-step PyTorch eager parity check (TP=1)
-        eager_tok = None
-        if check_eager and world == 1:
-            t_in = ex_tok.clone()
-            p_in = ex_pos.clone()
-            with torch.no_grad():
-                eager_tok = mod(t_in, p_in).tolist()
-            # Restore KV slot overwritten by eager check
+        if ctx_len > 0:
+            gen = torch.Generator().manual_seed(1234)
             for i in range(n_own):
                 kc = getattr(mod, f"k_cache_{i}")
                 vc = getattr(mod, f"v_cache_{i}")
-                slot = (ctx_len % kc.shape[2]) if cfg["layer_types"][i] == "sliding_attention" else ctx_len
-                kc[:, :, slot, :].zero_()
-                vc[:, :, slot, :].zero_()
+                fill_n = min(ctx_len, kc.shape[2])
+                hd_scale = 1.0 / math.sqrt(float(kc.shape[3]))
+                v = (torch.randn((B, kc.shape[1], fill_n, kc.shape[3]), generator=gen) * hd_scale).to(torch.bfloat16)
+                kc[:, :, :fill_n, :].copy_(v)
+                vc[:, :, :fill_n, :].copy_(v)
+
+        ex_tok = torch.tensor([2 if b == 0 else (5 + b) for b in range(B)], dtype=torch.int32)
+        ex_pos = torch.tensor([ctx_len], dtype=torch.int32)
+
+        # Optional multi-step PyTorch eager autoregressive parity check (TP=1)
+        eager_toks = None
+        check_steps = int(os.environ.get("CHECK_STEPS", "8"))
+        if check_eager and world == 1:
+            t_in = ex_tok.clone()
+            p_in = ex_pos.clone()
+            saved_kv = []
+            for i in range(n_own):
+                kc = getattr(mod, f"k_cache_{i}")
+                vc = getattr(mod, f"v_cache_{i}")
+                saved_kv.append((kc.clone(), vc.clone()))
+            eager_toks = []
+            with torch.no_grad():
+                for _ in range(check_steps):
+                    nxt = mod(t_in, p_in)
+                    eager_toks.extend(nxt.tolist())
+            for i in range(n_own):
+                getattr(mod, f"k_cache_{i}").copy_(saved_kv[i][0])
+                getattr(mod, f"v_cache_{i}").copy_(saved_kv[i][1])
 
         # 1. Export via torch.export.export()!
         t_exp0 = time.perf_counter()
@@ -340,7 +347,7 @@ def main():
             rank=rank,
             comm_id=comm_id,
             wire_mode=wire,
-            max_decode_steps=max(n_steps, 4),
+            max_decode_steps=max(n_steps, check_steps, 4),
         )
         t_comp = (time.perf_counter() - t_comp0) * 1e3
 
@@ -350,13 +357,15 @@ def main():
         tok_view.copy_(ex_tok)
         pos_view.copy_(ex_pos)
 
-        # Optional exact 1-step check before warmup advances pos
-        first_tok = None
+        # Optional exact multi-step autoregressive parity check before benchmark warmup advances pos
+        metal_check_toks = None
         if check_eager and world == 1:
-            _, _, toks1 = compiled.run(n_steps=1, warm_steps=0, out_tok_stride=B)
-            first_tok = toks1[:B]
+            _, _, metal_check_toks = compiled.run(n_steps=check_steps, warm_steps=0, out_tok_stride=B)
             tok_view.copy_(ex_tok)
             pos_view.copy_(ex_pos)
+            for i in range(n_own):
+                compiled.state_view(f"k_cache_{i}").copy_(getattr(mod, f"k_cache_{i}"))
+                compiled.state_view(f"v_cache_{i}").copy_(getattr(mod, f"v_cache_{i}"))
 
         # 3. Run multi-token autoregressive decode in pure C++/Metal (ZERO Python dispatch per token!)
         steady_ms, wall_ms, gen_toks = compiled.run(n_steps=n_steps, warm_steps=warm_steps, out_tok_stride=B)
@@ -380,12 +389,15 @@ def main():
             "wall_ms_step": round(ms_step, 3),
             "b_tok_s": round(b_tok_s, 1),
             "a_tok_s": round(a_tok_s, 1),
-            "toks_head": gen_toks[: min(len(gen_toks), B * 4)],
+            "toks_b0": [gen_toks[s * B] for s in range(min(n_steps, 8))],
         }
-        if eager_tok is not None:
-            rec["eager_tok"] = eager_tok
-            rec["metal_tok"] = first_tok
-            rec["exact_match"] = (eager_tok == first_tok)
+        if eager_toks is not None and metal_check_toks is not None:
+            rec["eager_b0"] = [eager_toks[s * B] for s in range(check_steps)]
+            rec["metal_b0"] = [metal_check_toks[s * B] for s in range(check_steps)]
+            rec["exact_match_b0"] = (rec["eager_b0"] == rec["metal_b0"])
+            rec["exact_match_all"] = (eager_toks == metal_check_toks)
+            rec["match_count"] = sum(int(a == b) for a, b in zip(eager_toks, metal_check_toks))
+            rec["total_checked"] = len(eager_toks)
         if rank == 0:
             print(json.dumps(rec), flush=True)
 
