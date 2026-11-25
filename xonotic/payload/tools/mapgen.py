@@ -6,9 +6,21 @@ from placement import fnum, vstr, check_bsp, vadd, vscale, vnorm, vcross
 
 Q3MAP2 = os.environ.get('Q3MAP2', os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'bin', 'mesh-q3map2')))
 BASEPATH = os.environ.get('XON_BASEPATH', os.path.expanduser('~/dox/xonotic/Xonotic'))
-TEX = dict(floor='exx/floor-tread01', wall='exx/wall-bigrib02', ceil='exx/panel-metalbig04',
-           trim='exx/trim-01', pad='exx/floor-clang01', light='exx/light-panel01',
-           caulk='common/caulk', trigger='common/trigger')
+THEMES = {
+    'industrial': dict(floor='exx/floor-tread01', wall='exx/wall-bigrib02', ceil='exx/panel-metalbig04',
+                       trim='exx/trim-01', pad='exx/floor-clang01', light='exx/light-panel01',
+                       caulk='common/caulk', trigger='common/trigger'),
+    'concrete': dict(floor='exx/floor-grate01', wall='exx/base-crete01', ceil='exx/base-metal03',
+                     trim='exx/trim-02', pad='exx/floor-clang01', light='exx/light-panel01',
+                     caulk='common/caulk', trigger='common/trigger'),
+    'reactor': dict(floor='exx/floor-clang01', wall='exx/panel-metalbig04', ceil='exx/wall-bigrib02',
+                    trim='exx/trim-01', pad='exx/floor-tread01', light='exx/light-panel01',
+                    caulk='common/caulk', trigger='common/trigger'),
+    'obsidian': dict(floor='exx/base-metal03', wall='exx/trim-01', ceil='exx/base-crete01',
+                     trim='exx/floor-tread01', pad='exx/floor-clang01', light='exx/light-panel01',
+                     caulk='common/caulk', trigger='common/trigger'),
+}
+TEX = dict(THEMES['industrial'])
 THK, DOORH, GRID = 32.0, 192.0, 176.0
 
 def basis(n):
@@ -96,6 +108,9 @@ class Gen:
     def ledge(self, x0, y0, x1, y1, z):
         self.slab(x0, y0, x1, y1, z - 24, z, TEX['caulk'], top=TEX['floor'])
         self.floors.append((x0 + 48, y0 + 48, x1 - 48, y1 - 48, z))
+
+    def pillar(self, cx, cy, z0, z1, half=40.0):
+        self.box([cx - half, cy - half, z0], [cx + half, cy + half, z1], TEX['trim'])
 
     def jumppad(self, at, target, idx):
         self.slab(at[0] - 48, at[1] - 48, at[0] + 48, at[1] + 48, at[2], at[2] + 8, TEX['pad'])
@@ -296,9 +311,13 @@ def compile_map(mappath, verbose=False, q3map2=Q3MAP2, basepath=BASEPATH):
             print(r.stderr[-1000:])
             raise SystemExit('q3map2 %s failed' % stage[0])
 
-def ring_arena(seed, nrooms):
+def ring_arena(seed, nrooms, kteams=5, theme='auto'):
     rng = random.Random(seed)
-    g = Gen(seed, 'arena seed %d' % seed)
+    theme_names = sorted(THEMES)
+    chosen = theme if theme in THEMES else theme_names[seed % len(theme_names)]
+    TEX.clear()
+    TEX.update(THEMES[chosen])
+    g = Gen(seed, 'arena seed %d (%s)' % (seed, chosen))
     nrooms = max(4, nrooms + (nrooms & 1))
     rows = int(math.sqrt(nrooms))
     while rows > 2 and (nrooms % rows or rows & 1):
@@ -351,10 +370,23 @@ def ring_arena(seed, nrooms):
     far = rooms[(tower + nrooms // 2) % nrooms]
     g.teleporter(ledge_c, [far[0], far[1], 0.0], 90, 0)
     for i, (cx, cy, w, d, h, doors) in enumerate(rooms):
+        if i != tower and w >= 832 and d >= 832 and (i % 3 == 0):
+            g.pillar(cx + 160, cy + 160, 0.0, h, 36.0)
+            g.pillar(cx - 160, cy - 160, 0.0, h, 36.0)
         g.spawn('info_player_deathmatch', [cx + 128, cy + 128, 0], rng.randrange(360))
-        g.spawn('info_player_team%d' % (i % 4 + 1), [cx - 128, cy - 128, 0], rng.randrange(360))
+        team_id = (i % max(2, kteams)) + 1
+        if kteams > 8:
+            g.ents.append({'classname': 'info_player_team', 'origin': '%g %g %g' % (cx - 128, cy - 128, 24),
+                           'angle': str(rng.randrange(360)), 'team': str(team_id)})
+        else:
+            g.spawn('info_player_team%d' % team_id, [cx - 128, cy - 128, 0], rng.randrange(360))
         if i % 2:
-            g.spawn('info_player_team%d' % (i % 4 + 1), [cx - 128, cy + 128, 0], rng.randrange(360))
+            team_id2 = ((i + max(1, kteams // 2)) % max(2, kteams)) + 1
+            if kteams > 8:
+                g.ents.append({'classname': 'info_player_team', 'origin': '%g %g %g' % (cx - 128, cy + 128, 24),
+                               'angle': str(rng.randrange(360)), 'team': str(team_id2)})
+            else:
+                g.spawn('info_player_team%d' % team_id2, [cx - 128, cy + 128, 0], rng.randrange(360))
     g.gen_nav()
     centers = [[room[0], room[1], 0.0] for room in rooms]
     g.wps += centers
@@ -369,6 +401,7 @@ if __name__ == '__main__':
     nrooms = 6
     kteams = 5
     kcarts = 3
+    theme = 'auto'
     outdir = '/tmp/mapgen/data/maps'
     for f in flags:
         if f.startswith('--rooms='):
@@ -377,12 +410,14 @@ if __name__ == '__main__':
             kteams = int(f[8:])
         if f.startswith('--carts='):
             kcarts = int(f[8:])
+        if f.startswith('--theme='):
+            theme = f[8:]
         if f.startswith('--out='):
             outdir = f[6:]
     os.makedirs(outdir, exist_ok=True)
     mapname = 'genarena%d' % seed
-    print('mapgen seed=%d rooms=%d out=%s' % (seed, nrooms, outdir))
-    g = ring_arena(seed, nrooms)
+    print('mapgen seed=%d rooms=%d teams=%d carts=%d theme=%s out=%s' % (seed, nrooms, kteams, kcarts, theme, outdir))
+    g = ring_arena(seed, nrooms, kteams=kteams, theme=theme)
     mappath = os.path.join(outdir, mapname + '.map')
     g.emit_map(mappath)
     compile_map(mappath)

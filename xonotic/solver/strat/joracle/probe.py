@@ -96,6 +96,18 @@ def literal_source_coordinates(model, server_state_labels=()):
         state_names = []
     return source, names, state, state_names
 
+MAX_J_COORD_WIDTH = 512
+
+def _project_matrix_columns(matrix, labels, max_width=MAX_J_COORD_WIDTH):
+    if matrix.ndim != 2 or matrix.shape[1] <= max_width:
+        return matrix, list(labels)
+    finite = np.where(np.isfinite(matrix), matrix, 0.0)
+    energy = np.var(finite, axis=0) + 1e-6 * np.mean(np.abs(finite), axis=0)
+    top = np.sort(np.argpartition(energy, -max_width)[-max_width:])
+    lbls = list(labels)
+    proj_labels = [lbls[int(i)] if int(i) < len(lbls) else f"coord.{int(i)}" for i in top]
+    return matrix[:, top].copy(), proj_labels
+
 def rows_from_frame(frame):
     model = frame.get("model") or {}
     x = model.get("x")
@@ -116,12 +128,15 @@ def rows_from_frame(frame):
     lens_input, lens_names, server_state, server_state_labels = literal_source_coordinates(
         model, frame.get("server_state_labels") or (),
     )
+    j_labels = tuple(model.get("j_labels") or (f"j.{index}" for index in range(j.shape[1])))
+    x, _ = _project_matrix_columns(x, model.get("x_labels") or ())
+    j, j_labels = _project_matrix_columns(j, j_labels)
+    lens_input, lens_names = _project_matrix_columns(lens_input, lens_names)
+    server_state, server_state_labels = _project_matrix_columns(server_state, server_state_labels)
     return {
         "row_mass": n,
         "j": j,
-        "j_labels": tuple(model.get("j_labels") or (
-            f"j.{index}" for index in range(j.shape[1])
-        )),
+        "j_labels": tuple(j_labels),
         "x": x,
         "lens_input": lens_input,
         "lens_names": lens_names,

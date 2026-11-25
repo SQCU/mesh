@@ -777,6 +777,13 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 	int myteam = Team_TeamToIndex(this.team);
 	int archetype = etof(this) % 4;
 	int pref_cart = payload_cart_count > 0 ? (etof(this) % payload_cart_count) : 0;
+	int plan_cart = -1;
+	float plan_boost = 1.0;
+	if (this.plc_pl_f_id == etof(this) && this.plc_pl_f_pick >= 0 && this.plc_pl_f_pick < PLC_MAX_CARTS * 5)
+	{
+		plan_cart = floor(this.plc_pl_f_pick / 5);
+		plan_boost = 1.5 + bound(0, this.plc_pl_f_w0 + this.plc_pl_f_w1 + this.plc_pl_f_w2, 3.0);
+	}
 	IL_EACH(g_payload_carts, true,
 	{
 		vector cpos = it.origin + it.view_ofs;
@@ -789,7 +796,12 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 			weight = (archetype == 1 ? 2.4 : 1.7);
 		else if (archetype == 0 || archetype == 3)
 			weight = 1.8;
-		if (it.plc_cart_id == pref_cart)
+		if (plan_cart >= 0)
+		{
+			if (it.plc_cart_id == plan_cart)
+				weight *= plan_boost;
+		}
+		else if (it.plc_cart_id == pref_cart)
 			weight *= 1.35;
 		entity goal = it;
 		if (vdist(cpos - org, >, autocvar_g_payload_push_radius * 1.5))

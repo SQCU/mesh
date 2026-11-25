@@ -5,6 +5,8 @@ float plc_str_h_obs  = -1;
 float plc_str_h_cart = -1;
 float plc_str_h_team = -1;
 float plc_str_h_evt  = -1;
+float plc_str_h_plan = -1;
+float plc_str_plan_done = 0;
 float plc_str_req_seq  = 0;
 
 entity plc_str_cart_pool[PLC_MAX_CARTS];
@@ -161,6 +163,7 @@ void payload_strategy_attach()
 		plc_str_h_cart = mesh_open(PLC_STR_NODE, MESH_KIND_CART, MESH_KIND_NONE, PLC_STR_CART_W, PLC_MAX_CARTS);
 		plc_str_h_team = mesh_open(PLC_STR_NODE, MESH_KIND_TEAM, MESH_KIND_NONE, PLC_STR_TEAM_W, NUM_TEAMS);
 		plc_str_h_evt  = mesh_open(PLC_STR_NODE, MESH_KIND_EVENT, MESH_KIND_NONE, PLC_STR_EVT_W, max(1, maxclients));
+		plc_str_h_plan = mesh_open(PLC_STR_NODE, MESH_KIND_NONE, MESH_KIND_PLAN, PLC_STR_PLAN_W, maxclients);
 	}
 
 	payload_strategy_cart_pool();
@@ -607,6 +610,15 @@ void payload_strategy_step(entity leadcart)
 		return;
 
 	float nclients = maxclients;
+	if (plc_str_h_plan >= 0)
+	{
+		float plan_id = mesh_poll(plc_str_h_plan);
+		if (plan_id > plc_str_plan_done)
+		{
+			plc_str_plan_done = plan_id;
+			mesh_scatter_rows(plc_str_h_plan, plc_pl_f_id, 1, nclients, PLC_STR_PLAN_W);
+		}
+	}
 	if (mesh_stat(plc_str_h_obs, MESH_STAT_PENDING) == 0)
 	{
 		FOREACH_CLIENT(IS_PLAYER(it), { payload_perceive(it); });

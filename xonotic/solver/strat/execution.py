@@ -277,6 +277,11 @@ class PolicyProgram:
         self.policy_arm = arm
         self.accumulated = {}
         self.queries = {}
+        if self.model is not None and getattr(self.model, 'metal_graph', None) is None:
+            from .metal_graph_exec import maybe_metal_graph
+            mg = maybe_metal_graph()
+            if mg is not None:
+                self.model.metal_graph = mg
 
     def announce(self, name, *operands):
         self.queries[name] = self.queries.get(name, 0) + 1
@@ -357,6 +362,9 @@ class PolicyProgram:
         reduce = self.world.reduce_norm if self.world is not None and self.world.size > 1 else None
         clipped, magnitude = clip_grad_norm(gradients, self.gradient_clip, reduce)
         self.optimizer.apply(clipped)
+        mg = getattr(self.model, 'metal_graph', None) if self.model is not None else None
+        if mg is not None:
+            mg.invalidate_weights()
         if self.world is not None and self.world.size > 1:
             self.world.broadcast_([value.data for value in self.replicated()])
         total = self.accumulated.get('loss', torch.zeros(()))

@@ -8,6 +8,7 @@ const float PLC_STR_OBS_W = 84;
 const float PLC_STR_CART_W = 18;
 const float PLC_STR_TEAM_W = 7;
 const float PLC_STR_EVT_W = 18;
+const float PLC_STR_PLAN_W = 8;
 
 const float PLC_OBS_ID = 0;
 const float PLC_OBS_TEAM = 1;
@@ -314,6 +315,14 @@ entity plc_nav_targets;
 .entity plc_ev_next;
 .float plc_str_spawn_stamp2;
 .float plc_str_death_stamp;
+.float plc_pl_f_id;
+.float plc_pl_f_pick;
+.float plc_pl_f_w0;
+.float plc_pl_f_w1;
+.float plc_pl_f_w2;
+.float plc_pl_f_w3;
+.float plc_pl_f_w4;
+.float plc_pl_f_leader;
 
 #define autocvar_g_payload_strategy_log cvar("g_payload_strategy_log")
 #define autocvar_g_payload_vcell_log cvar("g_payload_vcell_log")

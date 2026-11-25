@@ -23,6 +23,7 @@ gametype dm
 gametype tdm
 gametype lms
 gametype ka
+gametype plc
 MI
 
 echo "--- BSP ---";   ${=Q3} -meta $MAPS/$NAME.map            | grep -iE 'leaked|^\*\*\* ERROR' && { echo "LEAK/ERROR"; exit 1; } || true

@@ -39,3 +39,4 @@ float(entity bot, float selector) mesh_view_stat = #661;
 float(float node, float tick) mesh_view_publish = #662;
 void(float node, float episode, float winner) mesh_round_outcome = #663;
 #define MESH_KIND_STATE 6
+#define MESH_KIND_PLAN 8

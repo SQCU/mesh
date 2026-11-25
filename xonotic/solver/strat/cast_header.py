@@ -90,6 +90,11 @@ class Wally(nn.Module):
 
 
 def encode_rows(wally: Wally, rows):
+    mg = getattr(wally, "metal_graph", None)
+    if mg is not None:
+        out = mg.run_swiglu("encode_rows", rows, wally.input_gate.weight, wally.input_value.weight, wally.input_out.weight)
+        if out is not None:
+            return out
     normalized = norm(rows)
     return rows + linear(wally.input_out, silu(linear(wally.input_gate, normalized)) * linear(wally.input_value, normalized))
 
@@ -97,6 +102,11 @@ def ir_query(wally: Wally, query):
     return linear(wally.ir_query, query)
 
 def gia_uma_dov(wally: Wally, ir):
+    mg = getattr(wally, "metal_graph", None)
+    if mg is not None:
+        out = mg.run_swiglu("gia_uma_dov", ir, wally.gia.weight, wally.uma.weight, wally.dov.weight)
+        if out is not None:
+            return out - ir
     normed = norm(ir)
     gated = silu(linear(wally.gia, normed)) * linear(wally.uma, normed)
     return linear(wally.dov, gated)

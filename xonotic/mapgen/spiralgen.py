@@ -230,6 +230,47 @@ class Spiral:
             c = centers[i]
             ents.append((self.rng.choice(pool),
                          {'origin': '%s %s %s' % (fmt(c[0]), fmt(c[1]), fmt(c[2] + 24))}))
+
+        if a.payload:
+            nteams = max(2, min(256, int(a.teams)))
+            ncarts = max(1, min(64, int(a.carts)))
+            for t in range(nteams):
+                ents.append(('plc_team', {'cnt': str(t), 'netname': 'Team %d' % (t + 1)}))
+            tstep = max(1, (n - 4) // max(1, nteams))
+            for t in range(nteams):
+                idx = min(n - 3, 2 + (t * tstep) % max(1, n - 4))
+                c = centers[idx]
+                nxt = centers[min(idx + 1, n - 1)]
+                d = vsub(nxt, c)
+                yaw = math.degrees(math.atan2(d[1], d[0])) % 360.0
+                ents.append(('info_player_team',
+                             {'origin': '%s %s %s' % (fmt(c[0]), fmt(c[1]), fmt(c[2] + 26)),
+                              'angle': fmt(yaw), 'team': str(t + 1)}))
+            span = max(4, (n - 4) // ncarts)
+            ncp = max(1, int(a.checkpoints_per_cart))
+            for ci in range(ncarts):
+                s0 = 2 + ci * span
+                s1 = min(n - 2, s0 + span)
+                if s1 - s0 < 2:
+                    continue
+                nodes = list(range(s0, s1 + 1, max(1, (s1 - s0) // 10)))
+                if nodes[-1] != s1:
+                    nodes.append(s1)
+                first_tn = 'plc_c%d_n0' % ci
+                c0 = centers[nodes[0]]
+                ents.append(('func_plc_cart',
+                             {'origin': '%s %s %s' % (fmt(c0[0]), fmt(c0[1]), fmt(c0[2] + 24)),
+                              'target': first_tn, 'spawnflags': '1'}))
+                cp_stride = max(1, (len(nodes) - 1) // ncp)
+                for ni, idx in enumerate(nodes):
+                    p = centers[idx]
+                    kv = {'origin': '%s %s %s' % (fmt(p[0]), fmt(p[1]), fmt(p[2] + 24)),
+                          'targetname': 'plc_c%d_n%d' % (ci, ni)}
+                    if ni + 1 < len(nodes):
+                        kv['target'] = 'plc_c%d_n%d' % (ci, ni + 1)
+                    if ni > 0 and (ni % cp_stride == 0 or ni == len(nodes) - 1):
+                        kv['spawnflags'] = '1'
+                    ents.append(('plc_path', kv))
         return ents
 
 def write_waypoints(path, centers, spacing=320.0):
@@ -345,6 +386,11 @@ def build_parser():
     p.add_argument('--tex-ceil', default='exx/base/base_metal03')
     p.add_argument('--randomize', action='store_true',
                    help='draw the shape parameters from the seed instead of the flags')
+    p.add_argument('--payload', action='store_true',
+                   help='emit func_plc_cart, plc_path checkpoints, plc_team, and info_player_team entities')
+    p.add_argument('--teams', type=int, default=3, help='number of payload teams (2..256)')
+    p.add_argument('--carts', type=int, default=2, help='number of helical payload carts')
+    p.add_argument('--checkpoints-per-cart', type=int, default=3)
     return p
 
 def main():
