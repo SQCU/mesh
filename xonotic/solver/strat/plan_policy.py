@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from payload.tools.strategy_io_schema import CS, EVT, EVT_WIDTH, OBS, OBS_WIDTH, TS
 
+from .aurora import Aurora, aurora_init_weight_
 from .game_value import cgt_tensor_features
 from .grad_snr import (
     grad_cosine,
@@ -54,17 +55,16 @@ def mp_lerp(a: torch.Tensor, b: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
 
 
 class MPLinear(nn.Module):
-    """EDM2 unit-norm weight linear layer: every output row w_i lies on the unit hypersphere
-    ||w_i||_2 = 1 (forced both in forward and via post-step project_unit_norm_).
-    For unit-RMS input x (E[x_j^2] = 1), Var(w_i^T x) = ||w_i||_2^2 = 1 exactly, eliminating
-    the need for AdamW weight decay."""
+    """EDM2 unit-norm weight linear layer with Aurora-tuned Stiefel ∩ Row-Oblique initialization.
+    Every output row w_i lies on the unit hypersphere ||w_i||_2 = 1 and starts as a tight frame
+    with uniform row leverage (zero initial neuron favoritism, zero AdamW weight decay)."""
 
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
         self.in_features = int(in_features)
         self.out_features = int(out_features)
-        w = torch.randn(self.out_features, self.in_features)
-        w = w / w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        w = torch.empty(self.out_features, self.in_features)
+        aurora_init_weight_(w)
         self.weight = nn.Parameter(w)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -99,9 +99,29 @@ def weight_norm_report(model: nn.Module) -> dict:
     }
 
 
-def make_edm2_optimizer(model: nn.Module, lr: float = 1e-3) -> torch.optim.Adam:
-    """Plain Adam with weight_decay=0.0 paired with post-step unit-norm projection (no AdamW)."""
-    return torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.99), weight_decay=0.0)
+def make_aurora_optimizer(
+    model: nn.Module,
+    lr: float = 0.012,
+    scalar_lr: float = 2.5e-3,
+    mu: float = 0.90,
+    pp_iterations: int = 2,
+    pp_beta: float = 0.5,
+) -> Aurora:
+    """Aurora leverage-aware spectral optimizer (replaces Adam/AdamW & fixes Muon tall-matrix neuron death)."""
+    return Aurora(
+        model.parameters(),
+        lr=lr,
+        scalar_lr=scalar_lr,
+        mu=mu,
+        nesterov=True,
+        pp_iterations=pp_iterations,
+        pp_beta=pp_beta,
+    )
+
+
+def make_edm2_optimizer(model: nn.Module, lr: float = 0.012) -> Aurora:
+    """Default EDM2 unit-norm optimizer: Aurora spectral optimizer + post-step unit-sphere projection."""
+    return make_aurora_optimizer(model, lr=lr)
 
 
 def edm2_step(optimizer: torch.optim.Optimizer, model: nn.Module, grad_clip: float = 1.0) -> float:
@@ -209,14 +229,14 @@ class PlanSample(NamedTuple):
 
 
 class MPResCGTBlock(nn.Module):
-    """EDM2 Magnitude-Preserving CGT Block with:
-    1. Sharpened positive exponential kernel Gram phi_tau(u) = exp(tau * u) with exact kernel
-       normalization (O(M*r*d), convex-hull bounded => zero outliers, arbitrarily steep selection).
-    2. Bounded-condition DPP repulsive Gram (I + g_dpp * B^T B)^{-1} (anti-clumping team split).
-    3. Native products.World Tensor Parallelism across all 4 Mac Studios (row-Gram 'cross' TP
-       and column-sharded SwiGLU 'ffn' TP — identical mathematical function at arbitrary scale)."""
+    """Bitter-Lesson Wide Subspace ResNet + Plain Linear Gram CGT Block (EDM2 unit-norm + Aurora-ready):
+    - Pure associative linear Gram R(R^T V) & per-team T(T^T V): zero hand-crafted nonlinear kernel hacks.
+    - High-dimensional hidden stream (d=256, h=1024) where multi-layer rotate (MPLinear) + sum (mp_lerp)
+      bundles sharpness, routing, and information separation into model-learned orthogonal subspaces.
+    - Bounded-condition DPP repulsive Gram (I + g_dpp * B^T B)^{-1} (B^T V) for anti-clumping team split.
+    - Native products.World 4-Studio Tensor Parallelism on 'cross' (row-Gram) and 'ffn' (column-shard)."""
 
-    def __init__(self, d: int = 128, h: int = 256, r_gram: int = 64, r_dpp: int = 32, init_blend: float = 0.25):
+    def __init__(self, d: int = 256, h: int = 1024, r_gram: int = 128, r_dpp: int = 64, init_blend: float = 0.25):
         super().__init__()
         self.d = d
         self.h = h
@@ -235,20 +255,11 @@ class MPResCGTBlock(nn.Module):
         self.ffn_up = MPLinear(d, h)
         self.ffn_down = MPLinear(h, d)
 
-        # Explicit bounded scalar kernel sharpness & residual blend controls (no activation norm growth!)
-        self.log_tau_global = nn.Parameter(torch.tensor(math.log(2.0)))
-        self.log_tau_team = nn.Parameter(torch.tensor(math.log(2.0)))
         self.log_dpp_gain = nn.Parameter(torch.tensor(math.log(1.0)))
         logit_b = math.log(init_blend / max(1e-4, 1.0 - init_blend))
         self.blend_gram = nn.Parameter(torch.tensor(logit_b))
         self.blend_ffn = nn.Parameter(torch.tensor(logit_b))
-
-    def _positive_kernel_features(self, u_unit: torch.Tensor, log_tau: torch.Tensor) -> torch.Tensor:
-        """Bounded positive feature map phi_tau(u) = exp(tau * u) on unit-L2 vectors u.
-        Since |u_c| <= 1 and tau <= 4.0, entries are strictly in [e^-4, e^4] — zero overflow,
-        arbitrarily steep kernel selectivity via explicit scalar tau."""
-        tau = torch.clamp(torch.exp(log_tau), 0.25, 4.0)
-        return torch.exp(tau * u_unit)
+        self._last_ffn_act: torch.Tensor | None = None
 
     def forward(
         self,
@@ -261,38 +272,34 @@ class MPResCGTBlock(nn.Module):
         xn = mp_norm(x)
         v = mp_norm(self.val_proj(xn))
         m_rows = x.shape[0]
+        inv_m = 1.0 / math.sqrt(max(1, m_rows))
 
-        # 1. Global sharpened positive kernel Gram: ctx_i = (phi_i^T sum_j phi_j v_j^T) / (phi_i^T sum_j phi_j)
-        r_unit = mp_unit_vec(self.rival_metric(xn))
-        phi_g = self._positive_kernel_features(r_unit, self.log_tau_global)
+        # 1. Pure associative linear Global Gram: R (R^T V) — exact O(M*r*d), native 4-Studio row-TP
+        r = mp_norm(self.rival_metric(xn))
         if world is not None and world.parts("cross") is not None:
             lo, hi = world.span("cross", m_rows)
-            pg_c, v_c = world.copy(phi_g), world.copy(v)
-            kv_global = world.reduce(pg_c[lo:hi].T @ v_c[lo:hi])
-            z_global = world.reduce(pg_c[lo:hi].sum(dim=0))
+            r_c, v_c = world.copy(r), world.copy(v)
+            kv_global = world.reduce(r_c[lo:hi].T @ v_c[lo:hi]) * inv_m
         else:
-            kv_global = phi_g.T @ v
-            z_global = phi_g.sum(dim=0)
-        denom_g = torch.clamp(phi_g @ z_global, min=1e-6).unsqueeze(-1)
-        global_vals = mp_norm((phi_g @ kv_global) / denom_g)
+            kv_global = (r.T @ v) * inv_m
+        global_vals = mp_norm(r @ kv_global)
 
-        # 2. Per-team sharpened positive kernel Gram (same-team coordination)
-        t_unit = mp_unit_vec(self.team_metric(xn))
-        phi_t = self._positive_kernel_features(t_unit, self.log_tau_team)
+        # 2. Pure associative linear Per-Team Gram: T (T^T V) within each team
+        t = mp_norm(self.team_metric(xn))
         mem = (entity_team_ids[:, None] == team_ids[None, :]) & team_valid[None, :]
         mem_f = mem.to(x.dtype)
-        tv = (phi_t[:, :, None] * v[:, None, :]).reshape(m_rows, -1)
+        tv = (t[:, :, None] * v[:, None, :]).reshape(m_rows, -1)
         if world is not None and world.parts("cross") is not None:
             lo, hi = world.span("cross", m_rows)
-            mem_c, tv_c, pt_c = world.copy(mem_f), world.copy(tv), world.copy(phi_t)
-            team_kv = world.reduce(mem_c[lo:hi].T @ tv_c[lo:hi])
-            team_z = world.reduce(mem_c[lo:hi].T @ pt_c[lo:hi])
+            mem_c, tv_c = world.copy(mem_f), world.copy(tv)
+            team_sum = world.reduce(mem_c[lo:hi].T @ tv_c[lo:hi])
+            team_cnt = torch.clamp(world.reduce(mem_c[lo:hi].sum(dim=0, keepdim=True).T), min=1.0)
         else:
-            team_kv = mem_f.T @ tv
-            team_z = mem_f.T @ phi_t
-        ctx_t = (mem_f @ team_kv).reshape(m_rows, self.r_gram, self.d)
-        denom_t = torch.clamp((phi_t * (mem_f @ team_z)).sum(dim=-1, keepdim=True), min=1e-6)
-        team_vals = mp_norm((phi_t[:, :, None] * ctx_t).sum(dim=1) / denom_t)
+            team_sum = mem_f.T @ tv
+            team_cnt = torch.clamp(mem_f.sum(dim=0, keepdim=True).T, min=1.0)
+        team_mean = team_sum / team_cnt
+        ctx_t = (mem_f @ team_mean).reshape(m_rows, self.r_gram, self.d)
+        team_vals = mp_norm((t[:, :, None] * ctx_t).sum(dim=1))
 
         # 3. Bounded-condition DPP repulsive Gram: (I + g_dpp * B^T B)^{-1} (B^T V)
         q_dpp = torch.sigmoid(self.dpp_quality(xn))
@@ -316,7 +323,7 @@ class MPResCGTBlock(nn.Module):
         gram_merged = mp_norm(self.gram_out(mp_norm(global_vals + team_vals + dpp_ctx)))
         x = mp_norm(mp_lerp(xn, gram_merged, torch.sigmoid(self.blend_gram)))
 
-        # 4. Magnitude-preserving SwiGLU FFN (optionally column-sharded across 4 Studios via 'ffn' TP)
+        # 4. Wide Magnitude-Preserving SwiGLU FFN (tall h >> d protected from neuron death by Aurora!)
         if world is not None and world.parts("ffn") is not None:
             lo, hi = world.span("ffn", self.h)
             x_c = world.copy(x)
@@ -330,26 +337,26 @@ class MPResCGTBlock(nn.Module):
             hid = mp_silu(F.linear(x_c, wg)) * F.linear(x_c, wu)
             ffn_out = mp_norm(world.reduce(F.linear(hid, wd)))
         else:
-            ffn_out = mp_norm(self.ffn_down(mp_silu(self.ffn_gate(x)) * self.ffn_up(x)))
+            hid = mp_silu(self.ffn_gate(x)) * self.ffn_up(x)
+            self._last_ffn_act = hid.detach()
+            ffn_out = mp_norm(self.ffn_down(hid))
         x = mp_norm(mp_lerp(x, ffn_out, torch.sigmoid(self.blend_ffn)))
         return x
 
 
 class PlanWally(nn.Module):
-    """EDM2 Magnitude-Preserving, Voronoi-foveated, cart-spline-aware recurrent CGT controller.
-    - Every linear weight row is strictly unit-norm (||w_i||_2 = 1); zero AdamW needed.
-    - Every internal hidden state is strictly unit-RMS (mp_norm); zero activation outlier drift.
-    - Steep/sharp policy PDFs are expressed via explicit bounded scalar output inverse-temperatures
-      and gains (s_cart, s_rival, s_cell, g_cont) rather than activation norm explosion.
-    - Supports products.World 4-Studio Tensor Parallelism on 'cross' and 'ffn'."""
+    """Aurora + EDM2 Wide Subspace Linear-Gram ResNet controller.
+    - Pure associative linear Gram R(R^T V) + high-dimensional subspace stream (default d=256, h=1024).
+    - Every linear weight row is Aurora-initialized (Stiefel ∩ Row-Oblique) and unit-norm clamped.
+    - Optimized with Aurora (leverage-uniform polar orthogonalization) — zero AdamW, zero dead neurons."""
 
     def __init__(
         self,
-        d: int = 128,
+        d: int = 256,
         depth: int = 4,
-        h: int = 256,
-        r_gram: int = 64,
-        r_dpp: int = 32,
+        h: int = 1024,
+        r_gram: int = 128,
+        r_dpp: int = 64,
         recurrent: bool = True,
         use_fsq: bool = True,
         fsq_levels: tuple[int, ...] = (5, 5, 5, 5),
