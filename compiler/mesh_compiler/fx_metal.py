@@ -46,6 +46,9 @@ MG_OP_PLE_GATE = 9
 MG_OP_ELEMENTWISE = 10
 MG_OP_VOCAB_ARGMAX = 11
 MG_OP_ALLREDUCE = 12
+MG_OP_CONCAT = 13
+MG_OP_SPEC_VERIFY_COMMIT = 14
+MG_OP_WRITE_TOK_SLOT = 15
 
 MG_EW_ADD = 0
 MG_EW_MUL = 1
@@ -119,39 +122,50 @@ def _mesh_head_norm_rope_kv(
     eps: float,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
+    q_len: int = 1,
 ) -> torch.Tensor:
-    B = qkv.shape[0]
-    q_raw = qkv[:, : h_q * head_dim].reshape(B, h_q, head_dim)
+    B_tot = qkv.shape[0]
+    ql = max(1, int(q_len))
+    q_raw = qkv[:, : h_q * head_dim].reshape(B_tot, h_q, head_dim)
     qf = q_raw.float()
     q_norm = (qf * torch.rsqrt(qf.pow(2).mean(-1, keepdim=True) + eps)).to(qkv.dtype) * w_q
-    p = int(pos.item())
+    p0 = int(pos.item())
     half = head_dim // 2
     if rope_mode == 1:
         inv_f = torch.pow(rope_base, -torch.arange(half, device=qkv.device, dtype=torch.float32) / half)
     else:
         inv_f = 1.0 / freqs.float()
-    theta = float(p) * inv_f
-    c, s = torch.cos(theta), torch.sin(theta)
-    def apply_rope(t):
+
+    def apply_rope_pos(t, p_val):
+        theta = float(p_val) * inv_f
+        c, s = torch.cos(theta), torch.sin(theta)
         tf = t.float()
         a, b = tf[..., :half], tf[..., half:]
         return torch.cat([a * c - b * s, a * s + b * c], dim=-1).to(t.dtype)
-    q_out = apply_rope(q_norm)
+
+    if ql == 1:
+        q_out = apply_rope_pos(q_norm, p0)
+    else:
+        q_list = [apply_rope_pos(q_norm[bi : bi + 1], p0 + (bi % ql)) for bi in range(B_tot)]
+        q_out = torch.cat(q_list, dim=0)
     if h_kv > 0:
-        slot = (p % max_seq) if window > 0 else min(p, max_seq - 1)
-        k_raw = qkv[:, h_q * head_dim : (h_q + h_kv) * head_dim].reshape(B, h_kv, head_dim)
-        v_raw = qkv[:, (h_q + h_kv) * head_dim :].reshape(B, h_kv, head_dim)
+        k_raw = qkv[:, h_q * head_dim : (h_q + h_kv) * head_dim].reshape(B_tot, h_kv, head_dim)
+        v_raw = qkv[:, (h_q + h_kv) * head_dim :].reshape(B_tot, h_kv, head_dim)
         kf = k_raw.float()
         k_norm = (kf * torch.rsqrt(kf.pow(2).mean(-1, keepdim=True) + eps)).to(qkv.dtype) * w_k
         vf = v_raw.float()
         v_norm = (vf * torch.rsqrt(vf.pow(2).mean(-1, keepdim=True) + eps)).to(qkv.dtype)
-        k_cache[:, :, slot, :] = apply_rope(k_norm)
-        v_cache[:, :, slot, :] = v_norm
+        for bi in range(B_tot):
+            stream = bi // ql
+            p_val = p0 + (bi % ql)
+            slot = (p_val % max_seq) if window > 0 else min(p_val, max_seq - 1)
+            k_cache[stream, :, slot, :] = apply_rope_pos(k_norm[bi], p_val)
+            v_cache[stream, :, slot, :] = v_norm[bi]
     return q_out
 
 
 @_mesh_head_norm_rope_kv.register_fake
-def _(qkv, w_q, w_k, pos, freqs, h_q, h_kv, head_dim, rope_mode, rope_base, max_seq, window, eps, k_cache, v_cache):
+def _(qkv, w_q, w_k, pos, freqs, h_q, h_kv, head_dim, rope_mode, rope_base, max_seq, window, eps, k_cache, v_cache, q_len=1):
     return torch.empty((qkv.shape[0], h_q, head_dim), dtype=qkv.dtype, device=qkv.device)
 
 
@@ -167,27 +181,80 @@ def _mesh_kv_sdpa_decode(
     max_seq: int,
     window: int,
     scale: float,
+    q_len: int = 1,
+    shared_kv_b0: bool = False,
 ) -> torch.Tensor:
-    B = q.shape[0]
-    p = int(pos.item())
-    length = p + 1
-    start = max(0, length - window) if window > 0 else 0
-    idx = [((t % max_seq) if window > 0 else t) for t in range(start, length)]
-    k = k_cache[:, :, idx, :].float()
-    v = v_cache[:, :, idx, :].float()
-    if h_q != h_kv:
-        rep = h_q // h_kv
-        k = k.repeat_interleave(rep, dim=1)
-        v = v.repeat_interleave(rep, dim=1)
-    scores = torch.einsum("bhd,bhtd->bht", q.float(), k) * scale
-    probs = torch.softmax(scores, dim=-1)
-    out = torch.einsum("bht,bhtd->bhd", probs, v).to(q.dtype)
-    return out.reshape(B, h_q * head_dim)
+    B_tot = q.shape[0]
+    ql = max(1, int(q_len))
+    p0 = int(pos.item())
+    outs = []
+    for bi in range(B_tot):
+        stream = 0 if shared_kv_b0 else (bi // ql)
+        q_idx = 0 if shared_kv_b0 else (bi % ql)
+        length = p0 + q_idx + 1
+        start = max(0, length - window) if window > 0 else 0
+        idx = [((t % max_seq) if window > 0 else t) for t in range(start, length)]
+        k = k_cache[stream : stream + 1, :, idx, :].float()
+        v = v_cache[stream : stream + 1, :, idx, :].float()
+        if h_q != h_kv:
+            rep = h_q // h_kv
+            k = k.repeat_interleave(rep, dim=1)
+            v = v.repeat_interleave(rep, dim=1)
+        scores = torch.einsum("bhd,bhtd->bht", q[bi : bi + 1].float(), k) * scale
+        probs = torch.softmax(scores, dim=-1)
+        outs.append(torch.einsum("bht,bhtd->bhd", probs, v).to(q.dtype))
+    return torch.cat(outs, dim=0).reshape(B_tot, h_q * head_dim)
 
 
 @_mesh_kv_sdpa_decode.register_fake
-def _(q, k_cache, v_cache, pos, h_q, h_kv, head_dim, max_seq, window, scale):
+def _(q, k_cache, v_cache, pos, h_q, h_kv, head_dim, max_seq, window, scale, q_len=1, shared_kv_b0=False):
     return torch.empty((q.shape[0], h_q * head_dim), dtype=q.dtype, device=q.device)
+
+
+@torch.library.custom_op("mesh::spec_verify_commit", mutates_args=("draft_tok", "pos_buf", "anchor_pos_buf", "stats_buf"))
+def _mesh_spec_verify_commit(
+    targ_tok: torch.Tensor,
+    draft_tok: torch.Tensor,
+    targ_xn: torch.Tensor,
+    pos_buf: torch.Tensor,
+    anchor_pos_buf: torch.Tensor,
+    stats_buf: torch.Tensor,
+    K: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    n_acc = 0
+    while n_acc < K and int(targ_tok[n_acc].item()) == int(draft_tok[n_acc + 1].item()):
+        n_acc += 1
+    t_star = int(targ_tok[n_acc].item())
+    p0 = int(pos_buf[0].item())
+    stats_buf[0, 0] = n_acc
+    stats_buf[0, 1] = t_star
+    for k in range(K):
+        stats_buf[0, 2 + k] = int(draft_tok[k + 1].item())
+    anchor_pos_buf[0] = p0 + n_acc
+    pos_buf[0] = p0 + n_acc + 1
+    draft_tok[0] = t_star
+    out_tok = torch.tensor([t_star], dtype=torch.int32, device=targ_tok.device)
+    out_hid = targ_xn[n_acc : n_acc + 1].clone()
+    return out_tok, out_hid
+
+
+@_mesh_spec_verify_commit.register_fake
+def _(targ_tok, draft_tok, targ_xn, pos_buf, anchor_pos_buf, stats_buf, K):
+    return (
+        torch.empty((1,), dtype=torch.int32, device=targ_tok.device),
+        torch.empty((1, targ_xn.shape[-1]), dtype=targ_xn.dtype, device=targ_xn.device),
+    )
+
+
+@torch.library.custom_op("mesh::write_tok_slot", mutates_args=("dst_buf",))
+def _mesh_write_tok_slot(src_tok: torch.Tensor, dst_buf: torch.Tensor, slot_idx: int) -> torch.Tensor:
+    dst_buf[slot_idx] = src_tok[0]
+    return src_tok.clone()
+
+
+@_mesh_write_tok_slot.register_fake
+def _(src_tok, dst_buf, slot_idx):
+    return torch.empty_like(src_tok)
 
 
 @torch.library.custom_op("mesh::ple_gate", mutates_args=())
@@ -235,6 +302,8 @@ def load_libmesh_graph(path: str | pathlib.Path | None = None) -> C.CDLL:
     lib.mesh_graph_destroy.restype = None
     lib.mesh_graph_add_buffer.argtypes = [C.c_void_p, C.c_uint64, C.c_int, C.c_void_p, C.c_int, C.c_uint64]
     lib.mesh_graph_add_buffer.restype = C.c_int
+    lib.mesh_graph_import_buffer.argtypes = [C.c_void_p, C.c_void_p, C.c_int]
+    lib.mesh_graph_import_buffer.restype = C.c_int
     lib.mesh_graph_buffer_ptr.argtypes = [C.c_void_p, C.c_int]
     lib.mesh_graph_buffer_ptr.restype = C.c_void_p
     lib.mesh_graph_add_crossing.argtypes = [C.c_void_p, C.c_uint32, C.c_uint32, C.c_int, C.c_int]
@@ -247,6 +316,10 @@ def load_libmesh_graph(path: str | pathlib.Path | None = None) -> C.CDLL:
         C.c_void_p, C.c_uint32, C.c_uint32, C.POINTER(C.c_int32), C.c_uint32, C.POINTER(C.c_double)
     ]
     lib.mesh_graph_run.restype = C.c_double
+    lib.mesh_graph_submit_step.argtypes = [C.c_void_p, C.c_uint32]
+    lib.mesh_graph_submit_step.restype = C.c_void_p
+    lib.mesh_graph_wait_step.argtypes = [C.c_void_p]
+    lib.mesh_graph_wait_step.restype = None
     lib.mesh_graph_barrier.argtypes = [C.c_void_p]
     lib.mesh_graph_barrier.restype = None
     lib.mesh_graph_node_id.argtypes = [C.c_void_p]
@@ -356,6 +429,14 @@ class CompiledFXMetal:
         toks = [int(tok_arr[i]) for i in range(n_steps * out_tok_stride)] if tok_arr is not None else []
         return steady_ms, float(wall.value), toks
 
+    def submit_step(self, step_idx: int = 0) -> int:
+        """Non-blocking single-CB commit (returns opaque CB handle for wait_step)."""
+        return int(self._lib.mesh_graph_submit_step(self._handle, int(step_idx)))
+
+    def wait_step(self, cb_handle: int):
+        """Wait for a submitted CB handle to complete."""
+        self._lib.mesh_graph_wait_step(C.c_void_p(cb_handle))
+
     def barrier(self):
         self._lib.mesh_graph_barrier(self._handle)
 
@@ -461,6 +542,7 @@ def compile_fx_to_metal(
     comm_id: str = "",
     wire_mode: str | None = None,
     max_decode_steps: int = 128,
+    shared_buffers: dict[str, tuple[CompiledFXMetal, str]] | None = None,
     lib_path: str | pathlib.Path | None = None,
 ) -> CompiledFXMetal:
     """Compile a torch.export.ExportedProgram end-to-end into ONE single native Metal command buffer."""
@@ -506,7 +588,12 @@ def compile_fx_to_metal(
             t = sd[target].detach().cpu().contiguous()
             if t.dtype == torch.int64:
                 t = t.to(torch.int32)
-            bid = lib.mesh_graph_add_buffer(handle, t.numel() * t.element_size(), MG_BUF_STATE, C.c_void_p(t.data_ptr()), -1, 0)
+            if shared_buffers and target in shared_buffers:
+                src_g, src_name = shared_buffers[target]
+                src_bid = src_g._state_meta[src_name][0]
+                bid = lib.mesh_graph_import_buffer(handle, src_g._handle, src_bid)
+            else:
+                bid = lib.mesh_graph_add_buffer(handle, t.numel() * t.element_size(), MG_BUF_STATE, C.c_void_p(t.data_ptr()), -1, 0)
             vals[node.name] = _TensorVal(node.name, shape, mg_dt, nbytes, buf_id=bid, is_persistent=True)
             state_meta[target] = (bid, shape, t.dtype)
         else:
@@ -764,30 +851,36 @@ def compile_fx_to_metal(
             ))
             continue
 
-        # ---- Pattern D: HeadNorm + RoPE + Direct KV Cache Write ----
+        # ---- Pattern D: HeadNorm + RoPE + Direct KV Cache Write (supports q_len>=1 causal verify) ----
         if _is_op(node, "mesh::head_norm_rope_kv"):
-            (qkv_n, wq_n, wk_n, pos_n, freqs_n, h_q, h_kv, head_dim, rope_mode, rope_base, max_seq, window, eps, kc_n, vc_n) = node.args
+            args = node.args
+            (qkv_n, wq_n, wk_n, pos_n, freqs_n, h_q, h_kv, head_dim, rope_mode, rope_base, max_seq, window, eps, kc_n, vc_n) = args[:15]
+            q_len = int(args[15]) if len(args) > 15 else int(node.kwargs.get("q_len", 1))
             ov = ensure_val(node)
             B = ov.shape[0]
+            rope_packed = (int(rope_mode) & 0xFF) | ((max(1, q_len) & 0xFFFF) << 8)
             ops.append(_FusedOp(
                 MG_OP_HEAD_NORM_ROPE, ov.mg_dtype,
                 inputs=[resolve(qkv_n), resolve(wq_n), resolve(wk_n), resolve(pos_n), resolve(freqs_n)],
                 outputs=[node.name, resolve(kc_n) if h_kv > 0 else None, resolve(vc_n) if h_kv > 0 else None],
-                u=[B, int(h_q), int(h_kv), int(h_kv), int(head_dim), int(rope_mode), int(max_seq), int(window)],
+                u=[B, int(h_q), int(h_kv), int(h_kv), int(head_dim), rope_packed, int(max_seq), int(window)],
                 f=[float(eps), math.log2(float(rope_base)) if rope_base > 0 else 0.0, 0.0, 0.0],
             ))
             continue
 
-        # ---- Pattern E: Fused GQA KV SDPA Decode ----
+        # ---- Pattern E: Fused GQA KV SDPA Decode (supports q_len>=1 causal verify & shared_kv_b0) ----
         if _is_op(node, "mesh::kv_sdpa_decode"):
-            (q_n, kc_n, vc_n, pos_n, h_q, h_kv, head_dim, max_seq, window, scale) = node.args
+            args = node.args
+            (q_n, kc_n, vc_n, pos_n, h_q, h_kv, head_dim, max_seq, window, scale) = args[:10]
+            q_len = int(args[10]) if len(args) > 10 else int(node.kwargs.get("q_len", 1))
+            shared_b0 = bool(args[11]) if len(args) > 11 else bool(node.kwargs.get("shared_kv_b0", False))
             ov = ensure_val(node)
             B = ov.shape[0]
             ops.append(_FusedOp(
                 MG_OP_KV_SDPA_DECODE, ov.mg_dtype,
                 inputs=[resolve(q_n), resolve(kc_n), resolve(vc_n), resolve(pos_n)],
                 outputs=[node.name],
-                u=[B, int(h_q), int(h_kv), int(head_dim), int(max_seq), int(window), 0, 0],
+                u=[B, int(h_q), int(h_kv), int(head_dim), int(max_seq), int(window), max(1, q_len), 1 if shared_b0 else 0],
                 f=[float(scale), 0.0, 0.0, 0.0],
             ))
             continue
@@ -809,7 +902,7 @@ def compile_fx_to_metal(
             ))
             continue
 
-        # ---- Pattern G: Vocab-Parallel Global Argmax (+ in-GPU tok_buf/pos_buf update!) ----
+        # ---- Pattern G: Vocab-Parallel Global Argmax (+ optional in-GPU tok_buf/pos_buf update!) ----
         if _is_op(node, "mesh::vocab_argmax"):
             lg_n, tok_n, pos_n, v_off, upd = node.args
             ov = ensure_val(node)
@@ -817,12 +910,13 @@ def compile_fx_to_metal(
             B = lg_v.shape[0]
             V = lg_v.shape[-1]
             P = (V + 2047) // 2048
-            # Allocate persistent output token history buffer [max_decode_steps, B] int32
-            hist_bytes = max(1, max_decode_steps) * B * 4
-            hist_bid = lib.mesh_graph_add_buffer(handle, hist_bytes, MG_BUF_STATE, None, -1, 0)
-            ov.buf_id = hist_bid
-            ov.is_persistent = True
-            state_meta[node.name] = (hist_bid, (max_decode_steps, B), torch.int32)
+            if upd:
+                # Persistent output token history buffer [max_decode_steps, B] int32
+                hist_bytes = max(1, max_decode_steps) * B * 4
+                hist_bid = lib.mesh_graph_add_buffer(handle, hist_bytes, MG_BUF_STATE, None, -1, 0)
+                ov.buf_id = hist_bid
+                ov.is_persistent = True
+                state_meta[node.name] = (hist_bid, (max_decode_steps, B), torch.int32)
             # Temporary scratch buffers for row_argmax_parts & local_best
             p_name = f"{node.name}__parts"
             lb_name = f"{node.name}__lbest"
@@ -834,6 +928,74 @@ def compile_fx_to_metal(
                 outputs=[node.name, p_name, lb_name],
                 u=[B, V, int(v_off), 0, 1 if upd else 0, 0, 0, 0],
                 crossing_spec=(B, 8, MG_WIRE_GATHER, 1) if world_size > 1 else None,
+            ))
+            continue
+
+        # ---- Pattern G2: In-GPU Lossless Speculative Verify + Commit ----
+        if _is_op(node, "mesh::spec_verify_commit"):
+            targ_n, draft_n, xn_n, pos_n, apos_n, stats_n, K_spec = node.args
+            K_spec = int(K_spec)
+            D = vals[resolve(xn_n)].shape[-1]
+            stats_v = vals[resolve(stats_n)]
+            s_stride = stats_v.shape[-1]
+            # Locate the two getitem users (0 = out_anchor_tok, 1 = out_hidden)
+            gi_tok, gi_hid = None, None
+            for uu in list(node.users):
+                if uu.op == "call_function" and "getitem" in _target_name(uu.target):
+                    if int(uu.args[1]) == 0:
+                        gi_tok = uu
+                    elif int(uu.args[1]) == 1:
+                        gi_hid = uu
+            tok_name = gi_tok.name if gi_tok is not None else f"{node.name}__tok"
+            hid_name = gi_hid.name if gi_hid is not None else f"{node.name}__hid"
+            if gi_tok is not None:
+                consumed.add(gi_tok)
+                ensure_val(gi_tok)
+            else:
+                vals[tok_name] = _TensorVal(tok_name, (1,), MG_DTYPE_I32, 4)
+            if gi_hid is not None:
+                consumed.add(gi_hid)
+                ensure_val(gi_hid)
+            else:
+                vals[hid_name] = _TensorVal(hid_name, (1, D), vals[resolve(xn_n)].mg_dtype, D * 2)
+            ops.append(_FusedOp(
+                MG_OP_SPEC_VERIFY_COMMIT, vals[resolve(xn_n)].mg_dtype,
+                inputs=[resolve(targ_n), resolve(draft_n), resolve(xn_n), resolve(pos_n), resolve(apos_n), resolve(stats_n)],
+                outputs=[tok_name, hid_name],
+                u=[K_spec, D, s_stride, 0, 0, 0, 0, 0],
+            ))
+            continue
+
+        # ---- Pattern G3: Write 1 draft token into draft_tok[slot_idx] ----
+        if _is_op(node, "mesh::write_tok_slot"):
+            src_n, dst_n, slot_idx = node.args
+            src_res = resolve(src_n)
+            alias_map[node.name] = src_res
+            ops.append(_FusedOp(
+                MG_OP_WRITE_TOK_SLOT, MG_DTYPE_I32,
+                inputs=[src_res, resolve(dst_n)],
+                outputs=[],
+                u=[int(slot_idx), 0, 0, 0, 0, 0, 0, 0],
+            ))
+            continue
+
+        # ---- Pattern G4: Concat along last dim (aten::cat([a, b], dim=-1)) ----
+        if _is_op(node, "aten::cat"):
+            tensors_arg = node.args[0]
+            if len(tensors_arg) != 2:
+                raise NotImplementedError(f"aten::cat supports 2 inputs, got {len(tensors_arg)}")
+            a_n, b_n = tensors_arg[0], tensors_arg[1]
+            av = vals[resolve(a_n)]
+            bv = vals[resolve(b_n)]
+            ov = ensure_val(node)
+            M = math.prod(ov.shape[:-1])
+            K0 = av.shape[-1]
+            K1 = bv.shape[-1]
+            ops.append(_FusedOp(
+                MG_OP_CONCAT, ov.mg_dtype,
+                inputs=[resolve(a_n), resolve(b_n)],
+                outputs=[node.name],
+                u=[M, K0, K1, 0, 0, 0, 0, 0],
             ))
             continue
 

@@ -48,7 +48,10 @@ enum mesh_graph_op_kind {
   MG_OP_PLE_GATE          = 9,  /* fused gelu_approx(x @ Wg^T) * pli[:, layer, :] */
   MG_OP_ELEMENTWISE       = 10, /* unary/binary elementwise (u0 = subop) */
   MG_OP_VOCAB_ARGMAX      = 11, /* row_argmax(lg) + flat-DMA crossing + in-GPU tok_buf/out_tok/pos_buf update */
-  MG_OP_ALLREDUCE         = 12  /* standalone flat-DMA all-reduce (publish + await + sum + retire) */
+  MG_OP_ALLREDUCE         = 12, /* standalone flat-DMA all-reduce (publish + await + sum + retire) */
+  MG_OP_CONCAT            = 13, /* concat along last dim: out[M, K0+K1] = cat(a[M,K0], b[M,K1]) */
+  MG_OP_SPEC_VERIFY_COMMIT = 14, /* in-GPU lossless greedy spec verify + pos/anchor update + hidden select + stats */
+  MG_OP_WRITE_TOK_SLOT    = 15  /* write 1 int32 token from src[0] into dst[slot_idx] */
 };
 
 enum mesh_graph_ew_subop {
@@ -81,6 +84,7 @@ void          mesh_graph_destroy(mesh_graph_t *g);
 
 int           mesh_graph_add_buffer(mesh_graph_t *g, uint64_t nbytes, int kind,
                                     const void *init_data, int parent_buf, uint64_t parent_off);
+int           mesh_graph_import_buffer(mesh_graph_t *g, mesh_graph_t *src_graph, int src_buf_id);
 void         *mesh_graph_buffer_ptr(mesh_graph_t *g, int buf_id);
 
 int           mesh_graph_add_crossing(mesh_graph_t *g, uint32_t n_elems, uint32_t esize,
@@ -94,6 +98,10 @@ int           mesh_graph_compile(mesh_graph_t *g);
    Returns steady-state ms/step (median of interior steps when n_steps >= 4, else wall_ms / n_steps). */
 double        mesh_graph_run(mesh_graph_t *g, uint32_t n_steps, uint32_t warm_steps,
                              int32_t *out_tokens, uint32_t out_tok_stride, double *out_wall_ms);
+
+/* Non-blocking single-step submit + wait for Saguaro / SSD async overlap (verifier CB in flight while speculator runs). */
+void         *mesh_graph_submit_step(mesh_graph_t *g, uint32_t step_idx);
+void          mesh_graph_wait_step(void *cb_token);
 
 void          mesh_graph_barrier(mesh_graph_t *g);
 uint32_t      mesh_graph_node_id(mesh_graph_t *g);

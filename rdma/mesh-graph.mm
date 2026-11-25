@@ -769,29 +769,32 @@ template [[host_name("mg_sum_norm_f32")]] [[kernel]] void mg_sum_norm<float>(con
   }
 }
 
-// ---- 6. Fused Head RMSNorm + RoPE + Direct KV Cache Write (reads pos_buf[0] on GPU!) ----
+// ---- 6. Fused Head RMSNorm + RoPE + Direct KV Cache Write (supports q_len>=1 causal verify & reads pos_buf[0] on GPU!) ----
 [[kernel]] void mg_head_norm_rope_kv(const device bfloat* x [[buffer(0)]], const device bfloat* w0 [[buffer(1)]],
     const device bfloat* w1 [[buffer(2)]], device bfloat* q_out [[buffer(3)]],
     device bfloat* k_cache [[buffer(4)]], device bfloat* v_cache [[buffer(5)]],
     const device int* pos_buf [[buffer(6)]], const device float* freqs [[buffer(7)]],
-    constant uint* p [[buffer(8)]],  // h0, h1, h2, D, rope(0=none,1=base,2=freqs), S, max_seq, window
+    constant uint* p [[buffer(8)]],  // h0, h1, h2, D, rope(lo8) | (q_len<<8), S, max_seq, window
     constant float* f [[buffer(9)]], // eps, base_log2
     uint i [[thread_index_in_threadgroup]], uint tg [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  const uint h0 = p[0], h1 = p[1], h2 = p[2], D = p[3], rope = p[4], S = p[5], max_seq = p[6], window = p[7];
+  const uint h0 = p[0], h1 = p[1], h2 = p[2], D = p[3], rope = p[4] & 0xffu;
+  const uint q_len = (p[4] >> 8) ? (p[4] >> 8) : 1u;
+  const uint S = p[5], max_seq = p[6], window = p[7];
   const float eps = f[0], base_log2 = f[1];
   const uint heads = h0 + h1 + h2, b = tg / heads, g = tg % heads;
+  const uint stream = b / q_len, q_idx = b % q_len;
   const uint seg = g < h0 ? 0u : g < h0 + h1 ? 1u : 2u;
   const uint h = seg == 0u ? g : seg == 1u ? g - h0 : g - h0 - h1;
   const device bfloat* xr = x + ulong(b) * S + ulong(g) * D;
   const device bfloat* w = seg == 0u ? w0 : w1;
   const bool has_w = seg < 2u, rotate = rope && seg < 2u;
-  const uint pos = uint(max(0, pos_buf[0]));
+  const uint pos = uint(max(0, pos_buf[0])) + q_idx;
   const uint slot = (window > 0u) ? (pos % max_seq) : min(pos, max_seq - 1u);
 
   device bfloat* y = (seg == 0u)
                          ? (q_out + (ulong(b) * h0 + h) * D)
-                         : ((seg == 1u ? k_cache : v_cache) + ((ulong(b) * h1 + h) * max_seq + slot) * D);
+                         : ((seg == 1u ? k_cache : v_cache) + ((ulong(stream) * h1 + h) * max_seq + slot) * D);
 
   constexpr uint READS = 4;
   const uint k0 = i * READS;
@@ -829,15 +832,18 @@ template [[host_name("mg_sum_norm_f32")]] [[kernel]] void mg_sum_norm<float>(con
 template <uint D>
 [[kernel]] void mg_kv_sdpa_decode(const device bfloat* Q [[buffer(0)]], const device bfloat* Kc [[buffer(1)]],
     const device bfloat* Vc [[buffer(2)]], device bfloat* Out [[buffer(3)]], const device int* pos_buf [[buffer(4)]],
-    constant uint* u [[buffer(5)]], // B, h_q, h_kv, max_seq, window
+    constant uint* u [[buffer(5)]], // B, h_q, h_kv, max_seq, window, q_len, shared_kv_b0
     constant float& scale [[buffer(6)]],
     uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr uint E = D / 32u; // 8 for D=256, 16 for D=512
   constexpr uint H = E / 4u;  // 2 for D=256, 4 for D=512
   const uint h_q = u[1], h_kv = u[2], max_seq = u[3], window = u[4];
+  const uint q_len = u[5] ? u[5] : 1u, shared_b0 = u[6];
   const uint qh = tg.x, b = tg.y;
+  const uint stream = shared_b0 ? 0u : (b / q_len);
+  const uint q_idx = shared_b0 ? 0u : (b % q_len);
   const uint kvh = (qh * h_kv) / h_q;
-  const uint pos = uint(max(0, pos_buf[0]));
+  const uint pos = uint(max(0, pos_buf[0])) + q_idx;
   const uint len = pos + 1u;
   const uint start = (window > 0u && len > window) ? (len - window) : 0u;
 
@@ -848,7 +854,7 @@ template <uint D>
     qv[h] = float4(q4[lane * H + h]);
     ov[h] = float4(0.0f);
   }
-  const ulong kv_base = (ulong(b) * h_kv + kvh) * max_seq;
+  const ulong kv_base = (ulong(stream) * h_kv + kvh) * max_seq;
   float m_i = -INFINITY;
   float l_i = 0.0f;
 
@@ -907,15 +913,18 @@ template [[host_name("mg_kv_sdpa_decode_512")]] [[kernel]] void mg_kv_sdpa_decod
 template <uint D>
 [[kernel]] void mg_kv_sdpa_splitk(const device bfloat* Q [[buffer(0)]], const device bfloat* Kc [[buffer(1)]],
     const device bfloat* Vc [[buffer(2)]], device float* Scratch [[buffer(3)]], const device int* pos_buf [[buffer(4)]],
-    constant uint* u [[buffer(5)]], // B, h_q, h_kv, max_seq, window, splits
+    constant uint* u [[buffer(5)]], // B, h_q, h_kv, max_seq, window, splits, q_len, shared_kv_b0
     constant float& scale [[buffer(6)]],
     uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr uint E = D / 32u;
   constexpr uint H = E / 4u;
   const uint h_q = u[1], h_kv = u[2], max_seq = u[3], window = u[4], splits = u[5];
+  const uint q_len = u[6] ? u[6] : 1u, shared_b0 = u[7];
   const uint qh = tg.x, b = tg.y, sp = tg.z;
+  const uint stream = shared_b0 ? 0u : (b / q_len);
+  const uint q_idx = shared_b0 ? 0u : (b % q_len);
   const uint kvh = (qh * h_kv) / h_q;
-  const uint pos = uint(max(0, pos_buf[0]));
+  const uint pos = uint(max(0, pos_buf[0])) + q_idx;
   const uint len = pos + 1u;
   const uint start = (window > 0u && len > window) ? (len - window) : 0u;
   const uint total = len - start;
@@ -936,7 +945,7 @@ template <uint D>
     qv[h] = float4(q4[lane * H + h]);
     ov[h] = float4(0.0f);
   }
-  const ulong kv_base = (ulong(b) * h_kv + kvh) * max_seq;
+  const ulong kv_base = (ulong(stream) * h_kv + kvh) * max_seq;
   float m_i = -INFINITY;
   float l_i = 0.0f;
 
@@ -1147,6 +1156,48 @@ inline void best_reduce(thread float& v, thread uint& at, uint lane, uint sg, ui
     ulong seq = ulong(g[5]) | (ulong(g[6]) << 32);
     mesh_ring_ret(db, g[4], seq);
   }
+}
+
+// ---- 10. Concat along last dim + In-GPU Lossless Speculative Verify/Commit + Draft Token Slot Write ----
+[[kernel]] void mg_concat_bf16(const device bfloat* a [[buffer(0)]], const device bfloat* b [[buffer(1)]],
+    device bfloat* out [[buffer(2)]], constant uint* u [[buffer(3)]], // M, K0, K1
+    uint2 gid [[thread_position_in_grid]]) {
+  const uint M = u[0], K0 = u[1], K1 = u[2], Kt = K0 + K1;
+  const uint col = gid.x, row = gid.y;
+  if (row >= M || col >= Kt) return;
+  out[ulong(row) * Kt + col] = (col < K0) ? a[ulong(row) * K0 + col] : b[ulong(row) * K1 + (col - K0)];
+}
+
+[[kernel]] void mg_spec_verify_commit(const device int* targ_tok [[buffer(0)]], device int* draft_tok [[buffer(1)]],
+    const device bfloat* targ_xn [[buffer(2)]], device int* pos_buf [[buffer(3)]],
+    device int* anchor_pos_buf [[buffer(4)]], device int* out_anchor_tok [[buffer(5)]],
+    device bfloat* out_hidden [[buffer(6)]], device int* stats_out [[buffer(7)]],
+    constant uint* u [[buffer(8)]], // K, D, step_idx, stats_stride
+    uint i [[thread_position_in_grid]]) {
+  const uint K = u[0], D = u[1], step_idx = u[2], s_stride = u[3];
+  uint n_acc = 0u;
+  while (n_acc < K && targ_tok[n_acc] == draft_tok[n_acc + 1u]) n_acc++;
+  const int t_star = targ_tok[n_acc];
+  if (i < D) {
+    out_hidden[i] = targ_xn[ulong(n_acc) * D + i];
+  }
+  if (i == 0u) {
+    const int p0 = pos_buf[0];
+    // Write round record: [n_acc, t_star, d_0..d_{K-1}] BEFORE overwriting draft_tok!
+    device int* rec = stats_out + ulong(step_idx) * s_stride;
+    rec[0] = int(n_acc);
+    rec[1] = t_star;
+    for (uint k = 0; k < K; k++) rec[2u + k] = draft_tok[k + 1u];
+    anchor_pos_buf[0] = p0 + int(n_acc);
+    pos_buf[0] = p0 + int(n_acc) + 1;
+    out_anchor_tok[0] = t_star;
+    draft_tok[0] = t_star;
+  }
+}
+
+[[kernel]] void mg_write_tok_slot(const device int* src [[buffer(0)]], device int* dst [[buffer(1)]],
+    constant uint* u [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+  if (i == 0u) dst[u[0]] = src[0];
 }
 )MSL";
   s += launch_instantiations();
@@ -2035,14 +2086,15 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
         const BufSlot &bq = g->bufs[op.in[0]], &bk = g->bufs[op.in[1]], &bv = g->bufs[op.in[2]], &bpos = g->bufs[op.in[3]];
         const BufSlot &bo = g->bufs[op.out[0]];
         const uint32_t B = op.u[0], h_q = op.u[1], h_kv = op.u[2], D = op.u[3], max_seq = op.u[4], window = op.u[5];
+        const uint32_t q_len = op.u[6] ? op.u[6] : 1u, shared_b0 = op.u[7];
         const float sc = (op.f[0] == 0.0f) ? 1.0f : op.f[0];
         const uint32_t bh = B * h_q;
-        const uint32_t approx_len = (bpos.host_ptr ? static_cast<uint32_t>(std::max<int32_t>(0, *static_cast<const int32_t *>(bpos.host_ptr))) : 0u) + 2u;
+        const uint32_t approx_len = (bpos.host_ptr ? static_cast<uint32_t>(std::max<int32_t>(0, *static_cast<const int32_t *>(bpos.host_ptr))) : 0u) + q_len + 1u;
         const uint32_t eff_len = (window > 0u) ? std::min<uint32_t>(approx_len, window) : approx_len;
         const uint32_t splits = (eff_len >= 384u && max_seq >= 1024u && bh <= 32u) ? std::min<uint32_t>(32u, std::max<uint32_t>(1u, 64u / bh))
                               : ((eff_len >= 384u && max_seq >= 512u && bh <= 8u) ? std::min<uint32_t>(16u, std::max<uint32_t>(1u, 32u / bh)) : 1u);
         if (splits > 1u && g->sdpa_scratch) {
-          const uint32_t u[6] = {B, h_q, h_kv, max_seq, window, splits};
+          const uint32_t u[8] = {B, h_q, h_kv, max_seq, window, splits, q_len, shared_b0};
           [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_splitk_512" : "mg_kv_sdpa_splitk_256")];
           [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
           [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
@@ -2060,7 +2112,7 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
           [enc setBytes:cu length:sizeof(cu) atIndex:2];
           [enc dispatchThreadgroups:MTLSizeMake(h_q, B, 1) threadsPerThreadgroup:MTLSizeMake(D / 4u, 1, 1)];
         } else {
-          const uint32_t u[5] = {B, h_q, h_kv, max_seq, window};
+          const uint32_t u[7] = {B, h_q, h_kv, max_seq, window, q_len, shared_b0};
           [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_decode_512" : "mg_kv_sdpa_decode_256")];
           [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
           [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
@@ -2179,9 +2231,9 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
         const uint32_t B = op.u[0], V = op.u[1], offset = op.u[2], cid = op.u[3], upd = op.u[4];
         const uint32_t P = (V + 2047u) / 2048u;
         const bool has_net = (g->world_size > 1);
-        g->out_tok_buf_id = op.out[0];
-        // Write step's output tokens at step_idx * B so multi-step decode preserves full history!
-        const NSUInteger out_off = bout.off + static_cast<NSUInteger>(step_idx) * B * sizeof(int32_t);
+        if (upd) g->out_tok_buf_id = op.out[0];
+        // When upd==1, write step's output tokens at step_idx * B to preserve history; when upd==0, write at offset 0!
+        const NSUInteger out_off = bout.off + (upd ? (static_cast<NSUInteger>(step_idx) * B * sizeof(int32_t)) : 0u);
 
         // 1. row_argmax_parts
         [enc setComputePipelineState:get_pso(g, g->lib_core, "mg_argmax_parts")];
@@ -2238,6 +2290,47 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
           [enc setBytes:ag length:sizeof(ag) atIndex:8];
           [enc dispatchThreads:MTLSizeMake(wth, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(wth, 256), 1, 1)];
         }
+        break;
+      }
+      case MG_OP_CONCAT: {
+        const BufSlot &ba = g->bufs[op.in[0]], &bb = g->bufs[op.in[1]], &bo = g->bufs[op.out[0]];
+        const uint32_t M = op.u[0], K0 = op.u[1], K1 = op.u[2], Kt = K0 + K1;
+        const uint32_t u[3] = {M, K0, K1};
+        [enc setComputePipelineState:get_pso(g, g->lib_core, "mg_concat_bf16")];
+        [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
+        [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:2];
+        [enc setBytes:u length:sizeof(u) atIndex:3];
+        [enc dispatchThreads:MTLSizeMake(Kt, M, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(Kt, 256), 1, 1)];
+        break;
+      }
+      case MG_OP_SPEC_VERIFY_COMMIT: {
+        const BufSlot &btarg = g->bufs[op.in[0]], &bdraft = g->bufs[op.in[1]], &bxn = g->bufs[op.in[2]];
+        const BufSlot &bpos = g->bufs[op.in[3]], &bapos = g->bufs[op.in[4]], &bstats = g->bufs[op.in[5]];
+        const BufSlot &bo_tok = g->bufs[op.out[0]], &bo_hid = g->bufs[op.out[1]];
+        const uint32_t K = op.u[0], D = op.u[1], s_stride = op.u[2];
+        const uint32_t u[4] = {K, D, step_idx, s_stride};
+        [enc setComputePipelineState:get_pso(g, g->lib_core, "mg_spec_verify_commit")];
+        [enc setBuffer:btarg.mtl offset:btarg.off atIndex:0];
+        [enc setBuffer:bdraft.mtl offset:bdraft.off atIndex:1];
+        [enc setBuffer:bxn.mtl offset:bxn.off atIndex:2];
+        [enc setBuffer:bpos.mtl offset:bpos.off atIndex:3];
+        [enc setBuffer:bapos.mtl offset:bapos.off atIndex:4];
+        [enc setBuffer:bo_tok.mtl offset:bo_tok.off atIndex:5];
+        [enc setBuffer:bo_hid.mtl offset:bo_hid.off atIndex:6];
+        [enc setBuffer:bstats.mtl offset:bstats.off atIndex:7];
+        [enc setBytes:u length:sizeof(u) atIndex:8];
+        [enc dispatchThreads:MTLSizeMake(D, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(D, 256), 1, 1)];
+        break;
+      }
+      case MG_OP_WRITE_TOK_SLOT: {
+        const BufSlot &bsrc = g->bufs[op.in[0]], &bdst = g->bufs[op.in[1]];
+        const uint32_t slot = op.u[0];
+        [enc setComputePipelineState:get_pso(g, g->lib_core, "mg_write_tok_slot")];
+        [enc setBuffer:bsrc.mtl offset:bsrc.off atIndex:0];
+        [enc setBuffer:bdst.mtl offset:bdst.off atIndex:1];
+        [enc setBytes:&slot length:sizeof(slot) atIndex:2];
+        [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         break;
       }
       default:
@@ -2349,6 +2442,14 @@ int mesh_graph_add_buffer(mesh_graph_t *g, uint64_t nbytes, int kind,
     b.off = 0;
     b.host_ptr = [b.mtl contents];
   }
+  const int id = static_cast<int>(g->bufs.size());
+  g->bufs.push_back(b);
+  return id;
+}
+
+int mesh_graph_import_buffer(mesh_graph_t *g, mesh_graph_t *src_graph, int src_buf_id) {
+  if (!g || !src_graph || src_buf_id < 0 || static_cast<size_t>(src_buf_id) >= src_graph->bufs.size()) return -1;
+  BufSlot b = src_graph->bufs[static_cast<size_t>(src_buf_id)];
   const int id = static_cast<int>(g->bufs.size());
   g->bufs.push_back(b);
   return id;
@@ -2525,6 +2626,23 @@ double mesh_graph_run(mesh_graph_t *g, uint32_t n_steps, uint32_t warm_steps,
       return step_ms[step_ms.size() / 2];
     }
     return wall_ms / static_cast<double>(n_steps);
+  }
+}
+
+void *mesh_graph_submit_step(mesh_graph_t *g, uint32_t step_idx) {
+  if (!g) return nullptr;
+  @autoreleasepool {
+    id<MTLCommandBuffer> cb = encode_step(g, step_idx);
+    [cb commit];
+    return (__bridge_retained void *)cb;
+  }
+}
+
+void mesh_graph_wait_step(void *cb_token) {
+  if (!cb_token) return;
+  @autoreleasepool {
+    id<MTLCommandBuffer> cb = (__bridge_transfer id<MTLCommandBuffer>)cb_token;
+    [cb waitUntilCompleted];
   }
 }
 
