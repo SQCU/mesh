@@ -1,6 +1,6 @@
 # design/transport.md: the node's images, built in .build by `all`, which installs nothing; `install` renames each
 # that changed into rdma/, in IMAGES' order: the libraries first, the bridge's binary last
-IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-phase.dylib mesh-stat mesh-switch-stat mesh-cluster mesh-heartbeat mesh-flow
+IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh-phase.dylib libmesh-graph.dylib mesh-stat mesh-switch-stat mesh-cluster mesh-heartbeat mesh-flow
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt)
@@ -56,6 +56,10 @@ NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitR
 .build/libmesh-phase.dylib: mesh-phase.mm $(MESH_H) .build/libmesh.dylib Makefile
 	mkdir -p .build
 	clang++ -O2 -std=c++17 -fobjc-arc -shared -fPIC -o $@ mesh-phase.mm -L.build -lmesh -Wl,-rpath,@loader_path \
+	  -framework Metal -framework MetalPerformanceShaders -framework Foundation
+.build/libmesh-graph.dylib: mesh-graph.mm mesh-graph.h $(MESH_H) .build/libmesh.dylib Makefile
+	mkdir -p .build
+	clang++ -O3 -std=c++20 -fobjc-arc -shared -fPIC -o $@ mesh-graph.mm -L.build -lmesh -Wl,-rpath,@loader_path \
 	  -framework Metal -framework MetalPerformanceShaders -framework Foundation
 # design/transport.md: each built image whose bytes differ from the installed one's copied beside it and renamed into
 # place, in IMAGES' order, and the bridge's binary anew wherever libmesh changed; a running process keeps the files it
