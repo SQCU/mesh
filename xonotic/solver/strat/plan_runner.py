@@ -68,15 +68,38 @@ class MultiServerPlanHarness:
         self.payload_speed = float(payload_speed)
         self.slowmo = float(slowmo)
         self.maxclients = int(maxclients)
-        if manifold is not None:
-            self.manifold = manifold
-        else:
-            ent = Path(userdir) / "data" / "maps" / "boil.ent"
-            self.manifold = load_map_manifold(ent) if ent.exists() else None
+        self.manifold = manifold
+        self.manifolds_by_map: dict[str, MapManifold] = {}
+        maps_dir = Path(userdir) / "data" / "maps"
+        if maps_dir.exists():
+            for ent in sorted(maps_dir.glob("*.ent")):
+                try:
+                    self.manifolds_by_map[ent.stem] = load_map_manifold(ent)
+                except Exception:
+                    pass
+        if self.manifold is None:
+            self.manifold = self.manifolds_by_map.get("boil") or next(iter(self.manifolds_by_map.values()), None)
 
-    def _spawn_servers(self, work_dir: Path, sock: str, seeds: list[int], base_port: int):
+    def _identify_map(self, cart_rows: np.ndarray) -> tuple[str, MapManifold | None]:
+        if not self.manifolds_by_map or len(cart_rows) == 0:
+            return "unknown", self.manifold
+        lens = np.sort(cart_rows[:, CS["PATH_LENGTH"]].astype(np.float64))
+        best_name, best_m, best_err = "unknown", self.manifold, float("inf")
+        for name, m in self.manifolds_by_map.items():
+            if len(m.splines) != len(lens):
+                continue
+            ml = np.sort(np.asarray([s.length for s in m.splines], dtype=np.float64))
+            err = float(np.abs(ml - lens).mean())
+            if err < best_err:
+                best_err = err
+                best_name = name
+                best_m = m
+        return best_name, best_m
+
+    def _spawn_servers(self, work_dir: Path, sock: str, seeds: list[int], base_port: int, map_names: list[str] | None = None):
         procs, logs = [], []
-        for idx, seed in enumerate(seeds):
+        maps = map_names if (map_names is not None and len(map_names) == len(seeds)) else ["boil"] * len(seeds)
+        for idx, (seed, mname) in enumerate(zip(seeds, maps)):
             sv_userdir = work_dir / f"userdir_{idx}"
             sv_data = sv_userdir / "data"
             sv_data.mkdir(parents=True, exist_ok=True)
@@ -84,7 +107,7 @@ class MultiServerPlanHarness:
                 dst = sv_data / item.name
                 if not dst.exists():
                     os.symlink(item, dst)
-            logf = open(work_dir / f"server_{idx}.log", "w")
+            logf = open(work_dir / f"server_{idx}_{mname}.log", "w")
             logs.append(logf)
             env = dict(os.environ)
             env["MESH_EXPERT_SOCKET"] = sock
@@ -113,7 +136,7 @@ class MultiServerPlanHarness:
             ]
             if self.slowmo != 1.0:
                 cmd.extend(["+slowmo", str(self.slowmo)])
-            cmd.extend(["+map", "boil"])
+            cmd.extend(["+map", str(mname)])
             procs.append(subprocess.Popen(cmd, cwd=self.basedir, env=env, stdout=logf, stderr=subprocess.STDOUT))
             time.sleep(0.15)
         return procs, logs
@@ -159,24 +182,27 @@ class MultiServerPlanHarness:
         grad_clip: float = 1.0,
         device: str = "cpu",
         base_port: int = 27000,
+        map_names: list[str] | None = None,
         custom_plan_fn: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, MapManifold | None], np.ndarray] | None = None,
     ) -> dict:
         """Run G concurrent live Xonotic servers in PLAN-only mode over loopback UDP,
-        maintaining Voronoi/cart-spline geometry & recurrent Mealy state per bot."""
+        maintaining per-map Voronoi/cart-spline geometry & recurrent Mealy state per bot."""
         work_dir.mkdir(parents=True, exist_ok=True)
         engine = Engine("udp://127.0.0.1:0", self.framebytes)
         sock = engine.path
         inbox = RuntimeFrames(self.framebytes, plan_only=True)
-        procs, logs = self._spawn_servers(work_dir, sock, seeds, base_port)
+        procs, logs = self._spawn_servers(work_dir, sock, seeds, base_port, map_names=map_names)
 
         routes: dict[int, tuple[int, object]] = {}
         sess_order: dict[int, int] = {}
+        sess_maps: dict[int, tuple[str, MapManifold | None]] = {}
         obs_mems: dict[int, ObservationMemory] = {}
         prev_state: dict[int, dict] = {}
         mealy_states: dict[tuple[int, str], dict[int, np.ndarray]] = defaultdict(dict)
         telemetry_by_sess: dict[int, list[dict]] = defaultdict(list)
         trajectory_samples: dict[int, list[dict]] = defaultdict(list)
         team_dmg_matrix: dict[str, float] = defaultdict(float)
+        fsq_code_counts: dict[str, dict[tuple[int, ...], int]] = defaultdict(lambda: defaultdict(int))
         all_transitions: list[PlanTransition] = []
         fresh_buf: list[PlanTransition] = []
         update_logs: list[dict] = []
@@ -184,7 +210,6 @@ class MultiServerPlanHarness:
         online_group_pairs: dict[str, list[dict]] = defaultdict(list)
         plan_focus_pw_hits = defaultdict(list)
 
-        cell_centroids = self.manifold.cell_centroids if self.manifold is not None else None
         t_start = time.monotonic()
         total_responses = 0
         try:
@@ -211,13 +236,18 @@ class MultiServerPlanHarness:
                     if len(obs_rows) == 0 or len(cart_rows) == 0 or len(team_rows) == 0:
                         continue
 
+                    if session not in sess_maps:
+                        sess_maps[session] = self._identify_map(cart_rows)
+                    sess_map_name, sess_manifold = sess_maps[session]
+                    cell_centroids = sess_manifold.cell_centroids if sess_manifold is not None else None
+
                     ep_id = ObservationMemory.identity(session, team_rows[0, TS["EPISODE"]])
                     mem = obs_mems[session]
                     mem.observe(ep_id, event_batches)
                     evt_rows = mem.rows
                     geo_np = (
-                        self.manifold.build_features(obs_rows, cart_rows, team_rows, evt_rows)
-                        if self.manifold is not None
+                        sess_manifold.build_features(obs_rows, cart_rows, team_rows, evt_rows)
+                        if sess_manifold is not None
                         else None
                     )
 
@@ -240,7 +270,7 @@ class MultiServerPlanHarness:
                     train_h_next: np.ndarray | None = None
 
                     if custom_plan_fn is not None:
-                        plan_matrix = custom_plan_fn(obs_rows, cart_rows, team_rows, evt_rows, bot_arms, self.manifold)
+                        plan_matrix = custom_plan_fn(obs_rows, cart_rows, team_rows, evt_rows, bot_arms, sess_manifold)
                     else:
                         obs_t = torch.as_tensor(obs_rows, dtype=torch.float32, device=device)
                         carts_t = torch.as_tensor(cart_rows, dtype=torch.float32, device=device)
@@ -264,6 +294,10 @@ class MultiServerPlanHarness:
                                         h_prev_np[bi] = st_map[eid]
                                 h_prev_t = torch.as_tensor(h_prev_np, dtype=torch.float32, device=device)
                                 out = mdl(obs_t, carts_t, teams_t, evt_t, geo=geo_t, h_prev=h_prev_t)
+                                if out.fsq_codes is not None:
+                                    q_np = out.fsq_codes.detach().cpu().numpy().astype(np.int64)
+                                    for bi in np.flatnonzero(sel):
+                                        fsq_code_counts[arm_name][tuple(int(v) for v in q_np[bi])] += 1
                                 samp = sample_plan(out, deterministic=deterministic)
                                 h_nxt_np = out.h_next.detach().cpu().numpy()
                                 for bi in range(n_bots):
@@ -457,8 +491,12 @@ class MultiServerPlanHarness:
         match_motifs = {}
         score_matches = []
         composite_matches = []
+        score_matches_by_map: dict[str, list[dict]] = defaultdict(list)
+        composite_matches_by_map: dict[str, list[dict]] = defaultdict(list)
         for sess_id, recs in sorted(telemetry_by_sess.items()):
             mot = extract_behavioral_motifs(recs)
+            mname = sess_maps.get(sess_id, ("unknown", None))[0]
+            mot["map"] = mname
             match_motifs[str(sess_id)] = mot
             sc_map, comp_map = {}, {}
             for _, t_info in (mot.get("per_team") or {}).items():
@@ -471,10 +509,25 @@ class MultiServerPlanHarness:
             if len(sc_map) >= 2:
                 score_matches.append(sc_map)
                 composite_matches.append(comp_map)
+                score_matches_by_map[mname].append(sc_map)
+                composite_matches_by_map[mname].append(comp_map)
+
+        fsq_stats = {}
+        for arm_name, cmap in fsq_code_counts.items():
+            tot_c = sum(cmap.values())
+            if tot_c > 0:
+                probs = np.asarray(list(cmap.values()), dtype=np.float64) / tot_c
+                ent = float(-(probs * np.log2(np.maximum(probs, 1e-12))).sum())
+                fsq_stats[arm_name] = {
+                    "unique_codes": len(cmap),
+                    "total_samples": int(tot_c),
+                    "code_entropy_bits": round(ent, 3),
+                }
 
         return {
             "total_responses": total_responses,
             "sessions": len(telemetry_by_sess),
+            "session_maps": {str(k): v[0] for k, v in sess_maps.items()},
             "responses_per_session": {str(k): len(v) for k, v in telemetry_by_sess.items()},
             "transitions": all_transitions,
             "n_transitions": len(all_transitions),
@@ -487,9 +540,12 @@ class MultiServerPlanHarness:
             "plan_focus_pw_rate": {a: float(np.mean(v)) for a, v in plan_focus_pw_hits.items() if v},
             "score_matches": score_matches,
             "composite_matches": composite_matches,
+            "score_matches_by_map": dict(score_matches_by_map),
+            "composite_matches_by_map": dict(composite_matches_by_map),
             "match_motifs": match_motifs,
             "trajectory_samples": dict(trajectory_samples),
             "team_dmg_matrix": dict(team_dmg_matrix),
+            "fsq_stats": fsq_stats,
             "transport_errors": dict(engine.errors),
         }
 
