@@ -5,6 +5,7 @@
    invalidates. */
 #include "nccl.h"
 #include "mesh.h"
+#include <dispatch/dispatch.h>
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -1485,17 +1486,152 @@ static uint8_t nccl_red_op(ncclDataType_t type, int combine) {
   }
 }
 
-/* Algebraic in-switch ReduceScatter phase over mesh_reduce_write + shared W[dst_idx] landings.
-   Replaces blind N-copy mesh_write + host combine for ReduceScatter and AllReduce's RS phase across
-   f32, f16, bf16, i32, i64 (SUM/MAX/MIN + AVG). Uses 8-page SWAR runs interleaved across destinations
-   so intermediate switches coalesce 32 KiB blocks opportunistically with zero extra metadata. */
+struct rs_mt_ctx {
+  struct call *c;
+  struct ncclComm *comm;
+  struct mesh_ctx *ctx;
+  const unsigned char *const *seg_src;
+  const size_t *seg_bytes;
+  unsigned char *my_dst;
+  uint64_t win_p;
+  uint32_t win_n, my_n, win_cap, sl, nthreads;
+  uint8_t red_op;
+  uint16_t my_tag, done_tag;
+  _Atomic int err;
+  ncclResult_t res;
+};
+
+static void rs_mt_worker(void *arg, size_t tid) {
+  struct rs_mt_ctx *ctx_w = (struct rs_mt_ctx *)arg;
+  struct call *c = ctx_w->c;
+  struct ncclComm *comm = ctx_w->comm;
+  struct mesh_ctx *ctx = ctx_w->ctx;
+  struct hdr *m = ctx->M;
+  const int n = comm->nranks, me = comm->rank;
+  const uint32_t win_cap = ctx_w->win_cap, sl = ctx_w->sl;
+  const uint64_t win_p = ctx_w->win_p;
+  const uint32_t stride_blk = ctx_w->nthreads * BLOCK_PAGES;
+
+  uint32_t rs_base = 1u + ((uint32_t)((((uint64_t)tid + 1u) ^ (uint64_t)getpid()) * 2654435761u) >> 16 & 1023u) * 32u;
+  uint32_t rs_cur = rs_base;
+
+  struct mesh_red_xfer xf[MESH_DESC_FLUSH];
+  uint32_t rel_pages[MESH_DESC_FLUSH];
+  uint32_t nx = 0, nr = 0;
+
+  for (uint32_t blk = (uint32_t)tid * BLOCK_PAGES; blk < ctx_w->win_n; blk += stride_blk) {
+    if (atomic_load_explicit(&ctx_w->err, memory_order_relaxed)) break;
+    for (int d = 0; d < n; d++) {
+      const uint64_t dp = pages_of(ctx_w->seg_bytes[d]);
+      if (win_p + blk >= dp) continue;
+      const uint32_t cnt = (uint32_t)(dp - (win_p + blk) < BLOCK_PAGES ? dp - (win_p + blk) : BLOCK_PAGES);
+      if (nx + cnt > MESH_DESC_FLUSH) {
+        int st;
+        while ((st = mesh_reduce_write(ctx, xf, nx)) == ENOMEM) {
+          if (revoked(comm)) {
+            for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
+            if (!atomic_exchange(&ctx_w->err, 1)) ctx_w->res = revoked_fail(comm);
+            return;
+          }
+        }
+        for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
+        nx = 0; nr = 0;
+        if (st) {
+          if (!atomic_exchange(&ctx_w->err, 1))
+            ctx_w->res = comm_fail(comm, ncclInternalError, "communicator %s: reduce_write: %s", comm->name, strerror(st));
+          return;
+        }
+      }
+      const uint32_t *didx = comm->red_all + ((size_t)d * RED_SLOTS + sl) * win_cap + blk;
+      const size_t blk_off = (size_t)(win_p + blk) * MESH_PAGE_BYTES;
+      const size_t blk_bytes = ctx_w->seg_bytes[d] - blk_off < (size_t)cnt * MESH_PAGE_BYTES
+                                   ? ctx_w->seg_bytes[d] - blk_off : (size_t)cnt * MESH_PAGE_BYTES;
+
+      uint32_t sp0 = MESH_PAGE_NONE;
+      if (cnt == BLOCK_PAGES) {
+        const uint32_t w = rs_cur;
+        rs_cur = rs_base + ((rs_cur - rs_base + 1u) & 31u);
+        sp0 = mesh_page_alloc_run(m, BLOCK_PAGES, w);
+      }
+      if (sp0 != MESH_PAGE_NONE) {
+        unsigned char *dst_ptr = mesh_page_at(m, sp0);
+        if (c->premultiplied) premultiply(c->type, dst_ptr, ctx_w->seg_src[d] + blk_off, c->pre, blk_bytes / SIZE[c->type]);
+        else memcpy(dst_ptr, ctx_w->seg_src[d] + blk_off, blk_bytes);
+        for (uint32_t k = 0; k < BLOCK_PAGES; k++) {
+          const size_t poff = blk_off + (size_t)k * MESH_PAGE_BYTES;
+          const uint32_t pb = (uint32_t)(ctx_w->seg_bytes[d] - poff < MESH_PAGE_BYTES ? ctx_w->seg_bytes[d] - poff : MESH_PAGE_BYTES);
+          xf[nx++] = (struct mesh_red_xfer){ sp0 + k, pb, comm->node[d], didx[k], ctx_w->red_op, 0, ctx_w->my_tag };
+          rel_pages[nr++] = sp0 + k;
+        }
+      } else {
+        uint32_t sp[BLOCK_PAGES];
+        while (mesh_alloc(ctx, cnt, 1, NULL, sp) == ENOMEM) {
+          if (revoked(comm)) {
+            for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
+            if (!atomic_exchange(&ctx_w->err, 1)) ctx_w->res = revoked_fail(comm);
+            return;
+          }
+        }
+        for (uint32_t k = 0; k < cnt; k++) {
+          const size_t poff = blk_off + (size_t)k * MESH_PAGE_BYTES;
+          const uint32_t pb = (uint32_t)(ctx_w->seg_bytes[d] - poff < MESH_PAGE_BYTES ? ctx_w->seg_bytes[d] - poff : MESH_PAGE_BYTES);
+          unsigned char *dst_ptr = mesh_page_ptr(ctx, sp[k]);
+          if (c->premultiplied) premultiply(c->type, dst_ptr, ctx_w->seg_src[d] + poff, c->pre, pb / SIZE[c->type]);
+          else memcpy(dst_ptr, ctx_w->seg_src[d] + poff, pb);
+          xf[nx++] = (struct mesh_red_xfer){ sp[k], pb, comm->node[d], didx[k], ctx_w->red_op, 0, ctx_w->my_tag };
+          rel_pages[nr++] = sp[k];
+        }
+      }
+    }
+  }
+  if (nx) {
+    int st;
+    while ((st = mesh_reduce_write(ctx, xf, nx)) == ENOMEM) {
+      if (revoked(comm)) {
+        for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
+        if (!atomic_exchange(&ctx_w->err, 1)) ctx_w->res = revoked_fail(comm);
+        return;
+      }
+    }
+    for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
+    if (st) {
+      if (!atomic_exchange(&ctx_w->err, 1))
+        ctx_w->res = comm_fail(comm, ncclInternalError, "communicator %s: reduce_write: %s", comm->name, strerror(st));
+      return;
+    }
+  }
+
+  /* Drain this thread's disjoint blocks from shared W[my_idx] in parallel! */
+  const uint32_t *my_idx = comm->red_all + ((size_t)me * RED_SLOTS + sl) * win_cap;
+  for (uint32_t blk = (uint32_t)tid * BLOCK_PAGES; blk < ctx_w->my_n; blk += stride_blk) {
+    const uint32_t cnt = ctx_w->my_n - blk < BLOCK_PAGES ? ctx_w->my_n - blk : BLOCK_PAGES;
+    for (uint32_t k = 0; k < cnt; k++) {
+      const uint32_t pi = blk + k;
+      struct mesh_entry_info e;
+      uint16_t tag = 0;
+      for (;;) {
+        mesh_entry_red(ctx, my_idx[pi], &e, &tag);
+        if (e.data && tag == ctx_w->done_tag) break;
+        if (revoked(comm)) {
+          if (!atomic_exchange(&ctx_w->err, 1)) ctx_w->res = revoked_fail(comm);
+          return;
+        }
+      }
+      const size_t poff = (size_t)(win_p + pi) * MESH_PAGE_BYTES;
+      const size_t pb = ctx_w->seg_bytes[me] - poff < MESH_PAGE_BYTES ? ctx_w->seg_bytes[me] - poff : MESH_PAGE_BYTES;
+      if (c->post) truncdiv(c->type, ctx_w->my_dst + poff, (const unsigned char *)e.data, pb / SIZE[c->type], (uint64_t)n);
+      else memcpy(ctx_w->my_dst + poff, e.data, pb);
+    }
+  }
+}
+
+/* Multi-threaded algebraic in-switch ReduceScatter phase over mesh_reduce_write + shared W[dst_idx] landings. */
 static ncclResult_t reduce_scatter_in_switch(struct call *c, uint8_t red_op,
                                              const unsigned char *const *seg_src,
                                              const size_t *seg_bytes,
                                              unsigned char *my_dst) {
   struct ncclComm *comm = c->comm;
   struct mesh_ctx *ctx = comm->channel[0].context;
-  struct hdr *m = ctx->M;
   const int n = comm->nranks, me = comm->rank;
   const uint32_t win_cap = comm->red_pages;
   const uint16_t my_tag = MESH_TAG_WEIGHT(1);
@@ -1508,113 +1644,26 @@ static ncclResult_t reduce_scatter_in_switch(struct call *c, uint8_t red_op,
   }
   const uint64_t my_total_pages = pages_of(seg_bytes[me]);
 
-  static _Thread_local uint32_t rs_base, rs_cur;
-  if (!rs_base) {
-    uint64_t tid = 0;
-    pthread_threadid_np(NULL, &tid);
-    rs_base = 1u + ((uint32_t)((tid ^ (tid >> 32) ^ (uint64_t)getpid()) * 2654435761u) >> 16 & 1023u) * 32u;
-    rs_cur = rs_base;
-  }
-
   for (uint64_t win_p = 0; win_p < max_pages; win_p += win_cap) {
     const uint32_t sl = (comm->red_gen++) & (RED_SLOTS - 1u);
     const uint32_t win_n = (uint32_t)(max_pages - win_p < win_cap ? max_pages - win_p : win_cap);
     const uint32_t my_n = win_p < my_total_pages
                               ? (uint32_t)(my_total_pages - win_p < win_cap ? my_total_pages - win_p : win_cap)
                               : 0u;
-
-    /* Interleave 8-page (32 KiB) blocks across destinations d=0..n-1 so switches coalesce in-flight! */
-    struct mesh_red_xfer xf[MESH_DESC_FLUSH];
-    uint32_t rel_pages[MESH_DESC_FLUSH];
-    uint32_t nx = 0, nr = 0;
-
-    for (uint32_t blk = 0; blk < win_n; blk += BLOCK_PAGES) {
-      for (int d = 0; d < n; d++) {
-        const uint64_t dp = pages_of(seg_bytes[d]);
-        if (win_p + blk >= dp) continue;
-        const uint32_t cnt = (uint32_t)(dp - (win_p + blk) < BLOCK_PAGES ? dp - (win_p + blk) : BLOCK_PAGES);
-        if (nx + cnt > MESH_DESC_FLUSH) {
-          int st;
-          while ((st = mesh_reduce_write(ctx, xf, nx)) == ENOMEM) {
-            if (revoked(comm)) {
-              for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
-              return revoked_fail(comm);
-            }
-          }
-          for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
-          nx = 0; nr = 0;
-          if (st) return comm_fail(comm, ncclInternalError, "communicator %s: reduce_write: %s", comm->name, strerror(st));
-        }
-        const uint32_t *didx = comm->red_all + ((size_t)d * RED_SLOTS + sl) * win_cap + blk;
-        const size_t blk_off = (size_t)(win_p + blk) * MESH_PAGE_BYTES;
-        const size_t blk_bytes = seg_bytes[d] - blk_off < (size_t)cnt * MESH_PAGE_BYTES
-                                     ? seg_bytes[d] - blk_off : (size_t)cnt * MESH_PAGE_BYTES;
-
-        uint32_t sp0 = MESH_PAGE_NONE;
-        if (cnt == BLOCK_PAGES) {
-          const uint32_t w = rs_cur;
-          rs_cur = rs_base + ((rs_cur - rs_base + 1u) & 31u);
-          sp0 = mesh_page_alloc_run(m, BLOCK_PAGES, w);
-        }
-        if (sp0 != MESH_PAGE_NONE) {
-          unsigned char *dst_ptr = mesh_page_at(m, sp0);
-          if (c->premultiplied) premultiply(c->type, dst_ptr, seg_src[d] + blk_off, c->pre, blk_bytes / SIZE[c->type]);
-          else memcpy(dst_ptr, seg_src[d] + blk_off, blk_bytes);
-          for (uint32_t k = 0; k < BLOCK_PAGES; k++) {
-            const size_t poff = blk_off + (size_t)k * MESH_PAGE_BYTES;
-            const uint32_t pb = (uint32_t)(seg_bytes[d] - poff < MESH_PAGE_BYTES ? seg_bytes[d] - poff : MESH_PAGE_BYTES);
-            xf[nx++] = (struct mesh_red_xfer){ sp0 + k, pb, comm->node[d], didx[k], red_op, 0, my_tag };
-            rel_pages[nr++] = sp0 + k;
-          }
-        } else {
-          uint32_t sp[BLOCK_PAGES];
-          while (mesh_alloc(ctx, cnt, 1, NULL, sp) == ENOMEM) {
-            if (revoked(comm)) {
-              for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
-              return revoked_fail(comm);
-            }
-          }
-          for (uint32_t k = 0; k < cnt; k++) {
-            const size_t poff = blk_off + (size_t)k * MESH_PAGE_BYTES;
-            const uint32_t pb = (uint32_t)(seg_bytes[d] - poff < MESH_PAGE_BYTES ? seg_bytes[d] - poff : MESH_PAGE_BYTES);
-            unsigned char *dst_ptr = mesh_page_ptr(ctx, sp[k]);
-            if (c->premultiplied) premultiply(c->type, dst_ptr, seg_src[d] + poff, c->pre, pb / SIZE[c->type]);
-            else memcpy(dst_ptr, seg_src[d] + poff, pb);
-            xf[nx++] = (struct mesh_red_xfer){ sp[k], pb, comm->node[d], didx[k], red_op, 0, my_tag };
-            rel_pages[nr++] = sp[k];
-          }
-        }
-      }
-    }
-    if (nx) {
-      int st;
-      while ((st = mesh_reduce_write(ctx, xf, nx)) == ENOMEM) {
-        if (revoked(comm)) {
-          for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
-          return revoked_fail(comm);
-        }
-      }
-      for (uint32_t k = 0; k < nr; k++) mesh_release(ctx, rel_pages[k]);
-      if (st) return comm_fail(comm, ncclInternalError, "communicator %s: reduce_write: %s", comm->name, strerror(st));
-    }
-
-    if (my_n) {
-      const uint32_t *my_idx = comm->red_all + ((size_t)me * RED_SLOTS + sl) * win_cap;
-      for (uint32_t k = 0; k < my_n; k++) {
-        struct mesh_entry_info e;
-        uint16_t tag = 0;
-        for (;;) {
-          mesh_entry_red(ctx, my_idx[k], &e, &tag);
-          if (e.data && tag == done_tag) break;
-          if (revoked(comm)) return revoked_fail(comm);
-        }
-        const size_t poff = (size_t)(win_p + k) * MESH_PAGE_BYTES;
-        const size_t pb = seg_bytes[me] - poff < MESH_PAGE_BYTES ? seg_bytes[me] - poff : MESH_PAGE_BYTES;
-        if (c->post) truncdiv(c->type, my_dst + poff, (const unsigned char *)e.data, pb / SIZE[c->type], (uint64_t)n);
-        else memcpy(my_dst + poff, e.data, pb);
-      }
-      mesh_clear_indices(ctx, my_idx, my_n);
-    }
+    const uint32_t nblks = (win_n + BLOCK_PAGES - 1u) / BLOCK_PAGES;
+    const uint32_t max_t = comm->attach->threads;
+    const uint32_t nthreads = nblks < max_t ? (nblks ? nblks : 1u) : max_t;
+    struct rs_mt_ctx wctx = {
+      .c = c, .comm = comm, .ctx = ctx, .seg_src = seg_src, .seg_bytes = seg_bytes, .my_dst = my_dst,
+      .win_p = win_p, .win_n = win_n, .my_n = my_n, .win_cap = win_cap, .sl = sl, .nthreads = nthreads,
+      .red_op = red_op, .my_tag = my_tag, .done_tag = done_tag, .err = 0, .res = ncclSuccess
+    };
+    if (nthreads > 1u)
+      dispatch_apply_f(nthreads, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &wctx, rs_mt_worker);
+    else
+      rs_mt_worker(&wctx, 0);
+    if (atomic_load(&wctx.err)) return wctx.res;
+    if (my_n) mesh_clear_indices(ctx, comm->red_all + ((size_t)me * RED_SLOTS + sl) * win_cap, my_n);
   }
   return ncclSuccess;
 }

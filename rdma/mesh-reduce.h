@@ -337,7 +337,11 @@ static inline void mesh_table_reduce_land(struct hdr *m,struct mesh_c2_bucket *c
     mesh_table_reduce_land_c2(m,c2_buckets,index,page,bytes,op,tag);
     return;
   }
-  /* C0 / C1: 100% lock-free parallel reduction accumulator directly inside 64-bit W[index]. */
+  /* C0 / C1: 100% lock-free parallel reduction accumulator directly inside 64-bit W[index].
+     Supports zero-payload monoid identity (page == MESH_PAGE_NONE, bytes == 0, tag > 0) for sparse MoE/Engrams:
+       0_M(w1) + 0_M(w2) = 0_M(w1+w2)  (0 pages, 0 NEON)
+       x(w1)   + 0_M(w2) = x(w1+w2)    (0 pages, 0 NEON)
+       x(w1)   + y(w2)   = (x+y)(w1+w2) */
   const uint32_t slot_idx=index&(MESH_TABLE-1u);
   _Atomic uint64_t *wslot=&mesh_table(m)[slot_idx];
   uint32_t cur_p=page,cur_b=bytes;
@@ -348,16 +352,22 @@ static inline void mesh_table_reduce_land(struct hdr *m,struct mesh_c2_bucket *c
     if(atomic_compare_exchange_strong_explicit(wslot,&expected,val,memory_order_acq_rel,memory_order_acquire))return;
     const uint64_t old=atomic_exchange_explicit(wslot,(uint64_t)MESH_TABLE_EMPTY,memory_order_acq_rel);
     const uint32_t old_p=mesh_word_page(old);
-    if(old_p==MESH_PAGE_NONE)continue;
     const uint16_t old_tag=mesh_word_tag(old);
+    if(old_p==MESH_PAGE_NONE && !old_tag)continue;
     const uint32_t old_b=mesh_word_bytes(old);
     uint16_t merged_tag=0;int b_is_left=0;
     if(mesh_red_can_merge(op,old_tag,cur_tag,&merged_tag,&b_is_left)){
-      const uint32_t nb=cur_b>old_b?cur_b:old_b;
-      cur_p=mesh_red_fold_pair(m,op,old_p,cur_p,nb,b_is_left,slot_idx);
-      cur_b=nb;
-      cur_tag=merged_tag;
-    }else{
+      if(old_p==MESH_PAGE_NONE){
+        cur_tag=merged_tag;
+      }else if(cur_p==MESH_PAGE_NONE){
+        cur_p=old_p;cur_b=old_b;cur_tag=merged_tag;
+      }else{
+        const uint32_t nb=cur_b>old_b?cur_b:old_b;
+        cur_p=mesh_red_fold_pair(m,op,old_p,cur_p,nb,b_is_left,slot_idx);
+        cur_b=nb;
+        cur_tag=merged_tag;
+      }
+    }else if(old_p!=MESH_PAGE_NONE){
       mesh_page_release(m,old_p);
     }
   }

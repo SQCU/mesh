@@ -171,7 +171,7 @@ static inline _Atomic uint64_t *mesh_table(struct hdr *m){ return (_Atomic uint6
 static inline _Atomic uint32_t *mesh_refs(struct hdr *m){ return (_Atomic uint32_t *)((char *)m+m->arena_off); }
 
 static inline uint64_t mesh_word_pack_red(uint32_t p,uint32_t bytes,uint16_t tag){
-  return p==MESH_PAGE_NONE?(uint64_t)MESH_TABLE_EMPTY:(((uint64_t)tag<<48)|(((uint64_t)bytes&0xffffu)<<32)|(uint64_t)(p+1u));
+  return p==MESH_PAGE_NONE?(((uint64_t)tag<<48)|(uint64_t)MESH_TABLE_EMPTY):(((uint64_t)tag<<48)|(((uint64_t)bytes&0xffffu)<<32)|(uint64_t)(p+1u));
 }
 static inline uint64_t mesh_word_pack(uint32_t p,uint32_t bytes){
   return mesh_word_pack_red(p,bytes,0u);

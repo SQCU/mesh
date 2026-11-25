@@ -619,8 +619,9 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
       memcpy(rtags,tl->red_tag,cnt*sizeof *rtags);
       for(uint32_t k=0;k<cnt;k++){
         const struct mesh_wire_entry ent=ents[k];
-        if(ent.src_page>=2u)continue;
-        const uint32_t hp=h+ent.src_page;
+        const int is_zero=(ent.src_page==2u && ent.bytes==0u && rops[k]!=0u);
+        if(!is_zero && ent.src_page>=2u)continue;
+        const uint32_t hp=is_zero?MESH_PAGE_NONE:(h+ent.src_page);
         const uint32_t b=ent.bytes<=MESH_PAGE_BYTES?ent.bytes:MESH_PAGE_BYTES;
         if(ent.dst_node==M->node){
           if(rops[k])mesh_table_reduce_land(M,sw->c2_stash,ent.dst_index,hp,b,rops[k],rtags[k]);
@@ -630,10 +631,26 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
         }
         if(!terms_ready){if(!v)v=sw->view+mesh_switch_published(&sw->view_version);mesh_switch_terms_read(sw,v,line,terms);terms_ready=1;}
         const uint32_t tp=ent.hops+1<MESH_SWITCH_N?mesh_switch_route_dest(v,&togo,line,terms,ent.dst_node,origin,from):UINT32_MAX;
-        if(tp>=MESH_PORTS){mesh_page_release(M,hp);MESH_SWITCH_COUNT(sw,l->index,unreachable,1);continue;}
+        if(tp>=MESH_PORTS){if(!is_zero)mesh_page_release(M,hp);MESH_SWITCH_COUNT(sw,l->index,unreachable,1);continue;}
+        /* Zero-payload sparse identity coalescing right inside the relay inline tail! */
+        if(is_zero && relay_inl_dp[tp]!=MESH_PAGE_NONE){
+          struct mesh_wire_tail *rt=mesh_tail_at(M,relay_inl_dp[tp]);
+          int folded=0;
+          for(uint32_t j=0;j<relay_inl_n[tp];j++){
+            if(rt->e[j].dst_node==ent.dst_node && rt->e[j].dst_index==ent.dst_index && rt->red_op[j]==rops[k]){
+              uint16_t ntag=0;int bil=0;
+              if(mesh_red_can_merge(rops[k],rt->red_tag[j],rtags[k],&ntag,&bil)){
+                rt->red_tag[j]=ntag;
+                MESH_SWITCH_COUNT(sw,l->index,refreshes,1);
+                folded=1;break;
+              }
+            }
+          }
+          if(folded)continue;
+        }
         if(relay_inl_dp[tp]!=MESH_PAGE_NONE){
           struct mesh_wire_tail *rt=mesh_tail_at(M,relay_inl_dp[tp]);
-          const int fits=(relay_inl_src[tp][0]==hp || relay_inl_src[tp][1]==hp ||
+          const int fits=is_zero || (relay_inl_src[tp][0]==hp || relay_inl_src[tp][1]==hp ||
                           relay_inl_src[tp][0]==MESH_PAGE_NONE ||
                           (relay_inl_src[tp][1]==MESH_PAGE_NONE && b<=MESH_TAIL_SLOT1_MAX));
           if(rt->origin_node!=origin || !fits || relay_inl_n[tp]>=MESH_TAIL_MAX){
@@ -646,24 +663,26 @@ static int link_receive(struct link *l,uint32_t served,const uint64_t *line){
         }
         if(relay_inl_dp[tp]==MESH_PAGE_NONE){
           relay_inl_dp[tp]=mesh_page_alloc_run(M,2u,poller_seed(l));
-          if(relay_inl_dp[tp]==MESH_PAGE_NONE){mesh_page_release(M,hp);MESH_SWITCH_COUNT(sw,l->index,lost,1);continue;}
+          if(relay_inl_dp[tp]==MESH_PAGE_NONE){if(!is_zero)mesh_page_release(M,hp);MESH_SWITCH_COUNT(sw,l->index,lost,1);continue;}
           struct mesh_wire_tail *rt=mesh_tail_at(M,relay_inl_dp[tp]);
           rt->origin_node=origin;rt->from_node=M->node;
           relay_inl_n[tp]=0;
           relay_inl_src[tp][0]=relay_inl_src[tp][1]=MESH_PAGE_NONE;
           terms[tp].backlog+=(double)(2u*MESH_PAGE_BYTES)/terms[tp].rate;
         }
-        uint32_t sl=0;
-        if(relay_inl_src[tp][0]==hp)sl=0u;
-        else if(relay_inl_src[tp][1]==hp)sl=1u;
-        else if(relay_inl_src[tp][0]==MESH_PAGE_NONE){
-          sl=0u;relay_inl_src[tp][0]=hp;
-          if(b)memcpy(mesh_page_at(M,relay_inl_dp[tp]),mesh_page_at(M,hp),b);
-        }else{
-          sl=1u;relay_inl_src[tp][1]=hp;
-          if(b)memcpy(mesh_page_at(M,relay_inl_dp[tp]+1u),mesh_page_at(M,hp),b);
+        uint32_t sl=2u;
+        if(!is_zero){
+          if(relay_inl_src[tp][0]==hp)sl=0u;
+          else if(relay_inl_src[tp][1]==hp)sl=1u;
+          else if(relay_inl_src[tp][0]==MESH_PAGE_NONE){
+            sl=0u;relay_inl_src[tp][0]=hp;
+            if(b)memcpy(mesh_page_at(M,relay_inl_dp[tp]),mesh_page_at(M,hp),b);
+          }else{
+            sl=1u;relay_inl_src[tp][1]=hp;
+            if(b)memcpy(mesh_page_at(M,relay_inl_dp[tp]+1u),mesh_page_at(M,hp),b);
+          }
+          mesh_page_release(M,hp);
         }
-        mesh_page_release(M,hp);
         struct mesh_wire_tail *rt=mesh_tail_at(M,relay_inl_dp[tp]);
         const uint32_t idx=relay_inl_n[tp]++;
         rt->e[idx]=(struct mesh_wire_entry){.dst_node=ent.dst_node,.dst_index=ent.dst_index,.bytes=(uint16_t)b,
@@ -817,12 +836,13 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
     taken+=cnt;
     MESH_SWITCH_COUNT(sw,l->index,taken,cnt);
 
-    /* Fast path: <= 2 unique src_pages fitting in 8 KiB (slot 0 <= 4096 B, slot 1 <= 3760 B) */
+    /* Fast path: <= 2 unique non-empty src_pages (plus any number of 0-byte sparse identities) fitting in 8 KiB */
     if(cnt<=MESH_TAIL_MAX){
       uint32_t up[2]={MESH_PAGE_NONE,MESH_PAGE_NONE},ub[2]={0,0},nup=0;
-      int fits=1;
+      int fits=1,has_zero=0;
       for(uint32_t i=0;i<cnt;i++){
         const uint32_t sp=d->e[i].src_page,b=d->e[i].bytes<=MESH_PAGE_BYTES?d->e[i].bytes:MESH_PAGE_BYTES;
+        if(sp==MESH_PAGE_NONE && b==0u){has_zero=1;continue;}
         if(nup>=1u && up[0]==sp){if(b>ub[0])ub[0]=b;continue;}
         if(nup>=2u && up[1]==sp){if(b>ub[1])ub[1]=b;continue;}
         if(nup<2u){up[nup]=sp;ub[nup]=b;nup++;}
@@ -834,7 +854,7 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
           uint32_t tb_=ub[0];ub[0]=ub[1];ub[1]=tb_;
         }else fits=0;
       }
-      if(fits && nup>0u){
+      if(fits && (nup>0u || has_zero)){
         uint32_t udst[MESH_TAIL_MAX],nd=0,uport[MESH_TAIL_MAX];
         for(uint32_t i=0;i<cnt;i++){
           uint32_t fnd=0;
@@ -854,11 +874,11 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
             if(fdp[tp]==MESH_PAGE_NONE){ok=0;break;}
             struct mesh_wire_tail *it=mesh_tail_at(M,fdp[tp]);
             it->origin_node=M->node;it->from_node=M->node;
-            if(ub[0])memcpy(mesh_page_at(M,fdp[tp]),mesh_page_at(M,up[0]),ub[0]);
+            if(nup>=1u && ub[0])memcpy(mesh_page_at(M,fdp[tp]),mesh_page_at(M,up[0]),ub[0]);
             if(nup==2u && ub[1])memcpy(mesh_page_at(M,fdp[tp]+1u),mesh_page_at(M,up[1]),ub[1]);
           }
           struct mesh_wire_tail *it=mesh_tail_at(M,fdp[tp]);
-          const uint32_t sl=(d->e[i].src_page==up[0])?0u:1u;
+          const uint32_t sl=(d->e[i].src_page==MESH_PAGE_NONE && d->e[i].bytes==0u)?2u:((d->e[i].src_page==up[0])?0u:1u);
           const uint32_t idx=fn[tp]++;
           it->e[idx]=(struct mesh_wire_entry){
             .dst_node=d->e[i].dst_node,.dst_index=d->e[i].dst_index,.bytes=d->e[i].bytes,
@@ -873,7 +893,7 @@ static uint32_t switch_takes(struct link *l,const uint64_t *line){
             for(uint32_t u=0;u<nd;u++)if(udst[u]==d->e[i].dst_node){tp=uport[u];break;}
             if(tp>=MESH_PORTS)MESH_SWITCH_COUNT(sw,l->index,unreachable,1);
             else MESH_SWITCH_COUNT(sw,l->index,forwards,1);
-            mesh_page_release(M,d->e[i].src_page);
+            if(d->e[i].src_page!=MESH_PAGE_NONE)mesh_page_release(M,d->e[i].src_page);
           }
           for(uint32_t tp=0;tp<MESH_PORTS;tp++){
             if(fdp[tp]==MESH_PAGE_NONE)continue;

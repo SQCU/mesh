@@ -240,19 +240,22 @@ int mesh_reduce_write(struct mesh_ctx *ctx,const struct mesh_red_xfer *xfers,uin
   uint16_t cur_tag=0;
   for(uint32_t i=0;i<count;i++){
     const struct mesh_red_xfer *x=xfers+i;
-    if(x->src_page>=pages || x->bytes>MESH_PAGE_BYTES || x->dst_index>=m->entries){
+    const int is_zero=(x->bytes==0u && x->src_page==MESH_PAGE_NONE && x->op!=MESH_RED_NONE);
+    if((!is_zero && x->src_page>=pages) || x->bytes>MESH_PAGE_BYTES || x->dst_index>=m->entries){
       if(desc_page!=MESH_PAGE_NONE){
-        for(uint32_t k=0;k<n;k++)mesh_page_release(m,desc->e[k].src_page);
+        for(uint32_t k=0;k<n;k++)if(desc->e[k].src_page!=MESH_PAGE_NONE)mesh_page_release(m,desc->e[k].src_page);
         mesh_page_release(m,desc_page);
       }
       return EINVAL;
     }
     if(x->dst_node==self){
-      if(!mesh_page_hold(m,x->src_page))continue;
-      mesh_table_reduce_land(m,sw->c2_stash,x->dst_index,x->src_page,x->bytes,x->op,x->tag);
+      if(!is_zero && !mesh_page_hold(m,x->src_page))continue;
+      mesh_table_reduce_land(m,sw->c2_stash,x->dst_index,is_zero?MESH_PAGE_NONE:x->src_page,x->bytes,x->op,x->tag);
       continue;
     }
-    if(desc_page!=MESH_PAGE_NONE && (n==MESH_DESC_FLUSH || x->op!=cur_op || x->tag!=cur_tag)){
+    const uint32_t flush_at=(n>0 && desc->e[0].src_page==MESH_PAGE_NONE)?MESH_TAIL_MAX:MESH_DESC_FLUSH;
+    const int mix_zero=(n>0 && ((desc->e[0].src_page==MESH_PAGE_NONE)!=is_zero));
+    if(desc_page!=MESH_PAGE_NONE && (n==flush_at || mix_zero || x->op!=cur_op || x->tag!=cur_tag)){
       desc->e[254].flags=cur_op;
       desc->e[254].bytes=cur_tag;
       desc->count=n;
@@ -267,10 +270,11 @@ int mesh_reduce_write(struct mesh_ctx *ctx,const struct mesh_red_xfer *xfers,uin
       cur_op=x->op;cur_tag=x->tag;
       n=0;
     }
-    if(!mesh_page_hold(m,x->src_page))continue;
+    if(!is_zero && !mesh_page_hold(m,x->src_page))continue;
     desc->e[n++]=(struct mesh_wire_entry){
       .dst_node=x->dst_node,.dst_index=x->dst_index,
-      .bytes=(uint16_t)x->bytes,.flags=(cur_op?MESH_WIRE_REDUCE:0u),.hops=0,.src_page=x->src_page
+      .bytes=(uint16_t)x->bytes,.flags=(cur_op?MESH_WIRE_REDUCE:0u),.hops=0,
+      .src_page=is_zero?MESH_PAGE_NONE:x->src_page
     };
   }
   if(desc_page!=MESH_PAGE_NONE){
@@ -291,7 +295,7 @@ int mesh_entry_red(struct mesh_ctx *ctx,uint32_t index,struct mesh_entry_info *o
   const uint32_t p=mesh_word_page(w);
   if(p==MESH_PAGE_NONE || p>=mesh_flat_pages(m)){
     *out=(struct mesh_entry_info){.page=MESH_PAGE_NONE,.bytes=0,.data=NULL};
-    if(out_tag)*out_tag=0u;
+    if(out_tag)*out_tag=mesh_word_tag(w);
   }else{
     *out=(struct mesh_entry_info){.page=p,.bytes=mesh_word_bytes(w),.data=mesh_page_at(m,p)};
     if(out_tag)*out_tag=mesh_word_tag(w);
