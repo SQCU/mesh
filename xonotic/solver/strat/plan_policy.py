@@ -408,11 +408,11 @@ class PlanWally(nn.Module):
 
         # Output heads: unit-norm projections + EXPLICIT bounded scalar gains/temperatures for sharp PDFs!
         self.cont_proj = MPLinear(d, PLAN_CONT_DIM)
-        self.cont_gain = nn.Parameter(torch.full((PLAN_CONT_DIM,), 0.08))
+        self.cont_gain = nn.Parameter(torch.full((PLAN_CONT_DIM,), 0.04))
         self.cont_bias = nn.Parameter(torch.zeros(PLAN_CONT_DIM))
         with torch.no_grad():
             self.cont_bias[6] = 0.10   # pwr_w mild readiness
-            self.cont_bias[8] = -0.9   # nav_w soft boundary (~0.17)
+            self.cont_bias[8] = -1.1   # nav_w soft boundary (~0.14)
             self.cont_bias[9] = 0.25   # atk_cyl mild cart focus
         self.cont_logstd = nn.Parameter(torch.full((PLAN_CONT_DIM,), math.log(0.38)))
 
@@ -660,9 +660,10 @@ def pack_plan_rows(
             else:
                 nav_x = nav_y = nav_w = 0.0
             cpick = int(cart_np[i])
-            # Physical push-radius scale: <120u at init (stays inside cart push radius on all map sizes),
-            # up to +-315u (>120u) when the policy intentionally commands vanguard/ambush lead.
-            cart_ds = float(np.clip(350.0 * np.tanh(cont_np[i, 7] * 0.65), -450.0, 450.0))
+            # Superlinear push-radius mapping: |u|<=0.8 stays <120u (inside cart push radius on all maps);
+            # intentional |u|=1.3..2.0 reaches 180..365u (>120u) for vanguard/ambush lead.
+            u_ds = float(cont_np[i, 7])
+            cart_ds = float(np.clip(math.copysign(120.0 * (abs(u_ds) ** 1.6), u_ds), -480.0, 480.0))
             posture = float(np.tanh(cont_np[i, 10]))
             out[eid - 1, 0] = float(eid)
             out[eid - 1, 1] = float(cpick)
