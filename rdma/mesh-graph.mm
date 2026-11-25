@@ -903,6 +903,125 @@ template <uint D>
 template [[host_name("mg_kv_sdpa_decode_256")]] [[kernel]] void mg_kv_sdpa_decode<256>(const device bfloat*, const device bfloat*, const device bfloat*, device bfloat*, const device int*, constant uint*, constant float&, uint2, uint, uint);
 template [[host_name("mg_kv_sdpa_decode_512")]] [[kernel]] void mg_kv_sdpa_decode<512>(const device bfloat*, const device bfloat*, const device bfloat*, device bfloat*, const device int*, constant uint*, constant float&, uint2, uint, uint);
 
+// Split-K FlashDecoding for long contexts / small B*h_q (saturates all 80 M5 Ultra GPU cores!)
+template <uint D>
+[[kernel]] void mg_kv_sdpa_splitk(const device bfloat* Q [[buffer(0)]], const device bfloat* Kc [[buffer(1)]],
+    const device bfloat* Vc [[buffer(2)]], device float* Scratch [[buffer(3)]], const device int* pos_buf [[buffer(4)]],
+    constant uint* u [[buffer(5)]], // B, h_q, h_kv, max_seq, window, splits
+    constant float& scale [[buffer(6)]],
+    uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  constexpr uint E = D / 32u;
+  constexpr uint H = E / 4u;
+  const uint h_q = u[1], h_kv = u[2], max_seq = u[3], window = u[4], splits = u[5];
+  const uint qh = tg.x, b = tg.y, sp = tg.z;
+  const uint kvh = (qh * h_kv) / h_q;
+  const uint pos = uint(max(0, pos_buf[0]));
+  const uint len = pos + 1u;
+  const uint start = (window > 0u && len > window) ? (len - window) : 0u;
+  const uint total = len - start;
+  const uint chunk = (total + splits - 1u) / splits;
+  const uint t_lo = start + sp * chunk;
+  const uint t_hi = min(len, t_lo + chunk);
+
+  const ulong out_base = (ulong(b * h_q + qh) * splits + sp) * (D + 2u);
+  if (t_lo >= t_hi) {
+    if (sg == 0u && lane == 0u) { Scratch[out_base] = -INFINITY; Scratch[out_base + 1u] = 0.0f; }
+    return;
+  }
+
+  const device vec<bfloat, 4>* q4 = (const device vec<bfloat, 4>*)(Q + (ulong(b) * h_q + qh) * D);
+  float4 qv[H];
+  float4 ov[H];
+  for (uint h = 0; h < H; h++) {
+    qv[h] = float4(q4[lane * H + h]);
+    ov[h] = float4(0.0f);
+  }
+  const ulong kv_base = (ulong(b) * h_kv + kvh) * max_seq;
+  float m_i = -INFINITY;
+  float l_i = 0.0f;
+
+  for (uint t = t_lo + sg; t < t_hi; t += 8u) {
+    const uint slot = (window > 0u) ? (t % max_seq) : t;
+    const device vec<bfloat, 4>* k4 = (const device vec<bfloat, 4>*)(Kc + (kv_base + slot) * D);
+    const device vec<bfloat, 4>* v4 = (const device vec<bfloat, 4>*)(Vc + (kv_base + slot) * D);
+    float dotp = 0.0f;
+    for (uint h = 0; h < H; h++) dotp += dot(qv[h], float4(k4[lane * H + h]));
+    const float sc = simd_sum(dotp) * scale;
+    const float m_new = max(m_i, sc);
+    const float alpha = (m_i == -INFINITY) ? 0.0f : metal::fast::exp(m_i - m_new);
+    const float beta = metal::fast::exp(sc - m_new);
+    l_i = l_i * alpha + beta;
+    for (uint h = 0; h < H; h++) ov[h] = ov[h] * alpha + beta * float4(v4[lane * H + h]);
+    m_i = m_new;
+  }
+
+  threadgroup float sm_m[8];
+  threadgroup float sm_l[8];
+  threadgroup float sm_o[8][D];
+  if (lane == 0u) { sm_m[sg] = m_i; sm_l[sg] = l_i; }
+  for (uint h = 0; h < H; h++) {
+    const uint idx = (lane * H + h) * 4u;
+    sm_o[sg][idx + 0u] = ov[h].x; sm_o[sg][idx + 1u] = ov[h].y;
+    sm_o[sg][idx + 2u] = ov[h].z; sm_o[sg][idx + 3u] = ov[h].w;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (sg == 0u) {
+    float gm = -INFINITY;
+    for (uint s = 0; s < 8u; s++) gm = max(gm, sm_m[s]);
+    float gl = 0.0f;
+    float w[8];
+    for (uint s = 0; s < 8u; s++) {
+      w[s] = (sm_l[s] > 0.0f) ? metal::fast::exp(sm_m[s] - gm) : 0.0f;
+      gl += sm_l[s] * w[s];
+    }
+    if (lane == 0u) { Scratch[out_base] = gm; Scratch[out_base + 1u] = gl; }
+    device float* dst = Scratch + out_base + 2u;
+    for (uint h = 0; h < H; h++) {
+      const uint idx = (lane * H + h) * 4u;
+      for (uint c = 0; c < 4u; c++) {
+        float acc = 0.0f;
+        for (uint s = 0; s < 8u; s++) acc += sm_o[s][idx + c] * w[s];
+        dst[idx + c] = acc;
+      }
+    }
+  }
+}
+template [[host_name("mg_kv_sdpa_splitk_256")]] [[kernel]] void mg_kv_sdpa_splitk<256>(const device bfloat*, const device bfloat*, const device bfloat*, device float*, const device int*, constant uint*, constant float&, uint3, uint, uint);
+template [[host_name("mg_kv_sdpa_splitk_512")]] [[kernel]] void mg_kv_sdpa_splitk<512>(const device bfloat*, const device bfloat*, const device bfloat*, device float*, const device int*, constant uint*, constant float&, uint3, uint, uint);
+
+template <uint D>
+[[kernel]] void mg_kv_sdpa_combine(const device float* Scratch [[buffer(0)]], device bfloat* Out [[buffer(1)]],
+    constant uint* u [[buffer(2)]], // h_q, splits
+    uint2 tg [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
+  const uint h_q = u[0], splits = u[1];
+  const uint qh = tg.x, b = tg.y;
+  const ulong head_base = ulong(b * h_q + qh) * splits * (D + 2u);
+  float gm = -INFINITY;
+  for (uint sp = 0; sp < splits; sp++) gm = max(gm, Scratch[head_base + ulong(sp) * (D + 2u)]);
+  float gl = 0.0f;
+  float w[32];
+  for (uint sp = 0; sp < splits; sp++) {
+    const float ms = Scratch[head_base + ulong(sp) * (D + 2u)];
+    const float ls = Scratch[head_base + ulong(sp) * (D + 2u) + 1u];
+    w[sp] = (ls > 0.0f) ? metal::fast::exp(ms - gm) : 0.0f;
+    gl += ls * w[sp];
+  }
+  const float inv_l = (gl > 0.0f) ? (1.0f / gl) : 0.0f;
+  const uint k0 = i * 4u;
+  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint sp = 0; sp < splits; sp++) {
+    if (w[sp] == 0.0f) continue;
+    const device float* src = Scratch + head_base + ulong(sp) * (D + 2u) + 2u + k0;
+    const float ws = w[sp];
+    for (uint e = 0; e < 4u; e++) acc[e] += src[e] * ws;
+  }
+  device bfloat* dst = Out + (ulong(b) * h_q + qh) * D + k0;
+  for (uint e = 0; e < 4u; e++) dst[e] = bfloat(acc[e] * inv_l);
+}
+template [[host_name("mg_kv_sdpa_combine_256")]] [[kernel]] void mg_kv_sdpa_combine<256>(const device float*, device bfloat*, constant uint*, uint2, uint);
+template [[host_name("mg_kv_sdpa_combine_512")]] [[kernel]] void mg_kv_sdpa_combine<512>(const device float*, device bfloat*, constant uint*, uint2, uint);
+
 // ---- 8. General elementwise ops (bf16 & f32) ----
 template <typename T>
 [[kernel]] void mg_elementwise(const device T* a [[buffer(0)]], const device T* b [[buffer(1)]],
@@ -1340,6 +1459,8 @@ struct mesh_graph {
   std::vector<BufSlot> bufs;
   std::vector<CrossingSlot> crossings;
   std::vector<mesh_graph_op> ops;
+  id<MTLBuffer> sdpa_scratch = nil;
+  size_t sdpa_scratch_bytes = 0;
   uint64_t step_gen = 0;
   int out_tok_buf_id = -1;
 };
@@ -1915,16 +2036,45 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
         const BufSlot &bo = g->bufs[op.out[0]];
         const uint32_t B = op.u[0], h_q = op.u[1], h_kv = op.u[2], D = op.u[3], max_seq = op.u[4], window = op.u[5];
         const float sc = (op.f[0] == 0.0f) ? 1.0f : op.f[0];
-        const uint32_t u[5] = {B, h_q, h_kv, max_seq, window};
-        [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_decode_512" : "mg_kv_sdpa_decode_256")];
-        [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
-        [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
-        [enc setBuffer:bv.mtl offset:bv.off atIndex:2];
-        [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
-        [enc setBuffer:bpos.mtl offset:bpos.off atIndex:4];
-        [enc setBytes:u length:sizeof(u) atIndex:5];
-        [enc setBytes:&sc length:sizeof(sc) atIndex:6];
-        [enc dispatchThreadgroups:MTLSizeMake(h_q, B, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        const uint32_t bh = B * h_q;
+        // Use Split-K FlashDecoding when KV span is large and B*h_q under-fills the 80-core M5 Ultra GPU!
+        const uint32_t splits = (max_seq >= 1024u && bh <= 32u) ? std::min<uint32_t>(32u, std::max<uint32_t>(1u, 64u / bh))
+                              : ((max_seq >= 512u && bh <= 8u) ? std::min<uint32_t>(16u, std::max<uint32_t>(1u, 32u / bh)) : 1u);
+        if (splits > 1u) {
+          const size_t need = static_cast<size_t>(bh) * splits * (D + 2u) * sizeof(float);
+          if (need > g->sdpa_scratch_bytes) {
+            g->sdpa_scratch = [g->dev newBufferWithLength:need options:MTLResourceStorageModePrivate];
+            g->sdpa_scratch_bytes = need;
+          }
+          const uint32_t u[6] = {B, h_q, h_kv, max_seq, window, splits};
+          [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_splitk_512" : "mg_kv_sdpa_splitk_256")];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+          [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:2];
+          [enc setBuffer:g->sdpa_scratch offset:0 atIndex:3];
+          [enc setBuffer:bpos.mtl offset:bpos.off atIndex:4];
+          [enc setBytes:u length:sizeof(u) atIndex:5];
+          [enc setBytes:&sc length:sizeof(sc) atIndex:6];
+          [enc dispatchThreadgroups:MTLSizeMake(h_q, B, splits) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+          const uint32_t cu[2] = {h_q, splits};
+          [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_combine_512" : "mg_kv_sdpa_combine_256")];
+          [enc setBuffer:g->sdpa_scratch offset:0 atIndex:0];
+          [enc setBuffer:bo.mtl offset:bo.off atIndex:1];
+          [enc setBytes:cu length:sizeof(cu) atIndex:2];
+          [enc dispatchThreadgroups:MTLSizeMake(h_q, B, 1) threadsPerThreadgroup:MTLSizeMake(D / 4u, 1, 1)];
+        } else {
+          const uint32_t u[5] = {B, h_q, h_kv, max_seq, window};
+          [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_decode_512" : "mg_kv_sdpa_decode_256")];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+          [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:2];
+          [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
+          [enc setBuffer:bpos.mtl offset:bpos.off atIndex:4];
+          [enc setBytes:u length:sizeof(u) atIndex:5];
+          [enc setBytes:&sc length:sizeof(sc) atIndex:6];
+          [enc dispatchThreadgroups:MTLSizeMake(h_q, B, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        }
         break;
       }
       case MG_OP_GATE_UP_ACT: {
