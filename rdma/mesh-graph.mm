@@ -2037,8 +2037,10 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
         const uint32_t B = op.u[0], h_q = op.u[1], h_kv = op.u[2], D = op.u[3], max_seq = op.u[4], window = op.u[5];
         const float sc = (op.f[0] == 0.0f) ? 1.0f : op.f[0];
         const uint32_t bh = B * h_q;
-        const uint32_t splits = (max_seq >= 1024u && bh <= 32u) ? std::min<uint32_t>(32u, std::max<uint32_t>(1u, 64u / bh))
-                              : ((max_seq >= 512u && bh <= 8u) ? std::min<uint32_t>(16u, std::max<uint32_t>(1u, 32u / bh)) : 1u);
+        const uint32_t approx_len = (bpos.host_ptr ? static_cast<uint32_t>(std::max<int32_t>(0, *static_cast<const int32_t *>(bpos.host_ptr))) : 0u) + 2u;
+        const uint32_t eff_len = (window > 0u) ? std::min<uint32_t>(approx_len, window) : approx_len;
+        const uint32_t splits = (eff_len >= 384u && max_seq >= 1024u && bh <= 32u) ? std::min<uint32_t>(32u, std::max<uint32_t>(1u, 64u / bh))
+                              : ((eff_len >= 384u && max_seq >= 512u && bh <= 8u) ? std::min<uint32_t>(16u, std::max<uint32_t>(1u, 32u / bh)) : 1u);
         if (splits > 1u && g->sdpa_scratch) {
           const uint32_t u[6] = {B, h_q, h_kv, max_seq, window, splits};
           [enc setComputePipelineState:get_pso(g, g->lib_core, D == 512u ? "mg_kv_sdpa_splitk_512" : "mg_kv_sdpa_splitk_256")];
