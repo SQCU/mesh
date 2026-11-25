@@ -32,6 +32,7 @@ if str(REPO_ROOT / "xonotic") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "xonotic"))
 
 from payload.tools.strategy_io_schema import CS, EVT, OBS, TS
+from solver.strat.aurora import Aurora
 from solver.strat.buffers import ObservationMemory
 from solver.strat.game_value import effective_leader, formal_value_record, role_rewards
 from solver.strat.grad_snr import summarize_mccandlish_pairs
@@ -460,7 +461,7 @@ def _run_sync_wave(
                                 codes_np = out.fsq_codes.detach().cpu().numpy().astype(np.int64)
                                 for bi in np.flatnonzero(sel):
                                     fsq_code_counts[tuple(int(v) for v in codes_np[bi])] += 1
-                            samp = sample_plan(out, deterministic=(arm_name != train_arm))
+                            samp = sample_plan(out, deterministic=False)
                             h_next_np = out.h_next.detach().cpu().numpy()
                             for bi in range(n_bots):
                                 eid = int(round(float(obs_rows[bi, OBS["ID"]])))
@@ -628,12 +629,24 @@ def _run_sync_wave(
                     snr_pairs.append(gpair)
                     for grp, gp in grp_pairs.items():
                         group_snr_pairs[grp].append(gp)
-                    # If 4-machine signal_sq <= 0 on epoch 0, skip this noisy step cleanly across all 4 Studios
-                    if float(gpair["signal_sq"]) <= 0.0:
-                        deferred += 1
-                        step_skipped = True
-                        optimizer.zero_grad(set_to_none=True)
-                        break
+
+                # McCandlish sqrt(eff_g) per-group spectral trust region:
+                # Prevents polar(D G) from amplifying pure-noise action_head gradients into full lr steps!
+                grp_scales: dict[int, float] = {}
+                for gi, grp_name in enumerate(optimizer._group_names):
+                    gp = grp_pairs.get(grp_name)
+                    if gp is None:
+                        grp_scales[gi] = 0.0
+                    else:
+                        eff_g = float(gp.get("step_efficiency") or 0.0)
+                        # Minimum floor 0.0 when signal_sq <= 0; sqrt(eff) scaling when positive signal exists
+                        grp_scales[gi] = math.sqrt(eff_g) if float(gp.get("signal_sq") or 0.0) > 0.0 else 0.0
+
+                if all(v <= 0.0 for v in grp_scales.values()):
+                    deferred += 1
+                    step_skipped = True
+                    optimizer.zero_grad(set_to_none=True)
+                    break
 
                 off_g = 0
                 for p in params:
@@ -643,7 +656,9 @@ def _run_sync_wave(
                     else:
                         p.grad.copy_(mean_g[off_g : off_g + sz].view_as(p.data))
                     off_g += sz
-                last_gnorm = edm2_step(optimizer, model, grad_clip=grad_clip)
+                last_gnorm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
+                optimizer.step(group_lr_scales=grp_scales)
+                project_unit_norm_(model)
 
             if not step_skipped:
                 ema_update(ema_model, model, decay=ema_decay)
@@ -772,7 +787,24 @@ def run_train_and_elo(args):
     ema = clone_plan_model(live).to(device)
     _broadcast_model_(live, torch_mesh, rank, world_size, device)
     _broadcast_model_(ema, torch_mesh, rank, world_size, device)
-    opt = make_aurora_optimizer(live, lr=args.lr, scalar_lr=args.scalar_lr, mu=0.90, pp_iterations=2, pp_beta=0.5)
+    group_names = ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "dynamics_head")
+    grouped: dict[str, list[torch.nn.Parameter]] = {g: [] for g in group_names}
+    for n, p in live.named_parameters():
+        if not p.requires_grad:
+            continue
+        g = plan_module_group(n)
+        grouped.setdefault(g, []).append(p)
+    active_groups = [(g, ps) for g, ps in grouped.items() if ps]
+    opt = Aurora(
+        [{"params": ps, "lr": args.lr, "scalar_lr": args.scalar_lr} for _, ps in active_groups],
+        lr=args.lr,
+        scalar_lr=args.scalar_lr,
+        mu=0.90,
+        nesterov=True,
+        pp_iterations=2,
+        pp_beta=0.5,
+    )
+    opt._group_names = [g for g, _ in active_groups]
 
     snapshots: dict[str, PlanWally] = {"aur_w0": clone_plan_model(ema).to(device)}
     if rank == 0:
@@ -811,10 +843,10 @@ def run_train_and_elo(args):
             train_arm="train",
             optimizer=opt,
             ema_model=ema,
-            ema_decay=0.94,
+            ema_decay=0.90,
             n_sync_steps=args.steps_per_wave,
             local_batch_size=args.local_batch,
-            ppo_epochs=2,
+            ppo_epochs=args.ppo_epochs,
             gamma=0.95,
             grad_clip=1.0,
         )
@@ -862,7 +894,7 @@ def run_train_and_elo(args):
             team_arms=trip,
             duration_s=args.elo_duration_s,
             rotate_seats=True,
-            deterministic=True,
+            deterministic=False,
             device=device,
             base_port=args.base_port + 200 + ti * 10,
             map_names=[my_map] * len(e_seeds),
@@ -974,11 +1006,12 @@ def main():
     ap.add_argument("--out-dir", default="~/xonotic-runs/studio4-aurora")
     ap.add_argument("--waves", type=int, default=5)
     ap.add_argument("--steps-per-wave", type=int, default=18)
-    ap.add_argument("--local-batch", type=int, default=16)
-    ap.add_argument("--lr", type=float, default=0.012)
-    ap.add_argument("--scalar-lr", type=float, default=2.5e-3)
+    ap.add_argument("--local-batch", type=int, default=32)
+    ap.add_argument("--ppo-epochs", type=int, default=1)
+    ap.add_argument("--lr", type=float, default=0.005)
+    ap.add_argument("--scalar-lr", type=float, default=1.5e-3)
     ap.add_argument("--base-port", type=int, default=26000)
-    ap.add_argument("--elo-duration-s", type=float, default=24.0)
+    ap.add_argument("--elo-duration-s", type=float, default=35.0)
     args = ap.parse_args()
 
     if args.mode == "tp_bench":

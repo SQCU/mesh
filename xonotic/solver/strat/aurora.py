@@ -122,7 +122,7 @@ class Aurora(torch.optim.Optimizer):
         self.last_metrics: dict[str, float] = {}
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure=None, group_lr_scales: dict[int, float] | None = None):
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -130,9 +130,12 @@ class Aurora(torch.optim.Optimizer):
 
         tall_cvs = []
         all_cvs = []
-        for group in self.param_groups:
-            lr = group["lr"]
-            scalar_lr = group["scalar_lr"]
+        for g_idx, group in enumerate(self.param_groups):
+            scale = float(group_lr_scales.get(g_idx, 1.0)) if group_lr_scales is not None else 1.0
+            if scale <= 0.0:
+                continue
+            lr = group["lr"] * scale
+            scalar_lr = group["scalar_lr"] * scale
             mu = group["mu"]
             nesterov = group["nesterov"]
             pp_iters = group["pp_iterations"]

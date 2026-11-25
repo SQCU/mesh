@@ -198,7 +198,12 @@ class FSQBottleneck(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         g = torch.clamp(self.in_gain, 0.25, 4.0)
-        z = torch.tanh(g * self.proj_in(x)) * self.half_levels
+        z_raw = self.proj_in(x)
+        if z_raw.shape[0] > 1:
+            z_mean = z_raw.mean(dim=0, keepdim=True)
+            z_std = z_raw.std(dim=0, keepdim=True, unbiased=False).clamp_min(0.35)
+            z_raw = (z_raw - z_mean) / z_std
+        z = torch.tanh(g * z_raw) * self.half_levels
         q = torch.round(z)
         z_ste = z + (q - z).detach()
         norm_q = mp_norm(z_ste / torch.clamp(self.half_levels, min=1.0))
