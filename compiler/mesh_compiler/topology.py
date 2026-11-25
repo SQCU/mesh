@@ -87,24 +87,33 @@ class TopologyGraph:
         return sum(lk.rate_gbs for lk in self.links if lk.dst == u)
 
     def bottleneck_rate_gbs(self, ranks=None) -> float:
-        """Minimum directional per-rank bottleneck bandwidth (GB/s) across `ranks` (drives Pareto codec hull)."""
+        """Minimum directional per-rank bottleneck bandwidth (GB/s) across `ranks` (exact min-bisection for <=10 ranks)."""
+        from itertools import combinations
         nodes = tuple(self.nodes if ranks is None else ranks)
-        if len(nodes) <= 1:
+        p = len(nodes)
+        if p <= 1:
             return 10.0
         rates = []
         for u in nodes:
             cap = min(self.egress_capacity(u), self.ingress_capacity(u))
             if cap > 0.0:
                 rates.append(cap)
-        if not rates:
-            return 10.0
-        # Also check pairwise bisection / min-cut across the first half vs second half
-        mid = len(nodes) // 2
-        if mid > 0:
+        mid = p // 2
+        if p <= 10 and mid > 0:
+            # Exact min-bisection over all balanced partitions fixing nodes[0] on left side
+            rest = nodes[1:]
+            for pick in combinations(rest, mid - 1):
+                left = (nodes[0],) + pick
+                left_set = set(left)
+                right = tuple(x for x in nodes if x not in left_set)
+                bis = self.max_flow(left, right)
+                if math.isfinite(bis) and bis > 0.0:
+                    rates.append(bis / mid)
+        elif mid > 0:
             bis = self.max_flow(nodes[:mid], nodes[mid:])
             if math.isfinite(bis) and bis > 0.0:
                 rates.append(bis / mid)
-        return min(rates)
+        return min(rates) if rates else 10.0
 
     def max_flow(self, sources, sinks) -> float:
         """Exact Edmonds-Karp max-flow (GB/s) from super-source(sources) to super-sink(sinks)."""

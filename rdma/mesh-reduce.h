@@ -245,7 +245,8 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
   }
   case MESH_RED_SUM_HAD_I6:{
     /* C0 Hadamard-domain bit-packed INT6 reduction (52 B / 64 elems, 78 blocks/page, FP32 scale).
-       4 groups x 3 u32 = 384 bits = 64 x 6-bit unsigned values (v + 31), exact match with fwht64_had_int6_pack. */
+       4 groups x 3 u32 = 384 bits = 64 x 6-bit unsigned values (v + 31), exact match with fwht64_had_int6_pack.
+       Vectorized with ARM NEON (zero scalar lrintf calls) for full-rate in-switch coalescing! */
     uint8_t *dp=(uint8_t *)dst_v;
     const uint8_t *sp=(const uint8_t *)src_v;
     const uint32_t nb=bytes/MESH_HAD_I6_BLK_BYTES;
@@ -253,8 +254,7 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
       struct mesh_had_i6_blk *db=(struct mesh_had_i6_blk *)(dp+b*MESH_HAD_I6_BLK_BYTES);
       const struct mesh_had_i6_blk *sb=(const struct mesh_had_i6_blk *)(sp+b*MESH_HAD_I6_BLK_BYTES);
       const float sd=db->s,sf=sb->s;
-      float acc[64];
-      float amax=0.0f;
+      int32_t dq_i[64],sq_i[64];
       for(uint32_t g=0;g<4u;g++){
         const uint32_t dw0=db->w[g*3u+0u],dw1=db->w[g*3u+1u],dw2=db->w[g*3u+2u];
         const uint32_t sw0=sb->w[g*3u+0u],sw1=sb->w[g*3u+1u],sw2=sb->w[g*3u+2u];
@@ -266,31 +266,63 @@ static inline void mesh_red_apply_page(uint8_t op,void *dst_v,const void *src_v,
           sw0&0xfffu, (sw0>>12u)&0xfffu, (sw0>>24u)|((sw1&0xfu)<<8u), (sw1>>4u)&0xfffu,
           (sw1>>16u)&0xfffu, (sw1>>28u)|((sw2&0xffu)<<4u), (sw2>>8u)&0xfffu, (sw2>>20u)&0xfffu
         };
+        int32_t *dqi=dq_i+g*16u,*sqi=sq_i+g*16u;
         for(uint32_t k=0;k<8u;k++){
-          const float va=(float)((int)(du[k]&63u)-31)*sd+(float)((int)(su[k]&63u)-31)*sf;
-          const float vb=(float)((int)((du[k]>>6u)&63u)-31)*sd+(float)((int)((su[k]>>6u)&63u)-31)*sf;
-          acc[g*16u+k*2u]=va;
-          acc[g*16u+k*2u+1u]=vb;
-          const float aa=fabsf(va),ab=fabsf(vb);
-          if(aa>amax)amax=aa;
-          if(ab>amax)amax=ab;
+          dqi[k*2u]=(int32_t)(du[k]&63u)-31;
+          dqi[k*2u+1u]=(int32_t)((du[k]>>6u)&63u)-31;
+          sqi[k*2u]=(int32_t)(su[k]&63u)-31;
+          sqi[k*2u+1u]=(int32_t)((su[k]>>6u)&63u)-31;
         }
+      }
+      int32_t out_q[64];
+#if defined(__ARM_NEON)
+      const float32x4_t vsd=vdupq_n_f32(sd),vsf=vdupq_n_f32(sf);
+      float32x4_t acc[16];
+      float32x4_t vmax=vdupq_n_f32(0.0f);
+      for(uint32_t i=0;i<16u;i++){
+        acc[i]=vfmaq_f32(vmulq_f32(vcvtq_f32_s32(vld1q_s32(dq_i+i*4u)),vsd),
+                         vcvtq_f32_s32(vld1q_s32(sq_i+i*4u)),vsf);
+        vmax=vmaxq_f32(vmax,vabsq_f32(acc[i]));
+      }
+      const float amax=vmaxvq_f32(vmax);
+      const float new_s=(amax>0.0f)?(amax*(1.0f/31.0f)):0.0f;
+      const float inv_s=(new_s>0.0f)?(1.0f/new_s):0.0f;
+      db->s=new_s;
+      const float32x4_t vinv=vdupq_n_f32(inv_s);
+      const int32x4_t vlo=vdupq_n_s32(-31),vhi=vdupq_n_s32(31),vbias=vdupq_n_s32(31);
+      for(uint32_t i=0;i<16u;i++){
+        const int32x4_t q=vmaxq_s32(vlo,vminq_s32(vhi,vcvtnq_s32_f32(vmulq_f32(acc[i],vinv))));
+        vst1q_s32(out_q+i*4u,vaddq_s32(q,vbias));
+      }
+#else
+      float acc[64],amax=0.0f;
+      for(uint32_t i=0;i<64u;i++){
+        acc[i]=(float)dq_i[i]*sd+(float)sq_i[i]*sf;
+        const float a=fabsf(acc[i]);
+        if(a>amax)amax=a;
       }
       const float new_s=(amax>0.0f)?(amax*(1.0f/31.0f)):0.0f;
       const float inv_s=(new_s>0.0f)?(1.0f/new_s):0.0f;
       db->s=new_s;
+      for(uint32_t i=0;i<64u;i++){
+        int v=(int)lrintf(acc[i]*inv_s);
+        if(v<-31)v=-31; else if(v>31)v=31;
+        out_q[i]=v+31;
+      }
+#endif
       for(uint32_t g=0;g<4u;g++){
-        uint32_t u[8];
-        for(uint32_t k=0;k<8u;k++){
-          int qa=(int)lrintf(acc[g*16u+k*2u]*inv_s);
-          int qb=(int)lrintf(acc[g*16u+k*2u+1u]*inv_s);
-          if(qa<-31)qa=-31; else if(qa>31)qa=31;
-          if(qb<-31)qb=-31; else if(qb>31)qb=31;
-          u[k]=((uint32_t)(qa+31)&63u)|(((uint32_t)(qb+31)&63u)<<6u);
-        }
-        db->w[g*3u+0u]=u[0]|(u[1]<<12u)|((u[2]&0xffu)<<24u);
-        db->w[g*3u+1u]=(u[2]>>8u)|(u[3]<<4u)|(u[4]<<16u)|((u[5]&0xfu)<<28u);
-        db->w[g*3u+2u]=(u[5]>>4u)|(u[6]<<8u)|(u[7]<<20u);
+        const int32_t *oq=out_q+g*16u;
+        const uint32_t u0=(uint32_t)oq[0]|((uint32_t)oq[1]<<6u);
+        const uint32_t u1=(uint32_t)oq[2]|((uint32_t)oq[3]<<6u);
+        const uint32_t u2=(uint32_t)oq[4]|((uint32_t)oq[5]<<6u);
+        const uint32_t u3=(uint32_t)oq[6]|((uint32_t)oq[7]<<6u);
+        const uint32_t u4=(uint32_t)oq[8]|((uint32_t)oq[9]<<6u);
+        const uint32_t u5=(uint32_t)oq[10]|((uint32_t)oq[11]<<6u);
+        const uint32_t u6=(uint32_t)oq[12]|((uint32_t)oq[13]<<6u);
+        const uint32_t u7=(uint32_t)oq[14]|((uint32_t)oq[15]<<6u);
+        db->w[g*3u+0u]=u0|(u1<<12u)|((u2&0xffu)<<24u);
+        db->w[g*3u+1u]=(u2>>8u)|(u3<<4u)|(u4<<16u)|((u5&0xfu)<<28u);
+        db->w[g*3u+2u]=(u5>>4u)|(u6<<8u)|(u7<<20u);
       }
     }
     return;

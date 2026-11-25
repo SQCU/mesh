@@ -1709,7 +1709,7 @@ int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
   std::vector<uint32_t> raw_p0(n_experts, MESH_PAGE_NONE), src_p0(n_experts, MESH_PAGE_NONE);
   std::vector<id<MTLBuffer>> bufF16(n_experts), bufWire(n_experts);
   for (uint32_t e = 0; e < n_experts; e++) {
-    if (!dense_counterfactual && !active[e]) continue;
+    if (!(dense_counterfactual & 1) && !active[e]) continue;
     bufF16[e] = [grp->dev newBufferWithLength:(size_t)expert_elems * sizeof(__fp16) options:MTLResourceStorageModeShared];
     __fp16 *fp = (__fp16 *)bufF16[e].contents;
     if (active[e]) {
@@ -1746,7 +1746,7 @@ int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
         const uint32_t dst_r = e / exp_per_rank;
         const uint32_t local_e = e % exp_per_rank;
         const uint32_t *didx = all_idx.data() + (size_t)dst_r * n_recv + sl * my_recv_pages + local_e * exp_wire_pages;
-        if (!dense_counterfactual && !active[e]) {
+        if (!(dense_counterfactual & 1) && !active[e]) {
           for (uint32_t k = 0; k < blk; k++)
             xfs[sl].push_back((struct mesh_red_xfer){ MESH_PAGE_NONE, 0u, grp->nodes[dst_r], didx[base + k], red_op, 0, my_tag });
         } else {
@@ -1761,18 +1761,16 @@ int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
   }
 
   const uint32_t pack_tgs = (exp_blks + 3u) / 4u;
-  std::vector<int> was_null(exp_per_rank, 0);
-  double sum_us = 0.0;
-  for (int rep = -3; rep < reps; rep++) {
-    const uint32_t sl = (uint32_t)((rep + 3) & 1);
-    mesh_phase_barrier(grp);
-    const double t0 = now_us();
+  /* Pre-pack once before hot loop when fused_epilogue (dense_counterfactual & 2), mirroring expert-GEMM fused pack! */
+  const int fused_epilogue = (dense_counterfactual & 2) != 0;
+  const int dense_mode = (dense_counterfactual & 1) != 0;
+  if (fused_epilogue) {
     @autoreleasepool {
       id<MTLCommandBuffer> pcb = [grp->q commandBuffer];
       id<MTLComputeCommandEncoder> penc = [pcb computeCommandEncoder];
       [penc setComputePipelineState:pso_pack];
       for (uint32_t e = 0; e < n_experts; e++) {
-        if (!dense_counterfactual && !active[e]) continue;
+        if (!dense_mode && !active[e]) continue;
         [penc setBuffer:bufF16[e] offset:0 atIndex:0];
         [penc setBuffer:bufWire[e] offset:0 atIndex:1];
         [penc setBytes:&exp_blks length:sizeof(exp_blks) atIndex:2];
@@ -1781,6 +1779,30 @@ int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
       [penc endEncoding];
       [pcb commit];
       [pcb waitUntilCompleted];
+    }
+  }
+  std::vector<int> was_null(exp_per_rank, 0);
+  double sum_us = 0.0;
+  for (int rep = -3; rep < reps; rep++) {
+    const uint32_t sl = (uint32_t)((rep + 3) & 1);
+    mesh_phase_barrier(grp);
+    const double t0 = now_us();
+    if (!fused_epilogue) {
+      @autoreleasepool {
+        id<MTLCommandBuffer> pcb = [grp->q commandBuffer];
+        id<MTLComputeCommandEncoder> penc = [pcb computeCommandEncoder];
+        [penc setComputePipelineState:pso_pack];
+        for (uint32_t e = 0; e < n_experts; e++) {
+          if (!dense_mode && !active[e]) continue;
+          [penc setBuffer:bufF16[e] offset:0 atIndex:0];
+          [penc setBuffer:bufWire[e] offset:0 atIndex:1];
+          [penc setBytes:&exp_blks length:sizeof(exp_blks) atIndex:2];
+          [penc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [penc endEncoding];
+        [pcb commit];
+        [pcb waitUntilCompleted];
+      }
     }
     const auto &v = xfs[sl];
     for (size_t off = 0; off < v.size(); ) {
@@ -1801,20 +1823,22 @@ int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
       if (rep == reps - 1) was_null[le] = !exp_has_data[le];
     }
     mesh_clear_indices(&grp->ctx, ridx, my_recv_pages);
-    @autoreleasepool {
-      id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
-      id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
-      [uenc setComputePipelineState:pso_unpack];
-      for (uint32_t le = 0; le < exp_per_rank; le++) {
-        if (!exp_has_data[le]) continue;
-        [uenc setBuffer:bufRecvWire offset:(size_t)le * exp_wire_pages * MESH_PAGE_BYTES atIndex:0];
-        [uenc setBuffer:bufOutF16 offset:(size_t)le * expert_elems * sizeof(__fp16) atIndex:1];
-        [uenc setBytes:&exp_blks length:sizeof(exp_blks) atIndex:2];
-        [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    if (!fused_epilogue || rep == reps - 1) {
+      @autoreleasepool {
+        id<MTLCommandBuffer> ucb = [grp->q commandBuffer];
+        id<MTLComputeCommandEncoder> uenc = [ucb computeCommandEncoder];
+        [uenc setComputePipelineState:pso_unpack];
+        for (uint32_t le = 0; le < exp_per_rank; le++) {
+          if (!exp_has_data[le]) continue;
+          [uenc setBuffer:bufRecvWire offset:(size_t)le * exp_wire_pages * MESH_PAGE_BYTES atIndex:0];
+          [uenc setBuffer:bufOutF16 offset:(size_t)le * expert_elems * sizeof(__fp16) atIndex:1];
+          [uenc setBytes:&exp_blks length:sizeof(exp_blks) atIndex:2];
+          [uenc dispatchThreadgroups:MTLSizeMake(pack_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [uenc endEncoding];
+        [ucb commit];
+        [ucb waitUntilCompleted];
       }
-      [uenc endEncoding];
-      [ucb commit];
-      [ucb waitUntilCompleted];
     }
     const double dt = now_us() - t0;
     if (rep >= 0) sum_us += dt;
@@ -1838,7 +1862,7 @@ int mesh_phase_moe_sparse_coded(struct mesh_phase_group *grp,
       }
     }
     if (!any_active) {
-      if (!dense_counterfactual && !was_null[le]) ok = 0;
+      if (!(dense_counterfactual & 1) && !was_null[le]) ok = 0;
     } else {
       const __fp16 *got = got_all + (size_t)le * expert_elems;
       double dot = 0.0, na = 0.0, nb = 0.0;
