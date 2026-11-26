@@ -1024,6 +1024,7 @@ def main():
     ap.add_argument("--scalar-lr", type=float, default=5e-3)
     ap.add_argument("--base-port", type=int, default=26000)
     ap.add_argument("--elo-duration-s", type=float, default=32.0)
+    ap.add_argument("--init-ckpt", default="", help="Optional EMA checkpoint path on rank 0 to resume training study")
     args = ap.parse_args()
 
     device = args.device
@@ -1063,6 +1064,12 @@ def main():
 
     torch.manual_seed(2026)
     main_live = PlanWally(**MODEL_KWARGS).to(device)
+    if args.init_ckpt and rank == 0:
+        ckpt_p = Path(args.init_ckpt).expanduser()
+        if ckpt_p.exists():
+            sd = torch.load(ckpt_p, map_location="cpu")
+            main_live.load_state_dict(sd["model"] if "model" in sd else sd, strict=False)
+            print(f"[RESUME] Loaded init checkpoint on rank 0: {ckpt_p}", flush=True)
     main_ema = clone_plan_model(main_live).to(device)
     _broadcast_model_(main_live, torch_mesh, rank, world_size, device)
     _broadcast_model_(main_ema, torch_mesh, rank, world_size, device)
