@@ -495,7 +495,7 @@ void CL_Input (void)
 			orbit_signon_sent = 1;
 			Cbuf_AddText("cmd spectate; viewsize 120; r_drawviewmodel 0; showbrand 0\n");
 		}
-		cl.viewangles[YAW] = anglemod(cl.viewangles[YAW] + cl_orbit_yawrate.value * cl.realframetime);
+		cl.viewangles[YAW] = (float)fmod((double)cl.viewangles[YAW] + (double)cl_orbit_yawrate.value * (double)cl.realframetime + 360.0, 360.0);
 		cl.viewangles[PITCH] = 12.0f;
 		cl.cmd.forwardmove = cl_orbit_speed.value;
 		cl.cmd.sidemove = 0;
