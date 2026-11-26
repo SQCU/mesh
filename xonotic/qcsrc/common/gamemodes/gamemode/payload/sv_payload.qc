@@ -808,9 +808,16 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 		if (has_plan)
 		{
 			float u = 0;
-			if (it.plc_cart_id == 0) u = this.plc_pl_f_w0;
-			else if (it.plc_cart_id == 1) u = this.plc_pl_f_w1;
-			else if (it.plc_cart_id == 2) u = this.plc_pl_f_w2;
+			if (payload_cart_count <= 3)
+			{
+				if (it.plc_cart_id == 0) u = this.plc_pl_f_w0;
+				else if (it.plc_cart_id == 1) u = this.plc_pl_f_w1;
+				else if (it.plc_cart_id == 2) u = this.plc_pl_f_w2;
+			}
+			else if (plan_cart >= 0)
+			{
+				u = (it.plc_cart_id == plan_cart) ? this.plc_pl_f_w0 : this.plc_pl_f_w1;
+			}
 			weight *= pow(2.7182818, bound(-2.0, u, 2.0));
 			if (plan_cart >= 0 && it.plc_cart_id == plan_cart)
 				weight *= 2.2;

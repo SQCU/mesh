@@ -461,7 +461,8 @@ def spawn_overlay(entities, tracks, graph, limit=None, clearance=None, ns=None, 
             block = match.group(0)
             return '' if is_player_spawn(block) else block
         stripped = re.sub(r'\{[^{}]*\}', keep, entities).rstrip()
-        spawned = ['\n'.join(('{', '"classname" "info_player_team%d"' % t,
+        spawned = ['\n'.join(('{', '"classname" "info_player_team"',
+                                '"team" "%d"' % t,
                                 '"origin" "%.9g %.9g %.9g"' % tuple(pt), '}'))
                    for t, pt in team_assigned]
         team_counts = {t: sum(1 for tt, _ in team_assigned if tt == t) for t in range(1, kteams + 1)}
