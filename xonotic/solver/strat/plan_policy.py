@@ -237,34 +237,38 @@ class PlanSample(NamedTuple):
 
 
 class MPResCGTBlock(nn.Module):
-    """Bitter-Lesson Wide Subspace ResNet + Plain Linear Gram CGT Block (EDM2 unit-norm + Aurora-ready):
-    - Pure associative linear Gram R(R^T V) & per-team T(T^T V): zero hand-crafted nonlinear kernel hacks.
-    - High-dimensional hidden stream (d=256, h=1024) where multi-layer rotate (MPLinear) + sum (mp_lerp)
-      bundles sharpness, routing, and information separation into model-learned orthogonal subspaces.
-    - Bounded-condition DPP repulsive Gram (I + g_dpp * B^T B)^{-1} (B^T V) for anti-clumping team split.
-    - Native products.World 4-Studio Tensor Parallelism on 'cross' (row-Gram) and 'ffn' (column-shard)."""
+    """Hierarchical Team-Factored Gram Mixing + Wide Subspace ResNet Block (EDM2 unit-norm + Aurora-ready):
+    1. Entity -> Team attention-gated pooling O(M*d) into K team tokens (no flat M x (r*d) outer product).
+    2. Team x Team bilinear Gram mixing O(K^2 * r_team) on MPS (zero CPU linalg.solve round-trips)
+       to produce a mutated team projection T_mut that feeds the next residual layer's team Gram.
+    3. Mutated Team -> Entity broadcast O(M*d) + compact associative Global Entity Gram R(R^T V) O(M*r_gram*d).
+    4. Wide Magnitude-Preserving SwiGLU FFN (tall h >> d protected from neuron death by Aurora)."""
 
     def __init__(self, d: int = 256, h: int = 1024, r_gram: int = 128, r_dpp: int = 64, init_blend: float = 0.25):
         super().__init__()
         self.d = d
         self.h = h
         self.r_gram = r_gram
+        self.r_team = r_dpp
         self.r_dpp = r_dpp
 
-        self.team_metric = MPLinear(d, r_gram)
-        self.rival_metric = MPLinear(d, r_gram)
         self.val_proj = MPLinear(d, d)
-        self.dpp_metric = MPLinear(d, r_dpp)
-        self.dpp_quality = MPLinear(d, 1)
-        self.dpp_out = MPLinear(d, d)
+        self.pool_score = MPLinear(d, 1)
+        self.team_metric = MPLinear(d, self.r_team)
+        self.rival_metric = MPLinear(d, self.r_team)
+        self.team_val_proj = MPLinear(d, d)
+        self.team_mutate_proj = MPLinear(d, d)
+        self.team_bcast_proj = MPLinear(d, d)
+        self.global_metric = MPLinear(d, r_gram)
         self.gram_out = MPLinear(d, d)
 
         self.ffn_gate = MPLinear(d, h)
         self.ffn_up = MPLinear(d, h)
         self.ffn_down = MPLinear(h, d)
 
-        self.log_dpp_gain = nn.Parameter(torch.tensor(math.log(1.0)))
         logit_b = math.log(init_blend / max(1e-4, 1.0 - init_blend))
+        self.blend_pool = nn.Parameter(torch.tensor(0.0))
+        self.blend_team_mut = nn.Parameter(torch.tensor(0.0))
         self.blend_gram = nn.Parameter(torch.tensor(logit_b))
         self.blend_ffn = nn.Parameter(torch.tensor(logit_b))
         self._last_ffn_act: torch.Tensor | None = None
@@ -276,14 +280,17 @@ class MPResCGTBlock(nn.Module):
         team_ids: torch.Tensor,
         team_valid: torch.Tensor,
         world=None,
+        team_slice: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         xn = mp_norm(x)
         v = mp_norm(self.val_proj(xn))
         m_rows = x.shape[0]
+        k_teams = team_ids.shape[0]
         inv_m = 1.0 / math.sqrt(max(1, m_rows))
+        inv_k = 1.0 / math.sqrt(max(1, k_teams))
 
-        # 1. Pure associative linear Global Gram: R (R^T V) — exact O(M*r*d), native 4-Studio row-TP
-        r = mp_norm(self.rival_metric(xn))
+        # 1. Compact associative Global Entity Gram: R (R^T V) — O(M * r_gram * d), native 4-Studio row-TP
+        r = mp_norm(self.global_metric(xn))
         if world is not None and world.parts("cross") is not None:
             lo, hi = world.span("cross", m_rows)
             r_c, v_c = world.copy(r), world.copy(v)
@@ -292,43 +299,41 @@ class MPResCGTBlock(nn.Module):
             kv_global = (r.T @ v) * inv_m
         global_vals = mp_norm(r @ kv_global)
 
-        # 2. Pure associative linear Per-Team Gram: T (T^T V) within each team
-        t = mp_norm(self.team_metric(xn))
+        # 2. Hierarchical Entity -> Team pooling O(M * d) -> Team x Team Gram mixing O(K^2 * r_team)
         mem = (entity_team_ids[:, None] == team_ids[None, :]) & team_valid[None, :]
         mem_f = mem.to(x.dtype)
-        tv = (t[:, :, None] * v[:, None, :]).reshape(m_rows, -1)
+        pool_w = mem_f * torch.sigmoid(self.pool_score(xn))
         if world is not None and world.parts("cross") is not None:
             lo, hi = world.span("cross", m_rows)
-            mem_c, tv_c = world.copy(mem_f), world.copy(tv)
-            team_sum = world.reduce(mem_c[lo:hi].T @ tv_c[lo:hi])
-            team_cnt = torch.clamp(world.reduce(mem_c[lo:hi].sum(dim=0, keepdim=True).T), min=1.0)
+            pw_c, v_c = world.copy(pool_w), world.copy(v)
+            team_sum = world.reduce(pw_c[lo:hi].T @ v_c[lo:hi])
+            team_den = torch.clamp(world.reduce(pw_c[lo:hi].sum(dim=0, keepdim=True).T), min=1e-4)
         else:
-            team_sum = mem_f.T @ tv
-            team_cnt = torch.clamp(mem_f.sum(dim=0, keepdim=True).T, min=1.0)
-        team_mean = team_sum / team_cnt
-        ctx_t = (mem_f @ team_mean).reshape(m_rows, self.r_gram, self.d)
-        team_vals = mp_norm((t[:, :, None] * ctx_t).sum(dim=1))
+            team_sum = pool_w.T @ v
+            team_den = torch.clamp(pool_w.sum(dim=0, keepdim=True).T, min=1e-4)
+        team_pool = mp_norm(team_sum / team_den)
 
-        # 3. Bounded-condition DPP repulsive Gram: (I + g_dpp * B^T B)^{-1} (B^T V)
-        q_dpp = torch.sigmoid(self.dpp_quality(xn))
-        b_dpp = q_dpp * mp_unit_vec(self.dpp_metric(xn))
-        g_dpp = torch.clamp(torch.exp(self.log_dpp_gain), 0.1, 8.0)
-        if world is not None and world.parts("cross") is not None:
-            lo, hi = world.span("cross", m_rows)
-            b_c, v_c = world.copy(b_dpp), world.copy(v)
-            btb = world.reduce(b_c[lo:hi].T @ b_c[lo:hi])
-            btv = world.reduce(b_c[lo:hi].T @ v_c[lo:hi])
+        if team_slice is not None and (team_slice[1] - team_slice[0]) == k_teams:
+            t_cur = xn[team_slice[0] : team_slice[1]]
+            t_in = mp_norm(mp_lerp(t_cur, team_pool, torch.sigmoid(self.blend_pool)))
         else:
-            btb = b_dpp.T @ b_dpp
-            btv = b_dpp.T @ v
-        cov = torch.eye(self.r_dpp, dtype=x.dtype, device=x.device) + g_dpp * btb
-        if x.device.type == "mps":
-            solved = torch.linalg.solve(cov.cpu(), btv.cpu()).to(x.device)
-        else:
-            solved = torch.linalg.solve(cov, btv)
-        dpp_ctx = mp_norm(self.dpp_out(b_dpp @ solved))
+            t_in = team_pool
 
-        gram_merged = mp_norm(self.gram_out(mp_norm(global_vals + team_vals + dpp_ctx)))
+        # Team-level Gram mixing (K x K) -> mutated team projection T_mut fed into next residual layer
+        q_t = mp_norm(self.team_metric(t_in))
+        k_t = mp_norm(self.rival_metric(t_in))
+        v_t = mp_norm(self.team_val_proj(t_in))
+        gram_t = (q_t @ k_t.T) * inv_k
+        t_mixed = mp_norm(gram_t @ v_t)
+        t_mut = mp_norm(mp_lerp(t_in, mp_norm(self.team_mutate_proj(t_mixed)), torch.sigmoid(self.blend_team_mut)))
+
+        # 3. Broadcast mutated team projection back to all team members (and mean team state to neutral entities)
+        t_bcast = mp_norm(self.team_bcast_proj(t_mut))
+        has_team = mem_f.sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+        t_global = mp_norm(t_bcast.mean(dim=0, keepdim=True))
+        team_vals = mp_norm(has_team * (mem_f @ t_bcast) + (1.0 - has_team) * t_global)
+
+        gram_merged = mp_norm(self.gram_out(mp_norm(global_vals + team_vals)))
         x = mp_norm(mp_lerp(xn, gram_merged, torch.sigmoid(self.blend_gram)))
 
         # 4. Wide Magnitude-Preserving SwiGLU FFN (tall h >> d protected from neuron death by Aurora!)
@@ -425,10 +430,11 @@ class PlanWally(nn.Module):
         self.rival_k = MPLinear(d, d)
         self.cell_q = MPLinear(d, d)
         self.cell_k = MPLinear(d, d)
-        # Explicit scalar inverse-temperatures: allow arbitrarily steep categorical PDFs (up to temp=16)
+        # Explicit scalar inverse-temperatures + learnable spatial cart locality bias
         self.log_temp_cart = nn.Parameter(torch.tensor(math.log(2.0)))
         self.log_temp_rival = nn.Parameter(torch.tensor(math.log(2.0)))
         self.log_temp_cell = nn.Parameter(torch.tensor(math.log(2.0)))
+        self.log_cart_dist_bias = nn.Parameter(torch.tensor(0.0))
 
         self.value_proj = MPLinear(d, 2)
         self.value_gain = nn.Parameter(torch.tensor(0.5))
@@ -530,14 +536,15 @@ class PlanWally(nn.Module):
         entity_teams = torch.cat(team_parts, dim=0)
         team_ids = teams[:, TS["ID"]].to(torch.float32)
 
+        team_slice = (n + j, n + j + k)
         if self.recurrent:
             blk = self.blocks[0]
             for step in range(self.depth):
-                x_new = blk(x, entity_teams, team_ids, team_valid, world=world)
+                x_new = blk(x, entity_teams, team_ids, team_valid, world=world, team_slice=team_slice)
                 x = mp_norm(mp_lerp(x, x_new, torch.sigmoid(self.step_blends[step])))
         else:
             for blk in self.blocks:
-                x = blk(x, entity_teams, team_ids, team_valid, world=world)
+                x = blk(x, entity_teams, team_ids, team_valid, world=world, team_slice=team_slice)
 
         xn = mp_norm(x)
         p_h = xn[:n]
@@ -561,12 +568,16 @@ class PlanWally(nn.Module):
         cont_mean = 2.0 * torch.tanh(g_cont * self.cont_proj(p_h) + self.cont_bias)
         cont_logstd = torch.clamp(self.cont_logstd, min=-2.5, max=0.25).unsqueeze(0).expand(n, -1)
 
-        # Cosine pointer heads x explicit bounded inverse-temperature (steep PDF without outlier growth!)
+        # Cosine pointer heads x explicit bounded inverse-temperature + spatial locality bias for multi-submap carts
         temp_c = torch.clamp(torch.exp(self.log_temp_cart), 0.5, 32.0)
         temp_r = torch.clamp(torch.exp(self.log_temp_rival), 0.5, 32.0)
         temp_v = torch.clamp(torch.exp(self.log_temp_cell), 0.5, 32.0)
 
-        cart_logits = temp_c * (mp_unit_vec(self.cart_q(p_h)) @ mp_unit_vec(self.cart_k(c_h)).T)
+        p_pos = obs[:, OBS["POS_X"] : OBS["POS_Z"] + 1]
+        c_pos = carts[:, CS["POS_X"] : CS["POS_Z"] + 1]
+        d_pc = (p_pos[:, None, :] - c_pos[None, :, :]).square().sum(dim=-1).clamp_min(1e-6).sqrt()
+        dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), 0.0, 6.0) * torch.log1p(d_pc / 400.0)
+        cart_logits = temp_c * (mp_unit_vec(self.cart_q(p_h)) @ mp_unit_vec(self.cart_k(c_h)).T) - dist_bias
         rival_logits = temp_r * (mp_unit_vec(self.rival_q(p_h)) @ mp_unit_vec(self.rival_k(t_h)).T)
         if k >= 2:
             own_mask = obs[:, OBS["TEAM"]].to(torch.float32)[:, None] == team_ids[None, :]
@@ -609,6 +620,7 @@ class PlanWally(nn.Module):
             "fsq_levels": list(self.fsq_levels) if self.use_fsq else [],
             "use_mealy": self.use_mealy,
             "edm2_mp": True,
+            "hierarchical_team_gram": True,
         }
 
 
@@ -717,15 +729,14 @@ def plan_module_group(param_name: str) -> str:
                 "type_embed", "type_blend", "mealy_gate", "mealy_cand"):
         return "encoder"
     if root == "blocks":
-        if any(k in param_name for k in ("team_metric", "rival_metric", "val_proj", "dpp_", "gram_out",
-                                         "log_tau", "log_dpp", "blend_gram")):
-            return "gram_cgt"
-        return "resnet_ffn"
+        if any(k in param_name for k in ("ffn_", "blend_ffn")):
+            return "resnet_ffn"
+        return "gram_cgt"
     if root in ("step_blends", "fsq"):
         return "resnet_ffn"
     if root in ("cont_proj", "cont_gain", "cont_bias", "cont_logstd",
                 "cart_q", "cart_k", "rival_q", "rival_k", "cell_q", "cell_k",
-                "log_temp_cart", "log_temp_rival", "log_temp_cell"):
+                "log_temp_cart", "log_temp_rival", "log_temp_cell", "log_cart_dist_bias"):
         return "action_head"
     if root in ("value_proj", "value_gain", "value_bias", "value_priv_proj", "value_priv_gain"):
         return "value_head"

@@ -846,7 +846,7 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 		else if (it.plc_cart_id == pref_cart)
 			weight *= 1.35;
 		entity goal = it;
-		if (has_plan && fabs(plan_ds) > 120)
+		if (has_plan && fabs(plan_ds) > 120 && (plan_cart < 0 || it.plc_cart_id == plan_cart))
 		{
 			vector tpos = payload_pos(it, bound(0, it.plc_s + plan_ds, it.plc_length));
 			entity track_wp = payload_nearest_waypoint(tpos);
@@ -938,7 +938,7 @@ void havocbot_role_payload(entity this)
 		navigation_goalrating_end(this);
 		navigation_goalrating_timeout_set(this);
 		if (this.plc_pl_f_id == etof(this))
-			navigation_goalrating_timeout_expire(this, 0.75);
+			navigation_goalrating_timeout_expire(this, 2.5);
 	}
 }
 

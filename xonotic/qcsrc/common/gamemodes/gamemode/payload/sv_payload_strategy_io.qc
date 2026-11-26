@@ -641,7 +641,13 @@ void payload_strategy_step(entity leadcart)
 					it.bot_plan_atk_cyl = it.plc_pl_f_atk_cyl;
 					it.bot_plan_focus_team = floor(it.plc_pl_f_leader + 0.5);
 					it.bot_plan_posture = bound(-1, it.plc_pl_f_posture, 1);
-					navigation_goalrating_timeout_expire(it, 0.35);
+					float pick_tag = floor(it.plc_pl_f_pick) + 1;
+					if (it.plc_pl_last_pick != pick_tag && time >= it.plc_pl_replan_time)
+					{
+						it.plc_pl_last_pick = pick_tag;
+						it.plc_pl_replan_time = time + 2.0;
+						navigation_goalrating_timeout_expire(it, 0.35);
+					}
 				}
 				else
 				{

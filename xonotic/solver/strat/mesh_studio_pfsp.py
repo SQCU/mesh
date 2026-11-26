@@ -1200,8 +1200,11 @@ def main():
         # while match seeds & native roster draws vary cleanly across ranks & iterations!
         rng_sched = np.random.default_rng(91000 + idx_it * 100 + rank)
         if supermap_specs:
-            iter_specs = [supermap_specs[(rank * servers_per_node + idx_it + j) % len(supermap_specs)] for j in range(servers_per_node)]
-            iter_maps = [sp["name"] for sp in iter_specs]
+            # Match (K, J, N) supermap scale across all 4 Studios within each iteration so
+            # cross-rank McCandlish GradSNR compares matched-scale episodes and avoids straggler stalls.
+            iter_spec = supermap_specs[(idx_it - 1) % len(supermap_specs)]
+            iter_specs = [iter_spec] * servers_per_node
+            iter_maps = [iter_spec["name"]] * servers_per_node
         else:
             iter_specs = None
             iter_maps = train_maps[:servers_per_node] if servers_per_node < len(train_maps) else train_maps
@@ -1445,7 +1448,7 @@ def main():
             "mode": "large_batch_native_pfsp",
             "world_size": world_size,
             "device": device,
-            "episodes_per_batch": 6 * world_size,
+            "episodes_per_batch": servers_per_node * world_size,
             "b_global_per_step": args.local_batch * world_size,
             "total_training_episodes": sum(r["episodes_global"] for r in iter_reports),
             "train_wall_s": train_wall_s,

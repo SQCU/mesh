@@ -331,6 +331,8 @@ entity plc_nav_targets;
 .float plc_pl_f_nav_w;
 .float plc_pl_f_atk_cyl;
 .float plc_pl_f_posture;
+.float plc_pl_last_pick;
+.float plc_pl_replan_time;
 
 #define autocvar_g_payload_strategy_log cvar("g_payload_strategy_log")
 #define autocvar_g_payload_vcell_log cvar("g_payload_vcell_log")
