@@ -94,40 +94,44 @@ def sample_native_lobby_roster(
     regression: dict | None = None,
     native_bots: list[dict] | None = None,
     distribution: str | None = None,
+    n_teams: int = 3,
+    n_bots: int = 9,
 ) -> tuple[str, list[dict]]:
-    """Sample a 9-bot (3 teams x 3 bots) native HavocBot roster by drawing target 1v1 DM Elos
+    """Sample an N-bot across K-team native HavocBot roster by drawing target 1v1 DM Elos
     from a natural lobby distribution and inverting the calibrated native parameter map."""
     reg = regression or CALIBRATED_NATIVE_REGRESSION
     lo = float(reg.get("elo_min", 830.0))
     hi = float(reg.get("elo_max", 1130.0))
     mu = float(reg.get("elo_mean", 990.0))
+    K = max(2, int(n_teams))
+    N = max(K, int(n_bots))
     kind = distribution or str(rng.choice(
         ("gaussian_lobby", "team_skewed", "within_team_skewed", "uniform_native"),
         p=[0.35, 0.30, 0.25, 0.10],
     ))
+    teams = [(i % K) + 1 for i in range(N)]
     if kind == "gaussian_lobby":
-        targets = np.clip(rng.normal(mu, 75.0, size=9), lo, hi).tolist()
+        targets = np.clip(rng.normal(mu, 75.0, size=N), lo, hi).tolist()
     elif kind == "team_skewed":
-        # Three distinct team mechanical tiers drawn within native calibrated bounds, seats permuted
-        tier_means = np.asarray([lo + 0.15 * (hi - lo), mu, hi - 0.10 * (hi - lo)])
-        tier_means = tier_means[rng.permutation(3)]
-        targets = []
-        for tm_mu in tier_means:
-            targets.extend(np.clip(rng.normal(tm_mu, 28.0, size=3), lo, hi).tolist())
+        tier_means = np.linspace(lo + 0.15 * (hi - lo), hi - 0.10 * (hi - lo), K)
+        tier_means = tier_means[rng.permutation(K)]
+        targets = [float(np.clip(rng.normal(tier_means[tm - 1], 28.0), lo, hi)) for tm in teams]
     elif kind == "within_team_skewed":
-        # Each team mixes a top-tier native bot with lower-tier teammates (carry + support mix)
+        per_tm_count: dict[int, int] = {}
         targets = []
-        for _ in range(3):
-            t_elos = [
-                float(np.clip(rng.normal(hi - 0.08 * (hi - lo), 25.0), lo, hi)),
-                float(np.clip(rng.normal(mu, 35.0), lo, hi)),
-                float(np.clip(rng.normal(lo + 0.18 * (hi - lo), 25.0), lo, hi)),
-            ]
-            targets.extend(t_elos)
+        for tm in teams:
+            slot = per_tm_count.get(tm, 0)
+            per_tm_count[tm] = slot + 1
+            if slot % 3 == 0:
+                t_mu, t_sd = hi - 0.08 * (hi - lo), 25.0
+            elif slot % 3 == 1:
+                t_mu, t_sd = mu, 35.0
+            else:
+                t_mu, t_sd = lo + 0.18 * (hi - lo), 25.0
+            targets.append(float(np.clip(rng.normal(t_mu, t_sd), lo, hi)))
     else:
-        targets = rng.uniform(lo, hi, size=9).tolist()
+        targets = rng.uniform(lo, hi, size=N).tolist()
 
-    teams = [1, 1, 1, 2, 2, 2, 3, 3, 3]
     entries = sample_roster_from_target_elos(targets, reg, rng, native_bots=native_bots, teams=teams)
     return kind, entries
 

@@ -109,6 +109,10 @@ class MultiServerPlanHarness:
         skill: int = 5,
         extra_cvars: list[dict[str, float]] | None = None,
         slowmo_per_server: list[float] | None = None,
+        teams_per_server: list[int] | None = None,
+        bots_per_server: list[int] | None = None,
+        maxclients_per_server: list[int] | None = None,
+        meta_per_server: list[dict] | None = None,
     ):
         procs, logs = [], []
         maps = map_names if (map_names is not None and len(map_names) == len(seeds)) else ["boil"] * len(seeds)
@@ -131,6 +135,15 @@ class MultiServerPlanHarness:
             env = dict(os.environ)
             env["MESH_EXPERT_SOCKET"] = sock
             env["MESH_EXPERT_FRAMEBYTES"] = str(self.framebytes)
+            sv_teams = int(teams_per_server[idx]) if (teams_per_server is not None and idx < len(teams_per_server)) else 3
+            sv_bots = int(bots_per_server[idx]) if (bots_per_server is not None and idx < len(bots_per_server)) else 9
+            sv_maxc = (
+                int(maxclients_per_server[idx])
+                if (maxclients_per_server is not None and idx < len(maxclients_per_server))
+                else max(self.maxclients, min(255, sv_bots + 15))
+            )
+            sv_maxc = max(sv_bots + 1, min(255, sv_maxc))
+            sv_meta = meta_per_server[idx] if (meta_per_server is not None and idx < len(meta_per_server)) else {}
             cmd = [
                 self.dp_bin, "-xonotic",
                 "-basedir", self.basedir,
@@ -138,17 +151,17 @@ class MultiServerPlanHarness:
                 "+exec", "gamemodes-payload.cfg",
                 "+sv_public", "0",
                 "+port", str(base_port + idx),
-                "+maxplayers", str(self.maxclients),
+                "+maxplayers", str(sv_maxc),
                 "+sv_random_seed", str(seed),
                 "+g_payload", "1",
-                "+g_payload_teams_override", "3",
+                "+g_payload_teams_override", str(sv_teams),
                 "+g_payload_plan_only", "1",
                 "+g_warmup", "0",
                 "+g_start_delay", "0",
                 "+g_payload_warmup", "1",
                 "+g_spawn_swizzle", "1",
                 "+bot_join_empty", "1",
-                "+bot_number", "9",
+                "+bot_number", str(sv_bots),
                 "+skill", str(int(skill)),
                 "+g_payload_speed", str(self.payload_speed),
                 "+g_payload_strategy_interval", str(self.strategy_interval),
@@ -168,7 +181,17 @@ class MultiServerPlanHarness:
             cmd.extend(["+map", str(mname)])
             procs.append(subprocess.Popen(cmd, cwd=self.basedir, env=env, stdout=logf, stderr=subprocess.STDOUT))
             pub_host = os.environ.get("MESH_PUBLIC_HOST", "127.0.0.1")
-            self._browser_notify("register", f"{os.uname().nodename}-{os.getpid()}-{idx}", {"node": os.uname().nodename, "host": pub_host, "port": base_port + idx, "map": str(mname)})
+            reg_payload = {
+                "node": os.uname().nodename,
+                "host": pub_host,
+                "port": base_port + idx,
+                "map": str(mname),
+                "teams": sv_teams,
+                "carts": int(sv_meta.get("carts", 0)),
+                "tiles": int(sv_meta.get("tiles", 0)),
+                "target_bots": sv_bots,
+            }
+            self._browser_notify("register", f"{os.uname().nodename}-{os.getpid()}-{idx}", reg_payload)
             time.sleep(0.15)
         return procs, logs
 
@@ -327,7 +350,7 @@ class MultiServerPlanHarness:
                     rival_all = np.zeros((n_bots,), dtype=np.int64)
                     cell_all = np.zeros((n_bots,), dtype=np.int64)
                     logp_all = np.zeros((n_bots,), dtype=np.float32)
-                    plan_matrix = np.zeros((self.maxclients, PLAN_WIDTH), dtype=np.float32)
+                    plan_matrix = np.zeros((int(obs_raw.shape[0]), PLAN_WIDTH), dtype=np.float32)
                     train_h_in: np.ndarray | None = None
                     train_h_next: np.ndarray | None = None
 

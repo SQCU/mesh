@@ -35,6 +35,7 @@ DEFAULT_STUDIO_NODES = [
 DEFAULT_SCAN_PORTS = (26000, 26001, 26002, 26003, 27000, 27001, 27002, 27003)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLIENT_LAUNCHER = str(REPO_ROOT / "bin" / "mesh-xonotic-client")
+CLIENT_CMD_FILE = Path(os.environ.get("MESH_CLIENT_CMD_FILE", "/tmp/mesh-xonotic-client.cmd"))
 REGISTRY_STATE_PATH = Path(os.environ.get("MESH_SERVER_BROWSER_STATE", "/tmp/mesh_server_browser_registry.json"))
 
 
@@ -169,6 +170,10 @@ class ServerRegistry:
             "host": str(entry.get("host", "127.0.0.1")),
             "port": int(entry.get("port", 26000)),
             "map": str(entry.get("map", "boil")),
+            "teams": int(entry.get("teams", 0)),
+            "carts": int(entry.get("carts", 0)),
+            "tiles": int(entry.get("tiles", 0)),
+            "target_bots": int(entry.get("target_bots", 0)),
             "policy_arms": entry.get("policy_arms", []),
             "updated_at": time.time(),
         }
@@ -190,12 +195,51 @@ class ServerRegistry:
                 self._save_state_locked()
             return removed
 
-    def launch_client(self, req: dict) -> dict:
+    def find_running_client_pid(self) -> int | None:
+        try:
+            out = subprocess.check_output(["pgrep", "-x", "darkplaces-sdl"], stderr=subprocess.DEVNULL, timeout=2.0)
+            pids = [int(tok) for tok in out.decode().split() if tok.isdigit()]
+            if pids:
+                return pids[0]
+        except Exception:
+            pass
+        return None
+
+    def client_status(self) -> dict:
+        pid = self.find_running_client_pid()
+        return {"running": pid is not None, "pid": pid, "cmd_file": str(CLIENT_CMD_FILE)}
+
+    def connect_client(self, req: dict) -> dict:
         host = str(req.get("host", "")).strip()
         port = int(req.get("port", 0))
         if not host or port <= 0 or port > 65535:
             raise ValueError("valid host and port required")
         endpoint = f"{host}:{port}"
+        running_pid = self.find_running_client_pid()
+        if running_pid is not None:
+            tmp = CLIENT_CMD_FILE.with_suffix(".tmp")
+            tmp.write_text(f"connect {endpoint}\n")
+            tmp.replace(CLIENT_CMD_FILE)
+            try:
+                subprocess.Popen(
+                    ["osascript", "-e", f'tell application "System Events" to set frontmost of first process whose unix id is {running_pid} to true'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "mode": "reused",
+                "pid": running_pid,
+                "endpoint": endpoint,
+                "connect_cmd": f"connect {endpoint}",
+                "cli_cmd": f"{CLIENT_LAUNCHER} -window +connect {endpoint}",
+            }
+        try:
+            CLIENT_CMD_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
         cmd = [CLIENT_LAUNCHER, "-window", "+connect", endpoint]
         proc = subprocess.Popen(
             cmd,
@@ -206,10 +250,15 @@ class ServerRegistry:
         )
         return {
             "ok": True,
+            "mode": "launched",
             "pid": proc.pid,
+            "endpoint": endpoint,
             "connect_cmd": f"+connect {endpoint}",
             "cli_cmd": f"{CLIENT_LAUNCHER} -window +connect {endpoint}",
         }
+
+    def launch_client(self, req: dict) -> dict:
+        return self.connect_client(req)
 
     def list_probed(self, scan_defaults: bool = True) -> list[dict]:
         now = time.time()
@@ -339,14 +388,17 @@ code{background:#1f242c;padding:2px 6px;border-radius:4px;white-space:nowrap;}
   <select id="mapSel"><option>boil</option><option>stormkeep</option><option>catharsis</option><option>afterslime</option><option>dance</option><option>vorix</option><option>glowplant</option></select>
   <input id="portIn" type="number" value="26000" style="width:90px">
   <button onclick="launchSv()">Launch Server</button>
+  <button class="launch" onclick="connectAnyOnline(this)">Connect to Any ONLINE</button>
   <button onclick="refresh(true)">Refresh</button>
+  <span id="clientBadge" style="font-size:12px;color:#8b949e;margin-left:auto;"></span>
 </div>
 <div id="toast"></div>
-<table><thead><tr><th>Status</th><th>Scope</th><th>Node</th><th>Endpoint</th><th>Map</th><th>Players (Bots)</th><th>Ping</th><th>Connect</th></tr></thead>
+<table><thead><tr><th>Status</th><th>Scope</th><th>Node</th><th>Endpoint</th><th>Map</th><th>K / J / M</th><th>Players (Bots)</th><th>Ping</th><th>Connect</th></tr></thead>
 <tbody id="rows"></tbody></table>
 <script>
 const CLIENT_LAUNCHER = __CLIENT_LAUNCHER_JSON__;
 let holdRenderUntil = 0;
+let lastServers = [];
 
 function setToast(msg, isErr=false){
   const el = document.getElementById('toast');
@@ -393,30 +445,51 @@ async function copyText(raw, btn){
   }
 }
 
-async function launchClient(host, port, btn){
+async function connectClient(host, port, btn){
   holdRenderUntil = Date.now() + 2000;
   const prev = btn.textContent;
-  btn.textContent = 'Launching...';
+  btn.textContent = 'Connecting...';
   try {
-    const res = await fetch('/api/client/launch', {
+    const res = await fetch('/api/client/connect', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({host, port}),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'launch failed');
-    btn.textContent = 'Launched!';
-    setToast('Launched local Xonotic client (pid ' + data.pid + '): ' + data.connect_cmd);
-    setTimeout(() => { btn.textContent = prev; }, 1600);
+    if (!res.ok) throw new Error(data.error || 'connect failed');
+    const verb = data.mode === 'reused' ? 'Switched running Xonotic client' : 'Started Xonotic client';
+    btn.textContent = data.mode === 'reused' ? 'Connected!' : 'Started!';
+    setToast(`${verb} (pid ${data.pid}) -> ${data.endpoint}`);
+    setTimeout(() => { btn.textContent = prev; refresh(true); }, 1400);
   } catch (err) {
     btn.textContent = prev;
-    setToast('Client launch error: ' + err.message, true);
+    setToast('Client connect error: ' + err.message, true);
   }
+}
+
+async function connectAnyOnline(btn){
+  const target = lastServers.find(s => s.online);
+  if (!target) {
+    setToast('No ONLINE servers right now (rollout servers cycle briefly during PPO updates).', true);
+    return;
+  }
+  await connectClient(String(target.host).trim(), Number(target.port), btn);
 }
 
 async function refresh(force=false){
   if (!force && Date.now() < holdRenderUntil) return;
-  const [nodes, svs] = await Promise.all([fetch('/api/nodes').then(r=>r.json()), fetch('/api/servers').then(r=>r.json())]);
+  const [nodes, svs, cst] = await Promise.all([
+    fetch('/api/nodes').then(r=>r.json()),
+    fetch('/api/servers').then(r=>r.json()),
+    fetch('/api/client/status').then(r=>r.json()),
+  ]);
+  lastServers = svs;
+  const badge = document.getElementById('clientBadge');
+  badge.textContent = cst.running
+    ? `Xonotic client: RUNNING (pid ${cst.pid}) — Connect switches it live`
+    : 'Xonotic client: IDLE — Connect will auto-start it';
+  badge.style.color = cst.running ? '#3fb950' : '#8b949e';
+
   const sel = document.getElementById('nodeSel');
   if(!sel.options.length){ nodes.forEach(n=>{ const o=document.createElement('option'); o.value=n.host; o.textContent=`${n.name} (${n.host}) [${n.role}]`; sel.appendChild(o); }); }
   const tb = document.getElementById('rows');
@@ -424,7 +497,7 @@ async function refresh(force=false){
   if(!svs.length){
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 8;
+    td.colSpan = 9;
     td.style.color = '#8b949e';
     td.textContent = 'No active Xonotic servers detected on loopback or 4 Studios.';
     tr.appendChild(td);
@@ -433,9 +506,8 @@ async function refresh(force=false){
   }
   svs.forEach(s=>{
     const endpoint = `${String(s.host).trim()}:${Number(s.port)}`;
-    const consoleCmd = `connect ${endpoint}`;
-    const cliCmd = `${CLIENT_LAUNCHER} -window +connect ${endpoint}`;
     const tr = document.createElement('tr');
+    const kjm = (s.teams || s.carts || s.tiles) ? `K=${s.teams||'?'} J=${s.carts||'?'} M=${s.tiles||'?'}` : '-';
 
     const cells = [
       {cls: s.online ? 'ok' : 'off', text: s.online ? 'ONLINE' : 'OFFLINE'},
@@ -443,6 +515,7 @@ async function refresh(force=false){
       {text: s.node || ''},
       {code: endpoint},
       {text: s.mapname || s.map || '-'},
+      {code: kjm},
       {text: `${s.clients ?? '-'}/${s.maxclients ?? 16} (${s.bots ?? 0})`},
       {text: s.ping_ms != null ? `${s.ping_ms} ms` : '-'},
     ];
@@ -463,30 +536,19 @@ async function refresh(force=false){
     const wrap = document.createElement('div');
     wrap.className = 'actions';
 
+    const bConnect = document.createElement('button');
+    bConnect.textContent = 'Connect';
+    bConnect.className = 'launch';
+    bConnect.title = 'Connect running Xonotic client (or auto-start one) to ' + endpoint;
+    bConnect.addEventListener('click', () => connectClient(String(s.host).trim(), Number(s.port), bConnect));
+
     const bAddr = document.createElement('button');
-    bAddr.textContent = `Copy ${endpoint}`;
-    bAddr.title = 'Paste into Xonotic Multiplayer -> Address box';
+    bAddr.textContent = 'Copy IP:Port';
+    bAddr.title = endpoint;
     bAddr.addEventListener('click', () => copyText(endpoint, bAddr));
 
-    const bCon = document.createElement('button');
-    bCon.textContent = 'Copy console';
-    bCon.title = consoleCmd + ' (for in-game ~ console)';
-    bCon.addEventListener('click', () => copyText(consoleCmd, bCon));
-
-    const bCli = document.createElement('button');
-    bCli.textContent = 'Copy CLI';
-    bCli.title = cliCmd;
-    bCli.addEventListener('click', () => copyText(cliCmd, bCli));
-
-    const bLaunch = document.createElement('button');
-    bLaunch.textContent = 'Launch Client';
-    bLaunch.className = 'launch';
-    bLaunch.addEventListener('click', () => launchClient(String(s.host).trim(), Number(s.port), bLaunch));
-
+    wrap.appendChild(bConnect);
     wrap.appendChild(bAddr);
-    wrap.appendChild(bCon);
-    wrap.appendChild(bCli);
-    wrap.appendChild(bLaunch);
     actTd.appendChild(wrap);
     tr.appendChild(actTd);
     tb.appendChild(tr);
@@ -530,6 +592,8 @@ def make_handler(registry: ServerRegistry):
                 self._send_json(200, discover_fleet_nodes())
             elif p == "/api/servers":
                 self._send_json(200, registry.list_probed(scan_defaults=True))
+            elif p == "/api/client/status":
+                self._send_json(200, registry.client_status())
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -548,9 +612,9 @@ def make_handler(registry: ServerRegistry):
                     return self._send_json(200, registry.launch(body))
                 except Exception as exc:
                     return self._send_json(500, {"error": str(exc)})
-            if p == "/api/client/launch":
+            if p in ("/api/client/connect", "/api/client/launch"):
                 try:
-                    return self._send_json(200, registry.launch_client(body))
+                    return self._send_json(200, registry.connect_client(body))
                 except Exception as exc:
                     return self._send_json(500, {"error": str(exc)})
             return self._send_json(404, {"error": "not found"})

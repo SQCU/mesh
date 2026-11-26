@@ -142,6 +142,26 @@ char *Sys_ConsoleInput(void)
 				len = 0;
 		}
 #else
+		{
+			const char *cmdpath = getenv("MESH_CLIENT_CMD_FILE");
+			int cmdfd;
+			if (!cmdpath || !*cmdpath)
+				cmdpath = "/tmp/mesh-xonotic-client.cmd";
+			cmdfd = open(cmdpath, O_RDONLY);
+			if (cmdfd >= 0)
+			{
+				len = read(cmdfd, text, sizeof(text) - 2);
+				close(cmdfd);
+				unlink(cmdpath);
+				if (len >= 1)
+				{
+					if (text[len - 1] != '\n')
+						text[len++] = '\n';
+					text[len] = 0;
+					return text;
+				}
+			}
+		}
 		fd_set fdset;
 		struct timeval timeout;
 		FD_ZERO(&fdset);
