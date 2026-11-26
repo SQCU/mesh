@@ -372,17 +372,18 @@ void payload_think(entity this)
 		this.plc_idle = 0;
 
 	float v;
+	float max_v = autocvar_g_payload_max_speed * max(1.0, this.plc_speed_scale ? this.plc_speed_scale : 1.0);
 	if(color && wA > 0)
 	{
 
 		v = this.speed * (wA - wopp) / (1 + wopp * wopp);
-		v = bound(-autocvar_g_payload_contest_speed, v, autocvar_g_payload_max_speed);
+		v = bound(-autocvar_g_payload_contest_speed, v, max_v);
 	}
 	else if(color && oppw > 0)
 	{
 
 		v = -autocvar_g_payload_reverse_speed * oppw;
-		v = bound(-autocvar_g_payload_max_speed, v, 0);
+		v = bound(-max_v, v, 0);
 	}
 	else
 	{

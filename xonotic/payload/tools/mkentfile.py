@@ -332,7 +332,85 @@ def spawn_access_metrics(points, tracks, graph, access=None):
         'cart_distance': cart_distance,
     }
 
-def spawn_overlay(entities, tracks, graph, limit=None, clearance=None, ns=None, access=None):
+def partition_team_spawns(points, tracks, graph, kteams, limit, access=None, intra_spacing=88.0):
+    """Select kteams spatially disjoint team spawn clusters with bounded approach distance to carts
+    and enforced inter-spawn separation, returning list of (team_1based, point)."""
+    if kteams < 2 or not points:
+        return []
+    matrix = spawn_access_matrix(points, tracks, graph, access)
+    finite_mask = np.isfinite(matrix)
+    finite = [i for i in range(len(points)) if finite_mask[i].all()]
+    if len(finite) < kteams:
+        finite = [i for i in range(len(points)) if finite_mask[i].any()]
+    if len(finite) < kteams:
+        return []
+
+    rows = matrix[finite]
+    safe = np.where(np.isfinite(rows), rows, 1e6)
+    min_d = np.min(safe, axis=1)
+    mean_d = np.mean(safe, axis=1)
+    row_ratio = np.max(safe, axis=1) / np.maximum(min_d, 1.0)
+    # Keep candidates with reasonable approach distance so spawns aren't exiled to 3800u corners
+    approach_cap = max(1600.0, float(np.percentile(min_d, 65)))
+    pool_idx = [k for k in range(len(finite)) if min_d[k] <= approach_cap]
+    if len(pool_idx) < max(kteams * 3, limit):
+        order_all = np.argsort(mean_d + 250.0 * row_ratio)
+        pool_idx = [int(k) for k in order_all[:max(kteams * 6, limit * 2)]]
+
+    coords = np.asarray([points[finite[k]] for k in pool_idx], dtype=np.float64)
+    scores = np.asarray([float(mean_d[k] + 250.0 * row_ratio[k]) for k in pool_idx], dtype=np.float64)
+
+    # Pick kteams maximally separated team-base anchors among good-approach candidates
+    anchors = [int(np.argmin(scores))]
+    while len(anchors) < kteams:
+        best_j, best_val = -1, -1.0
+        for j in range(len(pool_idx)):
+            if j in anchors:
+                continue
+            d_min = min(float(np.linalg.norm(coords[j] - coords[a])) for a in anchors)
+            # Mild tie-break toward closer-to-cart anchors
+            val = d_min - 0.12 * scores[j]
+            if val > best_val:
+                best_val, best_j = val, j
+        if best_j < 0:
+            break
+        anchors.append(best_j)
+    if len(anchors) < kteams:
+        return []
+
+    per_team = max(3, min(8, int(math.ceil(limit / float(kteams)))))
+    # Partition pool into Voronoi territories of the kteams anchors so rival spawns never overlap
+    anchor_xyz = coords[anchors]
+    dists_to_anchors = np.linalg.norm(coords[:, None, :] - anchor_xyz[None, :, :], axis=-1)
+    nearest_team = np.argmin(dists_to_anchors, axis=1)
+
+    assigned = []
+    used_global = set()
+    for t in range(kteams):
+        cands = [j for j in range(len(pool_idx)) if int(nearest_team[j]) == t and j not in used_global]
+        cands.sort(key=lambda j: (float(dists_to_anchors[j, t]), float(scores[j])))
+        picked = []
+        for j in cands:
+            pt = coords[j]
+            if all(float(np.linalg.norm(pt - coords[p])) >= intra_spacing for p in picked):
+                picked.append(j)
+                used_global.add(j)
+            if len(picked) >= per_team:
+                break
+        # Relax intra-team spacing only if territory is tiny, never crossing into rival territory
+        if len(picked) < min(3, len(cands)):
+            for j in cands:
+                if j not in used_global:
+                    picked.append(j)
+                    used_global.add(j)
+                if len(picked) >= min(3, len(cands)):
+                    break
+        for j in picked:
+            assigned.append((t + 1, list(points[finite[pool_idx[j]]])))
+    return assigned
+
+
+def spawn_overlay(entities, tracks, graph, limit=None, clearance=None, ns=None, access=None, kteams=0):
     clearance = PUSH_R + EPS if clearance is None else float(clearance)
     blocks = re.findall(r'\{[^{}]*\}', entities)
     originals = [entity_origin(block) for block in blocks
@@ -375,32 +453,56 @@ def spawn_overlay(entities, tracks, graph, limit=None, clearance=None, ns=None, 
                 selected_set.add(point)
     clear = [list(point) for point in selected]
     limit = max(1, len(originals), len(tracks)) if limit is None else max(1, int(limit))
-    chosen = balanced_spawn_points(clear, tracks, graph, limit, access) if tracks else localized_points(
-        spread_points(clear, min(len(clear), limit))
-    )
-    recovery_mass = 0
-    if not chosen:
-        recovery = list(candidates) or [point for point in originals if point]
-        if not recovery and ns is not None:
-            for index in np.argsort(np.prod(np.maximum(ns.hi - ns.lo, 0.0), axis=1))[::-1]:
-                point = ns.standing_point((ns.lo[index] + ns.hi[index]) * 0.5)
-                if point is not None:
-                    recovery.append(list(point))
-                    break
-        chosen = localized_points(spread_points(recovery, min(len(recovery), limit)))
-        recovery_mass = len(chosen)
+    team_assigned = partition_team_spawns(clear, tracks, graph, kteams, limit, access) if (tracks and kteams >= 2) else []
+    if team_assigned and len({t for t, _ in team_assigned}) == kteams:
+        chosen = [pt for _, pt in team_assigned]
+        recovery_mass = 0
+        def keep(match):
+            block = match.group(0)
+            return '' if is_player_spawn(block) else block
+        stripped = re.sub(r'\{[^{}]*\}', keep, entities).rstrip()
+        spawned = ['\n'.join(('{', '"classname" "info_player_team%d"' % t,
+                                '"origin" "%.9g %.9g %.9g"' % tuple(pt), '}'))
+                   for t, pt in team_assigned]
+        team_counts = {t: sum(1 for tt, _ in team_assigned if tt == t) for t in range(1, kteams + 1)}
+        cross_dists = [
+            math.dist(p1, p2)
+            for i, (t1, p1) in enumerate(team_assigned)
+            for t2, p2 in team_assigned[i + 1:]
+            if t1 != t2
+        ]
+        min_cross = round(min(cross_dists), 2) if cross_dists else None
+    else:
+        chosen = balanced_spawn_points(clear, tracks, graph, limit, access) if tracks else localized_points(
+            spread_points(clear, min(len(clear), limit))
+        )
+        recovery_mass = 0
+        if not chosen:
+            recovery = list(candidates) or [point for point in originals if point]
+            if not recovery and ns is not None:
+                for index in np.argsort(np.prod(np.maximum(ns.hi - ns.lo, 0.0), axis=1))[::-1]:
+                    point = ns.standing_point((ns.lo[index] + ns.hi[index]) * 0.5)
+                    if point is not None:
+                        recovery.append(list(point))
+                        break
+            chosen = localized_points(spread_points(recovery, min(len(recovery), limit)))
+            recovery_mass = len(chosen)
 
-    def keep(match):
-        block = match.group(0)
-        return '' if is_player_spawn(block) else block
+        def keep(match):
+            block = match.group(0)
+            return '' if is_player_spawn(block) else block
 
-    stripped = re.sub(r'\{[^{}]*\}', keep, entities).rstrip()
-    spawned = ['\n'.join(('{', '"classname" "info_player_deathmatch"',
-                            '"origin" "%.9g %.9g %.9g"' % point, '}'))
-               for point in chosen]
+        stripped = re.sub(r'\{[^{}]*\}', keep, entities).rstrip()
+        spawned = ['\n'.join(('{', '"classname" "info_player_deathmatch"',
+                                '"origin" "%.9g %.9g %.9g"' % tuple(point), '}'))
+                   for point in chosen]
+        team_counts = {}
+        min_cross = None
     minimum = min((cart_origin_clearance(point, tracks) for point in chosen), default=None)
     measures = spawn_access_metrics(chosen, tracks, graph, access)
     measures['standing_point_measures'] = standing_measures
+    measures['team_spawn_counts'] = team_counts
+    measures['min_cross_team_spawn_dist'] = min_cross
     return (stripped + '\n' + '\n'.join(spawned) + '\n', chosen, minimum, len(clear),
             measures, original_spawn_classes, recovery_mass, clearance)
 
@@ -462,7 +564,7 @@ def emit(bsp, out, kteams, kcarts, pk3arg='', ns=None, checkpoints=4):
     spawn_access_relation = SpawnAccessRelation(placed_tracks, graph)
     (entities, spawn_points, spawn_minimum, spawn_candidates, spawn_access,
      original_spawn_classes, spawn_recovery_mass, spawn_origin_clearance) = spawn_overlay(
-        ents.rstrip('\0'), placed_tracks, graph, ns=ns, access=spawn_access_relation,
+        ents.rstrip('\0'), placed_tracks, graph, ns=ns, access=spawn_access_relation, kteams=kteams,
     )
     approach_distances = [row['median'] for row in spawn_access['cart_distance']]
     lengths, speed_scales, approach_times, traversal_times, end_to_end_times, end_to_end_ratio = cart_speed_scales(placed_tracks, approach_distances)
@@ -620,6 +722,8 @@ def emit(bsp, out, kteams, kcarts, pk3arg='', ns=None, checkpoints=4):
         'spawn_team_access_ratio': shared_spawn_team_pairs / max(1, len(spawn_points) * kteams),
         'spawn_cart_origin_occupancy_pair_mass': spawn_cart_origin_occupancy_pair_mass,
         'spawn_access_relation': spawn_access['relation'],
+        'team_spawn_counts': spawn_access.get('team_spawn_counts', {}),
+        'min_cross_team_spawn_dist': spawn_access.get('min_cross_team_spawn_dist'),
         'spawn_standing_point_measures': spawn_access['standing_point_measures'],
         'spawn_access_origin_node_mass': len(set(spawn_access_relation.origin_nodes)),
         'spawn_access_distance_row_mass': len(spawn_access_relation.distance),

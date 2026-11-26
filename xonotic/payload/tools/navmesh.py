@@ -538,8 +538,10 @@ class Navmesh(object):
         starts = np.asarray([self.cart_nodes[u] for u, v in edges]).reshape((-1, 3))
         ends = np.asarray([self.cart_nodes[v] for u, v in edges]).reshape((-1, 3))
         free, grounded, _ = solver.segment_relations(starts, ends)
+        rider_free, _, _ = ns.segment_relations(starts, ends, NS.CART_RIDER_MIN, NS.CART_RIDER_MAX)
         self.cart_incompatible = {}
         self.cart_adj = [{} for _ in self.nodes]
+        self.rider_adj = [{} for _ in self.nodes]
         for index, (u, v) in enumerate(edges):
             reason = ('semantic' if self._cart_incompatible_semantics(u, v)
                       else 'burrow' if not free[index] or not (present[u] and present[v])
@@ -547,7 +549,10 @@ class Navmesh(object):
             if reason:
                 self.cart_incompatible[u, v] = reason
             else:
-                self.cart_adj[u][v] = self.cart_adj[v][u] = math.dist(self.cart_nodes[u], self.cart_nodes[v])
+                dist_uv = math.dist(self.cart_nodes[u], self.cart_nodes[v])
+                self.cart_adj[u][v] = self.cart_adj[v][u] = dist_uv
+                if rider_free[index]:
+                    self.rider_adj[u][v] = self.rider_adj[v][u] = dist_uv
         if verbose:
             counts = {reason: list(self.cart_incompatible.values()).count(reason)
                       for reason in ('semantic', 'burrow', 'airborne')}
@@ -732,20 +737,68 @@ def trim_track(track, distance):
         distance -= length
     return [list(track[-1])]
 
-def place_carts(navigation, ns, count, push_radius=160.0, min_length=160.25, origin_separation=64.0):
+def trim_track_tail(track, max_length):
+    if len(track) < 2 or max_length <= 0.0:
+        return [list(p) for p in track]
+    out = [list(track[0])]
+    acc = 0.0
+    for a, b in zip(track, track[1:]):
+        seg = math.dist(a, b)
+        if acc + seg >= max_length:
+            rem = max_length - acc
+            frac = rem / seg if seg > 1e-9 else 0.0
+            out.append([a[axis] + frac * (b[axis] - a[axis]) for axis in range(3)])
+            return out
+        acc += seg
+        out.append([float(x) for x in b])
+    return out
+
+
+def place_carts(
+    navigation,
+    ns,
+    count,
+    push_radius=160.0,
+    min_length=160.25,
+    origin_separation=64.0,
+    max_lane_length=2000.0,
+    max_length_ratio=1.45,
+):
     navigation.classify_edges(ns, verbose=True)
-    nodes, adjacency = navigation.cart_nodes, navigation.cart_adj
-    networks = []
-    total_pruned = 0
-    for component in components(adjacency):
-        keep = prune_component(adjacency, component, 2.0 * push_radius)
-        graph = subgraph(adjacency, keep)
-        endpoints, distances = kcenter(graph, 2, sorted(keep))
-        horizon = distances[endpoints[0]][endpoints[-1]] if endpoints else 0.0
-        total_pruned += len(component) - len(keep)
-        if horizon >= min_length:
-            networks.append((horizon, keep))
-    networks.sort(key=lambda row: (-row[0], min(row[1])))
+    nodes = navigation.cart_nodes
+
+    def _viable_networks(adj):
+        nets = []
+        pruned = 0
+        for component in components(adj):
+            keep = prune_component(adj, component, 2.0 * push_radius)
+            graph = subgraph(adj, keep)
+            endpoints, distances = kcenter(graph, 2, sorted(keep))
+            horizon = distances[endpoints[0]][endpoints[-1]] if endpoints else 0.0
+            pruned += len(component) - len(keep)
+            if horizon >= min_length:
+                nets.append((horizon, keep))
+        nets.sort(key=lambda row: (-row[0], min(row[1])))
+        return nets, pruned
+
+    # Prefer rider-continuous networks (0 rider gaps) whenever they provide viable lanes,
+    # falling back to general cart_adj only if rider_adj cannot supply enough lanes.
+    rider_nets, rider_pruned = _viable_networks(navigation.rider_adj)
+    cart_nets, cart_pruned = _viable_networks(navigation.cart_adj)
+    if rider_nets and sum(len(k) for _, k in rider_nets) >= max(4, 2 * count):
+        adjacency = navigation.rider_adj
+        networks, total_pruned = rider_nets, rider_pruned
+    else:
+        adjacency = navigation.cart_adj
+        networks, total_pruned = cart_nets, cart_pruned
+
+    # Avoid assigning carts to tiny disconnected side islands when the primary component is much larger.
+    if len(networks) > 1:
+        primary_h = networks[0][0]
+        balanced_nets = [row for row in networks if row[0] >= 0.5 * primary_h]
+        if balanced_nets:
+            networks = balanced_nets
+
     paths, component_rows = [], []
     for index, (horizon, keep) in enumerate(networks):
         slots = len(range(index, count, len(networks)))
@@ -760,6 +813,8 @@ def place_carts(navigation, ns, count, push_radius=160.0, min_length=160.25, ori
     for path in paths:
         seed = [nodes[node].tolist() for node in path]
         track, fit = solver.solve(seed)
+        if max_lane_length and track_length(track) > max_lane_length:
+            track = trim_track_tail(track, max_lane_length)
         length = track_length(track)
         choices = [trim_track(track, step * origin_separation)
                    for step in range(int(max(0.0, length - min_length) // origin_separation) + 1)]
@@ -772,6 +827,12 @@ def place_carts(navigation, ns, count, push_radius=160.0, min_length=160.25, ori
             tracks.append(chosen)
             realized_paths.append(path)
             fits.append(fit)
+
+    # Enforce lane-length symmetry by trimming overly long tails down to max_length_ratio * min_len
+    if len(tracks) >= 2 and max_length_ratio and max_length_ratio > 1.0:
+        lens = [track_length(t) for t in tracks]
+        cap = max(min_length, min(lens) * float(max_length_ratio))
+        tracks = [trim_track_tail(t, cap) if track_length(t) > cap else t for t in tracks]
     origin_nodes = [min(range(len(navigation.nodes)),
                         key=lambda node: math.dist(track[0], navigation.nodes[node])) for track in tracks]
     attachment = [math.dist(track[0], navigation.nodes[node]) for track, node in zip(tracks, origin_nodes)]

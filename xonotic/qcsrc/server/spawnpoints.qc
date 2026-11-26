@@ -558,7 +558,34 @@ entity SelectSpawnPoint(entity this, bool anypoint)
 	}
 	else if(autocvar_g_spawn_swizzle && Team_IsValidTeam(this.team))
 	{
-		firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, -1, true);
+		float swiz_team = Spawn_HasTeamSpawn(this.team) ? this.team : -1;
+		firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, swiz_team, true);
+		if(!firstspot && swiz_team >= 0)
+		{
+			firstspot = IL_FIRST(g_spawnpoints);
+			prev = NULL;
+			IL_EACH(g_spawnpoints, true,
+			{
+				if(prev)
+					prev.chain = it;
+				it.chain = NULL;
+				prev = it;
+			});
+			firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, swiz_team, false);
+		}
+		if(!firstspot)
+		{
+			firstspot = IL_FIRST(g_spawnpoints);
+			prev = NULL;
+			IL_EACH(g_spawnpoints, true,
+			{
+				if(prev)
+					prev.chain = it;
+				it.chain = NULL;
+				prev = it;
+			});
+			firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, -1, false);
+		}
 		spot = Spawn_SwizzledPoint(firstspot, this);
 	}
 	else
