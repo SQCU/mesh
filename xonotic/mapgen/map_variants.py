@@ -93,7 +93,7 @@ PALETTES = {
     "obsidian_ruin": {
         "floor": "exx/base-metal03",
         "wall": "exx/base-crete01",
-        "trim": "exx/trim-02",
+        "trim": "exx/trim-01",
         "ambient": "22",
         "light_scale": 0.90,
     },

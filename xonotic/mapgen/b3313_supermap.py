@@ -101,7 +101,7 @@ def build_nexus_tile(tile_id: int, dst_offset: tuple[float, float, float], rng: 
 
     tex_f = "exx/base-crete01"
     tex_w = "exx/wall-bigrib02"
-    tex_t = "exx/trim-02"
+    tex_t = "exx/trim-01"
     brushes = [
         _box_block(x0 - t, y0 - t, z0 - t, x1 + t, y1 + t, z0, tex_f, tex_w),
         _box_block(x0 - t, y0 - t, z1, x1 + t, y1 + t, z1 + t, tex_w, tex_w),
@@ -293,7 +293,7 @@ def _make_portal_arch_illusionary(
     z0 = center[2] - 24.0
     # Floor threshold strip (4u thin, visual beacon)
     out = []
-    for za, dz, hd, tex in ((z0, 4.0, 18.0, "exx/trim-01"), (z0 + height, 16.0, 14.0, "exx/trim-02")):
+    for za, dz, hd, tex in ((z0, 4.0, 18.0, "exx/trim-01"), (z0 + height, 16.0, 14.0, "exx/trim-01")):
         p0 = (center[0] - tx * hw - nx * hd, center[1] - ty * hw - ny * hd, za)
         p1 = (center[0] + tx * hw - nx * hd, center[1] + ty * hw - ny * hd, za)
         p2 = (center[0] + tx * hw + nx * hd, center[1] + ty * hw + ny * hd, za)
@@ -428,8 +428,8 @@ def sample_variant_specs(
             continue
         rot = rng.choice([0, 90, 180, 270]) if (is_repeat or rng.random() < 0.75) else 0
         mirror = rng.choice(["x", "y"]) if (is_repeat or rng.random() < 0.35) else "none"
-        xy_s = round(rng.uniform(0.92, 1.12), 2) if (is_repeat or rng.random() < 0.5) else 1.0
-        z_s = round(rng.uniform(0.95, 1.12), 2) if rng.random() < 0.4 else 1.0
+        xy_s = round(rng.uniform(1.0, 1.16), 2) if (is_repeat or rng.random() < 0.5) else 1.0
+        z_s = round(rng.uniform(1.0, 1.14), 2) if rng.random() < 0.4 else 1.0
         pal = rng.choice(pal_names[1:]) if (is_repeat or rng.random() < 0.65) else "stock"
         n_motifs = rng.choice([1, 2, 3])
         motifs = rng.sample(list(ALL_MOTIFS), n_motifs)

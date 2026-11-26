@@ -49,6 +49,14 @@ int autocvar_g_payload_node_sprites = 0;
 
 .float plc_in;
 .float plc_block_accum;
+.float plc_net_last_s;
+.int plc_net_last_ctrl;
+.float plc_net_last_send;
+
+float payload_point_limit()
+{
+	return autocvar_g_payload_point_limit * max(1, floor(payload_cart_count / 3));
+}
 
 void payload_EventLog(string mode, float t)
 {
@@ -181,12 +189,13 @@ int payload_projected_winner()
 	int leader = 0;
 	payload_projected_time = 0;
 	payload_projected_ties = 0;
+	float plimit = payload_point_limit();
 	for(int j = 1; j <= payload_teams; ++j)
 	{
 		float rate = payload_checkpoints_held[j] * autocvar_g_payload_checkpoint_rate;
-		if(rate > 0 || payload_score[j] >= autocvar_g_payload_point_limit)
+		if(rate > 0 || payload_score[j] >= plimit)
 		{
-			float remaining = payload_score[j] >= autocvar_g_payload_point_limit ? 0 : (autocvar_g_payload_point_limit - payload_score[j]) / rate;
+			float remaining = payload_score[j] >= plimit ? 0 : (plimit - payload_score[j]) / rate;
 			if(!payload_projected_ties || remaining < payload_projected_time)
 			{
 				payload_projected_time = remaining;
@@ -223,7 +232,7 @@ bool payload_cart_state_send(entity this, entity to, int sendflags)
 		WriteShort(MSG_ENTITY, payload_projected_ties);
 		WriteByte(MSG_ENTITY, payload_score_finished);
 		WriteFloat(MSG_ENTITY, payload_score[leader]);
-		WriteFloat(MSG_ENTITY, autocvar_g_payload_point_limit);
+		WriteFloat(MSG_ENTITY, payload_point_limit());
 		WriteFloat(MSG_ENTITY, payload_projected_time);
 	}
 	return true;
@@ -436,8 +445,17 @@ void payload_think(entity this)
 			GameRules_scoring_add_float2int(it, PAYLOAD_BLOCK, autocvar_g_payload_block_rate * PLC_TICK, plc_block_accum, 1);
 	});
 
-	if(this.plc_state)
+	bool net_dirty = (fabs(this.plc_s - this.plc_net_last_s) > 0.5)
+		|| (this.plc_ctrl != this.plc_net_last_ctrl)
+		|| (this.plc_cart_id == 0 && (time - this.plc_net_last_send >= 1.0 || payload_score_finished))
+		|| (time - this.plc_net_last_send >= 4.0);
+	if(this.plc_state && net_dirty)
+	{
+		this.plc_net_last_s = this.plc_s;
+		this.plc_net_last_ctrl = this.plc_ctrl;
+		this.plc_net_last_send = time;
 		this.plc_state.SendFlags |= 1;
+	}
 	vector cart_center = this.origin + this.view_ofs;
 	if(!this.plc_wp || wasfreed(this.plc_wp) || vdist(this.plc_wp.origin - cart_center, >, 160))
 		this.plc_wp = payload_nearest_waypoint(cart_center);
@@ -542,7 +560,7 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 	}
 	this.plc_length = d;
 
-	if(autocvar_g_payload_pathlinks && guard > 1)
+	if((autocvar_g_payload_pathlinks > 1 || (autocvar_g_payload_pathlinks && payload_cart_count <= 16)) && guard > 1)
 	{
 		int stride = max(1, floor((guard - 1) / PLC_RIBBON_SEG));
 		entity samp = first;
@@ -563,8 +581,9 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 
 	entity wp = WP_PayloadCart;
+	float wp_maxd = (payload_cart_count > 12) ? 2400 : 0;
 	if(!this.sprite)
-		WaypointSprite_Spawn(wp, 0, 0, this, this.view_ofs + PLC_SPRITE_OFS, NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
+		WaypointSprite_Spawn(wp, 0, wp_maxd, this, this.view_ofs + PLC_SPRITE_OFS, NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
 
 	if(this.sprite)
 		this.sprite.wp_extra = this.plc_cart_id;
@@ -630,7 +649,7 @@ bool payload_cart_supports_player(entity cart)
 void payload_RoundEnd(int winner_team)
 {
 	mesh_round_outcome(PLC_STR_NODE, payload_episode, payload_score_winner);
-	string outcome = sprintf("{\"event\":\"server_outcome\",\"contract\":\"checkpoint-control-integral-v1\",\"map\":\"%s\",\"episode\":%d,\"time\":%.9g,\"actor_team\":%d,\"score_limit\":%.9g,\"scores\":[", mapname, payload_episode, time, payload_score_winner, autocvar_g_payload_point_limit);
+	string outcome = sprintf("{\"event\":\"server_outcome\",\"contract\":\"checkpoint-control-integral-v1\",\"map\":\"%s\",\"episode\":%d,\"time\":%.9g,\"actor_team\":%d,\"score_limit\":%.9g,\"scores\":[", mapname, payload_episode, time, payload_score_winner, payload_point_limit());
 	for(int j = 1; j <= payload_teams; ++j)
 		outcome = strcat(outcome, (j > 1 ? "," : ""), sprintf("%.9g", payload_score[j]));
 	print("MESH_OUTCOME ", outcome, "]}\n");
@@ -800,7 +819,7 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 	{
 		it.blacklisted = false;
 		vector cpos = it.origin + it.view_ofs;
-		if (vdist(cpos - org, >, sradius))
+		if (!(has_plan && plan_cart >= 0 && it.plc_cart_id == plan_cart) && vdist(cpos - org, >, sradius))
 			continue;
 		float weight = 1.4;
 		if (it.plc_ctrl == myteam)
@@ -842,7 +861,7 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 			if (best_wp && !wasfreed(best_wp))
 				goal = best_wp;
 		}
-		navigation_routerating(this, goal, ratingscale * weight, 10000);
+		navigation_routerating(this, goal, ratingscale * weight, 65536);
 	});
 }
 
@@ -910,11 +929,11 @@ void havocbot_role_payload(entity this)
 			nav_w = this.plc_pl_f_nav_w;
 		}
 		navigation_goalrating_start(this);
-		havocbot_goalrating_payload_carts(this, cart_scale, this.origin, 15000);
+		havocbot_goalrating_payload_carts(this, cart_scale, this.origin, 65536);
 		havocbot_goalrating_items(this, item_scale, this.origin, 12000);
 		havocbot_goalrating_enemyplayers(this, enemy_scale, this.origin, 10000);
 		if (focus_team > 0)
-			havocbot_goalrating_payload_focus_team(this, focus_scale, this.origin, 10000, focus_team);
+			havocbot_goalrating_payload_focus_team(this, focus_scale, this.origin, 20000, focus_team);
 		if (nav_w > 0.05)
 			havocbot_goalrating_payload_nav_flow(this, nav_x, nav_y, nav_w);
 		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);

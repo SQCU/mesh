@@ -530,9 +530,16 @@ void payload_strategy_gather(float nclients)
 		it.plc_ob_f_bot_thinkskill = it.bot_thinkskill;
 		it.plc_ob_f_bot_aiskill = it.bot_aiskill;
 		it.plc_ob_f_bot_global_skill = BOT_SKILL(it);
-		it.plc_ob_f_response_seq = mesh_view_stat(it, 4);
+		float obs_resp_seq = mesh_view_stat(it, 4);
+		float obs_app_seq = mesh_view_stat(it, 0);
+		if (autocvar_g_payload_plan_only && it.plc_pl_f_id == etof(it) && plc_str_plan_done > 0)
+		{
+			obs_resp_seq = plc_str_plan_done;
+			obs_app_seq = plc_str_plan_done;
+		}
+		it.plc_ob_f_response_seq = obs_resp_seq;
 		it.plc_ob_f_response_time = mesh_view_stat(it, 5);
-		it.plc_ob_f_applied_seq = mesh_view_stat(it, 0);
+		it.plc_ob_f_applied_seq = obs_app_seq;
 		it.plc_ob_f_applied_latency = mesh_view_stat(it, 6);
 		it.plc_ob_f_enemy_damage_dealt = it.plc_str_enemy_damage_dealt;
 		it.plc_ob_f_enemy_damage_taken = it.plc_str_enemy_damage_taken;

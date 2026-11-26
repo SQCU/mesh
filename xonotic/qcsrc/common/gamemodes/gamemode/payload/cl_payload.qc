@@ -83,18 +83,24 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	drawstring_aspect(titlepos, title, vec2(mySize.x, titleh), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 
 	int n = 0;
+	int n_active = 0;
 	for(int c = 0; c < PLC_MAX_CARTS; ++c)
 	{
 		payload_cart_read(c);
 		if(plc_r_present)
+		{
 			++n;
+			if(plc_r_frac > 0.001 || plc_r_ctrl > 0 || plc_r_lead > 0)
+				++n_active;
+		}
 	}
 	if(n < 1)
 		n = 1;
+	int max_rows = min(n, 12);
 
 	float pipband = mySize.y * 0.16;
 	float rowarea = mySize.y - pipband;
-	float rowh = rowarea / n;
+	float rowh = rowarea / max_rows;
 	float barh = rowh * 0.5;
 
 	int pipslot = 0;
@@ -116,10 +122,14 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	}
 
 	int slot = 0;
-	for(int c = 0; c < PLC_MAX_CARTS; ++c)
+	for(int pass = 0; pass < 2 && slot < max_rows; ++pass)
+	for(int c = 0; c < PLC_MAX_CARTS && slot < max_rows; ++c)
 	{
 		payload_cart_read(c);
-		if(!plc_r_present && !(n == 1 && c == 0))
+		if(!plc_r_present && !(n == 1 && c == 0 && pass == 0))
+			continue;
+		bool is_act = (plc_r_frac > 0.001 || plc_r_ctrl > 0 || plc_r_lead > 0);
+		if((pass == 0 && !is_act && n > max_rows) || (pass == 1 && is_act))
 			continue;
 
 		float f = plc_r_frac;
@@ -151,7 +161,9 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	if(autocvar_hud_panel_modicons_payload_layout)
 	{
 		payload_cart_read(0);
-		drawstring_aspect(myPos, _("Cart paths / checkpoint control"),
-			vec2(mySize.x, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+		string hdr = (n > max_rows)
+			? sprintf("%d carts (%d active, showing %d)", n, n_active, slot)
+			: _("Cart paths / checkpoint control");
+		drawstring_aspect(myPos, hdr, vec2(mySize.x, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 	}
 }

@@ -27,7 +27,7 @@ from spiralgen import fmt, quad_prism, vlen, vsub
 
 THEMES = [
     ("exx/floor-tread01", "exx/wall-bigrib02", "exx/trim-01", "exx/base-metal03"),
-    ("exx/base-crete01", "exx/panel-metalbig04", "exx/trim-02", "exx/base-metal03"),
+    ("exx/base-crete01", "exx/panel-metalbig04", "exx/trim-01", "exx/base-metal03"),
     ("exx/floor-clang01", "exx/panel-metalbig04", "exx/trim-01", "exx/wall-bigrib02"),
 ]
 

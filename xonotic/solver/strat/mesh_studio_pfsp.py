@@ -537,7 +537,7 @@ def _collect_full_episodes(
                                 codes_np = out.fsq_codes.detach().cpu().numpy().astype(np.int64)
                                 for bi in np.flatnonzero(sel):
                                     fsq_code_counts[tuple(int(v) for v in codes_np[bi])] += 1
-                            if out.pred_skill is not None and len(skill_pred_pairs) < 4000:
+                            if out.pred_skill is not None and (time.monotonic() - t0) >= 8.0 and len(skill_pred_pairs) < 4000:
                                 ps_hat = out.pred_skill.detach().cpu().numpy()
                                 for bi in range(n_bots):
                                     skill_pred_pairs.append((float(ps_hat[bi]), float(priv_skill_np[bi])))

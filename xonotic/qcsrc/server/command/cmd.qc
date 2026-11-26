@@ -352,7 +352,8 @@ void ClientCommand_join(entity caller, int request)
 				else if(time < CS(caller).jointime + MIN_SPEC_TIME)
 					CS(caller).autojoin_checked = -1;
 			}
-			CS(caller).parm_idlesince = time;
+			if (CS(caller))
+				CS(caller).parm_idlesince = time;
 
 			return;
 		}
