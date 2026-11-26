@@ -294,8 +294,9 @@ class ArenaBuilder:
             self._add_cover_pillar(0.0, 0.0, half=52.0, h=192.0)
 
         for ci in range(3):
-            base_ang = math.radians(120.0 * ci)
-            sweep = math.radians(95.0 + 45.0 * sw)
+            # Keep each climbing ramp strictly inside its own 120-deg sector (between the 60/180/300 return ramps)
+            base_ang = math.radians(120.0 * ci - 42.0)
+            sweep = math.radians(60.0 + 24.0 * sw)
             pts = []
             steps = 14
             for s in range(steps + 1):
