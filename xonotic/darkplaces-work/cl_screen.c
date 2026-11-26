@@ -85,6 +85,9 @@ cvar_t scr_refresh = {0, "scr_refresh", "1", "allows you to completely shut off 
 cvar_t scr_screenshot_name_in_mapdir = {CVAR_SAVE, "scr_screenshot_name_in_mapdir", "0", "if set to 1, screenshots are placed in a subdirectory named like the map they are from"};
 cvar_t shownetgraph = {CVAR_SAVE, "shownetgraph", "0", "shows a graph of packet sizes and other information, 0 = off, 1 = show client netgraph, 2 = show client and server netgraphs (when hosting a server)"};
 cvar_t cl_demo_mousegrab = {0, "cl_demo_mousegrab", "0", "Allows reading the mouse input while playing demos. Useful for camera mods developed in csqc. (0: never, 1: always)"};
+cvar_t cl_viewbuf_dir = {0, "cl_viewbuf_dir", "", "absolute directory for synced RGB viewbuffer PPM and 4x4 viewmatrix JSONL capture"};
+cvar_t cl_viewbuf_interval = {0, "cl_viewbuf_interval", "0.25", "minimum seconds between viewbuffer+viewmatrix frame dumps"};
+cvar_t cl_viewbuf_maxframes = {0, "cl_viewbuf_maxframes", "120", "maximum viewbuffer+viewmatrix frames to record (0 = unlimited)"};
 cvar_t timedemo_screenshotframelist = {0, "timedemo_screenshotframelist", "", "when performing a timedemo, take screenshots of each frame in this space-separated list - example: 1 201 401"};
 cvar_t vid_touchscreen_outlinealpha = {0, "vid_touchscreen_outlinealpha", "0", "opacity of touchscreen area outlines"};
 cvar_t vid_touchscreen_overlayalpha = {0, "vid_touchscreen_overlayalpha", "0.25", "opacity of touchscreen area icons"};
@@ -1275,6 +1278,9 @@ void CL_Screen_Init(void)
 	Cvar_RegisterVariable(&scr_refresh);
 	Cvar_RegisterVariable(&shownetgraph);
 	Cvar_RegisterVariable(&cl_demo_mousegrab);
+	Cvar_RegisterVariable(&cl_viewbuf_dir);
+	Cvar_RegisterVariable(&cl_viewbuf_interval);
+	Cvar_RegisterVariable(&cl_viewbuf_maxframes);
 	Cvar_RegisterVariable(&timedemo_screenshotframelist);
 	Cvar_RegisterVariable(&vid_touchscreen_outlinealpha);
 	Cvar_RegisterVariable(&vid_touchscreen_overlayalpha);
@@ -2516,6 +2522,78 @@ static void CL_FrameReport(double start, double swapstart, double end)
 	}
 }
 
+static void SCR_RecordViewBuffer(void)
+{
+	static double last_cap = -1e9;
+	static int cap_idx = 0;
+	int w, h, y, x;
+	unsigned char *bgra, *rgb;
+	char ppm_path[1024], meta_path[1024];
+	FILE *fp;
+	if (!cl_viewbuf_dir.string || !cl_viewbuf_dir.string[0])
+		return;
+	if (cls.state != ca_connected || cls.signon < SIGNONS || vid.width <= 0 || vid.height <= 0)
+		return;
+	if (cl_viewbuf_maxframes.integer > 0 && cap_idx >= cl_viewbuf_maxframes.integer)
+		return;
+	if (realtime - last_cap < max(0.02, cl_viewbuf_interval.value))
+		return;
+	last_cap = realtime;
+	w = vid.width;
+	h = vid.height;
+	bgra = (unsigned char *)Mem_Alloc(tempmempool, (size_t)w * (size_t)h * 4);
+	rgb = (unsigned char *)Mem_Alloc(tempmempool, (size_t)w * (size_t)h * 3);
+	if (!bgra || !rgb)
+	{
+		if (bgra) Mem_Free(bgra);
+		if (rgb) Mem_Free(rgb);
+		return;
+	}
+	GL_ReadPixelsBGRA(0, 0, w, h, bgra);
+	for (y = 0; y < h; ++y)
+	{
+		const unsigned char *src = bgra + (size_t)(h - 1 - y) * (size_t)w * 4;
+		unsigned char *dst = rgb + (size_t)y * (size_t)w * 3;
+		for (x = 0; x < w; ++x)
+		{
+			dst[x * 3 + 0] = src[x * 4 + 2];
+			dst[x * 3 + 1] = src[x * 4 + 1];
+			dst[x * 3 + 2] = src[x * 4 + 0];
+		}
+	}
+	dpsnprintf(ppm_path, sizeof(ppm_path), "%s/frame_%04d.ppm", cl_viewbuf_dir.string, cap_idx);
+	fp = fopen(ppm_path, "wb");
+	if (fp)
+	{
+		fprintf(fp, "P6\n%d %d\n255\n", w, h);
+		fwrite(rgb, 1, (size_t)w * (size_t)h * 3, fp);
+		fclose(fp);
+	}
+	dpsnprintf(meta_path, sizeof(meta_path), "%s/viewmatrices.jsonl", cl_viewbuf_dir.string);
+	fp = fopen(meta_path, "a");
+	if (fp)
+	{
+		const float (*m)[4] = r_refdef.view.matrix.m;
+		fprintf(fp,
+			"{\"frame\":%d,\"cl_time\":%.4f,\"realtime\":%.4f,\"width\":%d,\"height\":%d,"
+			"\"origin\":[%.2f,%.2f,%.2f],\"viewangles\":[%.2f,%.2f,%.2f],"
+			"\"frustum_x\":%.5f,\"frustum_y\":%.5f,"
+			"\"viewmatrix_4x4\":[[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f,%.6f]]}\n",
+			cap_idx, cl.time, realtime, w, h,
+			r_refdef.view.origin[0], r_refdef.view.origin[1], r_refdef.view.origin[2],
+			cl.viewangles[0], cl.viewangles[1], cl.viewangles[2],
+			r_refdef.view.frustum_x, r_refdef.view.frustum_y,
+			m[0][0], m[0][1], m[0][2], m[0][3],
+			m[1][0], m[1][1], m[1][2], m[1][3],
+			m[2][0], m[2][1], m[2][2], m[2][3],
+			m[3][0], m[3][1], m[3][2], m[3][3]);
+		fclose(fp);
+	}
+	Mem_Free(bgra);
+	Mem_Free(rgb);
+	++cap_idx;
+}
+
 void CL_UpdateScreen(void)
 {
 	vec3_t vieworigin;
@@ -2730,6 +2808,8 @@ void CL_UpdateScreen(void)
 		r_stereo_side = 0;
 		SCR_DrawScreen();
 	}
+
+	SCR_RecordViewBuffer();
 
 #ifdef CONFIG_VIDEO_CAPTURE
 	SCR_CaptureVideo();

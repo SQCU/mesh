@@ -522,7 +522,7 @@ def build_b3313_supermap(
         yaw_a = math.degrees(math.atan2(na[1], na[0])) % 360.0
         yaw_b = math.degrees(math.atan2(nb[1], nb[0])) % 360.0
 
-        # A -> B trigger_teleport (spawnflags 2 = TELEPORT_KEEP_SPEED) + visual arch + exit dest in B
+        # A -> B trigger_teleport (spawnflags 2 = TELEPORT_KEEP_SPEED) + visual arch + multi-pad anti-telefrag exits in B
         trig_a = _make_portal_trigger_brush(pa, na, joint_width_u)
         portal_entities.append(ParsedEntity(
             kv={"classname": "trigger_teleport", "target": dst_in_b, "spawnflags": "2"},
@@ -532,13 +532,22 @@ def build_b3313_supermap(
             kv={"classname": "func_illusionary"},
             brushes=_make_portal_arch_illusionary(pa, na, joint_width_u),
         ))
-        portal_entities.append(ParsedEntity(
-            kv={"classname": "info_teleport_destination", "targetname": dst_in_b,
-                "origin": f"{qb[0]:.1f} {qb[1]:.1f} {qb[2] + 16.0:.1f}", "angle": f"{yaw_b:.1f}"},
-            brushes=[],
-        ))
+        # Emit up to 3 verified walkable exit pads near qb (leveraging native TELEPORT_TELEFRAG_AVOID)
+        b_exits = [qb]
+        for cand_w in adjs[tb].get(wqb, []):
+            cq = tiles[tb]["wp_centers"][cand_w]
+            if vlen(vsub(cq, pb)) >= 115.0 and all(vlen(vsub(cq, ex)) >= 64.0 for ex in b_exits):
+                b_exits.append(cq)
+                if len(b_exits) >= 3:
+                    break
+        for ex_p in b_exits:
+            portal_entities.append(ParsedEntity(
+                kv={"classname": "info_teleport_destination", "targetname": dst_in_b,
+                    "origin": f"{ex_p[0]:.1f} {ex_p[1]:.1f} {ex_p[2] + 16.0:.1f}", "angle": f"{yaw_b:.1f}"},
+                brushes=[],
+            ))
 
-        # B -> A trigger_teleport (TELEPORT_KEEP_SPEED) + visual arch + exit dest in A
+        # B -> A trigger_teleport (TELEPORT_KEEP_SPEED) + visual arch + multi-pad anti-telefrag exits in A
         trig_b = _make_portal_trigger_brush(pb, nb, joint_width_u)
         portal_entities.append(ParsedEntity(
             kv={"classname": "trigger_teleport", "target": dst_in_a, "spawnflags": "2"},
@@ -548,11 +557,19 @@ def build_b3313_supermap(
             kv={"classname": "func_illusionary"},
             brushes=_make_portal_arch_illusionary(pb, nb, joint_width_u),
         ))
-        portal_entities.append(ParsedEntity(
-            kv={"classname": "info_teleport_destination", "targetname": dst_in_a,
-                "origin": f"{qa[0]:.1f} {qa[1]:.1f} {qa[2] + 16.0:.1f}", "angle": f"{yaw_a:.1f}"},
-            brushes=[],
-        ))
+        a_exits = [qa]
+        for cand_w in adjs[ta].get(wqa, []):
+            cq = tiles[ta]["wp_centers"][cand_w]
+            if vlen(vsub(cq, pa)) >= 115.0 and all(vlen(vsub(cq, ex)) >= 64.0 for ex in a_exits):
+                a_exits.append(cq)
+                if len(a_exits) >= 3:
+                    break
+        for ex_p in a_exits:
+            portal_entities.append(ParsedEntity(
+                kv={"classname": "info_teleport_destination", "targetname": dst_in_a,
+                    "origin": f"{ex_p[0]:.1f} {ex_p[1]:.1f} {ex_p[2] + 16.0:.1f}", "angle": f"{yaw_a:.1f}"},
+                brushes=[],
+            ))
 
         joints_meta.append({
             "id": jid,

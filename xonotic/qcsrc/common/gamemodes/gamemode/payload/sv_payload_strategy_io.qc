@@ -478,7 +478,8 @@ void payload_strategy_gather(float nclients)
 		row.plc_ts_f_episode = payload_episode;
 		row.plc_ts_f_finished = payload_score_finished;
 	}
-	mesh_gather_rows(plc_str_h_team, plc_ts_f_id, plc_str_cart_base, payload_teams, PLC_STR_TEAM_W);
+	if (payload_teams > 0)
+		mesh_gather_rows(plc_str_h_team, plc_ts_f_id, plc_str_cart_base, payload_teams, PLC_STR_TEAM_W);
 
 	for (int slot = 1; slot <= nclients; ++slot)
 	{
@@ -653,4 +654,82 @@ void payload_strategy_step(entity leadcart)
 	}
 	else
 		plc_str_snapshots_superseded += 1;
+}
+
+float autocvar_g_mesh_telemetry;
+float mesh_tel_next_time;
+
+REGISTER_MUTATOR(mesh_telemetry, true)
+{
+	MUTATOR_STATIC();
+	return 0;
+}
+
+MUTATOR_HOOKFUNCTION(mesh_telemetry, SV_StartFrame)
+{
+	if (!autocvar_g_mesh_telemetry || g_payload)
+		return;
+	float interval = max(0.05, autocvar_g_payload_strategy_interval);
+	if (time >= mesh_tel_next_time)
+	{
+		mesh_tel_next_time = time + interval;
+		payload_strategy_step(NULL);
+	}
+}
+
+MUTATOR_HOOKFUNCTION(mesh_telemetry, PlayerSpawn)
+{
+	if (!autocvar_g_mesh_telemetry || g_payload)
+		return;
+	entity player = M_ARGV(0, entity);
+	player.plc_str_spawn_stamp2 = time;
+	player.plc_str_death_stamp = 0;
+}
+
+MUTATOR_HOOKFUNCTION(mesh_telemetry, PlayerDies)
+{
+	if (!autocvar_g_mesh_telemetry || g_payload)
+		return;
+	entity attacker = M_ARGV(1, entity);
+	entity player = M_ARGV(2, entity);
+	player.plc_str_death_stamp = time;
+	player.plc_str_deaths += 1;
+	payload_str_measure(player, PLC_OUTCOME_DEATHS, 1);
+	if (IS_PLAYER(attacker) && attacker != player && (!teamplay || DIFF_TEAM(attacker, player)))
+	{
+		attacker.plc_str_enemy_kills += 1;
+		payload_str_measure(attacker, PLC_OUTCOME_ENEMY_KILLS, 1);
+		payload_str_outcome(attacker, PLC_EVT_KIND_KILL, player, 1);
+	}
+}
+
+MUTATOR_HOOKFUNCTION(mesh_telemetry, PlayerDamaged)
+{
+	if (!autocvar_g_mesh_telemetry || g_payload)
+		return;
+	entity attacker = M_ARGV(0, entity);
+	entity player = M_ARGV(1, entity);
+	float dealt = max(0, M_ARGV(2, float)) + max(0, M_ARGV(3, float));
+	if (IS_PLAYER(attacker) && IS_PLAYER(player) && attacker != player && (!teamplay || DIFF_TEAM(attacker, player)))
+	{
+		attacker.plc_str_enemy_damage_dealt += dealt;
+		player.plc_str_enemy_damage_taken += dealt;
+		payload_str_measure(attacker, PLC_OUTCOME_ENEMY_DAMAGE_DEALT, dealt);
+		payload_str_measure(player, PLC_OUTCOME_ENEMY_DAMAGE_TAKEN, dealt);
+		payload_str_outcome(attacker, PLC_EVT_KIND_DAMAGE, player, dealt);
+	}
+}
+
+MUTATOR_HOOKFUNCTION(mesh_telemetry, ItemTouched)
+{
+	if (!autocvar_g_mesh_telemetry || g_payload)
+		return;
+	entity item = M_ARGV(0, entity);
+	entity player = M_ARGV(1, entity);
+	if (IS_PLAYER(player))
+	{
+		player.plc_str_pickups += 1;
+		payload_str_measure(player, PLC_OUTCOME_PICKUPS, 1);
+		payload_str_outcome(player, PLC_EVT_KIND_PICKUP, item, 1);
+	}
 }
