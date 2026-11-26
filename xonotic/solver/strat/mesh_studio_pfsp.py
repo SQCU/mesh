@@ -825,10 +825,17 @@ def _large_batch_rdma_aurora_update(
         vals = [d[k] for d in last_diags if d.get(k) is not None]
         return float(np.mean(vals)) if vals else None
 
+    if world_size > 1:
+        bl_list = [None for _ in range(world_size)]
+        dist.all_gather_object(bl_list, len(batch))
+        b_global_exact = int(sum(int(x) for x in bl_list))
+    else:
+        b_global_exact = len(batch)
+
     return {
         "update_wall_s": round(time.perf_counter() - t0, 2),
         "b_local": len(batch),
-        "b_global": len(batch) * world_size,
+        "b_global": b_global_exact,
         "ppo_epochs_applied": len(gnorms),
         "mean_rdma_ms": round(float(np.mean(rdma_ms)), 3) if rdma_ms else None,
         "grad_norm": round(float(np.mean(gnorms)), 4) if gnorms else 0.0,
@@ -1173,10 +1180,8 @@ def main():
     iter_reports = []
     t_train0 = time.monotonic()
 
-    # Build clean macro-iteration schedule:
-    # 6 Main iterations (144 episodes) -> 3 Main Exploiter iterations (72 episodes) -> 4 Main iterations (96 episodes)
-    pre_exp = min(6, args.main_iters)
-    post_exp = max(0, args.main_iters - pre_exp)
+    # Macro-iteration schedule: pre-exploiter main -> exploiter -> post-exploiter main
+    pre_exp = max(1, (args.main_iters + 1) // 2) if args.exploiter_iters > 0 and args.main_iters >= 2 else args.main_iters
     schedule = []
     for k in range(1, pre_exp + 1):
         ent = 0.008 - 0.004 * ((k - 1) / max(1, args.main_iters - 1))
@@ -1230,8 +1235,11 @@ def main():
                 train_arm="train", ema_arm=ema_ref,
                 league_arms=league_arms, win_rates_vs_opp=win_rates_vs_opp,
             )
-            if "exploiter_1" in snapshots and len(scfg) > 2:
-                scfg[2]["team_arms"] = ("train", "exploiter_1", "default")
+            if "exploiter_1" in snapshots:
+                if len(scfg) > 2:
+                    scfg[2]["team_arms"] = ("train", "exploiter_1", "default")
+                elif rank % 2 == 1:
+                    scfg[0]["team_arms"] = ("train", "exploiter_1", "default")
             arm_models = {"train": main_live, "default": None, **snapshots}
             t_arm, t_model, t_ema, t_opt = "train", main_live, main_ema, main_opt
 
@@ -1356,7 +1364,9 @@ def main():
 
     # ── Held-Out 4-Studio Parallel Multi-Map CRN Elo + alpha-Rank + Skill-ID Audit (Play-to-Score-Out) ──
     if supermap_specs:
-        my_eval_spec = supermap_specs[rank % len(supermap_specs)]
+        # Spread the 4 ranks evenly across the full K/J/N scale spectrum of the manifest
+        eval_idxs = [int(round(r * (len(supermap_specs) - 1) / max(1, world_size - 1))) for r in range(world_size)]
+        my_eval_spec = supermap_specs[eval_idxs[rank % len(eval_idxs)]]
         my_map = my_eval_spec["name"]
         eval_n_seeds = 2
     else:
