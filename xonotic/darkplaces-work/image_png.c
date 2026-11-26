@@ -106,6 +106,8 @@ qboolean PNG_OpenLibrary (void)
 		"libpng14.dll",
 		"libpng12.dll",
 #elif defined(MACOSX)
+		"/opt/homebrew/lib/libpng16.16.dylib",
+		"/usr/local/lib/libpng16.16.dylib",
 		"libpng16.16.dylib",
 		"libpng15.15.dylib",
 		"libpng14.14.dylib",

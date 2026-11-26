@@ -300,6 +300,8 @@ qboolean Font_OpenLibrary (void)
 		"libfreetype-6.dll",
 		"freetype6.dll",
 #elif defined(MACOSX)
+		"/opt/homebrew/lib/libfreetype.6.dylib",
+		"/usr/local/lib/libfreetype.6.dylib",
 		"libfreetype.6.dylib",
 		"libfreetype.dylib",
 #else

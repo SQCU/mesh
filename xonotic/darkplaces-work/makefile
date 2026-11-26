@@ -163,7 +163,11 @@ ifeq ($(DP_MAKE_TARGET), macosx)
 	endif
 
 	DP_LINK_ZLIB?=shared
-	DP_LINK_JPEG?=dlopen
+	ifneq ($(wildcard /opt/homebrew/lib/libjpeg.dylib),)
+		DP_LINK_JPEG?=shared
+	else
+		DP_LINK_JPEG?=dlopen
+	endif
 	DP_LINK_ODE?=dlopen
 	DP_LINK_CRYPTO?=dlopen
 	DP_LINK_CRYPTO_RIJNDAEL?=dlopen
@@ -317,8 +321,13 @@ endif
 
 
 ifeq ($(DP_LINK_JPEG), shared)
-	CFLAGS_LIBJPEG=-DLINK_TO_LIBJPEG
-	LIB_JPEG=-ljpeg
+	ifneq ($(wildcard /opt/homebrew/include/jpeglib.h),)
+		CFLAGS_LIBJPEG=-DLINK_TO_LIBJPEG -I/opt/homebrew/include
+		LIB_JPEG=-L/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/lib -ljpeg
+	else
+		CFLAGS_LIBJPEG=-DLINK_TO_LIBJPEG
+		LIB_JPEG=-ljpeg
+	endif
 endif
 ifeq ($(DP_LINK_JPEG), dlopen)
 	CFLAGS_LIBJPEG=
