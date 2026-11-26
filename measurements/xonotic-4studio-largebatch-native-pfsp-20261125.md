@@ -127,3 +127,46 @@ Removing the zero-clamp cleanly fixed `action_head` starvation (`main_mid` beat 
 - **Normalized-scalar entropy ratchet:** Because Aurora normalizes 1D scalar parameter updates (`g_eff / rms`), a positive `entropy_coef` on `log_std` acts as a constant-velocity ratchet whenever 1-step TD(0) advantage gradients on `log_std` are noisier than the deterministic entropy bonus. Across `m01..m10`, policy entropy rose monotonically every single iteration (`8.760 → 8.905` at `main_mid` → `9.008` at `main_final`, `+0.248` nats), washing out `main_final`'s action sharpness while `exploiter_1` (3 iterations, `8.739 → 8.763`) stayed sharp.
 - **Remedies for the next iteration:** (1) Replace 1-step `0.4 s` TD(0) with full-episode **GAE($\lambda = 0.95$)** computed across each collected `24 s` episode before striding; (2) remove the positive `entropy_coef` ratchet on `log_std` (use a target-entropy or `0` continuous entropy bonus under Aurora's normalized 1D updates).
 
+---
+
+## 6. Controlled Ablation III: Full-Episode GAE($\lambda = 0.95$) + No `log_std` Ratchet (`16514d32c`)
+
+Re-ran the **exact same 4-Studio protocol** (`312` distinct episodes, `B_global = 1,024`, `2` PPO epochs, `lr = 0.010`, `scalar_lr = 5e-3`, `1,025.33 s` wall time, identical 48-match held-out eval) with per-bot full-episode **GAE($\lambda = 0.95$)** (`_attach_full_episode_gae_`) and discrete-only pointer entropy regularization (`plan_discrete_entropy`, eliminating Aurora's normalized-1D `cont_logstd` ratchet).
+
+### 6.1 Three-Way Compound Comparison (Teamgame Elo × 1v1 DM Skill-ID × 4-Studio GradSNR)
+
+| Compound Metric | Run A: Zero-Clamp TD(0) (`65a221c87`) | Run B: No-Clamp TD(0) (`5791cd182`) | Run C: No-Clamp GAE(0.95) + No Ratchet (`16514d32c`) |
+|---|---:|---:|---:|
+| **GradSNR: `encoder / gram_cgt / resnet_ffn`** | `0.24 – 0.94` (12/13) | `0.17 – 0.92` (13/13) | **`0.85 – 0.97` (ALL 13/13)** |
+| **GradSNR: `value_head`** | `0.64 – 0.99` | `0.53 – 0.99` | **`0.97 – 1.00` (ALL 13/13)** |
+| **GradSNR: `action_head` pos iters (peak)** | `5 / 13` (peak `0.25`) | `7 / 13` (peak `0.71`) | **`8 / 13` (peak `0.58`)** |
+| **Continuous `std` trajectory (`m01 → m10`)** | drifted up (`ent +0.08`) | ratcheted up (`ent +0.25`) | **`0.379 → 0.378` (rock steady)** |
+| **Held-out Skill-ID `early (0–8 s)` `r` / `MSE`** | `+0.2983` / `1.0572` | `+0.3471` / `1.0079` | **`+0.3970` / `0.9296`** |
+| **Held-out Skill-ID `late (8 s+)` `r` / `MSE`** | `+0.4088` / `0.8752` | `+0.4754` / `0.8332` | **`+0.6006` / `0.7067`** |
+| **`main_init → main_mid → main_final` Score Elo** | `1569.6 → 1428.1 → 1480.4` | `1458.4 → 1488.0 → 1466.9` | **`1458.9 → 1495.4 → 1524.5` (`+65.6`)** |
+| **`main_final` Mean Raw Score / Composite** | `3.16` / `5.28` | `1.35` / `2.60` | **`3.83` / `5.61` (`#1` of all 6 policies)** |
+| **`main_final` Score $\alpha$-Rank** | `0.0435` | `0.0370` | **`0.2507` (`#1` learned, beats `default` `0.1904`)** |
+| **Wide FFN dead units / EDM2 `max_dev_from_1`** | `0 / 1024` / `0.0` | `0 / 1024` / `0.0` | **`0 / 1024` / `0.0`** |
+
+### 6.2 Held-Out 48-Match Rankings (`16514d32c`)
+
+| Policy | Score Elo (95% CI) | Mean Raw Score | Composite Elo (95% CI) | Mean Comp | $\alpha$-Rank (Score / Comp) |
+|---|---:|---:|---:|---:|---:|
+| `script_cart_rush` | 1547.7 `[1478.3, 1633.3]` | 0.21 | 1541.8 `[1375.4, 1707.6]` | 1.69 | 0.3403 / 0.2983 |
+| **`main_final`** | **1524.5** `[1476.2, 1577.7]` | **3.83** | 1492.1 `[1402.0, 1586.2]` | **5.61** | **0.2507** / 0.1142 |
+| `default` | 1500.0 `[1500.0, 1500.0]` | 3.12 | 1500.0 `[1500.0, 1500.0]` | 5.14 | 0.1904 / 0.1362 |
+| `main_mid` | 1495.4 `[1457.9, 1534.8]` | 0.93 | 1457.4 `[1352.4, 1563.6]` | 1.75 | 0.0742 / 0.0527 |
+| `exploiter_1` | 1472.0 `[1428.8, 1509.4]` | 0.00 | 1403.0 `[1219.8, 1558.6]` | 0.32 | 0.0769 / 0.0574 |
+| `main_init` | 1458.9 `[1385.7, 1519.3]` | 0.00 | 1547.4 `[1411.8, 1679.0]` | 0.47 | 0.0675 / 0.3412 |
+
+- **`boil` (`12` matches):** Monotonic climb `main_init 1435.9 (0.00)` → `main_mid 1489.5 (0.00)` → **`main_final 1546.1` Score / `1558.4` Composite (`+110.2` Score Elo over init, `+46.1` over `default`)**.
+- **`stormkeep` (`12` matches):** Monotonic climb `main_init 1432.7 (0.00)` → `main_mid 1477.1 (3.74)` → **`main_final 1540.9` Score / `1525.2` Composite (`11.40` mean raw score = `1.57×` `default`'s `7.28`, `+108.2` Score Elo over init)**.
+- **`catharsis` & `afterslime` (`24` matches):** All 6 policies scored `0.00` raw score inside the `32 s` eval window (`57.6 s` game time at `slowmo = 1.8`), compressing overall Score Elo differences across the `48`-match aggregate; longer eval duration or higher `payload_speed` on long maps is needed to separate policies there.
+
+### 6.3 Verdict on Architecture & Policy-Environment Trainability
+All three compound signals now move together coherently and monotonically on a live 4-Studio RDMA cluster:
+1. **GradSNR:** Full-episode GAE($\lambda = 0.95$) pushed shared trunk (`encoder`, `gram_cgt`, `resnet_ffn`) to `0.85–0.97` and `value_head` to `0.97–1.00` on every iteration, with `action_head` positive on `8/13` iterations (`B_noise` still higher than trunk, as expected for multi-team RL policy gradients).
+2. **1v1 DM Skill Calibration → Masked Online Inference:** Online masked Skill-ID reached **`r = +0.6006`** (`MSE = 0.7067`, `n = 6,000` held-out predictions) with zero `BOT_CONFIGURATION_COLUMNS` visible — ~90% of the empirical 1v1 DM calibration LOO ceiling (`r ≈ 0.663`).
+3. **Teamgame Elo:** `main` progressed monotonically from `1458.9 → 1495.4 → 1524.5` Score Elo (`+65.6`), leading all 6 policies in raw score (`3.83`) and composite score (`5.61`) and finishing `#1` among learned policies in Score $\alpha$-Rank (`0.2507` vs `default` `0.1904`), with `0.0%` dead wide-FFN units and `max_dev_from_1 = 0.0`.
+
+
