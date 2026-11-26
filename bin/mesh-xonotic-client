@@ -1,0 +1,4 @@
+#!/bin/sh
+export DYLD_LIBRARY_PATH="/opt/homebrew/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$REPO_ROOT/xonotic/darkplaces-work/darkplaces-sdl" -xonotic -basedir "${XONOTIC_BASEDIR:-/Users/mdot/dox/xonotic/Xonotic}" "$@"
