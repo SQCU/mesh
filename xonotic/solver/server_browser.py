@@ -33,6 +33,13 @@ DEFAULT_STUDIO_NODES = [
     {"id": "mini", "name": "Ms-Mac-mini", "host": "100.77.188.102", "role": "mini", "arch": "Apple M4 Pro"},
 ]
 DEFAULT_SCAN_PORTS = (26000, 26001, 26002, 26003, 27000, 27001, 27002, 27003)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CLIENT_LAUNCHER = str(REPO_ROOT / "bin" / "mesh-xonotic-client")
+REGISTRY_STATE_PATH = Path(os.environ.get("MESH_SERVER_BROWSER_STATE", "/tmp/mesh_server_browser_registry.json"))
+
+
+class ReuseThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
 
 
 def discover_fleet_nodes() -> list[dict]:
@@ -127,10 +134,32 @@ def probe_darkplaces_server(host: str, port: int, timeout: float = 0.35) -> dict
 
 
 class ServerRegistry:
-    def __init__(self):
+    def __init__(self, state_path: Path = REGISTRY_STATE_PATH):
         self._lock = threading.Lock()
         self._entries: dict[str, dict] = {}
         self._procs: dict[str, subprocess.Popen] = {}
+        self._state_path = state_path
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text())
+            now = time.time()
+            for sid, rec in (data.items() if isinstance(data, dict) else []):
+                if isinstance(rec, dict) and now - float(rec.get("updated_at", 0.0)) <= 300.0:
+                    self._entries[str(sid)] = rec
+        except Exception:
+            pass
+
+    def _save_state_locked(self) -> None:
+        try:
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._entries))
+            tmp.replace(self._state_path)
+        except Exception:
+            pass
 
     def register(self, entry: dict) -> dict:
         sid = str(entry.get("id") or f"{entry['host']}:{entry['port']}")
@@ -145,6 +174,7 @@ class ServerRegistry:
         }
         with self._lock:
             self._entries[sid] = rec
+            self._save_state_locked()
         return rec
 
     def unregister(self, sid: str) -> bool:
@@ -155,7 +185,31 @@ class ServerRegistry:
                     p.terminate()
                 except OSError:
                     pass
-            return self._entries.pop(sid, None) is not None
+            removed = self._entries.pop(sid, None) is not None
+            if removed:
+                self._save_state_locked()
+            return removed
+
+    def launch_client(self, req: dict) -> dict:
+        host = str(req.get("host", "")).strip()
+        port = int(req.get("port", 0))
+        if not host or port <= 0 or port > 65535:
+            raise ValueError("valid host and port required")
+        endpoint = f"{host}:{port}"
+        cmd = [CLIENT_LAUNCHER, "-window", "+connect", endpoint]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return {
+            "ok": True,
+            "pid": proc.pid,
+            "connect_cmd": f"+connect {endpoint}",
+            "cli_cmd": f"{CLIENT_LAUNCHER} -window +connect {endpoint}",
+        }
 
     def list_probed(self, scan_defaults: bool = True) -> list[dict]:
         now = time.time()
@@ -265,45 +319,180 @@ INDEX_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Mesh Xonotic Fleet Server Browser</title>
 <style>
 body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;margin:24px;}
-h1{font-size:20px;margin:0 0 12px;} .bar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
+h1{font-size:20px;margin:0 0 12px;} .bar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center;}
+#toast{min-height:22px;margin-bottom:10px;font-size:13px;color:#3fb950;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+#toast.err{color:#f85149;}
 table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;}
 th,td{padding:8px 12px;border-bottom:1px solid #21262d;text-align:left;font-size:13px;}
 th{background:#21262d;color:#8b949e;} .ok{color:#3fb950;font-weight:600;} .off{color:#f85149;}
-button,input,select{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font-size:13px;}
-button:hover{background:#30363d;cursor:pointer;} code{background:#1f242c;padding:2px 6px;border-radius:4px;}
+.actions{display:flex;gap:6px;flex-wrap:wrap;}
+button,input,select{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:5px 9px;font-size:12px;}
+button:hover{background:#30363d;cursor:pointer;}
+button.copied{border-color:#3fb950;color:#3fb950;}
+button.launch{background:#1f6feb;border-color:#388bfd;color:#fff;}
+button.launch:hover{background:#388bfd;}
+code{background:#1f242c;padding:2px 6px;border-radius:4px;white-space:nowrap;}
 </style></head><body>
 <h1>Mesh Xonotic Fleet Server Browser (Loopback + 4 Mac Studios)</h1>
 <div class="bar">
   <select id="nodeSel"></select>
-  <select id="mapSel"><option>boil</option><option>stormkeep</option><option>catharsis</option><option>afterslime</option><option>dance</option><option>vorix</option></select>
+  <select id="mapSel"><option>boil</option><option>stormkeep</option><option>catharsis</option><option>afterslime</option><option>dance</option><option>vorix</option><option>glowplant</option></select>
   <input id="portIn" type="number" value="26000" style="width:90px">
   <button onclick="launchSv()">Launch Server</button>
-  <button onclick="refresh()">Refresh</button>
+  <button onclick="refresh(true)">Refresh</button>
 </div>
+<div id="toast"></div>
 <table><thead><tr><th>Status</th><th>Scope</th><th>Node</th><th>Endpoint</th><th>Map</th><th>Players (Bots)</th><th>Ping</th><th>Connect</th></tr></thead>
 <tbody id="rows"></tbody></table>
 <script>
-async function refresh(){
+const CLIENT_LAUNCHER = __CLIENT_LAUNCHER_JSON__;
+let holdRenderUntil = 0;
+
+function setToast(msg, isErr=false){
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = isErr ? 'err' : '';
+}
+
+function fallbackCopy(text){
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '-9999px';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+async function copyText(raw, btn){
+  const clean = String(raw).replace(/[\\r\\n]+/g, ' ').replace(/\\s+/g, ' ').trim();
+  let ok = false;
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(clean); ok = true; } catch (_) { ok = false; }
+  }
+  if (!ok) {
+    ok = fallbackCopy(clean);
+  }
+  holdRenderUntil = Date.now() + 1800;
+  if (ok) {
+    const prev = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setToast('Copied to clipboard: ' + clean);
+    setTimeout(() => { btn.textContent = prev; btn.classList.remove('copied'); }, 1400);
+  } else {
+    setToast('Copy blocked by browser — select manually: ' + clean, true);
+    window.prompt('Copy command:', clean);
+  }
+}
+
+async function launchClient(host, port, btn){
+  holdRenderUntil = Date.now() + 2000;
+  const prev = btn.textContent;
+  btn.textContent = 'Launching...';
+  try {
+    const res = await fetch('/api/client/launch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({host, port}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'launch failed');
+    btn.textContent = 'Launched!';
+    setToast('Launched local Xonotic client (pid ' + data.pid + '): ' + data.connect_cmd);
+    setTimeout(() => { btn.textContent = prev; }, 1600);
+  } catch (err) {
+    btn.textContent = prev;
+    setToast('Client launch error: ' + err.message, true);
+  }
+}
+
+async function refresh(force=false){
+  if (!force && Date.now() < holdRenderUntil) return;
   const [nodes, svs] = await Promise.all([fetch('/api/nodes').then(r=>r.json()), fetch('/api/servers').then(r=>r.json())]);
   const sel = document.getElementById('nodeSel');
   if(!sel.options.length){ nodes.forEach(n=>{ const o=document.createElement('option'); o.value=n.host; o.textContent=`${n.name} (${n.host}) [${n.role}]`; sel.appendChild(o); }); }
-  const tb = document.getElementById('rows'); tb.innerHTML='';
-  if(!svs.length){ tb.innerHTML='<tr><td colspan="8" style="color:#8b949e">No active Xonotic servers detected on loopback or 4 Studios.</td></tr>'; return; }
-  svs.forEach(s=>{
-    const cmd = s.connect_cmd || `+connect ${s.host}:${s.port}`;
+  const tb = document.getElementById('rows');
+  tb.textContent = '';
+  if(!svs.length){
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="${s.online?'ok':'off'}">${s.online?'ONLINE':'OFFLINE'}</td><td>${s.scope||''}</td><td>${s.node||''}</td><td><code>${s.host}:${s.port}</code></td><td>${s.mapname||s.map||'-'}</td><td>${s.clients??'-'}/${s.maxclients??16} (${s.bots??0})</td><td>${s.ping_ms!=null?s.ping_ms+' ms':'-'}</td><td><button onclick="navigator.clipboard.writeText('${cmd}')">Copy ${cmd}</button></td>`;
+    const td = document.createElement('td');
+    td.colSpan = 8;
+    td.style.color = '#8b949e';
+    td.textContent = 'No active Xonotic servers detected on loopback or 4 Studios.';
+    tr.appendChild(td);
+    tb.appendChild(tr);
+    return;
+  }
+  svs.forEach(s=>{
+    const endpoint = `${String(s.host).trim()}:${Number(s.port)}`;
+    const connectCmd = `+connect ${endpoint}`;
+    const cliCmd = `${CLIENT_LAUNCHER} -window ${connectCmd}`;
+    const tr = document.createElement('tr');
+
+    const cells = [
+      {cls: s.online ? 'ok' : 'off', text: s.online ? 'ONLINE' : 'OFFLINE'},
+      {text: s.scope || ''},
+      {text: s.node || ''},
+      {code: endpoint},
+      {text: s.mapname || s.map || '-'},
+      {text: `${s.clients ?? '-'}/${s.maxclients ?? 16} (${s.bots ?? 0})`},
+      {text: s.ping_ms != null ? `${s.ping_ms} ms` : '-'},
+    ];
+    cells.forEach(c => {
+      const td = document.createElement('td');
+      if (c.cls) td.className = c.cls;
+      if (c.code) {
+        const codeEl = document.createElement('code');
+        codeEl.textContent = c.code;
+        td.appendChild(codeEl);
+      } else {
+        td.textContent = c.text;
+      }
+      tr.appendChild(td);
+    });
+
+    const actTd = document.createElement('td');
+    const wrap = document.createElement('div');
+    wrap.className = 'actions';
+
+    const bConn = document.createElement('button');
+    bConn.textContent = `Copy ${connectCmd}`;
+    bConn.addEventListener('click', () => copyText(connectCmd, bConn));
+
+    const bCli = document.createElement('button');
+    bCli.textContent = 'Copy CLI';
+    bCli.title = cliCmd;
+    bCli.addEventListener('click', () => copyText(cliCmd, bCli));
+
+    const bLaunch = document.createElement('button');
+    bLaunch.textContent = 'Launch Client';
+    bLaunch.className = 'launch';
+    bLaunch.addEventListener('click', () => launchClient(String(s.host).trim(), Number(s.port), bLaunch));
+
+    wrap.appendChild(bConn);
+    wrap.appendChild(bCli);
+    wrap.appendChild(bLaunch);
+    actTd.appendChild(wrap);
+    tr.appendChild(actTd);
     tb.appendChild(tr);
   });
 }
 async function launchSv(){
   const body = {host: document.getElementById('nodeSel').value, port: Number(document.getElementById('portIn').value), map: document.getElementById('mapSel').value};
   await fetch('/api/servers/launch', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  setTimeout(refresh, 1200);
+  setTimeout(() => refresh(true), 1200);
 }
-refresh(); setInterval(refresh, 4000);
+refresh(true); setInterval(() => refresh(false), 4000);
 </script></body></html>
-"""
+""".replace("__CLIENT_LAUNCHER_JSON__", json.dumps(CLIENT_LAUNCHER))
 
 
 def make_handler(registry: ServerRegistry):
@@ -352,6 +541,11 @@ def make_handler(registry: ServerRegistry):
                     return self._send_json(200, registry.launch(body))
                 except Exception as exc:
                     return self._send_json(500, {"error": str(exc)})
+            if p == "/api/client/launch":
+                try:
+                    return self._send_json(200, registry.launch_client(body))
+                except Exception as exc:
+                    return self._send_json(500, {"error": str(exc)})
             return self._send_json(404, {"error": "not found"})
 
         def do_DELETE(self):
@@ -370,7 +564,7 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
     reg = ServerRegistry()
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(reg))
+    srv = ReuseThreadingHTTPServer((args.host, args.port), make_handler(reg))
     print(f"Mesh Server Browser listening on http://{args.host}:{args.port}", flush=True)
     try:
         srv.serve_forever()
