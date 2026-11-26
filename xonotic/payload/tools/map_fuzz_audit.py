@@ -38,7 +38,8 @@ def _run_3team_fuzz(harness: MultiServerPlanHarness, map_names: list[str], work_
         work_dir, eng.path, [9100 + i for i in range(len(map_names))], base_port,
         map_names=map_names, skill=7, slowmo_per_server=[slowmo] * len(map_names),
     )
-    stats, prev_pos, prev_alive, spawn_coords = {}, {}, {}, {}
+    stats, prev_alive, spawn_coords = {}, {}, {}
+    pos_hist = {}
     t0 = time.monotonic()
     try:
         while time.monotonic() - t0 < duration_s:
@@ -67,13 +68,14 @@ def _run_3team_fuzz(harness: MultiServerPlanHarness, map_names: list[str], work_
                         "max_frac": np.zeros(len(carts)),
                         "push_ticks": np.zeros(len(carts), dtype=int),
                         "max_cp": 0, "max_sc": 0.0,
-                        "stuck": 0, "alive": 0, "dead": 0,
+                        "stuck": 0, "stuck_denom": 0, "alive": 0, "dead": 0,
                         "in_push": 0, "dz_miss": 0, "dists": [], "dzs": [],
                     }
                     spawn_coords[sess] = []
                 st = stats[sess]
                 st["ticks"] += 1
-                dt_game = (time.monotonic() - t0) * slowmo
+                now_t = time.monotonic()
+                dt_game = (now_t - t0) * slowmo
                 frac = carts[:, CS["PATH_POSITION"]] / np.maximum(carts[:, CS["PATH_LENGTH"]], 1.0)
                 st["max_frac"] = np.maximum(st["max_frac"], frac)
                 st["push_ticks"] += (carts[:, CS["SPEED"]] > 1.0).astype(int)
@@ -95,22 +97,29 @@ def _run_3team_fuzz(harness: MultiServerPlanHarness, map_names: list[str], work_
                         p = np.array([row[OBS["POS_X"]], row[OBS["POS_Y"]], row[OBS["POS_Z"]]])
                         if not prev_alive.get(key, False):
                             spawn_coords[sess].append((tm, p))
-                        if key in prev_pos and prev_alive.get(key, False):
-                            if float(np.linalg.norm(p - prev_pos[key])) < 8.0:
-                                st["stuck"] += 1
-                        prev_pos[key] = p
+                            pos_hist[key] = (now_t, p)
                         d_xy = np.linalg.norm(c_xyz[:, :2] - p[:2], axis=1)
                         j = int(np.argmin(d_xy))
                         st["dists"].append(float(d_xy[j]))
+                        in_push_now = False
                         if d_xy[j] < 160.0:
                             dz = float(abs(c_xyz[j, 2] - p[2]))
                             st["dzs"].append(dz)
                             if dz < 96.0:
                                 st["in_push"] += 1
+                                in_push_now = True
                             else:
                                 st["dz_miss"] += 1
+                        # Real stuckness: < 24u movement over >= 1.0s wall while NOT actively pushing a cart
+                        if key in pos_hist and (now_t - pos_hist[key][0]) >= 1.0:
+                            if not in_push_now:
+                                st["stuck_denom"] += 1
+                                if float(np.linalg.norm(p - pos_hist[key][1])) < 24.0:
+                                    st["stuck"] += 1
+                            pos_hist[key] = (now_t, p)
                     else:
                         st["dead"] += 1
+                        pos_hist.pop(key, None)
                     prev_alive[key] = alive
     finally:
         harness._stop_servers(procs, logs)
@@ -147,7 +156,7 @@ def _run_3team_fuzz(harness: MultiServerPlanHarness, map_names: list[str], work_
             "first_cp_game_s": st["first_cp_s"],
             "max_cp": st["max_cp"],
             "max_score": round(st["max_sc"], 1),
-            "bot_stuck_pct": round(100.0 * st["stuck"] / max(1, st["alive"]), 1),
+            "bot_stuck_pct": round(100.0 * st["stuck"] / max(1, st["stuck_denom"]), 1),
             "in_push_pct": round(100.0 * st["in_push"] / max(1, st["alive"]), 1),
             "dz_miss_pct": round(100.0 * st["dz_miss"] / max(1, st["in_push"] + st["dz_miss"]), 1),
             "med_dist_u": round(float(np.median(st["dists"])), 0) if st["dists"] else None,
@@ -160,14 +169,25 @@ def _run_3team_fuzz(harness: MultiServerPlanHarness, map_names: list[str], work_
 
 
 def _run_solo_cart_probe(harness: MultiServerPlanHarness, mapname: str, work_dir: Path, base_port: int, duration_s: float, slowmo: float) -> dict:
-    """Launch 3 concurrent servers on `mapname`; server k directs ALL Team-1 bots onto Cart k
-    via PLAN so we verify every individual cart 0, 1, 2 can be reached & pushed autonomously."""
+    """Launch 3 concurrent servers on `mapname` with ONLY 3 Team-1 bots (zero enemy interference)
+    directed onto Cart 0, Cart 1, and Cart 2 independently so we measure pure physical reachability
+    and pushability of every single cart from 0% -> 100%."""
     work_dir.mkdir(parents=True, exist_ok=True)
+    # Write a 3-bot Team-1-only roster so enemy bots don't kill/contest the solo-reachability probe
+    solo_roster = work_dir / "solo_team1.txt"
+    solo_roster.write_text(
+        "//solo reachability probe: 3 bots on Team 1\n"
+        "Probe1\terebus\t0\t-1\t-1\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t7.0\n"
+        "Probe2\terebus\t0\t-1\t-1\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t7.0\n"
+        "Probe3\terebus\t0\t-1\t-1\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t7.0\n"
+    )
     eng = Engine("udp://127.0.0.1:0", harness.framebytes)
     inbox = RuntimeFrames(harness.framebytes, plan_only=True)
     procs, logs = harness._spawn_servers(
         work_dir, eng.path, [9400, 9401, 9402], base_port,
         map_names=[mapname, mapname, mapname], skill=7,
+        bot_config_files=[solo_roster, solo_roster, solo_roster],
+        extra_cvars=[{"bot_number": 3, "g_balance_teams": 0}] * 3,
         slowmo_per_server=[slowmo] * 3,
     )
     sess_cart = {}

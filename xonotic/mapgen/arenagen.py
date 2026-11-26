@@ -299,18 +299,25 @@ class ArenaBuilder:
             base_ang = math.radians(120.0 * ci)
             sweep = math.radians(95.0 + 45.0 * sw)
             pts = []
-            steps = 12
+            steps = 14
             for s in range(steps + 1):
                 f = s / float(steps)
                 ang = base_ang + f * sweep
-                rad = R * (1.0 - 0.55 * sw * f)
-                # Smooth ramp rising from z=0 at outer radius to z=peak_z near central terrace
-                z = peak_z * f
+                rad = R * (1.0 - 0.50 * sw * f)
+                # Smooth S-curve climb with flat z=0 entry apron so bots walk straight onto the ramp
+                if f <= 0.15:
+                    z = 0.0
+                else:
+                    u = (f - 0.15) / 0.85
+                    z = peak_z * 0.5 * (1.0 - math.cos(math.pi * u))
                 pts.append((rad * math.cos(ang), rad * math.sin(ang), z))
             if peak_z > 4.0:
-                _add_ramp_deck(self.brushes, pts, a.width, self.tex_floor, self.tex_wall)
+                _add_ramp_deck(self.brushes, pts, max(384.0, a.width), self.tex_floor, self.tex_wall)
             self.cart_tracks.append(pts)
-            self.nav_chains.append(pts + [(0.0, 0.0, peak_z)])
+            # Connect ground entry apron explicitly from the team spawn ring into the ramp mouth
+            ang0 = base_ang
+            mouth_approach = ((R + 140.0) * math.cos(ang0), (R + 140.0) * math.sin(ang0), 0.0)
+            self.nav_chains.append([mouth_approach] + pts + [(0.0, 0.0, peak_z)])
 
         # 3 wide return ramps from central terrace (z=peak_z) back down to ground + team bases (60, 180, 300 deg)
         bay_r = R + 260.0
