@@ -68,7 +68,7 @@ void bot_think_stock(entity this)
 	if (SUPERBOT)
 		this.bot_nextthink = max(time, this.bot_nextthink) + 0.005;
 	else
-		this.bot_nextthink = max(time, this.bot_nextthink) + max(0.01, autocvar_bot_ai_thinkinterval * min(14 / (skill + this.bot_aiskill + 14), 1));
+		this.bot_nextthink = max(time, this.bot_nextthink) + max(0.01, autocvar_bot_ai_thinkinterval * min(14 / (BOT_SKILL(this) + this.bot_aiskill + 14), 1));
 
 	if (!IS_PLAYER(this) || (autocvar_g_campaign && !campaign_bots_may_start))
 	{
@@ -93,7 +93,7 @@ void bot_think_stock(entity this)
 	else
 	{
 
-		CS(this).ping = bound(0,0.07 - bound(0, (skill + this.bot_pingskill) * 0.005,0.05)+random()*0.01,0.65);
+		CS(this).ping = bound(0,0.07 - bound(0, (BOT_SKILL(this) + this.bot_pingskill) * 0.005,0.05)+random()*0.01,0.65);
 
 	}
 
@@ -276,6 +276,18 @@ void bot_setnameandstuff(entity this)
 
 	READSKILL(bot_thinkskill, 1, 0.5);
 	READSKILL(bot_aiskill, 2, 0);
+
+	if (argv(prio) != "")
+	{
+		this.bot_base_skill = stof(argv(prio));
+		this.bot_has_base_skill = true;
+		prio++;
+	}
+	else
+	{
+		this.bot_base_skill = skill;
+		this.bot_has_base_skill = false;
+	}
 
 	if (SUPERBOT)
 	{

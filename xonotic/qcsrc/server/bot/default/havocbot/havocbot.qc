@@ -186,11 +186,11 @@ void havocbot_ai(entity this)
 			if(this.(weaponentity).m_weapon == WEP_Null && slot != 0)
 				continue;
 
-			if(skill >= 2)
+			if(BOT_SKILL(this) >= 2)
 			if(this.(weaponentity).clip_load < this.(weaponentity).clip_size)
 				CS(this).impulse = IMP_weapon_reload.impulse;
 
-			if(skill >= 5)
+			if(BOT_SKILL(this) >= 5)
 			if(this.(weaponentity).clip_load >= 0)
 			{
 				FOREACH(Weapons, it != WEP_Null, {
@@ -269,12 +269,13 @@ float bot_batch_fallback_total;
 
 void havocbot_keyboard_apply(entity this, vector destorg, float noise)
 {
-	float sk = skill + this.bot_moveskill;
+	float bsk = BOT_SKILL(this);
+	float sk = bsk + this.bot_moveskill;
 	this.havocbot_keyboardtime =
 		max(
 			this.havocbot_keyboardtime
 				+ 0.05 / max(1, sk + this.havocbot_keyboardskill)
-				+ noise * 0.025 / max(0.00025, skill + this.havocbot_keyboardskill)
+				+ noise * 0.025 / max(0.00025, bsk + this.havocbot_keyboardskill)
 		, time);
 	vector keyboard = CS(this).movement / autocvar_sv_maxspeed;
 
@@ -646,7 +647,7 @@ void havocbot_movetogoal(entity this)
 	else if(this.aistatus & AI_STATUS_OUT_JUMPPAD)
 		this.aistatus &= ~AI_STATUS_OUT_JUMPPAD;
 
-	if (skill > 6 && !(IS_ONGROUND(this)))
+	if (BOT_SKILL(this) > 6 && !(IS_ONGROUND(this)))
 	{
 		#define ROCKETJUMP_DAMAGE() WEP_CVAR(devastator, damage) * 0.8 \
 			* ((StatusEffects_active(STATUSEFFECT_Strength, this)) ? autocvar_g_balance_powerup_strength_selfdamage : 1) \
@@ -698,7 +699,7 @@ void havocbot_movetogoal(entity this)
 				{
 					CS(this).movement_x = dir * v_forward * maxspeed;
 					CS(this).movement_y = dir * v_right * maxspeed;
-					if (skill < 10)
+					if (BOT_SKILL(this) < 10)
 						havocbot_keyboard_movement(this, this.origin + dir * 100);
 				}
 			}
@@ -1132,7 +1133,7 @@ void havocbot_movetogoal(entity this)
 				this.goalcurrent_distance_time = -time;
 			}
 
-			if (skill + this.bot_moveskill <= 3 && time > this.bot_stop_moving_timeout
+			if (BOT_SKILL(this) + this.bot_moveskill <= 3 && time > this.bot_stop_moving_timeout
 				&& current_speed > maxspeed * 0.9 && fabs(deviation.y) > 70)
 			{
 				this.bot_stop_moving_timeout = time + 0.4 + random() * 0.2;
@@ -1186,7 +1187,7 @@ void havocbot_movetogoal(entity this)
 
 		dodge = havocbot_dodge(this);
 		if (dodge)
-			dodge *= bound(0, 0.5 + (skill + this.bot_dodgeskill) * 0.1, 1);
+			dodge *= bound(0, 0.5 + (BOT_SKILL(this) + this.bot_dodgeskill) * 0.1, 1);
 
 		if (dodge.z > 0 && this.bot_moveskill == 0)
 			dodge.z = 0;
@@ -1194,7 +1195,7 @@ void havocbot_movetogoal(entity this)
 		{
 			traceline(this.origin, (this.enemy.absmin + this.enemy.absmax) * 0.5, true, NULL);
 			if (IS_PLAYER(trace_ent))
-				dodge_enemy_factor = bound(0, (skill + this.bot_dodgeskill) / 7, 1);
+				dodge_enemy_factor = bound(0, (BOT_SKILL(this) + this.bot_dodgeskill) / 7, 1);
 		}
 
 		if (havocbot_checkdanger(this, this.origin + this.view_ofs + dodge * 32))
@@ -1258,7 +1259,7 @@ void havocbot_movetogoal(entity this)
 				if (vdist(evadedanger, >, 40))
 					do_break = normalize(this.velocity) * -1;
 				evadedanger = normalize(evadedanger);
-				evadedanger *= bound(1, 3 - (skill + this.bot_dodgeskill), 3);
+				evadedanger *= bound(1, 3 - (BOT_SKILL(this) + this.bot_dodgeskill), 3);
 			}
 			else
 				evadedanger = '0 0 0';
@@ -1310,23 +1311,23 @@ void havocbot_movetogoal(entity this)
 		}
 	}
 
-	if (skill < 10)
+	if (BOT_SKILL(this) < 10)
 		havocbot_keyboard_movement(this, destorg);
 
-	if (!bunnyhop_forbidden && !evadedanger && !do_break && skill + this.bot_moveskill >= autocvar_bot_ai_bunnyhop_skilloffset)
+	if (!bunnyhop_forbidden && !evadedanger && !do_break && BOT_SKILL(this) + this.bot_moveskill >= autocvar_bot_ai_bunnyhop_skilloffset)
 		havocbot_bunnyhop(this, dir);
 
 	if (dir * v_up >= autocvar_sv_jumpvelocity * 0.5 && IS_ONGROUND(this))
 		PHYS_INPUT_BUTTON_JUMP(this) = true;
 	if (dodge)
 	{
-		if (dodge * v_up > 0 && random() * frametime >= 0.2 * bound(0, (10 - skill - this.bot_dodgeskill) * 0.1, 1))
+		if (dodge * v_up > 0 && random() * frametime >= 0.2 * bound(0, (10 - BOT_SKILL(this) - this.bot_dodgeskill) * 0.1, 1))
 			PHYS_INPUT_BUTTON_JUMP(this) = true;
-		if (dodge * v_up < 0 && random() * frametime >= 0.5 * bound(0, (10 - skill - this.bot_dodgeskill) * 0.1, 1))
+		if (dodge * v_up < 0 && random() * frametime >= 0.5 * bound(0, (10 - BOT_SKILL(this) - this.bot_dodgeskill) * 0.1, 1))
 		{
 			if(IS_ONGROUND(this))
 				PHYS_INPUT_BUTTON_JUMP(this) = false;
-			this.havocbot_ducktime = time + 0.3 / bound(0.1, skill + this.bot_dodgeskill, 10);
+			this.havocbot_ducktime = time + 0.3 / bound(0.1, BOT_SKILL(this) + this.bot_dodgeskill, 10);
 			PHYS_INPUT_BUTTON_CROUCH(this) = true;
 		}
 	}
@@ -1478,7 +1479,7 @@ void havocbot_chooseenemy(entity this)
 float havocbot_chooseweapon_checkreload(entity this, .entity weaponentity, int new_weapon)
 {
 
-	if(skill < 5)
+	if(BOT_SKILL(this) < 5)
 		return false;
 
 	if (this.(weaponentity).weapon_load[new_weapon] < 0)
@@ -1542,7 +1543,7 @@ void havocbot_chooseweapon(entity this, .entity weaponentity)
 	af = ATTACK_FINISHED(this, weaponentity);
 	ct = autocvar_bot_ai_weapon_combo_threshold;
 
-	combo_time = time + ct + (ct * ((-0.3*(skill+this.bot_weaponskill))+3));
+	combo_time = time + ct + (ct * ((-0.3*(BOT_SKILL(this)+this.bot_weaponskill))+3));
 
 	combo = false;
 

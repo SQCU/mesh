@@ -166,15 +166,13 @@ void bot_aimdir(entity this, vector v, float maxfiredeviation)
 
 	if(!v) return;
 
-	float skill_save = skill;
-
-	if (!this.enemy)
-		skill = max(4, skill);
+	float bsk = BOT_SKILL(this);
+	float bsk_eff = (!this.enemy) ? max(4, bsk) : bsk;
 
 	if (time >= this.bot_badaimtime)
 	{
 		this.bot_badaimtime = max(this.bot_badaimtime + 0.2 + 0.3 * random(), time);
-		int f = bound(0, 1 - 0.1 * (skill + this.bot_offsetskill), 1);
+		int f = bound(0, 1 - 0.1 * (bsk_eff + this.bot_offsetskill), 1);
 		this.bot_badaimoffset = randomvec() * f * autocvar_bot_ai_aimskill_offset;
 		this.bot_badaimoffset.x *= 0.7;
 	}
@@ -208,7 +206,7 @@ void bot_aimdir(entity this, vector v, float maxfiredeviation)
 	this.bot_5th_order_aimfilter= this.bot_5th_order_aimfilter
 		+ (this.bot_4th_order_aimfilter - this.bot_5th_order_aimfilter) * bound(0, autocvar_bot_ai_aimskill_order_filter_5th,1);
 
-	blend = bound(0,skill+this.bot_aimskill,10)*0.1;
+	blend = bound(0,bsk_eff+this.bot_aimskill,10)*0.1;
 	desiredang = desiredang + blend *
 	(
 		  this.bot_1st_order_aimfilter * autocvar_bot_ai_aimskill_order_mix_1st
@@ -227,8 +225,8 @@ void bot_aimdir(entity this, vector v, float maxfiredeviation)
 
 	if (time >= this.bot_aimthinktime)
 	{
-		this.bot_aimthinktime = max(this.bot_aimthinktime + 0.5 - 0.05*(skill+this.bot_thinkskill), time);
-		this.bot_mouseaim = this.bot_mouseaim + diffang * (1-random()*0.1*bound(1,10-(skill+this.bot_thinkskill),10));
+		this.bot_aimthinktime = max(this.bot_aimthinktime + 0.5 - 0.05*(bsk_eff+this.bot_thinkskill), time);
+		this.bot_mouseaim = this.bot_mouseaim + diffang * (1-random()*0.1*bound(1,10-(bsk_eff+this.bot_thinkskill),10));
 	}
 
 	diffang = this.bot_mouseaim - desiredang;
@@ -251,12 +249,10 @@ void bot_aimdir(entity this, vector v, float maxfiredeviation)
 	blendrate = autocvar_bot_ai_aimskill_blendrate;
 	r = max(fixedrate, blendrate);
 
-	r = bound(delta_t, r * delta_t * (2 + ((skill + this.bot_mouseskill) ** 3) * 0.005 - random()), 1);
+	r = bound(delta_t, r * delta_t * (2 + ((bsk_eff + this.bot_mouseskill) ** 3) * 0.005 - random()), 1);
 	this.v_angle += diffang * (r + (1 - r) * bound(0, 1 - autocvar_bot_ai_aimskill_mouse, 1));
 	this.v_angle_z = 0;
 	this.v_angle_y = this.v_angle.y - floor(this.v_angle.y / 360) * 360;
-
-	skill = skill_save;
 
 	if (maxfiredeviation <= 0)
 		return;
@@ -277,10 +273,10 @@ void bot_aimdir(entity this, vector v, float maxfiredeviation)
 	if (fabs(deviation.x) < maxfiredeviation && fabs(deviation.y) < maxfiredeviation)
 	{
 		traceline(shotorg, shotorg + shotdir * 1000, false, NULL);
-		if (vdist(trace_endpos - shotorg, <, 500 + 500 * bound(0, skill + this.bot_aggresskill, 10))
-			|| random() * random() > bound(0, (skill + this.bot_aggresskill) * 0.05, 1))
+		if (vdist(trace_endpos - shotorg, <, 500 + 500 * bound(0, bsk + this.bot_aggresskill, 10))
+			|| random() * random() > bound(0, (bsk + this.bot_aggresskill) * 0.05, 1))
 		{
-			this.bot_firetimer = time + bound(0.1, 0.5 - (skill + this.bot_aggresskill) * 0.05, 0.5);
+			this.bot_firetimer = time + bound(0.1, 0.5 - (bsk + this.bot_aggresskill) * 0.05, 0.5);
 		}
 	}
 }
@@ -321,7 +317,7 @@ bool bot_aim(entity this, .entity weaponentity, float shotspeed, float shotspeed
 	float maxfiredeviation = 1000 / (dist - 9) - 0.35;
 
 	float f = (shot_accurate) ? 1 : 1.6;
-	f += bound(0, (10 - (skill + this.bot_aimskill)) * 0.3, 3);
+	f += bound(0, (10 - (BOT_SKILL(this) + this.bot_aimskill)) * 0.3, 3);
 	maxfiredeviation = min(90, maxfiredeviation * f);
 
 	if (applygravity && this.enemy)

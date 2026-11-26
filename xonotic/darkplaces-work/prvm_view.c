@@ -10,6 +10,7 @@ static int PRVM_ViewSkill(const char *name)
 	static const char *fields[] = {"havocbot_keyboardskill", "bot_moveskill", "bot_dodgeskill",
 		"bot_pingskill", "bot_weaponskill", "bot_aggresskill", "bot_rangepreference",
 		"bot_aimskill", "bot_offsetskill", "bot_mouseskill", "bot_thinkskill", "bot_aiskill",
+		"bot_base_skill", "bot_has_base_skill", "bsk", "bsk_eff",
 		"skill", "autocvar_skill", "bot_global_skill", "skill_save", "sk"};
 	if (!strncmp(name, "plc_ob_f_", 9))
 		name += 9;

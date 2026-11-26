@@ -90,7 +90,7 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 {
 	uint32_t first, count, row, active, padded, wave_start;
 	int pending, destination, randomfield, isbot, wavefield, csfield, movement, button5, keyboardtime, moveskill;
-	int keyboardskill, ducktime, keyboard, period, raw_wave, color_span, cell_rank;
+	int keyboardskill, ducktime, keyboard, baseskill, hasbaseskill, period, raw_wave, color_span, cell_rank;
 	float dt, maxspeed, motion, causal_distance;
 	float *data;
 	vcellplan_t plan;
@@ -132,6 +132,8 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 	keyboardskill = BotBatchField(prog, "havocbot_keyboardskill");
 	ducktime = BotBatchField(prog, "havocbot_ducktime");
 	keyboard = BotBatchField(prog, "havocbot_keyboard");
+	baseskill = PRVM_ED_FindFieldOffset(prog, "bot_base_skill");
+	hasbaseskill = PRVM_ED_FindFieldOffset(prog, "bot_has_base_skill");
 	if (pending < 0 || destination < 0 || randomfield < 0 || isbot < 0 || wavefield < 0 || csfield < 0 || movement < 0 || button5 < 0 || keyboardtime < 0 || moveskill < 0 || keyboardskill < 0 || ducktime < 0 || keyboard < 0)
 		return;
 	if (!count)
@@ -242,7 +244,9 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 		data[BOT_BATCH_RANDOM * padded + active] = PRVM_EDICTREADFLOAT(actor, randomfield);
 		data[BOT_BATCH_NOW * padded + active] = PRVM_G_READFLOAT(OFS_PARM0);
 		prog->view->global_readonly[OFS_PARM2] = 1;
-		data[BOT_BATCH_SKILL * padded + active] = PRVM_G_READFLOAT(OFS_PARM2);
+		data[BOT_BATCH_SKILL * padded + active] = (hasbaseskill >= 0 && baseskill >= 0 && PRVM_EDICTREADFLOAT(actor, hasbaseskill) != 0.0f)
+			? PRVM_EDICTREADFLOAT(actor, baseskill)
+			: PRVM_G_READFLOAT(OFS_PARM2);
 		data[BOT_BATCH_MAXSPEED * padded + active] = PRVM_G_READFLOAT(OFS_PARM3);
 		data[BOT_BATCH_TRIGGER * padded + active] = PRVM_G_READFLOAT(OFS_PARM4);
 		data[BOT_BATCH_DISTANCE * padded + active] = PRVM_G_READFLOAT(OFS_PARM5);

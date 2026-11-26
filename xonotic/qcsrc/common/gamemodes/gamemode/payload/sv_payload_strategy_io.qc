@@ -528,7 +528,7 @@ void payload_strategy_gather(float nclients)
 		it.plc_ob_f_bot_mouseskill = it.bot_mouseskill;
 		it.plc_ob_f_bot_thinkskill = it.bot_thinkskill;
 		it.plc_ob_f_bot_aiskill = it.bot_aiskill;
-		it.plc_ob_f_bot_global_skill = autocvar_skill;
+		it.plc_ob_f_bot_global_skill = BOT_SKILL(it);
 		it.plc_ob_f_response_seq = mesh_view_stat(it, 4);
 		it.plc_ob_f_response_time = mesh_view_stat(it, 5);
 		it.plc_ob_f_applied_seq = mesh_view_stat(it, 0);

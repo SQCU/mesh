@@ -18,6 +18,10 @@ const int AI_STATUS_STUCK                      = BIT(11);
 
 #define SUPERBOT (skill > 100)
 
+.bool bot_has_base_skill;
+.float bot_base_skill;
+#define BOT_SKILL(e) ((e).bot_has_base_skill ? (e).bot_base_skill : skill)
+
 float autoskill_nextthink;
 
 .float bot_moveskill;

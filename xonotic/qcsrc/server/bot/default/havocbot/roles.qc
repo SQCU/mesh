@@ -126,8 +126,8 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 
 			float t = 0;
 			if(it.itemdef.instanceOfPowerup)
-				t = bound(0, skill / 10, 1) * 6;
-			else if(skill >= 9)
+				t = bound(0, BOT_SKILL(this) / 10, 1) * 6;
+			else if(BOT_SKILL(this) >= 9)
 				t = 4;
 			if (this.bot_plan_pwr_w > 0.25 && is_major_pickup)
 				t = max(t, bound(1, 2 + this.bot_plan_pwr_w * 1.2, 5));
@@ -199,14 +199,14 @@ void havocbot_goalrating_enemyplayers(entity this, float ratingscale, vector org
 
 		float t = ((GetResource(this, RES_HEALTH) + GetResource(this, RES_ARMOR)) - (GetResource(it, RES_HEALTH) + GetResource(it, RES_ARMOR))) / 150;
 		t = bound(0, 1 + t, 3);
-		if (skill > 3)
+		if (BOT_SKILL(this) > 3)
 		{
 			if (time < StatusEffects_gettime(STATUSEFFECT_Strength, this) - 1) t += 0.5;
 			if (time < StatusEffects_gettime(STATUSEFFECT_Strength, it) - 1) t -= 0.5;
 			if (time < StatusEffects_gettime(STATUSEFFECT_Shield, this) - 1) t += 0.2;
 			if (time < StatusEffects_gettime(STATUSEFFECT_Shield, it) - 1) t -= 0.4;
 		}
-		t += max(0, 8 - skill) * 0.05;
+		t += max(0, 8 - BOT_SKILL(this)) * 0.05;
 		ratingscale *= t;
 		if (ratingscale > 0)
 			navigation_routerating(this, it, ratingscale * BOT_RATING_ENEMY, 2000);
