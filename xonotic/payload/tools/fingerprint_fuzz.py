@@ -76,9 +76,9 @@ def run_live_fingerprint(
         "+g_payload_plan_only", "1",
     ]
     if mode == "dm":
-        cmd.extend(["+g_dm", "1", "+g_tdm", "0", "+g_payload", "0", "+g_mesh_telemetry", "1", "+fraglimit", "0", "+timelimit", "0"])
+        cmd.extend(["+exec", "gamemodes-payload.cfg", "+g_dm", "1", "+g_tdm", "0", "+g_payload", "0", "+set", "g_mesh_telemetry", "1", "+fraglimit", "0", "+timelimit", "0"])
     elif mode == "tdm":
-        cmd.extend(["+g_dm", "0", "+g_tdm", "1", "+g_tdm_teams_override", str(teams), "+g_payload", "0", "+g_mesh_telemetry", "1", "+fraglimit", "0", "+timelimit", "0"])
+        cmd.extend(["+exec", "gamemodes-payload.cfg", "+g_dm", "0", "+g_tdm", "1", "+g_tdm_teams_override", str(teams), "+g_payload", "0", "+set", "g_mesh_telemetry", "1", "+fraglimit", "0", "+timelimit", "0"])
     else:
         cmd.extend(["+exec", "gamemodes-payload.cfg", "+g_payload", "1", "+g_payload_teams_override", str(teams), "+g_payload_warmup", "1", "+g_spawn_swizzle", "1", "+g_payload_speed", "80"])
     if slowmo != 1.0:
@@ -96,9 +96,9 @@ def run_live_fingerprint(
             for _, _, buf in eng.receive():
                 inbox.feed(buf)
             while (ready := inbox.take()) is not None:
-                _, recs, _ = ready
+                _, recs, evts = ready
                 obs_raw = recs.get(OBSERVATION_KIND, (None, None))[1]
-                evt_raw = recs.get(EVENT_KIND, (None, None))[1] if EVENT_KIND in recs else None
+                evt_raw = np.concatenate(evts, axis=0) if evts else None
                 acc.update(obs_raw, evt_raw)
     finally:
         proc.terminate()
