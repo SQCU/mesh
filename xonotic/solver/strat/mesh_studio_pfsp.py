@@ -39,13 +39,19 @@ from payload.tools.strategy_io_schema import CS, OBS, TS
 from solver.strat.aurora import Aurora
 from solver.strat.buffers import ObservationMemory
 from solver.strat.curriculum import PERTURBATIONS
-from solver.strat.game_value import effective_leader, formal_value_record, role_rewards
+from solver.strat.game_value import effective_leader, formal_value_record
 from solver.strat.grad_snr import summarize_mccandlish_pairs
 from solver.strat.league_curriculum import (
     SCRIPTED_ANCHORS,
     alpha_rank_3team,
     sample_pfsp_server_assignments,
     scripted_plan_rows,
+)
+from solver.strat.losses import (
+    LossConfig,
+    attach_episode_gae_,
+    compute_step_rewards,
+    plan_losses_for_transition,
 )
 from solver.strat.mech_calibration import (
     CALIBRATED_NATIVE_REGRESSION,
@@ -65,7 +71,6 @@ from solver.strat.plan_policy import (
     clone_plan_model,
     ema_update,
     pack_plan_rows,
-    plan_losses_for_transition,
     plan_module_group,
     project_unit_norm_,
     sample_plan,
@@ -73,21 +78,16 @@ from solver.strat.plan_policy import (
 )
 from solver.strat.plan_runner import MultiServerPlanHarness
 from solver.strat.runtime import build_runtime_frame
+from solver.strat.train_config import (
+    DEFAULT_TRAINING_CONFIG_PATH,
+    OptimizerConfig,
+    TrainingConfig,
+    load_training_config,
+)
 from solver.xonwire import CART_KIND, OBSERVATION_KIND, PLAN_KIND, TEAM_KIND, Engine, RuntimeFrames, frames
 
 
-MODEL_KWARGS = dict(
-    d=256,
-    h=1024,
-    r_gram=128,
-    r_dpp=64,
-    depth=4,
-    recurrent=True,
-    use_fsq=True,
-    use_mealy=True,
-)
 MODULE_GROUPS = ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "skill_id_head", "dynamics_head")
-MAP_SLOWMO = {"boil": 1.0, "stormkeep": 1.2, "catharsis": 1.8, "afterslime": 1.8, "vorix": 1.3, "dance": 1.3, "glowplant": 1.3}
 
 
 def _init_mesh_world(device: str):
@@ -124,96 +124,43 @@ def _broadcast_model_(model: PlanWally, torch_mesh, rank: int, world_size: int, 
                 off += n
 
 
-def _make_grouped_aurora(model: PlanWally, lr: float, scalar_lr: float) -> Aurora:
+def _make_grouped_aurora(model: PlanWally, opt_cfg: OptimizerConfig, lr_mult: float = 1.0) -> Aurora:
     grouped: dict[str, list[torch.nn.Parameter]] = {g: [] for g in MODULE_GROUPS}
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
         grouped.setdefault(plan_module_group(n), []).append(p)
     active = [(g, ps) for g, ps in grouped.items() if ps]
+    lr = opt_cfg.lr * lr_mult
+    scalar_lr = opt_cfg.scalar_lr * lr_mult
     opt = Aurora(
         [{"params": ps, "lr": lr, "scalar_lr": scalar_lr} for _, ps in active],
         lr=lr,
         scalar_lr=scalar_lr,
-        mu=0.90,
-        nesterov=True,
-        pp_iterations=2,
-        pp_beta=0.5,
+        mu=opt_cfg.mu,
+        nesterov=opt_cfg.nesterov,
+        pp_iterations=opt_cfg.pp_iterations,
+        pp_beta=opt_cfg.pp_beta,
+        ns_steps=opt_cfg.ns_steps,
+        eps=opt_cfg.eps,
+        ns_coeffs=opt_cfg.ns_coeffs,
+        d_init_clamp=opt_cfg.d_init_clamp,
+        d_iter_clamp=opt_cfg.d_iter_clamp,
+        scalar_beta2=opt_cfg.scalar_beta2,
+        scalar_eps=opt_cfg.scalar_eps,
     )
     opt._group_names = [g for g, _ in active]
     return opt
 
 
-def _attach_full_episode_gae_(
+def _sync_adv_stats(
     model: PlanWally,
-    by_session: dict[int, list[PlanTransition]],
+    batch: list[PlanTransition],
+    torch_mesh,
+    world_size: int,
     device: str,
-    gae_lambda: float = 0.95,
-) -> None:
-    """Compute exact per-bot full-episode GAE(lambda) advantages and lambda-returns across each
-    complete contiguous episode BEFORE striding into the large multi-episode batch."""
-    with torch.no_grad():
-        for trs in by_session.values():
-            if not trs:
-                continue
-            T = len(trs)
-            v_in_list: list[np.ndarray] = []
-            for tr in trs:
-                obs_in = torch.as_tensor(tr.obs_in, dtype=torch.float32, device=device)
-                carts_in = torch.as_tensor(tr.carts_in, dtype=torch.float32, device=device)
-                teams_in = torch.as_tensor(tr.teams_in, dtype=torch.float32, device=device)
-                evt_in = torch.as_tensor(np.array(tr.events_in, copy=True), dtype=torch.float32, device=device) if len(tr.events_in) else None
-                geo_in = _geo_to_torch(tr.geo_in, device)
-                h_in = torch.as_tensor(tr.h_in, dtype=torch.float32, device=device) if tr.h_in is not None else None
-                priv_in = torch.as_tensor(tr.priv_skill_in, dtype=torch.float32, device=device) if tr.priv_skill_in is not None else None
-                cur = model(obs_in, carts_in, teams_in, evt_in, geo=geo_in, h_prev=h_in, priv_skill=priv_in)
-                wm = torch.as_tensor(tr.winner_mask, dtype=torch.bool, device=device)
-                v_in_list.append(torch.where(wm, cur.value_winnie, cur.value_lou).cpu().numpy().astype(np.float32))
-
-            last = trs[-1]
-            obs_last = torch.as_tensor(last.obs_out, dtype=torch.float32, device=device)
-            carts_last = torch.as_tensor(last.carts_out, dtype=torch.float32, device=device)
-            teams_last = torch.as_tensor(last.teams_out, dtype=torch.float32, device=device)
-            evt_last = torch.as_tensor(np.array(last.events_out, copy=True), dtype=torch.float32, device=device) if len(last.events_out) else None
-            geo_last = _geo_to_torch(last.geo_out, device)
-            h_last = torch.as_tensor(last.h_out, dtype=torch.float32, device=device) if last.h_out is not None else None
-            priv_last = torch.as_tensor(last.priv_skill_out, dtype=torch.float32, device=device) if last.priv_skill_out is not None else None
-            nxt_last = model(obs_last, carts_last, teams_last, evt_last, geo=geo_last, h_prev=h_last, priv_skill=priv_last)
-            last_vw = nxt_last.value_winnie.cpu().numpy().astype(np.float32)
-            last_vl = nxt_last.value_lou.cpu().numpy().astype(np.float32)
-
-            next_adv: np.ndarray | None = None
-            next_id_map: dict[int, int] = {}
-            for t in range(T - 1, -1, -1):
-                tr = trs[t]
-                v_in = v_in_list[t]
-                n = len(v_in)
-                adv = np.zeros((n,), dtype=np.float32)
-                eids = tr.obs_in[:, OBS["ID"]].astype(np.int64)
-                for i in range(n):
-                    disc = float(tr.discount[i])
-                    succ = int(tr.successor_rows[i])
-                    same_role = bool(tr.winner_mask[i]) == bool(tr.next_winner_mask[i])
-                    v_next = 0.0
-                    gae_next = 0.0
-                    if same_role and disc > 0.0 and succ >= 0:
-                        if t == T - 1:
-                            if succ < len(last_vw):
-                                v_next = float(last_vw[succ] if tr.next_winner_mask[i] else last_vl[succ])
-                        else:
-                            j = next_id_map.get(int(eids[i]), -1)
-                            if j >= 0 and bool(trs[t + 1].winner_mask[j]) == bool(tr.next_winner_mask[i]):
-                                v_next = float(v_in_list[t + 1][j])
-                                gae_next = float(next_adv[j])
-                    delta = float(tr.reward[i]) + disc * v_next - float(v_in[i])
-                    adv[i] = delta + disc * gae_lambda * gae_next
-                tr.gae_adv = adv
-                tr.gae_ret = (adv + v_in).astype(np.float32)
-                next_adv = adv
-                next_id_map = {int(eids[i]): i for i in range(n)}
-
-
-def _sync_adv_stats(model: PlanWally, batch: list[PlanTransition], torch_mesh, world_size: int, device: str) -> tuple[float, float]:
+    loss_cfg: LossConfig,
+) -> tuple[float, float]:
     errs = []
     with torch.no_grad():
         for tr in batch:
@@ -263,7 +210,7 @@ def _sync_adv_stats(model: PlanWally, batch: list[PlanTransition], torch_mesh, w
     cnt = max(float(s_cpu[0]), 1.0)
     mean = float(s_cpu[1] / cnt)
     var = max(float(s_cpu[2] / cnt) - mean * mean, 1e-6)
-    return mean, max(math.sqrt(var), 1e-3)
+    return mean, max(math.sqrt(var), loss_cfg.batch_adv_std_floor)
 
 
 def _rdma_mccandlish_from_flat(
@@ -340,6 +287,7 @@ def _collect_full_episodes(
     harness: MultiServerPlanHarness,
     work_dir: Path,
     *,
+    cfg: TrainingConfig,
     rank: int,
     device: str,
     seeds: list[int],
@@ -350,14 +298,9 @@ def _collect_full_episodes(
     train_arm: str,
     regression: dict,
     native_bots: list[dict],
-    max_wall_s: float = 600.0,
-    point_limit: float | None = None,
-    gamma: float = 0.95,
-    rng_seed: int = 1000,
+    rng_seed: int,
     map_specs: list[dict] | None = None,
 ) -> dict:
-    """Run G concurrent live episodes on this Studio until EVERY match genuinely scores out
-    (`tick.cartstate.finished`), collecting 100% of transitions unconditionally."""
     work_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(rng_seed)
 
@@ -375,14 +318,14 @@ def _collect_full_episodes(
         sv_n = int(spec["players"]) if spec else 9
         sv_maxc = int(spec.get("maxclients", min(255, sv_n + 15))) if spec else harness.maxclients
         r_kind, entries = sample_native_lobby_roster(
-            rng, regression=regression, native_bots=native_bots, n_teams=sv_k, n_bots=sv_n
+            rng, regression=regression, native_bots=native_bots, n_teams=sv_k, n_bots=sv_n, league_cfg=cfg.league,
         )
         roster_kinds.append(r_kind)
         bfile = work_dir / f"native_roster_{idx}_{r_kind}.txt"
         write_native_bots_txt(bfile, entries)
         bot_cfg_files.append(bfile)
         extra_cvars.append(dict(PERTURBATIONS.get(scfg["perturbation"], {})))
-        slowmos.append(float(MAP_SLOWMO.get(mname, 1.0)))
+        slowmos.append(float(cfg.harness.map_slowmo.get(mname, 1.0)))
         teams_per_sv.append(sv_k)
         bots_per_sv.append(sv_n)
         maxc_per_sv.append(sv_maxc)
@@ -395,14 +338,14 @@ def _collect_full_episodes(
         work_dir, sock, seeds, base_port,
         map_names=map_names,
         bot_config_files=bot_cfg_files,
-        skill=7,
+        skill=cfg.harness.default_skill,
         extra_cvars=extra_cvars,
         slowmo_per_server=slowmos,
         teams_per_server=teams_per_sv,
         bots_per_server=bots_per_sv,
         maxclients_per_server=maxc_per_sv,
         meta_per_server=meta_per_sv,
-        point_limit=point_limit,
+        point_limit=cfg.harness.point_limit,
     )
 
     routes: dict[int, tuple[int, object]] = {}
@@ -419,12 +362,12 @@ def _collect_full_episodes(
     sess_first_episode: dict[int, tuple] = {}
     expected_sessions = len(seeds)
     skill_pred_pairs: list[tuple[float, float]] = []
-    fp_train_acc = PhaseSpaceAccumulator(label=f"train:{train_arm}", cell_size=256.0)
-    fp_default_acc = PhaseSpaceAccumulator(label="ref:default", cell_size=256.0)
+    fp_train_acc = PhaseSpaceAccumulator(label=f"train:{train_arm}", cell_size=cfg.eval.fingerprint_cell_size)
+    fp_default_acc = PhaseSpaceAccumulator(label="ref:default", cell_size=cfg.eval.fingerprint_cell_size)
 
     t0 = time.monotonic()
     try:
-        while len(finished_sessions) < expected_sessions and (time.monotonic() - t0) < max_wall_s:
+        while len(finished_sessions) < expected_sessions and (time.monotonic() - t0) < cfg.harness.max_episode_wall_s:
             if all(p.poll() is not None for p in procs):
                 break
             readable, _, _ = select.select([engine], [], [], 0.05)
@@ -550,7 +493,7 @@ def _collect_full_episodes(
                                 codes_np = out.fsq_codes.detach().cpu().numpy().astype(np.int64)
                                 for bi in np.flatnonzero(sel):
                                     fsq_code_counts[tuple(int(v) for v in codes_np[bi])] += 1
-                            if out.pred_skill is not None and (time.monotonic() - t0) >= 8.0:
+                            if out.pred_skill is not None and (time.monotonic() - t0) >= cfg.eval.skill_id_early_cutoff_s:
                                 ps_hat = out.pred_skill.detach().cpu().numpy()
                                 for bi in range(n_bots):
                                     skill_pred_pairs.append((float(ps_hat[bi]), float(priv_skill_np[bi])))
@@ -573,6 +516,7 @@ def _collect_full_episodes(
                             obs_rows, team_rows, samp, bot_arms, {arm_name},
                             sv_maxc, cell_centroids=cell_centroids,
                             cart_lengths=cart_rows[:, CS["PATH_LENGTH"]],
+                            pack_cfg=cfg.action_pack,
                         )
                         m_rows = part[:, 0] > 0
                         plan_matrix[m_rows] = part[m_rows]
@@ -600,36 +544,17 @@ def _collect_full_episodes(
                     c_ids = obs_rows[:, OBS["ID"]].astype(np.int64)
                     id_to_idx = {int(eid): idx for idx, eid in enumerate(c_ids)}
                     succ = np.asarray([id_to_idx.get(int(eid), -1) for eid in p_ids], dtype=np.int64)
-                    rew = role_rewards(prev["tick"].context, prev["tick"].cartstate, tick.cartstate)
-                    prev_obs = prev["obs"]
-                    push_delta = np.asarray([
-                        max(0.0, float(obs_rows[idx, OBS["CART_PUSH"]]) - float(prev_obs[i, OBS["CART_PUSH"]])) if idx >= 0 else 0.0
-                        for i, idx in enumerate(succ)
-                    ], dtype=np.float32)
-                    contest_delta = np.asarray([
-                        max(0.0, float(obs_rows[idx, OBS["CART_CONTEST"]]) - float(prev_obs[i, OBS["CART_CONTEST"]])) if idx >= 0 else 0.0
-                        for i, idx in enumerate(succ)
-                    ], dtype=np.float32)
-                    pickup_delta = np.asarray([
-                        max(0.0, float(obs_rows[idx, OBS["PICKUPS"]]) - float(prev_obs[i, OBS["PICKUPS"]])) if idx >= 0 else 0.0
-                        for i, idx in enumerate(succ)
-                    ], dtype=np.float32)
-                    p_carts = prev["carts"]
-                    prev_frac = p_carts[:, CS["PATH_POSITION"]] / np.maximum(p_carts[:, CS["PATH_LENGTH"]], 1.0)
-                    cur_frac = cart_rows[:, CS["PATH_POSITION"]] / np.maximum(cart_rows[:, CS["PATH_LENGTH"]], 1.0)
-                    dfrac = cur_frac - prev_frac
-                    ctrl_t = cart_rows[:, CS["CONTROL_TEAM"]].astype(np.int64)
-                    p_teams_1 = prev_obs[:, OBS["TEAM"]].astype(np.int64)
-                    lane_prog = np.zeros((len(prev_obs),), dtype=np.float32)
-                    for ci in range(min(len(dfrac), len(ctrl_t))):
-                        if ctrl_t[ci] > 0:
-                            lane_prog += np.where(p_teams_1 == ctrl_t[ci], float(dfrac[ci]), -0.4 * float(dfrac[ci]))
-                    rew = (
-                        rew
-                        + 0.25 * lane_prog
-                        + 0.015 * np.tanh(push_delta / 25.0)
-                        + 0.012 * np.tanh(contest_delta / 1.0)
-                        + 0.008 * np.tanh(pickup_delta)
+                    rew = compute_step_rewards(
+                        prev["tick"].context,
+                        prev["tick"].cartstate,
+                        tick.cartstate,
+                        prev["obs"],
+                        obs_rows,
+                        prev["carts"],
+                        cart_rows,
+                        succ,
+                        n_teams=n_teams,
+                        cfg=cfg.losses.reward,
                     )
                     w_before = effective_leader(prev["tick"].context, prev["tick"].cartstate)
                     w_after = effective_leader(tick.context, tick.cartstate)
@@ -638,7 +563,7 @@ def _collect_full_episodes(
                     nwm = np.asarray([
                         (int(tick.context.team_of[idx]) == w_after) if idx >= 0 else False for idx in succ
                     ], dtype=bool)
-                    disc = np.where((succ >= 0) & (not tick.cartstate.finished), gamma, 0.0).astype(np.float32)
+                    disc = np.where((succ >= 0) & (not tick.cartstate.finished), cfg.losses.gamma, 0.0).astype(np.float32)
                     actor_mask = (prev["arms"] == train_arm) & (succ >= 0)
                     if np.any(actor_mask):
                         by_session_transitions[int(session)].append(PlanTransition(
@@ -741,14 +666,12 @@ def _large_batch_rdma_aurora_update(
     optimizer: Aurora,
     batch: list[PlanTransition],
     *,
+    cfg: TrainingConfig,
     rank: int,
     world_size: int,
     torch_mesh,
     device: str,
-    ppo_epochs: int,
     entropy_coef: float,
-    ema_decay: float,
-    grad_clip: float,
     iter_id: int,
 ) -> dict:
     params = [p for p in model.parameters() if p.requires_grad]
@@ -761,21 +684,23 @@ def _large_batch_rdma_aurora_update(
         slices_by_group[plan_module_group(n)].append((off, off + sz))
         off += sz
 
+    ppo_epochs = max(1, cfg.optimizer.ppo_epochs)
     t0 = time.perf_counter()
-    adv_mean, adv_std = _sync_adv_stats(model, batch, torch_mesh, world_size, device)
+    adv_mean, adv_std = _sync_adv_stats(model, batch, torch_mesh, world_size, device, cfg.losses)
     ep0_snr = None
     ep0_group_snr = {}
     rdma_ms = []
     last_diags = []
     gnorms = []
 
-    for ep in range(max(1, ppo_epochs)):
+    for ep in range(ppo_epochs):
         optimizer.zero_grad(set_to_none=True)
         inv_n = 1.0 / max(1, len(batch))
         diags = []
         for tr in batch:
             comps, diag = plan_losses_for_transition(
                 model, tr, device=device,
+                loss_cfg=cfg.losses,
                 entropy_coef=entropy_coef,
                 adv_mean=adv_mean, adv_std=adv_std,
             )
@@ -812,11 +737,11 @@ def _large_batch_rdma_aurora_update(
             else:
                 p.grad.copy_(mean_g[off_g : off_g + sz].view_as(p.data))
             off_g += sz
-        gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
+        gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip).item())
         gnorms.append(gn)
         optimizer.step()
-        project_unit_norm_(model)
-        ema_update(ema_model, model, decay=ema_decay)
+        project_unit_norm_(model, eps=cfg.norm.unit_norm_eps)
+        ema_update(ema_model, model, decay=cfg.optimizer.ema_decay)
 
     _broadcast_model_(model, torch_mesh, rank, world_size, device)
     _broadcast_model_(ema_model, torch_mesh, rank, world_size, device)
@@ -853,12 +778,11 @@ def _eval_triplet_native(
     harness: MultiServerPlanHarness,
     work_dir: Path,
     *,
+    cfg: TrainingConfig,
     seeds: list[int],
     arm_models: dict[str, PlanWally | None],
     team_arms: tuple[str, ...],
     mapname: str,
-    max_wall_s: float = 600.0,
-    point_limit: float | None = None,
     device: str,
     base_port: int,
     regression: dict,
@@ -876,7 +800,7 @@ def _eval_triplet_native(
         dist_kind = "gaussian_lobby" if j == 0 else ("team_skewed" if j == 1 else "within_team_skewed")
         rk, ents = sample_native_lobby_roster(
             rng, regression=regression, native_bots=native_bots, distribution=dist_kind,
-            n_teams=sv_k, n_bots=sv_n,
+            n_teams=sv_k, n_bots=sv_n, league_cfg=cfg.league,
         )
         bf = work_dir / f"eval_roster_{j}_{rk}.txt"
         write_native_bots_txt(bf, ents)
@@ -885,18 +809,18 @@ def _eval_triplet_native(
     engine = Engine("udp://127.0.0.1:0", harness.framebytes)
     sock = engine.path
     inbox = RuntimeFrames(harness.framebytes, plan_only=True)
-    slowmos = [float(MAP_SLOWMO.get(mapname, 1.0))] * len(seeds)
+    slowmos = [float(cfg.harness.map_slowmo.get(mapname, 1.0))] * len(seeds)
     procs, logs = harness._spawn_servers(
         work_dir, sock, seeds, base_port,
         map_names=[mapname] * len(seeds),
         bot_config_files=bfiles,
-        skill=7,
+        skill=cfg.harness.default_skill,
         slowmo_per_server=slowmos,
         teams_per_server=[sv_k] * len(seeds),
         bots_per_server=[sv_n] * len(seeds),
         maxclients_per_server=[sv_maxc] * len(seeds),
         meta_per_server=[map_spec or {}] * len(seeds),
-        point_limit=point_limit,
+        point_limit=cfg.harness.point_limit,
     )
     routes: dict[int, tuple[int, object]] = {}
     sess_order: dict[int, int] = {}
@@ -912,7 +836,7 @@ def _eval_triplet_native(
     t_start = time.monotonic()
 
     try:
-        while len(finished_sessions) < expected_sessions and (time.monotonic() - t_start) < max_wall_s:
+        while len(finished_sessions) < expected_sessions and (time.monotonic() - t_start) < cfg.harness.max_episode_wall_s:
             if all(p.poll() is not None for p in procs):
                 break
             readable, _, _ = select.select([engine], [], [], 0.05)
@@ -996,7 +920,7 @@ def _eval_triplet_native(
                         out = mdl(obs_t, carts_t, teams_t, evt_t, geo=geo_t, h_prev=torch.as_tensor(h_prev_np, dtype=torch.float32, device=device), priv_skill=None)
                         if out.pred_skill is not None and arm_name == "main_final":
                             ph = out.pred_skill.detach().cpu().numpy()
-                            dst_list = skill_preds_early if elapsed_s < 8.0 else skill_preds_late
+                            dst_list = skill_preds_early if elapsed_s < cfg.eval.skill_id_early_cutoff_s else skill_preds_late
                             for bi in range(n_bots):
                                 dst_list.append((float(ph[bi]), float(priv_skill_np[bi])))
                         samp = sample_plan(out, deterministic=False)
@@ -1011,6 +935,7 @@ def _eval_triplet_native(
                             obs_rows, team_rows, samp, bot_arms, {arm_name},
                             sv_maxc_obs, cell_centroids=cell_centroids,
                             cart_lengths=cart_rows[:, CS["PATH_LENGTH"]],
+                            pack_cfg=cfg.action_pack,
                         )
                         m_rows = part[:, 0] > 0
                         plan_matrix[m_rows] = part[m_rows]
@@ -1056,32 +981,41 @@ def _eval_triplet_native(
     }
 
 
-def _audit_dead_neurons(model: PlanWally, harness: MultiServerPlanHarness, work_dir: Path, device: str, base_port: int) -> dict:
+def _audit_dead_neurons(
+    model: PlanWally,
+    harness: MultiServerPlanHarness,
+    work_dir: Path,
+    device: str,
+    base_port: int,
+    cfg: TrainingConfig,
+) -> dict:
     res = harness.run_episode_batch(
         work_dir / "neuron_audit",
-        seeds=[9901, 9902],
+        seeds=list(cfg.seeds.neuron_audit_seeds),
         arm_models={"eval": model, "default": None},
         team_arms=("eval", "default", "default"),
-        duration_s=10.0,
+        duration_s=cfg.eval.neuron_audit_duration_s,
         rotate_seats=False,
         deterministic=False,
         device=device,
         base_port=base_port,
-        map_names=["boil", "stormkeep"],
+        map_names=list(cfg.eval.neuron_audit_maps),
+        loss_cfg=cfg.losses,
+        pack_cfg=cfg.action_pack,
     )
     trs = res["transitions"]
     if not trs:
         return {"error": "no transitions"}
     model.zero_grad(set_to_none=True)
     for tr in trs:
-        comps, _ = plan_losses_for_transition(model, tr, device=device)
+        comps, _ = plan_losses_for_transition(model, tr, device=device, loss_cfg=cfg.losses)
         (comps["total"] / len(trs)).backward()
     ffn_reports, tot_units, tot_dead = [], 0, 0
     for bi, blk in enumerate(model.blocks):
         g_up = blk.ffn_up.weight.grad.detach().cpu() if blk.ffn_up.weight.grad is not None else torch.zeros_like(blk.ffn_up.weight.cpu())
         rn = g_up.norm(dim=-1)
         med = float(rn.median().item())
-        dead = int((rn < 0.01 * max(med, 1e-12)).sum().item())
+        dead = int((rn < cfg.eval.dead_unit_rel_threshold * max(med, 1e-12)).sum().item())
         tot_units += int(rn.numel())
         tot_dead += dead
         ffn_reports.append({
@@ -1093,40 +1027,85 @@ def _audit_dead_neurons(model: PlanWally, harness: MultiServerPlanHarness, work_
     return {"total_wide_ffn_units": tot_units, "dead_units": tot_dead, "dead_fraction": round(tot_dead / max(1, tot_units), 6), "blocks": ffn_reports}
 
 
+def _build_overrides_from_args(args) -> dict:
+    ov: dict = {"schedule": {}, "harness": {}, "optimizer": {}}
+    if args.device is not None:
+        ov["schedule"]["device"] = args.device
+    if args.out_dir is not None:
+        ov["schedule"]["out_dir"] = args.out_dir
+    if args.calibration_json is not None:
+        ov["schedule"]["calibration_json"] = args.calibration_json
+    if args.init_ckpt is not None:
+        ov["schedule"]["init_ckpt"] = args.init_ckpt
+    if args.supermap_manifest is not None:
+        ov["schedule"]["supermap_manifest"] = args.supermap_manifest
+    if args.train_maps is not None:
+        ov["schedule"]["train_maps"] = [m.strip() for m in args.train_maps.split(",") if m.strip()]
+    if args.servers_per_node is not None:
+        ov["schedule"]["servers_per_node"] = args.servers_per_node
+    if args.main_iters is not None:
+        ov["schedule"]["main_iters"] = args.main_iters
+    if args.exploiter_iters is not None:
+        ov["schedule"]["exploiter_iters"] = args.exploiter_iters
+    if args.local_batch is not None:
+        ov["schedule"]["local_batch"] = args.local_batch
+    if args.stage_dir is not None:
+        ov["harness"]["stage_dir"] = args.stage_dir
+    if args.max_episode_wall_s is not None:
+        ov["harness"]["max_episode_wall_s"] = args.max_episode_wall_s
+    if args.point_limit is not None:
+        ov["harness"]["point_limit"] = args.point_limit
+    if args.base_port is not None:
+        ov["harness"]["base_port"] = args.base_port
+    if args.ppo_epochs is not None:
+        ov["optimizer"]["ppo_epochs"] = args.ppo_epochs
+    if args.lr is not None:
+        ov["optimizer"]["lr"] = args.lr
+    if args.scalar_lr is not None:
+        ov["optimizer"]["scalar_lr"] = args.scalar_lr
+    return {k: v for k, v in ov.items() if v}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="mps")
-    ap.add_argument("--stage-dir", default="~/xonotic-stage")
-    ap.add_argument("--out-dir", default="~/xonotic-runs/studio4-largebatch-native")
-    ap.add_argument("--calibration-json", default="")
-    ap.add_argument("--main-iters", type=int, default=10)
-    ap.add_argument("--exploiter-iters", type=int, default=3)
-    ap.add_argument("--max-episode-wall-s", type=float, default=600.0, help="Deadlock ceiling only; matches run until real QuakeC score-out")
-    ap.add_argument("--point-limit", type=float, default=120.0, help="Per-(J/K) g_payload_point_limit so matches finish cleanly by scoring out")
-    ap.add_argument("--local-batch", type=int, default=0, help="0 = train unconditionally on 100% of collected transitions")
-    ap.add_argument("--ppo-epochs", type=int, default=2)
-    ap.add_argument("--lr", type=float, default=0.010)
-    ap.add_argument("--scalar-lr", type=float, default=5e-3)
-    ap.add_argument("--base-port", type=int, default=26000)
-    ap.add_argument("--init-ckpt", default="", help="Optional EMA checkpoint path on rank 0 to resume training study")
-    ap.add_argument("--train-maps", default="boil,boil,stormkeep,stormkeep,catharsis,catharsis", help="Comma-separated 6-map training pool")
-    ap.add_argument("--supermap-manifest", default="", help="Optional JSON manifest of gas-normalized B3313 supermaps (K, J, N, M)")
-    ap.add_argument("--servers-per-node", type=int, default=0, help="Concurrent servers per Studio (0 = all train_maps, or 2-3 for supermaps)")
+    ap.add_argument("--config", default=str(DEFAULT_TRAINING_CONFIG_PATH))
+    ap.add_argument("--losses", default="")
+    ap.add_argument("--device", default=None)
+    ap.add_argument("--stage-dir", default=None)
+    ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--calibration-json", default=None)
+    ap.add_argument("--main-iters", type=int, default=None)
+    ap.add_argument("--exploiter-iters", type=int, default=None)
+    ap.add_argument("--max-episode-wall-s", type=float, default=None)
+    ap.add_argument("--point-limit", type=float, default=None)
+    ap.add_argument("--local-batch", type=int, default=None)
+    ap.add_argument("--ppo-epochs", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--scalar-lr", type=float, default=None)
+    ap.add_argument("--base-port", type=int, default=None)
+    ap.add_argument("--init-ckpt", default=None)
+    ap.add_argument("--train-maps", default=None)
+    ap.add_argument("--supermap-manifest", default=None)
+    ap.add_argument("--servers-per-node", type=int, default=None)
     args = ap.parse_args()
 
-    device = args.device
+    cfg = load_training_config(
+        config_path=args.config,
+        losses_path=args.losses or None,
+        overrides=_build_overrides_from_args(args),
+    )
+    device = cfg.schedule.device
     rank, world_size, torch_mesh = _init_mesh_world(device)
-    stage_dir = Path(args.stage_dir).expanduser()
-    out_dir = Path(args.out_dir).expanduser()
+    stage_dir = Path(cfg.harness.stage_dir).expanduser()
+    out_dir = Path(cfg.schedule.out_dir).expanduser()
     ckpt_dir = out_dir / "ckpts"
     if rank == 0:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "effective_config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
-    # Use embedded ridge=40.0 calibrated native HavocBot regression identically on all ranks,
-    # unless an explicit --calibration-json is provided (then broadcast from rank 0).
     regression = CALIBRATED_NATIVE_REGRESSION
-    if args.calibration_json:
-        cal_path = Path(args.calibration_json).expanduser()
+    if cfg.schedule.calibration_json:
+        cal_path = Path(cfg.schedule.calibration_json).expanduser()
         if rank == 0 and cal_path.exists():
             try:
                 cal_data = json.loads(cal_path.read_text())
@@ -1137,28 +1116,25 @@ def main():
             reg_box = [regression]
             dist.broadcast_object_list(reg_box, src=0)
             regression = reg_box[0]
-    native_bots = load_native_bots(stage_dir / "Xonotic/data/xonotic-20230620-data.pk3")
+    native_bots = load_native_bots(stage_dir / cfg.harness.data_pk3_rel)
 
     supermap_specs: list[dict] = []
-    if args.supermap_manifest:
-        mpath = Path(args.supermap_manifest).expanduser()
+    if cfg.schedule.supermap_manifest:
+        mpath = Path(cfg.schedule.supermap_manifest).expanduser()
         if mpath.exists():
             supermap_specs = json.loads(mpath.read_text())
-    servers_per_node = int(args.servers_per_node) if args.servers_per_node > 0 else (3 if supermap_specs else len([m.strip() for m in args.train_maps.split(",") if m.strip()]))
-    harness = MultiServerPlanHarness(
-        dp_bin=str(stage_dir / "darkplaces-dedicated"),
-        basedir=str(stage_dir / "Xonotic"),
-        userdir=str(stage_dir / "userdir"),
-        framebytes=8192,
-        strategy_interval=0.4,
-        payload_speed=80.0,
-        maxclients=255 if supermap_specs else 16,
+    train_maps = list(cfg.schedule.train_maps)
+    servers_per_node = (
+        int(cfg.schedule.servers_per_node)
+        if cfg.schedule.servers_per_node > 0
+        else (3 if supermap_specs else len(train_maps))
     )
+    harness = MultiServerPlanHarness.from_config(cfg.harness, is_supermap=bool(supermap_specs))
 
-    torch.manual_seed(2026)
-    main_live = PlanWally(**MODEL_KWARGS).to(device)
-    if args.init_ckpt and rank == 0:
-        ckpt_p = Path(args.init_ckpt).expanduser()
+    torch.manual_seed(cfg.seeds.model_init)
+    main_live = PlanWally.from_config(cfg.model, cfg.norm).to(device)
+    if cfg.schedule.init_ckpt and rank == 0:
+        ckpt_p = Path(cfg.schedule.init_ckpt).expanduser()
         if ckpt_p.exists():
             sd = torch.load(ckpt_p, map_location="cpu")
             main_live.load_state_dict(sd["model"] if "model" in sd else sd, strict=False)
@@ -1166,13 +1142,12 @@ def main():
     main_ema = clone_plan_model(main_live).to(device)
     _broadcast_model_(main_live, torch_mesh, rank, world_size, device)
     _broadcast_model_(main_ema, torch_mesh, rank, world_size, device)
-    main_opt = _make_grouped_aurora(main_live, lr=args.lr, scalar_lr=args.scalar_lr)
+    main_opt = _make_grouped_aurora(main_live, cfg.optimizer, lr_mult=1.0)
 
     snapshots: dict[str, PlanWally] = {"main_init": clone_plan_model(main_ema).to(device)}
     if rank == 0:
         torch.save({"model": main_ema.state_dict(), "spec": main_ema.spec()}, ckpt_dir / "main_init_ema.pt")
 
-    train_maps = [m.strip() for m in args.train_maps.split(",") if m.strip()]
     fp_iter0_ref: dict | None = None
     win_rates_vs_opp: dict[str, float] = {}
     pfsp_wins: dict[str, float] = defaultdict(float)
@@ -1180,52 +1155,57 @@ def main():
     iter_reports = []
     t_train0 = time.monotonic()
 
-    # Macro-iteration schedule: pre-exploiter main -> exploiter -> post-exploiter main
-    pre_exp = max(1, (args.main_iters + 1) // 2) if args.exploiter_iters > 0 and args.main_iters >= 2 else args.main_iters
+    main_iters = cfg.schedule.main_iters
+    exp_iters = cfg.schedule.exploiter_iters
+    pre_exp = max(1, (main_iters + 1) // 2) if exp_iters > 0 and main_iters >= 2 else main_iters
     schedule = []
     for k in range(1, pre_exp + 1):
-        ent = 0.008 - 0.004 * ((k - 1) / max(1, args.main_iters - 1))
+        ent = cfg.losses.entropy_for_iteration("main", k, main_iters, post_exploiter=False)
         schedule.append((f"m{k:02d}", "main", ent))
-    for k in range(1, args.exploiter_iters + 1):
-        schedule.append((f"exp{k:02d}", "exploiter", 0.006))
-    for k in range(pre_exp + 1, args.main_iters + 1):
-        ent = 0.008 - 0.006 * ((k - 1) / max(1, args.main_iters - 1))
+    for k in range(1, exp_iters + 1):
+        ent = cfg.losses.entropy_for_iteration("exploiter", k, main_iters)
+        schedule.append((f"exp{k:02d}", "exploiter", ent))
+    for k in range(pre_exp + 1, main_iters + 1):
+        ent = cfg.losses.entropy_for_iteration("main", k, main_iters, post_exploiter=True)
         schedule.append((f"m{k:02d}", "main", ent))
 
     exp_live = exp_ema = exp_opt = None
     exp_target_name = None
 
     for idx_it, (it_name, role, ent_coef) in enumerate(schedule, start=1):
-        # Use a shared RNG seed across ranks ONLY for opponent/perturbation distribution balance,
-        # while match seeds & native roster draws vary cleanly across ranks & iterations!
-        rng_sched = np.random.default_rng(91000 + idx_it * 100 + rank)
+        rng_sched = np.random.default_rng(cfg.seeds.schedule_base + idx_it * 100 + rank)
         if supermap_specs:
-            # Match (K, J, N) supermap scale across all 4 Studios within each iteration so
-            # cross-rank McCandlish GradSNR compares matched-scale episodes and avoids straggler stalls.
-            iter_spec = supermap_specs[(idx_it - 1) % len(supermap_specs)]
-            iter_specs = [iter_spec] * servers_per_node
-            iter_maps = [iter_spec["name"]] * servers_per_node
+            if cfg.schedule.match_supermap_scale_across_ranks:
+                iter_spec = supermap_specs[(idx_it - 1) % len(supermap_specs)]
+                iter_specs = [iter_spec] * servers_per_node
+                iter_maps = [iter_spec["name"]] * servers_per_node
+            else:
+                iter_specs = [supermap_specs[(rank * servers_per_node + idx_it + j) % len(supermap_specs)] for j in range(servers_per_node)]
+                iter_maps = [sp["name"] for sp in iter_specs]
         else:
             iter_specs = None
             iter_maps = train_maps[:servers_per_node] if servers_per_node < len(train_maps) else train_maps
 
         if role == "exploiter":
             if exp_live is None:
-                exp_target_name = f"main_mid"
+                exp_target_name = "main_mid"
                 snapshots[exp_target_name] = clone_plan_model(main_ema).to(device)
                 exp_live = clone_plan_model(snapshots["main_init"]).to(device)
                 exp_ema = clone_plan_model(exp_live).to(device)
                 _broadcast_model_(exp_live, torch_mesh, rank, world_size, device)
                 _broadcast_model_(exp_ema, torch_mesh, rank, world_size, device)
-                exp_opt = _make_grouped_aurora(exp_live, lr=args.lr * 1.2, scalar_lr=args.scalar_lr * 1.2)
-            # True best-response exploiter: every single server targets `main_mid`!
+                exp_opt = _make_grouped_aurora(exp_live, cfg.optimizer, lr_mult=cfg.optimizer.exploiter_lr_mult)
             base_exp_cfgs = [
-                {"team_arms": ("exploiter", exp_target_name, exp_target_name), "fcp_mixed": False, "perturbation": "baseline"},
-                {"team_arms": ("exploiter", exp_target_name, "default"), "fcp_mixed": False, "perturbation": "baseline"},
-                {"team_arms": ("exploiter", exp_target_name, exp_target_name), "fcp_mixed": False, "perturbation": "fast"},
-                {"team_arms": ("exploiter", exp_target_name, "default"), "fcp_mixed": False, "perturbation": "slow"},
-                {"team_arms": ("exploiter", exp_target_name, exp_target_name), "fcp_mixed": False, "perturbation": "volatile"},
-                {"team_arms": ("exploiter", exp_target_name, "script_cart_rush"), "fcp_mixed": False, "perturbation": "baseline"},
+                {
+                    "team_arms": (
+                        "exploiter",
+                        exp_target_name if item["opp1"] == "{target}" else item["opp1"],
+                        exp_target_name if item["opp2"] == "{target}" else item["opp2"],
+                    ),
+                    "fcp_mixed": bool(item.get("fcp_mixed", False)),
+                    "perturbation": str(item.get("perturbation", "baseline")),
+                }
+                for item in cfg.league.exploiter_server_configs
             ]
             scfg = [base_exp_cfgs[j % len(base_exp_cfgs)] for j in range(len(iter_maps))]
             arm_models: dict[str, PlanWally | None] = {"exploiter": exp_live, "default": None, **snapshots}
@@ -1237,6 +1217,9 @@ def main():
                 rng_sched, len(iter_maps),
                 train_arm="train", ema_arm=ema_ref,
                 league_arms=league_arms, win_rates_vs_opp=win_rates_vs_opp,
+                pfsp_power=cfg.league.pfsp_power,
+                pfsp_min_weight=cfg.league.pfsp_min_weight,
+                pfsp_default_winrate=cfg.league.pfsp_default_winrate,
             )
             if "exploiter_1" in snapshots:
                 if len(scfg) > 2:
@@ -1246,27 +1229,25 @@ def main():
             arm_models = {"train": main_live, "default": None, **snapshots}
             t_arm, t_model, t_ema, t_opt = "train", main_live, main_ema, main_opt
 
-        seeds = [30000 + idx_it * 1000 + rank * 100 + j for j in range(len(iter_maps))]
+        seeds = [cfg.seeds.match_base + idx_it * 1000 + rank * 100 + j for j in range(len(iter_maps))]
+        iter_port = cfg.harness.base_port + (idx_it % cfg.harness.port_iter_modulo) * cfg.harness.port_stride_per_iter
         col = _collect_full_episodes(
             harness, out_dir / f"roll_r{rank}_{it_name}",
-            rank=rank, device=device, seeds=seeds, map_names=iter_maps,
-            server_configs=scfg, base_port=args.base_port + (idx_it % 5) * 10,
+            cfg=cfg, rank=rank, device=device, seeds=seeds, map_names=iter_maps,
+            server_configs=scfg, base_port=iter_port,
             arm_models=arm_models, train_arm=t_arm,
             regression=regression, native_bots=native_bots,
-            max_wall_s=args.max_episode_wall_s, point_limit=args.point_limit,
-            rng_seed=50000 + idx_it * 100 + rank,
+            rng_seed=cfg.seeds.rollout_rng_base + idx_it * 100 + rank,
             map_specs=iter_specs,
         )
-        _attach_full_episode_gae_(t_model, col["by_session_transitions"], device=device, gae_lambda=0.95)
-        batch = _collect_training_transitions(col["by_session_transitions"], args.local_batch)
+        attach_episode_gae_(t_model, col["by_session_transitions"], device=device, gae_lambda=cfg.losses.gae_lambda)
+        batch = _collect_training_transitions(col["by_session_transitions"], cfg.schedule.local_batch)
         upd = _large_batch_rdma_aurora_update(
             t_model, t_ema, t_opt, batch,
-            rank=rank, world_size=world_size, torch_mesh=torch_mesh, device=device,
-            ppo_epochs=args.ppo_epochs, entropy_coef=ent_coef,
-            ema_decay=0.88, grad_clip=1.0, iter_id=idx_it,
+            cfg=cfg, rank=rank, world_size=world_size, torch_mesh=torch_mesh, device=device,
+            entropy_coef=ent_coef, iter_id=idx_it,
         )
 
-        # Update PFSP win-rates & gather live observed (K, J, N) dims + score-out counts globally across all Studios
         if world_size > 1:
             all_m_list = [None for _ in range(world_size)]
             all_d_list = [None for _ in range(world_size)]
@@ -1299,11 +1280,11 @@ def main():
                 snapshots["main_mid"] = clone_plan_model(main_ema).to(device)
                 if rank == 0:
                     torch.save({"model": main_ema.state_dict(), "spec": main_ema.spec()}, ckpt_dir / "main_mid_ema.pt")
-            if it_name == f"m{args.main_iters:02d}":
+            if it_name == f"m{main_iters:02d}":
                 snapshots["main_final"] = clone_plan_model(main_ema).to(device)
                 if rank == 0:
                     torch.save({"model": main_ema.state_dict(), "spec": main_ema.spec()}, ckpt_dir / "main_final_ema.pt")
-        elif it_name == f"exp{args.exploiter_iters:02d}":
+        elif it_name == f"exp{exp_iters:02d}":
             snapshots["exploiter_1"] = clone_plan_model(exp_ema).to(device)
             if rank == 0:
                 torch.save({"model": exp_ema.state_dict(), "spec": exp_ema.spec()}, ckpt_dir / "exploiter_1_ema.pt")
@@ -1365,37 +1346,32 @@ def main():
 
     train_wall_s = round(time.monotonic() - t_train0, 2)
 
-    # ── Held-Out 4-Studio Parallel Multi-Map CRN Elo + alpha-Rank + Skill-ID Audit (Play-to-Score-Out) ──
     if supermap_specs:
-        # Spread the 4 ranks evenly across the full K/J/N scale spectrum of the manifest
         eval_idxs = [int(round(r * (len(supermap_specs) - 1) / max(1, world_size - 1))) for r in range(world_size)]
         my_eval_spec = supermap_specs[eval_idxs[rank % len(eval_idxs)]]
         my_map = my_eval_spec["name"]
-        eval_n_seeds = 2
+        eval_n_seeds = cfg.eval.eval_seeds_supermap
     else:
-        eval_maps = ["boil", "stormkeep", "catharsis", "afterslime"]
+        eval_maps = list(cfg.eval.eval_maps)
         my_eval_spec = None
         my_map = eval_maps[rank % len(eval_maps)]
-        eval_n_seeds = 3
+        eval_n_seeds = cfg.eval.eval_seeds_standard
     eval_models: dict[str, PlanWally | None] = {"default": None, **snapshots}
-    eval_triplets = [
-        ("default", "main_init", "main_final"),
-        ("default", "main_mid", "main_final"),
-        ("default", "exploiter_1", "main_final"),
-        ("script_cart_rush", "main_mid", "main_final"),
-    ]
+    eval_triplets = [trip for trip in cfg.eval.eval_triplets if all((a in eval_models or a in SCRIPTED_ANCHORS) for a in trip)]
     local_sc, local_cp, local_sk_early, local_sk_late = [], [], [], []
     local_eval_so = 0
     local_eval_exp = 0
     for ti, trip in enumerate(eval_triplets):
         er = _eval_triplet_native(
             harness, out_dir / f"elo_r{rank}_{my_map}_t{ti}",
-            seeds=[75000 + ti * 100 + j for j in range(eval_n_seeds)],
+            cfg=cfg,
+            seeds=[cfg.seeds.eval_match_base + ti * 100 + j for j in range(eval_n_seeds)],
             arm_models=eval_models, team_arms=trip,
-            mapname=my_map, max_wall_s=args.max_episode_wall_s, point_limit=args.point_limit,
-            device=device, base_port=args.base_port + 200 + ti * 10,
+            mapname=my_map,
+            device=device,
+            base_port=cfg.harness.base_port + cfg.eval.eval_port_offset + ti * cfg.eval.eval_triplet_port_stride,
             regression=regression, native_bots=native_bots,
-            rng_seed=88000 + rank * 100 + ti,
+            rng_seed=cfg.seeds.eval_rng_base + rank * 100 + ti,
             map_spec=my_eval_spec,
         )
         local_sc.extend(er["score_matches"])
@@ -1418,7 +1394,10 @@ def main():
         gathered = [local_payload]
 
     if rank == 0:
-        neuron_audit = _audit_dead_neurons(main_ema, harness, out_dir / "audit_r0", device, args.base_port + 350)
+        neuron_audit = _audit_dead_neurons(
+            main_ema, harness, out_dir / "audit_r0", device,
+            cfg.harness.base_port + cfg.eval.neuron_audit_port_offset, cfg,
+        )
         all_sc = [m for g in gathered for m in g["score_matches"]]
         all_cp = [m for g in gathered for m in g["composite_matches"]]
         per_map = {}
@@ -1431,8 +1410,8 @@ def main():
         overall_sc = compute_multiteam_elo(all_sc, anchor_arm="default")
         overall_cp = compute_multiteam_elo(all_cp, anchor_arm="default")
         all_arms = sorted({a for m in all_cp for a in m})
-        arank_comp = alpha_rank_3team(all_arms, all_cp, alpha=2.0)
-        arank_score = alpha_rank_3team(all_arms, all_sc, alpha=2.0)
+        arank_comp = alpha_rank_3team(all_arms, all_cp, alpha=cfg.league.alpha_rank_alpha, m_pop=cfg.league.alpha_rank_m_pop)
+        arank_score = alpha_rank_3team(all_arms, all_sc, alpha=cfg.league.alpha_rank_alpha, m_pop=cfg.league.alpha_rank_m_pop)
 
         def _corr_mse(pairs):
             if len(pairs) < 20:
@@ -1446,10 +1425,11 @@ def main():
 
         summary = {
             "mode": "large_batch_native_pfsp",
+            "config": cfg.to_dict(),
             "world_size": world_size,
             "device": device,
             "episodes_per_batch": servers_per_node * world_size,
-            "b_global_per_step": args.local_batch * world_size,
+            "b_global_per_step": cfg.schedule.local_batch * world_size,
             "total_training_episodes": sum(r["episodes_global"] for r in iter_reports),
             "train_wall_s": train_wall_s,
             "iterations": iter_reports,

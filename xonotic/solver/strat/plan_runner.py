@@ -24,8 +24,13 @@ from solver.xonwire import (
 )
 
 from .buffers import ObservationMemory
-from .game_value import effective_leader, formal_value_record, role_rewards
+from .game_value import effective_leader, formal_value_record
 from .grad_snr import mccandlish_pair_from_grads, summarize_mccandlish_pairs
+from .losses import (
+    DEFAULT_LOSS_CONFIG,
+    LossConfig,
+    compute_step_rewards,
+)
 from .map_manifold import MapManifold, load_map_manifold
 from .outer_validation import extract_behavioral_motifs
 from .plan_policy import (
@@ -43,36 +48,48 @@ from .plan_policy import (
     sample_plan,
 )
 from .runtime import build_runtime_frame
+from .train_config import (
+    DEFAULT_ACTION_PACK_CONFIG,
+    DEFAULT_HARNESS_CONFIG,
+    DEFAULT_OPTIMIZER_CONFIG,
+    ActionPackConfig,
+    HarnessConfig,
+)
 
 
 class MultiServerPlanHarness:
-    """High-throughput G-server concurrent DarkPlaces rollout & training harness over
-    loopback AF_INET UDP (udp://127.0.0.1:0) and 16-float parametric flow PLAN rows."""
 
     def __init__(
         self,
         *,
-        dp_bin: str = "/tmp/xonotic-live-cgt/darkplaces-dedicated",
-        basedir: str = "/Users/mdot/dox/xonotic/Xonotic",
-        userdir: str = "/tmp/xonotic-live-cgt/userdir",
-        framebytes: int = 8192,
-        strategy_interval: float = 0.4,
-        payload_speed: float = 80.0,
+        dp_bin: str | None = None,
+        basedir: str | None = None,
+        userdir: str | None = None,
+        framebytes: int = DEFAULT_HARNESS_CONFIG.framebytes,
+        strategy_interval: float = DEFAULT_HARNESS_CONFIG.strategy_interval,
+        payload_speed: float = DEFAULT_HARNESS_CONFIG.payload_speed,
         slowmo: float = 1.0,
-        maxclients: int = 16,
+        maxclients: int = DEFAULT_HARNESS_CONFIG.maxclients_default,
+        spawn_stagger_s: float = DEFAULT_HARNESS_CONFIG.spawn_stagger_s,
+        stop_sigterm_timeout_s: float = DEFAULT_HARNESS_CONFIG.stop_sigterm_timeout_s,
+        stop_sigkill_timeout_s: float = DEFAULT_HARNESS_CONFIG.stop_sigkill_timeout_s,
         manifold: MapManifold | None = None,
     ):
-        self.dp_bin = dp_bin
-        self.basedir = basedir
-        self.userdir = userdir
+        stage = Path(DEFAULT_HARNESS_CONFIG.stage_dir).expanduser()
+        self.dp_bin = dp_bin or str(stage / DEFAULT_HARNESS_CONFIG.dp_bin_rel)
+        self.basedir = basedir or str(stage / DEFAULT_HARNESS_CONFIG.basedir_rel)
+        self.userdir = userdir or str(stage / DEFAULT_HARNESS_CONFIG.userdir_rel)
         self.framebytes = int(framebytes)
         self.strategy_interval = float(strategy_interval)
         self.payload_speed = float(payload_speed)
         self.slowmo = float(slowmo)
         self.maxclients = int(maxclients)
+        self.spawn_stagger_s = float(spawn_stagger_s)
+        self.stop_sigterm_timeout_s = float(stop_sigterm_timeout_s)
+        self.stop_sigkill_timeout_s = float(stop_sigkill_timeout_s)
         self.manifold = manifold
         self.manifolds_by_map: dict[str, MapManifold] = {}
-        maps_dir = Path(userdir) / "data" / "maps"
+        maps_dir = Path(self.userdir) / "data" / "maps"
         if maps_dir.exists():
             for ent in sorted(maps_dir.glob("*.ent")):
                 try:
@@ -81,6 +98,22 @@ class MultiServerPlanHarness:
                     pass
         if self.manifold is None:
             self.manifold = self.manifolds_by_map.get("boil") or next(iter(self.manifolds_by_map.values()), None)
+
+    @classmethod
+    def from_config(cls, cfg: HarnessConfig, *, is_supermap: bool = False) -> "MultiServerPlanHarness":
+        stage = Path(cfg.stage_dir).expanduser()
+        return cls(
+            dp_bin=str(stage / cfg.dp_bin_rel),
+            basedir=str(stage / cfg.basedir_rel),
+            userdir=str(stage / cfg.userdir_rel),
+            framebytes=cfg.framebytes,
+            strategy_interval=cfg.strategy_interval,
+            payload_speed=cfg.payload_speed,
+            maxclients=cfg.maxclients_supermap if is_supermap else cfg.maxclients_default,
+            spawn_stagger_s=cfg.spawn_stagger_s,
+            stop_sigterm_timeout_s=cfg.stop_sigterm_timeout_s,
+            stop_sigkill_timeout_s=cfg.stop_sigkill_timeout_s,
+        )
 
     def _identify_map(self, cart_rows: np.ndarray) -> tuple[str, MapManifold | None]:
         if not self.manifolds_by_map or len(cart_rows) == 0:
@@ -195,7 +228,7 @@ class MultiServerPlanHarness:
                 "target_bots": sv_bots,
             }
             self._browser_notify("register", f"{os.uname().nodename}-{os.getpid()}-{idx}", reg_payload)
-            time.sleep(0.15)
+            time.sleep(self.spawn_stagger_s)
         return procs, logs
 
     @staticmethod
@@ -216,8 +249,7 @@ class MultiServerPlanHarness:
         except Exception:
             pass
 
-    @staticmethod
-    def _stop_servers(procs, logs):
+    def _stop_servers(self, procs, logs):
         for p in procs:
             if p.poll() is None:
                 try:
@@ -225,11 +257,11 @@ class MultiServerPlanHarness:
                 except OSError:
                     pass
                 try:
-                    p.wait(timeout=3.0)
+                    p.wait(timeout=self.stop_sigterm_timeout_s)
                 except subprocess.TimeoutExpired:
                     try:
                         p.kill()
-                        p.wait(timeout=2.0)
+                        p.wait(timeout=self.stop_sigkill_timeout_s)
                     except OSError:
                         pass
                 time.sleep(0.05)
@@ -249,23 +281,24 @@ class MultiServerPlanHarness:
         train_arm: str | None = None,
         optimizer: torch.optim.Optimizer | None = None,
         ema_model: PlanWally | None = None,
-        ema_decay: float = 0.95,
+        ema_decay: float = DEFAULT_OPTIMIZER_CONFIG.ema_decay,
         min_batch_transitions: int = 16,
         min_groups_per_step: int = 2,
-        ppo_epochs: int = 2,
-        gamma: float = 0.95,
-        grad_clip: float = 1.0,
+        ppo_epochs: int = DEFAULT_OPTIMIZER_CONFIG.ppo_epochs,
+        gamma: float | None = None,
+        grad_clip: float = DEFAULT_OPTIMIZER_CONFIG.grad_clip,
         device: str = "cpu",
         base_port: int = 27000,
         map_names: list[str] | None = None,
         bot_config_files: list[Path | None] | None = None,
-        skill: int = 5,
+        skill: int = DEFAULT_HARNESS_CONFIG.default_skill,
         extra_cvars: list[dict[str, float]] | None = None,
         slowmo_per_server: list[float] | None = None,
+        loss_cfg: LossConfig = DEFAULT_LOSS_CONFIG,
+        pack_cfg: ActionPackConfig = DEFAULT_ACTION_PACK_CONFIG,
         custom_plan_fn: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, MapManifold | None], np.ndarray] | None = None,
     ) -> dict:
-        """Run G concurrent live Xonotic servers in PLAN-only mode over loopback UDP,
-        maintaining per-map Voronoi/cart-spline geometry & recurrent Mealy state per bot."""
+        eff_gamma = loss_cfg.gamma if gamma is None else float(gamma)
         work_dir.mkdir(parents=True, exist_ok=True)
         engine = Engine("udp://127.0.0.1:0", self.framebytes)
         sock = engine.path
@@ -406,49 +439,28 @@ class MultiServerPlanHarness:
                                     obs_rows, team_rows, samp, bot_arms, {arm_name},
                                     self.maxclients, cell_centroids=cell_centroids,
                                     cart_lengths=cart_rows[:, CS["PATH_LENGTH"]],
+                                    pack_cfg=pack_cfg,
                                 )
                                 mask_rows = part[:, 0] > 0
                                 plan_matrix[mask_rows] = part[mask_rows]
 
-                    # Build transition from previous tick of this session
                     prev = prev_state.get(session)
                     if prev is not None and prev["episode"] == ep_id:
                         p_ids = prev["obs"][:, OBS["ID"]].astype(np.int64)
                         c_ids = obs_rows[:, OBS["ID"]].astype(np.int64)
                         id_to_idx = {int(eid): idx for idx, eid in enumerate(c_ids)}
                         succ = np.asarray([id_to_idx.get(int(eid), -1) for eid in p_ids], dtype=np.int64)
-                        rew = role_rewards(prev["tick"].context, prev["tick"].cartstate, tick.cartstate)
-                        # True per-step deltas (OBS["CART_PUSH/CONTEST/PICKUPS"] are cumulative match counters!)
-                        prev_obs = prev["obs"]
-                        push_delta = np.asarray([
-                            max(0.0, float(obs_rows[idx, OBS["CART_PUSH"]]) - float(prev_obs[i, OBS["CART_PUSH"]])) if idx >= 0 else 0.0
-                            for i, idx in enumerate(succ)
-                        ], dtype=np.float32)
-                        contest_delta = np.asarray([
-                            max(0.0, float(obs_rows[idx, OBS["CART_CONTEST"]]) - float(prev_obs[i, OBS["CART_CONTEST"]])) if idx >= 0 else 0.0
-                            for i, idx in enumerate(succ)
-                        ], dtype=np.float32)
-                        pickup_delta = np.asarray([
-                            max(0.0, float(obs_rows[idx, OBS["PICKUPS"]]) - float(prev_obs[i, OBS["PICKUPS"]])) if idx >= 0 else 0.0
-                            for i, idx in enumerate(succ)
-                        ], dtype=np.float32)
-                        # Scale-invariant lane-progress shaping (so long-lane maps carry dense checkpoint-aligned signal)
-                        p_carts = prev["carts"]
-                        prev_frac = p_carts[:, CS["PATH_POSITION"]] / np.maximum(p_carts[:, CS["PATH_LENGTH"]], 1.0)
-                        cur_frac = cart_rows[:, CS["PATH_POSITION"]] / np.maximum(cart_rows[:, CS["PATH_LENGTH"]], 1.0)
-                        dfrac = cur_frac - prev_frac
-                        ctrl_t = cart_rows[:, CS["CONTROL_TEAM"]].astype(np.int64)
-                        p_teams_1 = prev_obs[:, OBS["TEAM"]].astype(np.int64)
-                        lane_prog = np.zeros((len(prev_obs),), dtype=np.float32)
-                        for ci in range(min(len(dfrac), len(ctrl_t))):
-                            if ctrl_t[ci] > 0:
-                                lane_prog += np.where(p_teams_1 == ctrl_t[ci], float(dfrac[ci]), -0.4 * float(dfrac[ci]))
-                        rew = (
-                            rew
-                            + 0.25 * lane_prog
-                            + 0.015 * np.tanh(push_delta / 25.0)
-                            + 0.012 * np.tanh(contest_delta / 1.0)
-                            + 0.008 * np.tanh(pickup_delta)
+                        rew = compute_step_rewards(
+                            prev["tick"].context,
+                            prev["tick"].cartstate,
+                            tick.cartstate,
+                            prev["obs"],
+                            obs_rows,
+                            prev["carts"],
+                            cart_rows,
+                            succ,
+                            n_teams=n_teams,
+                            cfg=loss_cfg.reward,
                         )
 
                         w_before = effective_leader(prev["tick"].context, prev["tick"].cartstate)
@@ -458,7 +470,7 @@ class MultiServerPlanHarness:
                         nwm = np.asarray([
                             (int(tick.context.team_of[idx]) == w_after) if idx >= 0 else False for idx in succ
                         ], dtype=bool)
-                        disc = np.where((succ >= 0) & (~tick.cartstate.finished), gamma, 0.0).astype(np.float32)
+                        disc = np.where((succ >= 0) & (~tick.cartstate.finished), eff_gamma, 0.0).astype(np.float32)
                         actor_mask = (prev["arms"] == (train_arm or "matrix_fusion")) & (succ >= 0)
                         tr = PlanTransition(
                             session=int(session),
@@ -469,13 +481,13 @@ class MultiServerPlanHarness:
                             obs_out=obs_rows.copy(),
                             carts_out=cart_rows.copy(),
                             teams_out=team_rows.copy(),
-                            events_out=evt_rows[-64:].copy() if len(evt_rows) > 64 else evt_rows.copy(),
+                            events_out=evt_rows.copy(),
                             cont=prev["cont"].copy(),
                             cart_pick=prev["cart_pick"].copy(),
                             rival_pick=prev["rival_pick"].copy(),
                             cell_pick=prev["cell_pick"].copy(),
                             behavior_logp=prev["logp"].copy(),
-                            reward=rew.astype(np.float32),
+                            reward=rew,
                             winner_mask=wm,
                             next_winner_mask=nwm,
                             discount=disc,
@@ -511,7 +523,7 @@ class MultiServerPlanHarness:
                         "obs": obs_rows.copy(),
                         "carts": cart_rows.copy(),
                         "teams": team_rows.copy(),
-                        "events": evt_rows[-64:].copy() if len(evt_rows) > 64 else evt_rows.copy(),
+                        "events": evt_rows.copy(),
                         "geo": geo_np,
                         "h_in": train_h_in.copy() if train_h_in is not None else None,
                         "arms": bot_arms.copy(),
@@ -585,6 +597,7 @@ class MultiServerPlanHarness:
                                 step_id=len(update_logs),
                                 online_snr_pairs=online_snr_pairs,
                                 online_group_pairs=online_group_pairs,
+                                loss_cfg=loss_cfg,
                             )
                             fresh_buf = []
                             next_batch_target = int(min_batch_transitions)
@@ -670,7 +683,7 @@ class MultiServerPlanHarness:
         step_id: int,
         online_snr_pairs: list[dict],
         online_group_pairs: dict[str, list[dict]],
-        allow_snr_defer: bool = True,
+        loss_cfg: LossConfig = DEFAULT_LOSS_CONFIG,
     ) -> dict:
         # Map-stratified split into two balanced replica groups so both halves see identical map mix
         sess_by_map: dict[str, list[int]] = defaultdict(list)
@@ -694,7 +707,7 @@ class MultiServerPlanHarness:
         split_at = len(half0)
         last_diags = []
         last_gnorm = 0.0
-        adv_mean, adv_std = compute_batch_adv_stats(model, ordered, device=device)
+        adv_mean, adv_std = compute_batch_adv_stats(model, ordered, device=device, loss_cfg=loss_cfg)
 
         for epoch in range(max(1, ppo_epochs)):
             optimizer.zero_grad(set_to_none=True)
@@ -702,7 +715,7 @@ class MultiServerPlanHarness:
             inv_n = 1.0 / len(ordered)
             for idx, tr in enumerate(ordered):
                 comps, diag = plan_losses_for_transition(
-                    model, tr, device=device, adv_mean=adv_mean, adv_std=adv_std,
+                    model, tr, device=device, loss_cfg=loss_cfg, adv_mean=adv_mean, adv_std=adv_std,
                 )
                 (comps["total"] * inv_n).backward()
                 if epoch == 0:

@@ -1,0 +1,18 @@
+{
+  "extends": "training_default.json",
+  "losses_file": "losses.json",
+  "harness": {
+    "point_limit": 40.0,
+    "max_episode_wall_s": 600.0,
+    "base_port": 26200
+  },
+  "schedule": {
+    "out_dir": "~/xonotic-runs/studio4-hiergram-config-pfsp",
+    "supermap_manifest": "~/xonotic-stage/userdir/data/maps/gas_supermap_manifest.json",
+    "servers_per_node": 2,
+    "match_supermap_scale_across_ranks": true,
+    "main_iters": 6,
+    "exploiter_iters": 2,
+    "local_batch": 0
+  }
+}

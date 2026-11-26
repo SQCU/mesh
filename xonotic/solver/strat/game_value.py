@@ -143,9 +143,9 @@ def cgt_tensor_features(carts, teams, cart_present, team_present, eps_dist=0.05)
         rem_heaps = torch.where(c_valid, torch.clamp((cp_count - cp_depth).round().to(torch.int64), min=0), torch.zeros(j, device=device, dtype=torch.int64))
         mod = NIM_BOUNDED_STEP + 1
         nimbers = rem_heaps % mod
-        nim_total = torch.zeros((), device=device, dtype=torch.int64)
-        for idx in range(j):
-            nim_total = torch.bitwise_xor(nim_total, nimbers[idx])
+        b0 = (nimbers & 1).sum() & 1
+        b1 = ((nimbers >> 1) & 1).sum() & 1
+        nim_total = b0 | (b1 << 1)
         target_nim = torch.bitwise_xor(nimbers, nim_total)
         nim_move = ((nim_total != 0) & (target_nim < nimbers) & ((nimbers - target_nim) <= rem_heaps) & c_valid).to(torch.float32)
         nim_mod = torch.where(c_valid, nimbers.to(torch.float32) / float(mod), torch.zeros_like(t_deny))
@@ -375,7 +375,7 @@ POTENTIAL_SHAPING_WEIGHT = 0.25
 POTENTIAL_SHAPING_GAMMA = 0.95
 
 
-def effective_finish_rates(snapshot: CartSnapshot, eps=1e-12) -> np.ndarray:
+def effective_finish_rates(snapshot: CartSnapshot, eps=1e-12, partial_cp_weight: float = 0.5) -> np.ndarray:
     scores = np.asarray(snapshot.scores, dtype=np.float64)
     held = np.asarray(snapshot.held, dtype=np.float64).copy()
     pos = np.clip(np.asarray(snapshot.pos, dtype=np.float64), 0.0, 1.0)
@@ -386,11 +386,22 @@ def effective_finish_rates(snapshot: CartSnapshot, eps=1e-12) -> np.ndarray:
         if 0 <= owner < len(held) and pos[idx] > 0.0:
             seg = pos[idx] * cp_max[idx]
             frac = seg - math.floor(seg)
-            held[owner] += 0.5 * frac
+            held[owner] += float(partial_cp_weight) * frac
     return finish_rates(scores, held, snapshot.checkpoint_rate, snapshot.score_limit, eps=eps)
 
 
-def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot) -> np.ndarray:
+def role_rewards(
+    context: GameContext,
+    before: CartSnapshot,
+    after: CartSnapshot,
+    *,
+    barrier_margin: float = WINNER_BARRIER_MARGIN,
+    barrier_weight: float = WINNER_BARRIER_WEIGHT,
+    shaping_weight: float = POTENTIAL_SHAPING_WEIGHT,
+    shaping_gamma: float = POTENTIAL_SHAPING_GAMMA,
+    loser_self_weight: float = 0.5,
+    partial_cp_weight: float = 0.5,
+) -> np.ndarray:
     before_value = formal_game_value(context, before)
     after_value = formal_game_value(context, after)
     before_winner = before_value.projected_role
@@ -404,8 +415,8 @@ def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot
     winner_mask = teams == before_winner
     rank_flip = after_ranks[teams] > before_ranks[teams]
     if before_winner is not None and after_winner == before_winner:
-        deficit = max(0.0, WINNER_BARRIER_MARGIN - float(after_margins[before_winner]))
-        winner_reward = -WINNER_BARRIER_WEIGHT * (deficit * deficit)
+        deficit = max(0.0, float(barrier_margin) - float(after_margins[before_winner]))
+        winner_reward = -float(barrier_weight) * (deficit * deficit)
     else:
         winner_reward = -float(after_winner != before_winner)
     team_rewards = np.where(
@@ -413,14 +424,14 @@ def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot
         winner_reward,
         rank_flip.astype(np.float32),
     ).astype(np.float32)
-    eff_before = winning_margin(effective_finish_rates(before))
-    eff_after = winning_margin(effective_finish_rates(after))
+    eff_before = winning_margin(effective_finish_rates(before, partial_cp_weight=partial_cp_weight))
+    eff_after = winning_margin(effective_finish_rates(after, partial_cp_weight=partial_cp_weight))
     leader_before = before_winner if before_winner is not None else (int(np.argmax(eff_before)) if np.max(eff_before) > 0 else None)
     leader_after = after_winner if after_winner is not None else (int(np.argmax(eff_after)) if np.max(eff_after) > 0 else None)
     m_lead_before = float(eff_before[leader_before]) if leader_before is not None else 0.0
     m_lead_after = float(eff_after[leader_after]) if leader_after is not None else 0.0
-    phi_before = np.where(teams == leader_before, eff_before[teams], -m_lead_before + 0.5 * eff_before[teams])
-    phi_after = np.where(teams == leader_after, eff_after[teams], -m_lead_after + 0.5 * eff_after[teams])
-    shaping = (POTENTIAL_SHAPING_WEIGHT * (POTENTIAL_SHAPING_GAMMA * phi_after - phi_before)).astype(np.float32)
+    phi_before = np.where(teams == leader_before, eff_before[teams], -m_lead_before + float(loser_self_weight) * eff_before[teams])
+    phi_after = np.where(teams == leader_after, eff_after[teams], -m_lead_after + float(loser_self_weight) * eff_after[teams])
+    shaping = (float(shaping_weight) * (float(shaping_gamma) * phi_after - phi_before)).astype(np.float32)
     team_rewards = team_rewards + shaping
     return team_rewards[np.asarray(context.team_of, dtype=np.int64)]

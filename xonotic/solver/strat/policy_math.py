@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from .policy_contract import POLICY_LOG_RATIO_BOUND, POLICY_ROLLOUT_IS_THRESHOLD
+from .losses import clipped_policy_surrogate, rollout_importance_weights
 
 
 def norm(rows, eps=1e-6):
@@ -27,14 +27,3 @@ def clip_grad_norm(gradients, limit, reduce=None):
 
 def control_log_scale(raw):
     return torch.asinh(raw)
-
-
-def clipped_policy_surrogate(log_ratio, advantage, clip):
-    selected = torch.where(advantage >= 0, torch.clamp(log_ratio, max=math.log1p(clip)),
-                           torch.clamp(log_ratio, min=math.log1p(-clip)))
-    return torch.exp(selected) * advantage
-
-
-def rollout_importance_weights(log_ratio):
-    ratio = torch.exp(torch.clamp(log_ratio, -POLICY_LOG_RATIO_BOUND, POLICY_LOG_RATIO_BOUND))
-    return torch.clamp(ratio, max=POLICY_ROLLOUT_IS_THRESHOLD).detach()

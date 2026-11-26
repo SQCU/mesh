@@ -96,26 +96,31 @@ def sample_native_lobby_roster(
     distribution: str | None = None,
     n_teams: int = 3,
     n_bots: int = 9,
+    league_cfg=None,
 ) -> tuple[str, list[dict]]:
-    """Sample an N-bot across K-team native HavocBot roster by drawing target 1v1 DM Elos
-    from a natural lobby distribution and inverting the calibrated native parameter map."""
     reg = regression or CALIBRATED_NATIVE_REGRESSION
     lo = float(reg.get("elo_min", 830.0))
     hi = float(reg.get("elo_max", 1130.0))
     mu = float(reg.get("elo_mean", 990.0))
     K = max(2, int(n_teams))
     N = max(K, int(n_bots))
-    kind = distribution or str(rng.choice(
-        ("gaussian_lobby", "team_skewed", "within_team_skewed", "uniform_native"),
-        p=[0.35, 0.30, 0.25, 0.10],
-    ))
+    dist_probs = getattr(league_cfg, "roster_dist_probs", None) or {
+        "gaussian_lobby": 0.35, "team_skewed": 0.30, "within_team_skewed": 0.25, "uniform_native": 0.10,
+    }
+    dist_names = tuple(dist_probs.keys())
+    p_arr = np.asarray([float(dist_probs[k]) for k in dist_names], dtype=np.float64)
+    p_arr /= p_arr.sum()
+    g_std = float(getattr(league_cfg, "roster_gaussian_std", 75.0))
+    ts_std = float(getattr(league_cfg, "roster_team_skew_std", 28.0))
+    wt_stds = getattr(league_cfg, "roster_within_stds", (25.0, 35.0, 25.0))
+    kind = distribution or str(rng.choice(dist_names, p=p_arr))
     teams = [(i % K) + 1 for i in range(N)]
     if kind == "gaussian_lobby":
-        targets = np.clip(rng.normal(mu, 75.0, size=N), lo, hi).tolist()
+        targets = np.clip(rng.normal(mu, g_std, size=N), lo, hi).tolist()
     elif kind == "team_skewed":
         tier_means = np.linspace(lo + 0.15 * (hi - lo), hi - 0.10 * (hi - lo), K)
         tier_means = tier_means[rng.permutation(K)]
-        targets = [float(np.clip(rng.normal(tier_means[tm - 1], 28.0), lo, hi)) for tm in teams]
+        targets = [float(np.clip(rng.normal(tier_means[tm - 1], ts_std), lo, hi)) for tm in teams]
     elif kind == "within_team_skewed":
         per_tm_count: dict[int, int] = {}
         targets = []
@@ -123,11 +128,11 @@ def sample_native_lobby_roster(
             slot = per_tm_count.get(tm, 0)
             per_tm_count[tm] = slot + 1
             if slot % 3 == 0:
-                t_mu, t_sd = hi - 0.08 * (hi - lo), 25.0
+                t_mu, t_sd = hi - 0.08 * (hi - lo), float(wt_stds[0])
             elif slot % 3 == 1:
-                t_mu, t_sd = mu, 35.0
+                t_mu, t_sd = mu, float(wt_stds[1])
             else:
-                t_mu, t_sd = lo + 0.18 * (hi - lo), 25.0
+                t_mu, t_sd = lo + 0.18 * (hi - lo), float(wt_stds[2])
             targets.append(float(np.clip(rng.normal(t_mu, t_sd), lo, hi)))
     else:
         targets = rng.uniform(lo, hi, size=N).tolist()

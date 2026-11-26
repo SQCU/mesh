@@ -73,33 +73,30 @@ def scripted_plan_rows(
         row = np.zeros((PLAN_WIDTH,), dtype=np.float32)
         row[0] = float(eid)
         if arm_name == "script_cart_rush":
-            # All 3 bots push own/nearest cart hard with low combat distraction
             own_carts = [c for c in range(n_carts) if int(cart_ctrl[c]) == my_team]
-            cpick = own_carts[0] if own_carts else nearest_cart
+            cpick = min(own_carts, key=lambda c: float(dists[c])) if own_carts else nearest_cart
             row[1] = float(cpick)
             row[2 + min(cpick, 2)] = 1.6
-            row[5] = 1.4    # w3: high cart_scale
-            row[6] = -0.6   # w4: lower enemy chase
-            row[14] = 0.4   # atk_cyl
-            row[15] = -0.3  # defensive hold on cart
+            row[5] = 1.4
+            row[6] = -0.6
+            row[14] = 0.4
+            row[15] = -0.3
         elif arm_name == "script_leader_gank":
-            # Focus-fire the leading team + contest their cart aggressively
             lead_carts = [c for c in range(n_carts) if int(cart_ctrl[c]) == int(leader_team_id) and int(leader_team_id) != my_team]
-            cpick = lead_carts[0] if lead_carts else nearest_cart
+            cpick = min(lead_carts, key=lambda c: float(dists[c])) if lead_carts else nearest_cart
             row[1] = float(cpick)
             row[2 + min(cpick, 2)] = 1.2
             row[5] = 0.6
-            row[6] = 1.4    # high enemy aggression
+            row[6] = 1.4
             row[7] = leader_team_id if int(leader_team_id) != my_team else 0.0
-            row[14] = 1.2   # high atk_cyl
-            row[15] = 0.7   # aggressive posture
+            row[14] = 1.2
+            row[15] = 0.7
         elif arm_name == "script_powerup_roam":
-            # Prioritize powerups & items while contesting mid-map Voronoi cells
             row[1] = float(nearest_cart)
             row[5] = 0.3
             row[6] = 0.5
-            row[8] = 1.4    # item_w
-            row[9] = 1.8    # pwr_w
+            row[8] = 1.4
+            row[9] = 1.8
             if cell_centroids is not None and len(cell_centroids) > 0:
                 c_idx = (eid + my_team) % len(cell_centroids)
                 row[11] = float(cell_centroids[c_idx, 0])
@@ -107,14 +104,13 @@ def scripted_plan_rows(
                 row[13] = 0.35
             row[15] = 0.4
         elif arm_name == "script_vanguard_ambush":
-            # Push ahead of cart (+240u vanguard lead) to clear chokes before cart arrives
             own_carts = [c for c in range(n_carts) if int(cart_ctrl[c]) == my_team]
-            cpick = own_carts[0] if own_carts else nearest_cart
+            cpick = min(own_carts, key=lambda c: float(dists[c])) if own_carts else nearest_cart
             row[1] = float(cpick)
             row[2 + min(cpick, 2)] = 1.2
             row[5] = 1.1
             row[6] = 0.8
-            row[10] = 240.0 if (i % 2 == 0) else 0.0  # vanguard lead + pusher split!
+            row[10] = 240.0 if (i % 2 == 0) else 0.0
             row[14] = 0.8
             row[15] = 0.5
         out[eid - 1] = row
@@ -223,17 +219,13 @@ def sample_pfsp_server_assignments(
     league_arms: list[str],
     win_rates_vs_opp: dict[str, float],
     pfsp_power: float = 2.0,
+    pfsp_min_weight: float = 0.05,
+    pfsp_default_winrate: float = 0.45,
 ) -> list[dict]:
-    """Build per-server matchmaking configs for N concurrent servers on a Studio, mixing:
-      - ~40% PFSP hard opponents weighted by (1 - p_win)^p
-      - ~25% current / near-current mirror + league opponent
-      - ~20% permanent anchors (`default` + scripted archetypes)
-      - ~15% FCP mixed-teammate (`fcp_mixed=True`: 1 default bot on `train`'s own team)
-    Plus randomized physics perturbation (`baseline/fast/slow/volatile`)."""
     anchors = ["default", *SCRIPTED_ANCHORS]
     candidates = sorted(set(anchors + list(league_arms)))
     weights = np.asarray(
-        [max(0.05, 1.0 - float(win_rates_vs_opp.get(a, 0.45))) ** pfsp_power for a in candidates],
+        [max(float(pfsp_min_weight), 1.0 - float(win_rates_vs_opp.get(a, pfsp_default_winrate))) ** float(pfsp_power) for a in candidates],
         dtype=np.float64,
     )
     weights /= weights.sum()

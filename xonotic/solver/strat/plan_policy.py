@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import dataclass
-from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -19,8 +17,30 @@ from .grad_snr import (
     mccandlish_pair_from_grads,
     summarize_mccandlish_pairs,
 )
-from .policy_contract import POLICY_LOG_RATIO_BOUND, POLICY_RATIO_CLIP
-from .policy_math import clipped_policy_surrogate
+from .losses import (
+    DEFAULT_LOSS_CONFIG,
+    LossConfig,
+    PlanOutput,
+    PlanSample,
+    PlanTransition,
+    _geo_to_torch,
+    clipped_policy_surrogate,
+    compute_batch_adv_stats,
+    plan_discrete_entropy,
+    plan_entropy,
+    plan_logp,
+    plan_losses_for_transition,
+)
+from .train_config import (
+    DEFAULT_ACTION_PACK_CONFIG,
+    DEFAULT_MODEL_CONFIG,
+    DEFAULT_NORM_CONFIG,
+    DEFAULT_OPTIMIZER_CONFIG,
+    ActionPackConfig,
+    ModelConfig,
+    NormConfig,
+    OptimizerConfig,
+)
 
 PLAN_WIDTH = 16
 PLAN_CONT_DIM = 11
@@ -31,50 +51,56 @@ CELL_TOK_DIM = 10
 ITEM_TOK_DIM = 9
 
 
-# ── EDM2 (Karras et al. 2024) Magnitude-Preserving Primitives ────────────────────────────
-
-def mp_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-    """Unit-RMS token normalization: forces E[x_j^2] = 1 so internal activations never grow outliers."""
+def mp_norm(x: torch.Tensor, eps: float = DEFAULT_NORM_CONFIG.mp_norm_eps) -> torch.Tensor:
     return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
 
 
-def mp_unit_vec(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Unit L2 vector normalization (||x||_2 = 1) for cosine pointer heads & bounded kernel maps."""
+def mp_unit_vec(x: torch.Tensor, eps: float = DEFAULT_NORM_CONFIG.mp_unit_vec_eps) -> torch.Tensor:
     return x * torch.rsqrt(x.square().sum(dim=-1, keepdim=True) + eps)
 
 
-def mp_silu(x: torch.Tensor) -> torch.Tensor:
-    """EDM2 variance-preserving SiLU (std(silu(N(0,1))) ≈ 0.596)."""
-    return F.silu(x) / 0.596
+def mp_silu(x: torch.Tensor, scale: float = DEFAULT_NORM_CONFIG.mp_silu_scale) -> torch.Tensor:
+    return F.silu(x) / scale
 
 
-def mp_lerp(a: torch.Tensor, b: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    """EDM2 magnitude-preserving residual blend of two unit-RMS tensors."""
+def mp_lerp(a: torch.Tensor, b: torch.Tensor, t: torch.Tensor, eps: float = DEFAULT_NORM_CONFIG.mp_lerp_eps) -> torch.Tensor:
     t_c = torch.clamp(t, 0.0, 1.0)
-    return ((1.0 - t_c) * a + t_c * b) * torch.rsqrt((1.0 - t_c).square() + t_c.square() + 1e-8)
+    return ((1.0 - t_c) * a + t_c * b) * torch.rsqrt((1.0 - t_c).square() + t_c.square() + eps)
 
 
 class MPLinear(nn.Module):
-    """EDM2 unit-norm weight linear layer with Aurora-tuned Stiefel ∩ Row-Oblique initialization.
-    Every output row w_i lies on the unit hypersphere ||w_i||_2 = 1 and starts as a tight frame
-    with uniform row leverage (zero initial neuron favoritism, zero AdamW weight decay)."""
 
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        init_pp_iterations: int = DEFAULT_OPTIMIZER_CONFIG.init_pp_iterations,
+        init_pp_beta: float = DEFAULT_OPTIMIZER_CONFIG.pp_beta,
+        init_ns_steps: int = DEFAULT_OPTIMIZER_CONFIG.init_ns_steps,
+        unit_norm_eps: float = DEFAULT_NORM_CONFIG.unit_norm_eps,
+    ):
         super().__init__()
         self.in_features = int(in_features)
         self.out_features = int(out_features)
+        self.unit_norm_eps = float(unit_norm_eps)
         w = torch.empty(self.out_features, self.in_features)
-        aurora_init_weight_(w)
+        aurora_init_weight_(
+            w,
+            pp_iterations=init_pp_iterations,
+            pp_beta=init_pp_beta,
+            ns_steps=init_ns_steps,
+            unit_norm_eps=self.unit_norm_eps,
+        )
         self.weight = nn.Parameter(w)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w_unit = self.weight / self.weight.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        w_unit = self.weight / self.weight.norm(dim=-1, keepdim=True).clamp_min(self.unit_norm_eps)
         return F.linear(x, w_unit)
 
 
 @torch.no_grad()
-def project_unit_norm_(model: nn.Module, eps: float = 1e-6) -> None:
-    """EDM2 forced unit-norm weight projection after every optimizer step (replaces AdamW)."""
+def project_unit_norm_(model: nn.Module, eps: float = DEFAULT_NORM_CONFIG.unit_norm_eps) -> None:
     for m in model.modules():
         if isinstance(m, MPLinear):
             w = m.weight.data
@@ -82,7 +108,6 @@ def project_unit_norm_(model: nn.Module, eps: float = 1e-6) -> None:
 
 
 def weight_norm_report(model: nn.Module) -> dict:
-    """Audit unit-norm weight invariant across all MPLinear layers."""
     norms = []
     for m in model.modules():
         if isinstance(m, MPLinear):
@@ -101,170 +126,180 @@ def weight_norm_report(model: nn.Module) -> dict:
 
 def make_aurora_optimizer(
     model: nn.Module,
-    lr: float = 0.012,
-    scalar_lr: float = 2.5e-3,
-    mu: float = 0.90,
-    pp_iterations: int = 2,
-    pp_beta: float = 0.5,
+    lr: float | None = None,
+    scalar_lr: float | None = None,
+    mu: float | None = None,
+    pp_iterations: int | None = None,
+    pp_beta: float | None = None,
+    opt_cfg: OptimizerConfig | None = None,
 ) -> Aurora:
-    """Aurora leverage-aware spectral optimizer (replaces Adam/AdamW & fixes Muon tall-matrix neuron death)."""
+    cfg = opt_cfg or DEFAULT_OPTIMIZER_CONFIG
     return Aurora(
         model.parameters(),
-        lr=lr,
-        scalar_lr=scalar_lr,
-        mu=mu,
-        nesterov=True,
-        pp_iterations=pp_iterations,
-        pp_beta=pp_beta,
+        lr=cfg.lr if lr is None else float(lr),
+        scalar_lr=cfg.scalar_lr if scalar_lr is None else float(scalar_lr),
+        mu=cfg.mu if mu is None else float(mu),
+        nesterov=cfg.nesterov,
+        pp_iterations=cfg.pp_iterations if pp_iterations is None else int(pp_iterations),
+        pp_beta=cfg.pp_beta if pp_beta is None else float(pp_beta),
+        ns_steps=cfg.ns_steps,
+        eps=cfg.eps,
+        ns_coeffs=cfg.ns_coeffs,
+        d_init_clamp=cfg.d_init_clamp,
+        d_iter_clamp=cfg.d_iter_clamp,
+        scalar_beta2=cfg.scalar_beta2,
+        scalar_eps=cfg.scalar_eps,
     )
 
 
-def make_edm2_optimizer(model: nn.Module, lr: float = 0.012) -> Aurora:
-    """Default EDM2 unit-norm optimizer: Aurora spectral optimizer + post-step unit-sphere projection."""
-    return make_aurora_optimizer(model, lr=lr)
+def make_edm2_optimizer(model: nn.Module, lr: float | None = None, opt_cfg: OptimizerConfig | None = None) -> Aurora:
+    return make_aurora_optimizer(model, lr=lr, opt_cfg=opt_cfg)
 
 
-def edm2_step(optimizer: torch.optim.Optimizer, model: nn.Module, grad_clip: float = 1.0) -> float:
+def edm2_step(optimizer: torch.optim.Optimizer, model: nn.Module, grad_clip: float = DEFAULT_OPTIMIZER_CONFIG.grad_clip) -> float:
     gnorm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
     optimizer.step()
     project_unit_norm_(model)
     return gnorm
 
 
-def prenormalize_obs(obs: torch.Tensor, geo: dict[str, torch.Tensor] | None) -> torch.Tensor:
-    """EDM2-style domain prenormalization: strips map-specific absolute coordinate drift
-    and brings every physical observation column to O(1) unit scale before mp_norm."""
+def prenormalize_obs(
+    obs: torch.Tensor,
+    geo: dict[str, torch.Tensor] | None,
+    norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+) -> torch.Tensor:
     x = obs.clone()
     if geo is not None and "map_center" in geo and "map_radius" in geo:
         center = geo["map_center"].to(obs.device, obs.dtype)
-        radius = torch.clamp(geo["map_radius"].to(obs.device, obs.dtype), min=128.0)
+        radius = torch.clamp(geo["map_radius"].to(obs.device, obs.dtype), min=norm_cfg.map_radius_min)
         x[:, OBS["POS_X"] : OBS["POS_Z"] + 1] = (x[:, OBS["POS_X"] : OBS["POS_Z"] + 1] - center[None, :]) / radius
     else:
-        x[:, OBS["POS_X"] : OBS["POS_Z"] + 1] = x[:, OBS["POS_X"] : OBS["POS_Z"] + 1] / 1000.0
-    x[:, OBS["VEL_X"] : OBS["VEL_Z"] + 1] = x[:, OBS["VEL_X"] : OBS["VEL_Z"] + 1] / 400.0
-    x[:, OBS["HEALTH"]] = (x[:, OBS["HEALTH"]] - 100.0) / 100.0
-    x[:, OBS["ARMOR"]] = (x[:, OBS["ARMOR"]] - 50.0) / 100.0
-    x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] = x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] / 50.0
-    # Zero out non-stationary absolute clock / sequence counters AND all 13 bot-configuration
-    # mechanical skill columns so the actor NEVER cheats on bot metadata and must infer latent
-    # mechanical skill online from behavior (100% compatible with human players).
-    for col in ("ENGINE_TIME", "SPAWN_TIME", "STRENGTH_FINISHED", "RESPONSE_SEQ", "RESPONSE_TIME",
-                "APPLIED_SEQUENCE", "OUTCOME_A_SEQ", "OUTCOME_B_SEQ", "CELL_X", "CELL_Y",
-                "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME", *BOT_CONFIGURATION_COLUMNS):
+        x[:, OBS["POS_X"] : OBS["POS_Z"] + 1] = x[:, OBS["POS_X"] : OBS["POS_Z"] + 1] / norm_cfg.pos_fallback_scale
+    x[:, OBS["VEL_X"] : OBS["VEL_Z"] + 1] = x[:, OBS["VEL_X"] : OBS["VEL_Z"] + 1] / norm_cfg.vel_scale
+    x[:, OBS["HEALTH"]] = (x[:, OBS["HEALTH"]] - norm_cfg.health_offset) / norm_cfg.health_scale
+    x[:, OBS["ARMOR"]] = (x[:, OBS["ARMOR"]] - norm_cfg.armor_offset) / norm_cfg.armor_scale
+    x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] = x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] / norm_cfg.ammo_scale
+    for col in (
+        "ENGINE_TIME", "SPAWN_TIME", "STRENGTH_FINISHED", "RESPONSE_SEQ", "RESPONSE_TIME",
+        "APPLIED_SEQUENCE", "OUTCOME_A_SEQ", "OUTCOME_B_SEQ", "CELL_X", "CELL_Y",
+        "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME", *BOT_CONFIGURATION_COLUMNS,
+    ):
         if col == "STRENGTH_FINISHED":
-            rem = torch.clamp(obs[:, OBS["STRENGTH_FINISHED"]] - obs[:, OBS["ENGINE_TIME"]], min=0.0, max=30.0) / 30.0
+            rem = torch.clamp(obs[:, OBS["STRENGTH_FINISHED"]] - obs[:, OBS["ENGINE_TIME"]], min=0.0, max=norm_cfg.strength_max_s) / norm_cfg.strength_max_s
             x[:, OBS[col]] = rem
         else:
             x[:, OBS[col]] = 0.0
     x = torch.asinh(x)
-    return mp_norm(x)
+    return mp_norm(x, eps=norm_cfg.mp_norm_eps)
 
 
-def prenormalize_carts(carts: torch.Tensor, cart_extra: torch.Tensor, geo: dict[str, torch.Tensor] | None) -> torch.Tensor:
+def prenormalize_carts(
+    carts: torch.Tensor,
+    cart_extra: torch.Tensor,
+    geo: dict[str, torch.Tensor] | None,
+    norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+) -> torch.Tensor:
     c = carts.clone()
     plen = torch.clamp(c[:, CS["PATH_LENGTH"]], min=1.0)
     c[:, CS["PATH_POSITION"]] = c[:, CS["PATH_POSITION"]] / plen
-    c[:, CS["PATH_LENGTH"]] = torch.log1p(plen / 500.0)
-    c[:, CS["SPEED"]] = c[:, CS["SPEED"]] / 100.0
+    c[:, CS["PATH_LENGTH"]] = torch.log1p(plen / norm_cfg.cart_len_scale)
+    c[:, CS["SPEED"]] = c[:, CS["SPEED"]] / norm_cfg.cart_speed_scale
     if geo is not None and "map_center" in geo and "map_radius" in geo:
         center = geo["map_center"].to(carts.device, carts.dtype)
-        radius = torch.clamp(geo["map_radius"].to(carts.device, carts.dtype), min=128.0)
+        radius = torch.clamp(geo["map_radius"].to(carts.device, carts.dtype), min=norm_cfg.map_radius_min)
         c[:, CS["POS_X"] : CS["POS_Z"] + 1] = (c[:, CS["POS_X"] : CS["POS_Z"] + 1] - center[None, :]) / radius
     else:
-        c[:, CS["POS_X"] : CS["POS_Z"] + 1] = c[:, CS["POS_X"] : CS["POS_Z"] + 1] / 1000.0
+        c[:, CS["POS_X"] : CS["POS_Z"] + 1] = c[:, CS["POS_X"] : CS["POS_Z"] + 1] / norm_cfg.pos_fallback_scale
     c_geo = geo["cart_geo"] if (geo is not None and "cart_geo" in geo) else torch.zeros((carts.shape[0], CART_GEO_DIM), device=carts.device, dtype=carts.dtype)
-    return mp_norm(torch.asinh(torch.cat((c, cart_extra, c_geo), dim=-1)))
+    return mp_norm(torch.asinh(torch.cat((c, cart_extra, c_geo), dim=-1)), eps=norm_cfg.mp_norm_eps)
 
 
-def prenormalize_teams(teams: torch.Tensor, team_extra: torch.Tensor) -> torch.Tensor:
+def prenormalize_teams(
+    teams: torch.Tensor,
+    team_extra: torch.Tensor,
+    norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+) -> torch.Tensor:
     t = teams.clone()
     lim = torch.clamp(t[:, TS["SCORE_LIMIT"]], min=1.0)
     t[:, TS["SCORE"]] = t[:, TS["SCORE"]] / lim
     t[:, TS["SCORE_LIMIT"]] = 1.0
     t[:, TS["EPISODE"]] = 0.0
-    return mp_norm(torch.asinh(torch.cat((t, team_extra), dim=-1)))
+    return mp_norm(torch.asinh(torch.cat((t, team_extra), dim=-1)), eps=norm_cfg.mp_norm_eps)
 
 
 class FSQBottleneck(nn.Module):
-    """Finite Scalar Quantization bottleneck with straight-through estimator on unit-RMS latents."""
 
-    def __init__(self, d: int, levels: tuple[int, ...] = (5, 5, 5, 5)):
+    def __init__(
+        self,
+        d: int,
+        levels: tuple[int, ...] = DEFAULT_MODEL_CONFIG.fsq_levels,
+        *,
+        in_gain_init: float = DEFAULT_MODEL_CONFIG.fsq_in_gain_init,
+        in_gain_bounds: tuple[float, float] = DEFAULT_MODEL_CONFIG.fsq_in_gain_bounds,
+        blend_init_logit: float = DEFAULT_MODEL_CONFIG.fsq_blend_init_logit,
+        std_min: float = DEFAULT_MODEL_CONFIG.fsq_std_min,
+        norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+    ):
         super().__init__()
         self.levels = tuple(int(v) for v in levels)
-        self.proj_in = MPLinear(d, len(self.levels))
-        self.proj_out = MPLinear(len(self.levels), d)
-        self.in_gain = nn.Parameter(torch.tensor(1.2))
-        self.blend_logit = nn.Parameter(torch.tensor(-1.5))
+        self.in_gain_bounds = (float(in_gain_bounds[0]), float(in_gain_bounds[1]))
+        self.std_min = float(std_min)
+        self.norm_cfg = norm_cfg
+        self.proj_in = MPLinear(d, len(self.levels), unit_norm_eps=norm_cfg.unit_norm_eps)
+        self.proj_out = MPLinear(len(self.levels), d, unit_norm_eps=norm_cfg.unit_norm_eps)
+        self.in_gain = nn.Parameter(torch.tensor(float(in_gain_init)))
+        self.blend_logit = nn.Parameter(torch.tensor(float(blend_init_logit)))
         half = torch.tensor([(v - 1) / 2.0 for v in self.levels], dtype=torch.float32)
         self.register_buffer("half_levels", half)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        g = torch.clamp(self.in_gain, 0.25, 4.0)
+        g = torch.clamp(self.in_gain, self.in_gain_bounds[0], self.in_gain_bounds[1])
         z_raw = self.proj_in(x)
         if z_raw.shape[0] > 1:
             z_mean = z_raw.mean(dim=0, keepdim=True)
-            z_std = z_raw.std(dim=0, keepdim=True, unbiased=False).clamp_min(0.35)
+            z_std = z_raw.std(dim=0, keepdim=True, unbiased=False).clamp_min(self.std_min)
             z_raw = (z_raw - z_mean) / z_std
         z = torch.tanh(g * z_raw) * self.half_levels
         q = torch.round(z)
         z_ste = z + (q - z).detach()
         scaled_q = z_ste / torch.clamp(self.half_levels, min=1.0)
-        out = mp_lerp(x, self.proj_out(scaled_q), torch.sigmoid(self.blend_logit))
-        return mp_norm(out), q.detach()
-
-
-class PlanOutput(NamedTuple):
-    cont_mean: torch.Tensor
-    cont_logstd: torch.Tensor
-    cart_logits: torch.Tensor
-    rival_logits: torch.Tensor
-    cell_logits: torch.Tensor
-    value_winnie: torch.Tensor
-    value_lou: torch.Tensor
-    dyn_drift: torch.Tensor
-    dyn_action: torch.Tensor
-    h_next: torch.Tensor
-    fsq_codes: torch.Tensor | None
-    pred_skill: torch.Tensor | None = None
-
-
-class PlanSample(NamedTuple):
-    cont: torch.Tensor
-    cart_pick: torch.Tensor
-    rival_pick: torch.Tensor
-    cell_pick: torch.Tensor
-    logp: torch.Tensor
+        out = mp_lerp(x, self.proj_out(scaled_q), torch.sigmoid(self.blend_logit), eps=self.norm_cfg.mp_lerp_eps)
+        return mp_norm(out, eps=self.norm_cfg.mp_norm_eps), q.detach()
 
 
 class MPResCGTBlock(nn.Module):
-    """Hierarchical Team-Factored Gram Mixing + Wide Subspace ResNet Block (EDM2 unit-norm + Aurora-ready):
-    1. Entity -> Team attention-gated pooling O(M*d) into K team tokens (no flat M x (r*d) outer product).
-    2. Team x Team bilinear Gram mixing O(K^2 * r_team) on MPS (zero CPU linalg.solve round-trips)
-       to produce a mutated team projection T_mut that feeds the next residual layer's team Gram.
-    3. Mutated Team -> Entity broadcast O(M*d) + compact associative Global Entity Gram R(R^T V) O(M*r_gram*d).
-    4. Wide Magnitude-Preserving SwiGLU FFN (tall h >> d protected from neuron death by Aurora)."""
 
-    def __init__(self, d: int = 256, h: int = 1024, r_gram: int = 128, r_dpp: int = 64, init_blend: float = 0.25):
+    def __init__(
+        self,
+        d: int = DEFAULT_MODEL_CONFIG.d,
+        h: int = DEFAULT_MODEL_CONFIG.h,
+        r_gram: int = DEFAULT_MODEL_CONFIG.r_gram,
+        r_dpp: int = DEFAULT_MODEL_CONFIG.r_dpp,
+        init_blend: float = 0.25,
+        norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+    ):
         super().__init__()
         self.d = d
         self.h = h
         self.r_gram = r_gram
         self.r_team = r_dpp
         self.r_dpp = r_dpp
+        self.norm_cfg = norm_cfg
+        eps = norm_cfg.unit_norm_eps
 
-        self.val_proj = MPLinear(d, d)
-        self.pool_score = MPLinear(d, 1)
-        self.team_metric = MPLinear(d, self.r_team)
-        self.rival_metric = MPLinear(d, self.r_team)
-        self.team_val_proj = MPLinear(d, d)
-        self.team_mutate_proj = MPLinear(d, d)
-        self.team_bcast_proj = MPLinear(d, d)
-        self.global_metric = MPLinear(d, r_gram)
-        self.gram_out = MPLinear(d, d)
+        self.val_proj = MPLinear(d, d, unit_norm_eps=eps)
+        self.pool_score = MPLinear(d, 1, unit_norm_eps=eps)
+        self.team_metric = MPLinear(d, self.r_team, unit_norm_eps=eps)
+        self.rival_metric = MPLinear(d, self.r_team, unit_norm_eps=eps)
+        self.team_val_proj = MPLinear(d, d, unit_norm_eps=eps)
+        self.team_mutate_proj = MPLinear(d, d, unit_norm_eps=eps)
+        self.team_bcast_proj = MPLinear(d, d, unit_norm_eps=eps)
+        self.global_metric = MPLinear(d, r_gram, unit_norm_eps=eps)
+        self.gram_out = MPLinear(d, d, unit_norm_eps=eps)
 
-        self.ffn_gate = MPLinear(d, h)
-        self.ffn_up = MPLinear(d, h)
-        self.ffn_down = MPLinear(h, d)
+        self.ffn_gate = MPLinear(d, h, unit_norm_eps=eps)
+        self.ffn_up = MPLinear(d, h, unit_norm_eps=eps)
+        self.ffn_down = MPLinear(h, d, unit_norm_eps=eps)
 
         logit_b = math.log(init_blend / max(1e-4, 1.0 - init_blend))
         self.blend_pool = nn.Parameter(torch.tensor(0.0))
@@ -282,24 +317,23 @@ class MPResCGTBlock(nn.Module):
         world=None,
         team_slice: tuple[int, int] | None = None,
     ) -> torch.Tensor:
-        xn = mp_norm(x)
-        v = mp_norm(self.val_proj(xn))
+        nc = self.norm_cfg
+        xn = mp_norm(x, eps=nc.mp_norm_eps)
+        v = mp_norm(self.val_proj(xn), eps=nc.mp_norm_eps)
         m_rows = x.shape[0]
         k_teams = team_ids.shape[0]
         inv_m = 1.0 / math.sqrt(max(1, m_rows))
         inv_k = 1.0 / math.sqrt(max(1, k_teams))
 
-        # 1. Compact associative Global Entity Gram: R (R^T V) — O(M * r_gram * d), native 4-Studio row-TP
-        r = mp_norm(self.global_metric(xn))
+        r = mp_norm(self.global_metric(xn), eps=nc.mp_norm_eps)
         if world is not None and world.parts("cross") is not None:
             lo, hi = world.span("cross", m_rows)
             r_c, v_c = world.copy(r), world.copy(v)
             kv_global = world.reduce(r_c[lo:hi].T @ v_c[lo:hi]) * inv_m
         else:
             kv_global = (r.T @ v) * inv_m
-        global_vals = mp_norm(r @ kv_global)
+        global_vals = mp_norm(r @ kv_global, eps=nc.mp_norm_eps)
 
-        # 2. Hierarchical Entity -> Team pooling O(M * d) -> Team x Team Gram mixing O(K^2 * r_team)
         mem = (entity_team_ids[:, None] == team_ids[None, :]) & team_valid[None, :]
         mem_f = mem.to(x.dtype)
         pool_w = mem_f * torch.sigmoid(self.pool_score(xn))
@@ -311,147 +345,166 @@ class MPResCGTBlock(nn.Module):
         else:
             team_sum = pool_w.T @ v
             team_den = torch.clamp(pool_w.sum(dim=0, keepdim=True).T, min=1e-4)
-        team_pool = mp_norm(team_sum / team_den)
+        team_pool = mp_norm(team_sum / team_den, eps=nc.mp_norm_eps)
 
         if team_slice is not None and (team_slice[1] - team_slice[0]) == k_teams:
             t_cur = xn[team_slice[0] : team_slice[1]]
-            t_in = mp_norm(mp_lerp(t_cur, team_pool, torch.sigmoid(self.blend_pool)))
+            t_in = mp_norm(mp_lerp(t_cur, team_pool, torch.sigmoid(self.blend_pool), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
         else:
             t_in = team_pool
 
-        # Team-level Gram mixing (K x K) -> mutated team projection T_mut fed into next residual layer
-        q_t = mp_norm(self.team_metric(t_in))
-        k_t = mp_norm(self.rival_metric(t_in))
-        v_t = mp_norm(self.team_val_proj(t_in))
+        q_t = mp_norm(self.team_metric(t_in), eps=nc.mp_norm_eps)
+        k_t = mp_norm(self.rival_metric(t_in), eps=nc.mp_norm_eps)
+        v_t = mp_norm(self.team_val_proj(t_in), eps=nc.mp_norm_eps)
         gram_t = (q_t @ k_t.T) * inv_k
-        t_mixed = mp_norm(gram_t @ v_t)
-        t_mut = mp_norm(mp_lerp(t_in, mp_norm(self.team_mutate_proj(t_mixed)), torch.sigmoid(self.blend_team_mut)))
+        t_mixed = mp_norm(gram_t @ v_t, eps=nc.mp_norm_eps)
+        t_mut = mp_norm(
+            mp_lerp(t_in, mp_norm(self.team_mutate_proj(t_mixed), eps=nc.mp_norm_eps), torch.sigmoid(self.blend_team_mut), eps=nc.mp_lerp_eps),
+            eps=nc.mp_norm_eps,
+        )
 
-        # 3. Broadcast mutated team projection back to all team members (and mean team state to neutral entities)
-        t_bcast = mp_norm(self.team_bcast_proj(t_mut))
+        t_bcast = mp_norm(self.team_bcast_proj(t_mut), eps=nc.mp_norm_eps)
         has_team = mem_f.sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-        t_global = mp_norm(t_bcast.mean(dim=0, keepdim=True))
-        team_vals = mp_norm(has_team * (mem_f @ t_bcast) + (1.0 - has_team) * t_global)
+        t_global = mp_norm(t_bcast.mean(dim=0, keepdim=True), eps=nc.mp_norm_eps)
+        team_vals = mp_norm(has_team * (mem_f @ t_bcast) + (1.0 - has_team) * t_global, eps=nc.mp_norm_eps)
 
-        gram_merged = mp_norm(self.gram_out(mp_norm(global_vals + team_vals)))
-        x = mp_norm(mp_lerp(xn, gram_merged, torch.sigmoid(self.blend_gram)))
+        gram_merged = mp_norm(self.gram_out(mp_norm(global_vals + team_vals, eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps)
+        x = mp_norm(mp_lerp(xn, gram_merged, torch.sigmoid(self.blend_gram), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
 
-        # 4. Wide Magnitude-Preserving SwiGLU FFN (tall h >> d protected from neuron death by Aurora!)
         if world is not None and world.parts("ffn") is not None:
             lo, hi = world.span("ffn", self.h)
             x_c = world.copy(x)
             wg = self.ffn_gate.weight[lo:hi]
             wu = self.ffn_up.weight[lo:hi]
             wd = self.ffn_down.weight[:, lo:hi]
-            wg = wg / wg.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-            wu = wu / wu.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-            wd_full_norm = self.ffn_down.weight.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            wg = wg / wg.norm(dim=-1, keepdim=True).clamp_min(nc.unit_norm_eps)
+            wu = wu / wu.norm(dim=-1, keepdim=True).clamp_min(nc.unit_norm_eps)
+            wd_full_norm = self.ffn_down.weight.norm(dim=-1, keepdim=True).clamp_min(nc.unit_norm_eps)
             wd = wd / wd_full_norm
-            hid = mp_silu(F.linear(x_c, wg)) * F.linear(x_c, wu)
-            ffn_out = mp_norm(world.reduce(F.linear(hid, wd)))
+            hid = mp_silu(F.linear(x_c, wg), scale=nc.mp_silu_scale) * F.linear(x_c, wu)
+            ffn_out = mp_norm(world.reduce(F.linear(hid, wd)), eps=nc.mp_norm_eps)
         else:
-            hid = mp_silu(self.ffn_gate(x)) * self.ffn_up(x)
+            hid = mp_silu(self.ffn_gate(x), scale=nc.mp_silu_scale) * self.ffn_up(x)
             self._last_ffn_act = hid.detach()
-            ffn_out = mp_norm(self.ffn_down(hid))
-        x = mp_norm(mp_lerp(x, ffn_out, torch.sigmoid(self.blend_ffn)))
+            ffn_out = mp_norm(self.ffn_down(hid), eps=nc.mp_norm_eps)
+        x = mp_norm(mp_lerp(x, ffn_out, torch.sigmoid(self.blend_ffn), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
         return x
 
 
 class PlanWally(nn.Module):
-    """Aurora + EDM2 Wide Subspace Linear-Gram ResNet controller.
-    - Pure associative linear Gram R(R^T V) + high-dimensional subspace stream (default d=256, h=1024).
-    - Every linear weight row is Aurora-initialized (Stiefel ∩ Row-Oblique) and unit-norm clamped.
-    - Optimized with Aurora (leverage-uniform polar orthogonalization) — zero AdamW, zero dead neurons."""
 
     def __init__(
         self,
-        d: int = 256,
-        depth: int = 4,
-        h: int = 1024,
-        r_gram: int = 128,
-        r_dpp: int = 64,
-        recurrent: bool = True,
-        use_fsq: bool = True,
-        fsq_levels: tuple[int, ...] = (5, 5, 5, 5),
-        use_mealy: bool = True,
+        d: int | None = None,
+        depth: int | None = None,
+        h: int | None = None,
+        r_gram: int | None = None,
+        r_dpp: int | None = None,
+        recurrent: bool | None = None,
+        use_fsq: bool | None = None,
+        fsq_levels: tuple[int, ...] | None = None,
+        use_mealy: bool | None = None,
+        *,
+        model_cfg: ModelConfig | None = None,
+        norm_cfg: NormConfig | None = None,
     ):
         super().__init__()
-        self.d = int(d)
-        self.depth = max(1, int(depth))
-        self.h = int(h)
-        self.r_gram = int(r_gram)
-        self.r_dpp = int(r_dpp)
-        self.recurrent = bool(recurrent)
-        self.use_fsq = bool(use_fsq)
-        self.fsq_levels = tuple(int(v) for v in fsq_levels)
-        self.use_mealy = bool(use_mealy)
+        mc = model_cfg or DEFAULT_MODEL_CONFIG
+        nc = norm_cfg or DEFAULT_NORM_CONFIG
+        self.model_cfg = mc
+        self.norm_cfg = nc
 
-        self.enc_obs = MPLinear(OBS_WIDTH + BOT_GEO_DIM, d)
-        self.enc_cart = MPLinear(18 + 4 + CART_GEO_DIM, d)
-        self.enc_team = MPLinear(7 + 2, d)
-        self.enc_evt = MPLinear(EVT_WIDTH, d)
-        self.enc_track = MPLinear(TRACK_TOK_DIM, d)
-        self.enc_cell = MPLinear(CELL_TOK_DIM, d)
-        self.enc_item = MPLinear(ITEM_TOK_DIM, d)
-        self.type_embed = nn.Parameter(mp_norm(torch.randn(6, d)))
-        self.type_blend = nn.Parameter(torch.tensor(-1.8))  # sigmoid ~= 0.14
+        self.d = int(mc.d if d is None else d)
+        self.depth = max(1, int(mc.depth if depth is None else depth))
+        self.h = int(mc.h if h is None else h)
+        self.r_gram = int(mc.r_gram if r_gram is None else r_gram)
+        self.r_dpp = int(mc.r_dpp if r_dpp is None else r_dpp)
+        self.recurrent = bool(mc.recurrent if recurrent is None else recurrent)
+        self.use_fsq = bool(mc.use_fsq if use_fsq is None else use_fsq)
+        self.fsq_levels = tuple(int(v) for v in (mc.fsq_levels if fsq_levels is None else fsq_levels))
+        self.use_mealy = bool(mc.use_mealy if use_mealy is None else use_mealy)
+        self.temp_bounds = mc.temp_bounds
 
-        # Magnitude-preserving Mealy state update (replaces unconstrained GRUCell)
+        eps = nc.unit_norm_eps
+        self.enc_obs = MPLinear(OBS_WIDTH + BOT_GEO_DIM, self.d, unit_norm_eps=eps)
+        self.enc_cart = MPLinear(18 + 4 + CART_GEO_DIM, self.d, unit_norm_eps=eps)
+        self.enc_team = MPLinear(7 + 2, self.d, unit_norm_eps=eps)
+        self.enc_evt = MPLinear(EVT_WIDTH, self.d, unit_norm_eps=eps)
+        self.enc_track = MPLinear(TRACK_TOK_DIM, self.d, unit_norm_eps=eps)
+        self.enc_cell = MPLinear(CELL_TOK_DIM, self.d, unit_norm_eps=eps)
+        self.enc_item = MPLinear(ITEM_TOK_DIM, self.d, unit_norm_eps=eps)
+        self.type_embed = nn.Parameter(mp_norm(torch.randn(6, self.d), eps=nc.mp_norm_eps))
+        self.type_blend = nn.Parameter(torch.tensor(float(mc.type_blend_init_logit)))
+
         if self.use_mealy:
-            self.mealy_gate = MPLinear(2 * d, d)
-            self.mealy_cand = MPLinear(2 * d, d)
+            self.mealy_gate = MPLinear(2 * self.d, self.d, unit_norm_eps=eps)
+            self.mealy_cand = MPLinear(2 * self.d, self.d, unit_norm_eps=eps)
         else:
             self.mealy_gate = None
             self.mealy_cand = None
 
-        self.fsq = FSQBottleneck(d, levels=self.fsq_levels) if self.use_fsq else None
+        self.fsq = (
+            FSQBottleneck(
+                self.d,
+                levels=self.fsq_levels,
+                in_gain_init=mc.fsq_in_gain_init,
+                in_gain_bounds=mc.fsq_in_gain_bounds,
+                blend_init_logit=mc.fsq_blend_init_logit,
+                std_min=mc.fsq_std_min,
+                norm_cfg=nc,
+            )
+            if self.use_fsq
+            else None
+        )
 
         init_blend = 1.0 / (self.depth + 1.0)
         if self.recurrent:
-            self.blocks = nn.ModuleList([MPResCGTBlock(d, h, r_gram, r_dpp, init_blend=init_blend)])
-            self.step_blends = nn.Parameter(torch.full((self.depth,), math.log(0.35 / 0.65)))
+            self.blocks = nn.ModuleList([MPResCGTBlock(self.d, self.h, self.r_gram, self.r_dpp, init_blend=init_blend, norm_cfg=nc)])
+            sb = float(mc.step_blend_init)
+            self.step_blends = nn.Parameter(torch.full((self.depth,), math.log(sb / max(1e-4, 1.0 - sb))))
         else:
-            self.blocks = nn.ModuleList([MPResCGTBlock(d, h, r_gram, r_dpp, init_blend=init_blend) for _ in range(self.depth)])
+            self.blocks = nn.ModuleList([MPResCGTBlock(self.d, self.h, self.r_gram, self.r_dpp, init_blend=init_blend, norm_cfg=nc) for _ in range(self.depth)])
             self.step_blends = None
 
-        # Output heads: unit-norm projections + EXPLICIT bounded scalar gains/temperatures for sharp PDFs!
-        self.cont_proj = MPLinear(d, PLAN_CONT_DIM)
-        self.cont_gain = nn.Parameter(torch.full((PLAN_CONT_DIM,), 0.04))
+        self.cont_proj = MPLinear(self.d, PLAN_CONT_DIM, unit_norm_eps=eps)
+        self.cont_gain = nn.Parameter(torch.full((PLAN_CONT_DIM,), float(mc.cont_gain_init)))
         self.cont_bias = nn.Parameter(torch.zeros(PLAN_CONT_DIM))
         with torch.no_grad():
-            self.cont_bias[6] = 0.10   # pwr_w mild readiness
-            self.cont_bias[8] = -1.1   # nav_w soft boundary (~0.14)
-            self.cont_bias[9] = 0.25   # atk_cyl mild cart focus
-        self.cont_logstd = nn.Parameter(torch.full((PLAN_CONT_DIM,), math.log(0.38)))
+            for idx_b, val_b in mc.cont_bias_init.items():
+                if 0 <= int(idx_b) < PLAN_CONT_DIM:
+                    self.cont_bias[int(idx_b)] = float(val_b)
+        self.cont_logstd = nn.Parameter(torch.full((PLAN_CONT_DIM,), math.log(max(float(mc.cont_std_init), 1e-4))))
 
-        self.cart_q = MPLinear(d, d)
-        self.cart_k = MPLinear(d, d)
-        self.rival_q = MPLinear(d, d)
-        self.rival_k = MPLinear(d, d)
-        self.cell_q = MPLinear(d, d)
-        self.cell_k = MPLinear(d, d)
-        # Explicit scalar inverse-temperatures + learnable spatial cart locality bias
-        self.log_temp_cart = nn.Parameter(torch.tensor(math.log(2.0)))
-        self.log_temp_rival = nn.Parameter(torch.tensor(math.log(2.0)))
-        self.log_temp_cell = nn.Parameter(torch.tensor(math.log(2.0)))
-        self.log_cart_dist_bias = nn.Parameter(torch.tensor(0.0))
+        self.cart_q = MPLinear(self.d, self.d, unit_norm_eps=eps)
+        self.cart_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
+        self.rival_q = MPLinear(self.d, self.d, unit_norm_eps=eps)
+        self.rival_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
+        self.cell_q = MPLinear(self.d, self.d, unit_norm_eps=eps)
+        self.cell_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
+        log_t0 = math.log(max(float(mc.temp_init), 1e-4))
+        self.log_temp_cart = nn.Parameter(torch.tensor(log_t0))
+        self.log_temp_rival = nn.Parameter(torch.tensor(log_t0))
+        self.log_temp_cell = nn.Parameter(torch.tensor(log_t0))
+        self.log_cart_dist_bias = nn.Parameter(torch.tensor(math.log(max(float(mc.cart_dist_bias_init), 1e-4))))
 
-        self.value_proj = MPLinear(d, 2)
-        self.value_gain = nn.Parameter(torch.tensor(0.5))
+        self.value_proj = MPLinear(self.d, 2, unit_norm_eps=eps)
+        self.value_gain = nn.Parameter(torch.tensor(float(mc.value_gain_init)))
         self.value_bias = nn.Parameter(torch.zeros(2))
-        # Asymmetric critic conditioning on privileged roster skill (training-only; never touches actor!)
-        self.value_priv_proj = MPLinear(3, 2)
-        self.value_priv_gain = nn.Parameter(torch.tensor(0.15))
-        # Auxiliary online skill-ID head: supervises Mealy h_t + Linear-Gram to infer latent mechanical Elo
-        self.skill_id_proj = MPLinear(d, 1)
-        self.skill_id_gain = nn.Parameter(torch.tensor(0.5))
+        self.value_priv_proj = MPLinear(3, 2, unit_norm_eps=eps)
+        self.value_priv_gain = nn.Parameter(torch.tensor(float(mc.value_priv_gain_init)))
+        self.skill_id_proj = MPLinear(self.d, 1, unit_norm_eps=eps)
+        self.skill_id_gain = nn.Parameter(torch.tensor(float(mc.skill_id_gain_init)))
         self.skill_id_bias = nn.Parameter(torch.zeros(1))
-        self.dyn_drift_proj = MPLinear(d, 1)
-        self.dyn_drift_gain = nn.Parameter(torch.tensor(0.25))
-        self.dyn_action_proj = MPLinear(d, PLAN_CONT_DIM)
-        self.dyn_action_gain = nn.Parameter(torch.tensor(0.25))
+        self.dyn_drift_proj = MPLinear(self.d, 1, unit_norm_eps=eps)
+        self.dyn_drift_gain = nn.Parameter(torch.tensor(float(mc.dyn_drift_gain_init)))
+        self.dyn_action_proj = MPLinear(self.d, PLAN_CONT_DIM, unit_norm_eps=eps)
+        self.dyn_action_gain = nn.Parameter(torch.tensor(float(mc.dyn_action_gain_init)))
 
-        project_unit_norm_(self)
+        project_unit_norm_(self, eps=eps)
+
+    @classmethod
+    def from_config(cls, model_cfg: ModelConfig, norm_cfg: NormConfig = DEFAULT_NORM_CONFIG) -> "PlanWally":
+        return cls(model_cfg=model_cfg, norm_cfg=norm_cfg)
 
     def forward(
         self,
@@ -464,6 +517,8 @@ class PlanWally(nn.Module):
         world=None,
         priv_skill: torch.Tensor | None = None,
     ) -> PlanOutput:
+        mc = self.model_cfg
+        nc = self.norm_cfg
         n, j, k = obs.shape[0], carts.shape[0], teams.shape[0]
         device, dtype = obs.device, obs.dtype
         cart_valid = torch.ones(j, device=device, dtype=torch.bool)
@@ -471,58 +526,60 @@ class PlanWally(nn.Module):
         cart_extra, team_extra = cgt_tensor_features(carts, teams, cart_valid, team_valid)
 
         tb = torch.sigmoid(self.type_blend)
-        te = mp_norm(self.type_embed)
+        te = mp_norm(self.type_embed, eps=nc.mp_norm_eps)
 
-        obs_pre = prenormalize_obs(obs, geo)
-        bot_geo = mp_norm(torch.asinh(geo["bot_geo"])) if (geo is not None and "bot_geo" in geo) else torch.zeros((n, BOT_GEO_DIM), device=device, dtype=dtype)
-        obs_h = mp_lerp(mp_norm(self.enc_obs(torch.cat((obs_pre, bot_geo), dim=-1))), te[0].unsqueeze(0), tb)
+        obs_pre = prenormalize_obs(obs, geo, norm_cfg=nc)
+        bot_geo = mp_norm(torch.asinh(geo["bot_geo"]), eps=nc.mp_norm_eps) if (geo is not None and "bot_geo" in geo) else torch.zeros((n, BOT_GEO_DIM), device=device, dtype=dtype)
+        obs_h = mp_lerp(mp_norm(self.enc_obs(torch.cat((obs_pre, bot_geo), dim=-1)), eps=nc.mp_norm_eps), te[0].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
 
         if events is not None and events.shape[0] > 0:
-            evt_h = mp_norm(self.enc_evt(mp_norm(torch.asinh(events))))
+            evt_h = mp_norm(self.enc_evt(mp_norm(torch.asinh(events), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps)
             evt_team = events[:, EVT["TEAM"]].to(torch.float32)
             obs_team = obs[:, OBS["TEAM"]].to(torch.float32)
             em = (obs_team[:, None] == evt_team[None, :]).to(dtype)
             ecnt = torch.clamp(em.sum(dim=1, keepdim=True), min=1.0)
-            obs_h = mp_norm(mp_lerp(obs_h, mp_norm((em @ evt_h) / ecnt), torch.tensor(0.2, device=device, dtype=dtype)))
+            obs_h = mp_norm(
+                mp_lerp(obs_h, mp_norm((em @ evt_h) / ecnt, eps=nc.mp_norm_eps), torch.tensor(mc.evt_blend, device=device, dtype=dtype), eps=nc.mp_lerp_eps),
+                eps=nc.mp_norm_eps,
+            )
 
-        cart_pre = prenormalize_carts(carts, cart_extra, geo)
-        cart_h = mp_lerp(mp_norm(self.enc_cart(cart_pre)), te[1].unsqueeze(0), tb)
+        cart_pre = prenormalize_carts(carts, cart_extra, geo, norm_cfg=nc)
+        cart_h = mp_lerp(mp_norm(self.enc_cart(cart_pre), eps=nc.mp_norm_eps), te[1].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
 
-        team_pre = prenormalize_teams(teams, team_extra)
-        team_h = mp_lerp(mp_norm(self.enc_team(team_pre)), te[2].unsqueeze(0), tb)
+        team_pre = prenormalize_teams(teams, team_extra, norm_cfg=nc)
+        team_h = mp_lerp(mp_norm(self.enc_team(team_pre), eps=nc.mp_norm_eps), te[2].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
 
         extra_tokens = []
         extra_teams = []
 
         if geo is not None and "track_tokens" in geo and geo["track_tokens"].shape[0] > 0:
-            tr_h = mp_lerp(mp_norm(self.enc_track(mp_norm(torch.asinh(geo["track_tokens"])))), te[3].unsqueeze(0), tb)
+            tr_h = mp_lerp(mp_norm(self.enc_track(mp_norm(torch.asinh(geo["track_tokens"]), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[3].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
             extra_tokens.append(tr_h)
             extra_teams.append(geo["track_teams"].to(torch.float32))
 
         cell_h = None
         if geo is not None and "cell_tokens" in geo and geo["cell_tokens"].shape[0] > 0:
-            cell_h = mp_lerp(mp_norm(self.enc_cell(mp_norm(torch.asinh(geo["cell_tokens"])))), te[4].unsqueeze(0), tb)
+            cell_h = mp_lerp(mp_norm(self.enc_cell(mp_norm(torch.asinh(geo["cell_tokens"]), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[4].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
             if "fovea_weights" in geo:
-                obs_h = mp_norm(mp_lerp(obs_h, mp_norm(geo["fovea_weights"] @ cell_h), torch.tensor(0.25, device=device, dtype=dtype)))
+                obs_h = mp_norm(
+                    mp_lerp(obs_h, mp_norm(geo["fovea_weights"] @ cell_h, eps=nc.mp_norm_eps), torch.tensor(mc.fovea_blend, device=device, dtype=dtype), eps=nc.mp_lerp_eps),
+                    eps=nc.mp_norm_eps,
+                )
             extra_tokens.append(cell_h)
             extra_teams.append(torch.zeros((cell_h.shape[0],), device=device, dtype=torch.float32))
 
         if geo is not None and "item_tokens" in geo and geo["item_tokens"].shape[0] > 0:
-            it_h = mp_lerp(mp_norm(self.enc_item(mp_norm(torch.asinh(geo["item_tokens"])))), te[5].unsqueeze(0), tb)
+            it_h = mp_lerp(mp_norm(self.enc_item(mp_norm(torch.asinh(geo["item_tokens"]), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[5].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
             extra_tokens.append(it_h)
             extra_teams.append(torch.zeros((it_h.shape[0],), device=device, dtype=torch.float32))
 
-        # Magnitude-preserving Mealy state recursion (strictly unit-RMS!)
         if self.mealy_gate is not None:
-            if h_prev is None or h_prev.shape != (n, self.d):
-                h_in = obs_h.detach()
-            else:
-                h_in = mp_norm(h_prev)
+            h_in = obs_h.detach() if (h_prev is None or h_prev.shape != (n, self.d)) else mp_norm(h_prev, eps=nc.mp_norm_eps)
             cat_m = torch.cat((obs_h, h_in), dim=-1)
             z_gate = torch.sigmoid(self.mealy_gate(cat_m))
-            cand = mp_norm(mp_silu(self.mealy_cand(cat_m)))
-            h_next = mp_norm(mp_lerp(h_in, cand, z_gate))
-            obs_h = mp_norm(mp_lerp(obs_h, h_next, torch.tensor(0.25, device=device, dtype=dtype)))
+            cand = mp_norm(mp_silu(self.mealy_cand(cat_m), scale=nc.mp_silu_scale), eps=nc.mp_norm_eps)
+            h_next = mp_norm(mp_lerp(h_in, cand, z_gate, eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+            obs_h = mp_norm(mp_lerp(obs_h, h_next, torch.tensor(mc.mealy_blend, device=device, dtype=dtype), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
         else:
             h_next = obs_h.detach()
 
@@ -532,7 +589,7 @@ class PlanWally(nn.Module):
             carts[:, CS["CONTROL_TEAM"]].to(torch.float32),
             teams[:, TS["ID"]].to(torch.float32),
         ] + extra_teams
-        x = mp_norm(torch.cat(seq_parts, dim=0))
+        x = mp_norm(torch.cat(seq_parts, dim=0), eps=nc.mp_norm_eps)
         entity_teams = torch.cat(team_parts, dim=0)
         team_ids = teams[:, TS["ID"]].to(torch.float32)
 
@@ -541,12 +598,12 @@ class PlanWally(nn.Module):
             blk = self.blocks[0]
             for step in range(self.depth):
                 x_new = blk(x, entity_teams, team_ids, team_valid, world=world, team_slice=team_slice)
-                x = mp_norm(mp_lerp(x, x_new, torch.sigmoid(self.step_blends[step])))
+                x = mp_norm(mp_lerp(x, x_new, torch.sigmoid(self.step_blends[step]), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
         else:
             for blk in self.blocks:
                 x = blk(x, entity_teams, team_ids, team_valid, world=world, team_slice=team_slice)
 
-        xn = mp_norm(x)
+        xn = mp_norm(x, eps=nc.mp_norm_eps)
         p_h = xn[:n]
         c_h = xn[n : n + j]
         t_h = xn[n + j : n + j + k]
@@ -554,37 +611,35 @@ class PlanWally(nn.Module):
         offset = n + j + k
         if geo is not None and "track_tokens" in geo:
             offset += geo["track_tokens"].shape[0]
-        if cell_h is not None:
-            vcell_h = xn[offset : offset + cell_h.shape[0]]
-        else:
-            vcell_h = c_h
+        vcell_h = xn[offset : offset + cell_h.shape[0]] if cell_h is not None else c_h
 
         fsq_codes = None
         if self.fsq is not None:
             p_h, fsq_codes = self.fsq(p_h)
 
-        # Explicit gain-scaled continuous head (bounded, sharp, zero weight/activation blowup)
-        g_cont = torch.clamp(self.cont_gain, -3.0, 3.0)
-        cont_mean = 2.0 * torch.tanh(g_cont * self.cont_proj(p_h) + self.cont_bias)
-        cont_logstd = torch.clamp(self.cont_logstd, min=-2.5, max=0.25).unsqueeze(0).expand(n, -1)
+        g_cont = torch.clamp(self.cont_gain, -mc.cont_gain_bound, mc.cont_gain_bound)
+        cont_mean = mc.cont_mean_scale * torch.tanh(g_cont * self.cont_proj(p_h) + self.cont_bias)
+        cont_logstd = torch.clamp(self.cont_logstd, min=mc.cont_logstd_bounds[0], max=mc.cont_logstd_bounds[1]).unsqueeze(0).expand(n, -1)
 
-        # Cosine pointer heads x explicit bounded inverse-temperature + spatial locality bias for multi-submap carts
-        temp_c = torch.clamp(torch.exp(self.log_temp_cart), 0.5, 32.0)
-        temp_r = torch.clamp(torch.exp(self.log_temp_rival), 0.5, 32.0)
-        temp_v = torch.clamp(torch.exp(self.log_temp_cell), 0.5, 32.0)
+        t_lo, t_hi = mc.temp_bounds
+        temp_c = torch.clamp(torch.exp(self.log_temp_cart), t_lo, t_hi)
+        temp_r = torch.clamp(torch.exp(self.log_temp_rival), t_lo, t_hi)
+        temp_v = torch.clamp(torch.exp(self.log_temp_cell), t_lo, t_hi)
 
         p_pos = obs[:, OBS["POS_X"] : OBS["POS_Z"] + 1]
         c_pos = carts[:, CS["POS_X"] : CS["POS_Z"] + 1]
-        d_pc = (p_pos[:, None, :] - c_pos[None, :, :]).square().sum(dim=-1).clamp_min(1e-6).sqrt()
-        dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), 0.0, 6.0) * torch.log1p(d_pc / 400.0)
-        cart_logits = temp_c * (mp_unit_vec(self.cart_q(p_h)) @ mp_unit_vec(self.cart_k(c_h)).T) - dist_bias
-        rival_logits = temp_r * (mp_unit_vec(self.rival_q(p_h)) @ mp_unit_vec(self.rival_k(t_h)).T)
+        d_pc = (p_pos[:, None, :] - c_pos[None, :, :]).square().sum(dim=-1).clamp_min(nc.mp_unit_vec_eps).sqrt()
+        db_lo, db_hi = mc.cart_dist_bias_bounds
+        dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), db_lo, db_hi) * torch.log1p(d_pc / mc.cart_dist_scale)
+        cart_logits = temp_c * (mp_unit_vec(self.cart_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.cart_k(c_h), eps=nc.mp_unit_vec_eps).T) - dist_bias
+        rival_logits = temp_r * (mp_unit_vec(self.rival_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.rival_k(t_h), eps=nc.mp_unit_vec_eps).T)
         if k >= 2:
             own_mask = obs[:, OBS["TEAM"]].to(torch.float32)[:, None] == team_ids[None, :]
-            rival_logits = rival_logits.masked_fill(own_mask, -1e4)
-        cell_logits = temp_v * (mp_unit_vec(self.cell_q(p_h)) @ mp_unit_vec(self.cell_k(vcell_h)).T)
+            rival_logits = rival_logits.masked_fill(own_mask, mc.rival_own_mask_fill)
+        cell_logits = temp_v * (mp_unit_vec(self.cell_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.cell_k(vcell_h), eps=nc.mp_unit_vec_eps).T)
 
-        vals = torch.clamp(self.value_gain, 0.05, 5.0) * self.value_proj(p_h) + self.value_bias
+        vg_lo, vg_hi = mc.value_gain_bounds
+        vals = torch.clamp(self.value_gain, vg_lo, vg_hi) * self.value_proj(p_h) + self.value_bias
         if priv_skill is not None and priv_skill.shape[0] == n:
             ps = priv_skill.to(device=device, dtype=dtype)
             obs_t = obs[:, OBS["TEAM"]].to(torch.float32)
@@ -594,15 +649,19 @@ class PlanWally(nn.Module):
             own_mean = t_mem @ t_mean
             if k > 1:
                 rival_mask = obs_t[:, None] != team_ids[None, :]
-                rival_vals = t_mean[None, :].expand(n, k).masked_fill(~rival_mask, -1e4)
+                rival_vals = t_mean[None, :].expand(n, k).masked_fill(~rival_mask, mc.rival_own_mask_fill)
                 rival_max = rival_vals.max(dim=-1).values
             else:
                 rival_max = torch.zeros_like(ps)
             priv_feat = torch.stack((ps, own_mean, rival_max), dim=-1)
-            vals = vals + torch.clamp(self.value_priv_gain, 0.0, 2.0) * self.value_priv_proj(priv_feat)
-        pred_skill = (torch.clamp(self.skill_id_gain, 0.05, 3.0) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
-        dyn_drift = (torch.clamp(self.dyn_drift_gain, 0.05, 2.0) * self.dyn_drift_proj(p_h)).squeeze(-1)
-        dyn_action = torch.clamp(self.dyn_action_gain, 0.05, 2.0) * self.dyn_action_proj(p_h)
+            vp_lo, vp_hi = mc.value_priv_gain_bounds
+            vals = vals + torch.clamp(self.value_priv_gain, vp_lo, vp_hi) * self.value_priv_proj(priv_feat)
+
+        sg_lo, sg_hi = mc.skill_id_gain_bounds
+        dg_lo, dg_hi = mc.dyn_gain_bounds
+        pred_skill = (torch.clamp(self.skill_id_gain, sg_lo, sg_hi) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
+        dyn_drift = (torch.clamp(self.dyn_drift_gain, dg_lo, dg_hi) * self.dyn_drift_proj(p_h)).squeeze(-1)
+        dyn_action = torch.clamp(self.dyn_action_gain, dg_lo, dg_hi) * self.dyn_action_proj(p_h)
         return PlanOutput(
             cont_mean, cont_logstd, cart_logits, rival_logits, cell_logits,
             vals[:, 0], vals[:, 1], dyn_drift, dyn_action, h_next, fsq_codes, pred_skill,
@@ -640,37 +699,6 @@ def sample_plan(out: PlanOutput, deterministic: bool = False) -> PlanSample:
     return PlanSample(cont, cart_pick, rival_pick, cell_pick, logp)
 
 
-def plan_logp(
-    out: PlanOutput,
-    cont: torch.Tensor,
-    cart_pick: torch.Tensor,
-    rival_pick: torch.Tensor,
-    cell_pick: torch.Tensor,
-) -> torch.Tensor:
-    inv_std = torch.exp(-out.cont_logstd)
-    err = (cont - out.cont_mean) * inv_std
-    lp_cont = -0.5 * (err.square() + 2.0 * out.cont_logstd + math.log(2.0 * math.pi)).sum(dim=-1)
-    lp_cart = F.log_softmax(out.cart_logits, dim=-1).gather(-1, cart_pick.long().unsqueeze(-1)).squeeze(-1)
-    lp_rival = F.log_softmax(out.rival_logits, dim=-1).gather(-1, rival_pick.long().unsqueeze(-1)).squeeze(-1)
-    lp_cell = F.log_softmax(out.cell_logits, dim=-1).gather(-1, cell_pick.long().unsqueeze(-1)).squeeze(-1)
-    return lp_cont + lp_cart + lp_rival + lp_cell
-
-
-def plan_discrete_entropy(out: PlanOutput) -> torch.Tensor:
-    p_cart = F.softmax(out.cart_logits, dim=-1)
-    h_cart = -(p_cart * F.log_softmax(out.cart_logits, dim=-1)).sum(dim=-1)
-    p_riv = F.softmax(out.rival_logits, dim=-1)
-    h_riv = -(p_riv * F.log_softmax(out.rival_logits, dim=-1)).sum(dim=-1)
-    p_cell = F.softmax(out.cell_logits, dim=-1)
-    h_cell = -(p_cell * F.log_softmax(out.cell_logits, dim=-1)).sum(dim=-1)
-    return h_cart + h_riv + h_cell
-
-
-def plan_entropy(out: PlanOutput) -> torch.Tensor:
-    h_cont = (out.cont_logstd + 0.5 * math.log(2.0 * math.pi * math.e)).sum(dim=-1)
-    return h_cont + plan_discrete_entropy(out)
-
-
 def pack_plan_rows(
     obs_rows: np.ndarray,
     team_rows: np.ndarray,
@@ -680,15 +708,15 @@ def pack_plan_rows(
     maxclients: int = 16,
     cell_centroids: np.ndarray | None = None,
     cart_lengths: np.ndarray | None = None,
+    pack_cfg: ActionPackConfig = DEFAULT_ACTION_PACK_CONFIG,
 ) -> np.ndarray:
-    """Pack per-bot 16-float parametric flow PLAN rows indexed by 1-based edict slot.
-    cart_ds scales proportionally to the selected cart's lane length for cross-map invariance."""
     out = np.zeros((maxclients, PLAN_WIDTH), dtype=np.float32)
     cont_np = sample.cont.detach().cpu().numpy()
     cart_np = sample.cart_pick.detach().cpu().numpy()
     rival_np = sample.rival_pick.detach().cpu().numpy()
     cell_np = sample.cell_pick.detach().cpu().numpy()
     team_ids = team_rows[:, TS["ID"]].astype(np.float32)
+    nw_lo, nw_hi = pack_cfg.nav_w_clip
     for i in range(len(obs_rows)):
         if str(arms[i]) not in active_arms:
             continue
@@ -699,14 +727,18 @@ def pack_plan_rows(
             c_idx = int(cell_np[i])
             if cell_centroids is not None and 0 <= c_idx < len(cell_centroids):
                 nav_x, nav_y = float(cell_centroids[c_idx, 0]), float(cell_centroids[c_idx, 1])
-                nav_w = float(np.log1p(np.exp(np.clip(cont_np[i, 8] - 0.8, -10.0, 10.0))))
+                nav_w = float(np.log1p(np.exp(np.clip(cont_np[i, 8] - pack_cfg.nav_w_shift, nw_lo, nw_hi))))
             else:
                 nav_x = nav_y = nav_w = 0.0
             cpick = int(cart_np[i])
-            # Superlinear push-radius mapping: |u|<=0.8 stays <120u (inside cart push radius on all maps);
-            # intentional |u|=1.3..2.0 reaches 180..365u (>120u) for vanguard/ambush lead.
             u_ds = float(cont_np[i, 7])
-            cart_ds = float(np.clip(math.copysign(120.0 * (abs(u_ds) ** 1.6), u_ds), -480.0, 480.0))
+            cart_ds = float(
+                np.clip(
+                    math.copysign(pack_cfg.cart_ds_scale * (abs(u_ds) ** pack_cfg.cart_ds_power), u_ds),
+                    -pack_cfg.cart_ds_clip,
+                    pack_cfg.cart_ds_clip,
+                )
+            )
             posture = float(np.tanh(cont_np[i, 10]))
             out[eid - 1, 0] = float(eid)
             out[eid - 1, 1] = float(cpick)
@@ -725,8 +757,10 @@ def pack_plan_rows(
 
 def plan_module_group(param_name: str) -> str:
     root = param_name.split(".", 1)[0]
-    if root in ("enc_obs", "enc_cart", "enc_team", "enc_evt", "enc_track", "enc_cell", "enc_item",
-                "type_embed", "type_blend", "mealy_gate", "mealy_cand"):
+    if root in (
+        "enc_obs", "enc_cart", "enc_team", "enc_evt", "enc_track", "enc_cell", "enc_item",
+        "type_embed", "type_blend", "mealy_gate", "mealy_cand",
+    ):
         return "encoder"
     if root == "blocks":
         if any(k in param_name for k in ("ffn_", "blend_ffn")):
@@ -734,9 +768,11 @@ def plan_module_group(param_name: str) -> str:
         return "gram_cgt"
     if root in ("step_blends", "fsq"):
         return "resnet_ffn"
-    if root in ("cont_proj", "cont_gain", "cont_bias", "cont_logstd",
-                "cart_q", "cart_k", "rival_q", "rival_k", "cell_q", "cell_k",
-                "log_temp_cart", "log_temp_rival", "log_temp_cell", "log_cart_dist_bias"):
+    if root in (
+        "cont_proj", "cont_gain", "cont_bias", "cont_logstd",
+        "cart_q", "cart_k", "rival_q", "rival_k", "cell_q", "cell_k",
+        "log_temp_cart", "log_temp_rival", "log_temp_cell", "log_cart_dist_bias",
+    ):
         return "action_head"
     if root in ("value_proj", "value_gain", "value_bias", "value_priv_proj", "value_priv_gain"):
         return "value_head"
@@ -747,231 +783,13 @@ def plan_module_group(param_name: str) -> str:
     return "other"
 
 
-def _team_eff_rho(carts: torch.Tensor, teams: torch.Tensor, obs: torch.Tensor) -> torch.Tensor:
-    scores = teams[:, TS["SCORE"]].to(torch.float32)
-    held = teams[:, TS["CHECKPOINTS_HELD"]].to(torch.float32)
-    rate = teams[:, TS["CHECKPOINT_RATE"]].to(torch.float32)
-    limit = torch.clamp(teams[:, TS["SCORE_LIMIT"]].to(torch.float32), min=1e-6)
-    rem = torch.clamp(limit - scores, min=1e-6)
-    path_len = torch.clamp(carts[:, CS["PATH_LENGTH"]].to(torch.float32), min=1e-6)
-    pos_frac = torch.clamp(carts[:, CS["PATH_POSITION"]].to(torch.float32) / path_len, 0.0, 1.0)
-    cp_count = torch.clamp(carts[:, CS["CHECKPOINT_COUNT"]].to(torch.float32), min=1.0)
-    seg_frac = (pos_frac * cp_count) - torch.floor(pos_frac * cp_count)
-    owner = carts[:, CS["CONTROL_TEAM"]].to(torch.float32)[:, None] == teams[:, TS["ID"]].to(torch.float32)[None, :]
-    eff_held = held + 0.5 * (owner.to(torch.float32).T @ seg_frac)
-    rho = torch.where(eff_held > 0, (rate * eff_held) / rem, torch.zeros_like(scores))
-    mem = obs[:, OBS["TEAM"]].to(torch.float32)[:, None] == teams[:, TS["ID"]].to(torch.float32)[None, :]
-    return mem.to(torch.float32) @ rho
-
-
-def _geo_to_torch(geo: dict[str, np.ndarray] | None, device: str) -> dict[str, torch.Tensor] | None:
-    if geo is None:
-        return None
-    out = {}
-    for k in ("bot_geo", "cart_geo", "track_tokens", "track_teams", "cell_tokens",
-              "item_tokens", "fovea_weights", "map_center", "map_radius"):
-        if k in geo:
-            out[k] = torch.as_tensor(geo[k], dtype=torch.float32, device=device)
-    return out
-
-
-@dataclass
-class PlanTransition:
-    session: int
-    obs_in: np.ndarray
-    carts_in: np.ndarray
-    teams_in: np.ndarray
-    events_in: np.ndarray
-    obs_out: np.ndarray
-    carts_out: np.ndarray
-    teams_out: np.ndarray
-    events_out: np.ndarray
-    cont: np.ndarray
-    cart_pick: np.ndarray
-    rival_pick: np.ndarray
-    cell_pick: np.ndarray
-    behavior_logp: np.ndarray
-    reward: np.ndarray
-    winner_mask: np.ndarray
-    next_winner_mask: np.ndarray
-    discount: np.ndarray
-    actor_mask: np.ndarray
-    successor_rows: np.ndarray
-    geo_in: dict[str, np.ndarray] | None = None
-    geo_out: dict[str, np.ndarray] | None = None
-    h_in: np.ndarray | None = None
-    h_out: np.ndarray | None = None
-    map_name: str = "boil"
-    priv_skill_in: np.ndarray | None = None
-    priv_skill_out: np.ndarray | None = None
-    gae_adv: np.ndarray | None = None
-    gae_ret: np.ndarray | None = None
-
-
-def plan_losses_for_transition(
-    model: PlanWally,
-    tr: PlanTransition,
-    device: str = "cpu",
-    *,
-    entropy_coef: float = 0.01,
-    actor_weight: float = 1.0,
-    critic_weight: float = 0.5,
-    dyn_weight: float = 0.25,
-    skill_id_weight: float = 0.25,
-    adv_mean: float = 0.0,
-    adv_std: float = 1.0,
-    world=None,
-) -> tuple[dict[str, torch.Tensor], dict]:
-    obs_in = torch.as_tensor(tr.obs_in, dtype=torch.float32, device=device)
-    carts_in = torch.as_tensor(tr.carts_in, dtype=torch.float32, device=device)
-    teams_in = torch.as_tensor(tr.teams_in, dtype=torch.float32, device=device)
-    evt_in = torch.as_tensor(np.array(tr.events_in, copy=True), dtype=torch.float32, device=device) if len(tr.events_in) else None
-    geo_in = _geo_to_torch(tr.geo_in, device)
-    h_in = torch.as_tensor(tr.h_in, dtype=torch.float32, device=device) if tr.h_in is not None else None
-    priv_in = torch.as_tensor(tr.priv_skill_in, dtype=torch.float32, device=device) if tr.priv_skill_in is not None else None
-
-    obs_out = torch.as_tensor(tr.obs_out, dtype=torch.float32, device=device)
-    carts_out = torch.as_tensor(tr.carts_out, dtype=torch.float32, device=device)
-    teams_out = torch.as_tensor(tr.teams_out, dtype=torch.float32, device=device)
-    evt_out = torch.as_tensor(np.array(tr.events_out, copy=True), dtype=torch.float32, device=device) if len(tr.events_out) else None
-    geo_out = _geo_to_torch(tr.geo_out, device)
-    h_out = torch.as_tensor(tr.h_out, dtype=torch.float32, device=device) if tr.h_out is not None else None
-    priv_out = torch.as_tensor(tr.priv_skill_out, dtype=torch.float32, device=device) if tr.priv_skill_out is not None else None
-
-    cur = model(obs_in, carts_in, teams_in, evt_in, geo=geo_in, h_prev=h_in, world=world, priv_skill=priv_in)
-    with torch.no_grad():
-        nxt = model(obs_out, carts_out, teams_out, evt_out, geo=geo_out, h_prev=h_out, world=world, priv_skill=priv_out)
-
-    cont = torch.as_tensor(tr.cont, dtype=torch.float32, device=device)
-    cart_pick = torch.as_tensor(tr.cart_pick, dtype=torch.long, device=device)
-    rival_pick = torch.as_tensor(tr.rival_pick, dtype=torch.long, device=device)
-    cell_pick = torch.as_tensor(tr.cell_pick, dtype=torch.long, device=device)
-    beh_lp = torch.as_tensor(tr.behavior_logp, dtype=torch.float32, device=device)
-    reward = torch.as_tensor(tr.reward, dtype=torch.float32, device=device)
-    wm = torch.as_tensor(tr.winner_mask, dtype=torch.bool, device=device)
-    nwm = torch.as_tensor(tr.next_winner_mask, dtype=torch.bool, device=device)
-    disc = torch.as_tensor(tr.discount, dtype=torch.float32, device=device)
-    am = torch.as_tensor(tr.actor_mask, dtype=torch.float32, device=device)
-    succ = torch.clamp(torch.as_tensor(tr.successor_rows, dtype=torch.long, device=device), min=0, max=max(0, obs_out.shape[0] - 1))
-    valid_succ = torch.as_tensor(tr.successor_rows >= 0, dtype=torch.float32, device=device)
-
-    val = torch.where(wm, cur.value_winnie, cur.value_lou)
-    if tr.gae_adv is not None and tr.gae_ret is not None:
-        raw_adv = torch.as_tensor(tr.gae_adv, dtype=torch.float32, device=device)
-        target = torch.as_tensor(tr.gae_ret, dtype=torch.float32, device=device)
-    else:
-        boot = torch.where(nwm, nxt.value_winnie[succ], nxt.value_lou[succ])
-        boot = torch.where((wm == nwm) & (disc > 0) & (valid_succ > 0), boot, 0.0)
-        target = reward + disc * boot.detach()
-        raw_adv = (target - val).detach()
-
-    logpi = plan_logp(cur, cont, cart_pick, rival_pick, cell_pick)
-    log_ratio = torch.clamp(logpi - beh_lp, -POLICY_LOG_RATIO_BOUND, POLICY_LOG_RATIO_BOUND)
-    adv_norm = (raw_adv - float(adv_mean)) / max(float(adv_std), 1e-4)
-    adv = torch.clamp(adv_norm, -3.0, 3.0)
-    am_sum = torch.clamp(am.sum(), min=1.0)
-    surrogate = clipped_policy_surrogate(log_ratio, adv, POLICY_RATIO_CLIP)
-    ent = (plan_entropy(cur) * am).sum() / am_sum
-    ent_disc = (plan_discrete_entropy(cur) * am).sum() / am_sum
-    # Regularize discrete pointer entropy only; avoid normalized-1D Aurora ratchet on continuous cont_logstd
-    actor_loss = actor_weight * (-(surrogate * am).sum() / am_sum - entropy_coef * ent_disc)
-
-    w_mask = wm.to(torch.float32)
-    l_mask = (~wm).to(torch.float32)
-    w_loss = critic_weight * (F.smooth_l1_loss(cur.value_winnie, target, reduction="none", beta=0.5) * w_mask).sum() / torch.clamp(w_mask.sum(), min=1.0)
-    l_loss = critic_weight * (F.smooth_l1_loss(cur.value_lou, target, reduction="none", beta=0.5) * l_mask).sum() / torch.clamp(l_mask.sum(), min=1.0)
-
-    with torch.no_grad():
-        rho_c = _team_eff_rho(carts_in, teams_in, obs_in)
-        rho_n = _team_eff_rho(carts_out, teams_out, obs_out)[succ]
-        obs_drho = torch.asinh(10.0 * (rho_n - rho_c))
-    pred_drho = cur.dyn_drift + (cur.dyn_action * cont).sum(dim=-1)
-    dyn_loss = dyn_weight * (F.smooth_l1_loss(pred_drho, obs_drho, reduction="none", beta=0.25) * valid_succ).sum() / torch.clamp(valid_succ.sum(), min=1.0)
-
-    if priv_in is not None and cur.pred_skill is not None:
-        skill_loss = skill_id_weight * F.smooth_l1_loss(cur.pred_skill, priv_in, beta=0.5)
-        skill_mse = float((cur.pred_skill.detach() - priv_in).square().mean().item())
-    else:
-        skill_loss = torch.zeros((), dtype=torch.float32, device=device)
-        skill_mse = None
-
-    total = actor_loss + w_loss + l_loss + dyn_loss + skill_loss
-    with torch.no_grad():
-        lr_np = log_ratio.detach().cpu().numpy()[tr.actor_mask.astype(bool)] if np.any(tr.actor_mask) else np.empty((0,))
-        ratio_np = np.exp(np.clip(lr_np, -20.0, 20.0)) if lr_np.size else np.empty((0,))
-        diag = {
-            "loss_total": float(total.item()),
-            "loss_actor": float(actor_loss.item()),
-            "loss_w": float(w_loss.item()),
-            "loss_l": float(l_loss.item()),
-            "loss_dyn": float(dyn_loss.item()),
-            "loss_skill": float(skill_loss.item()),
-            "skill_id_mse": skill_mse,
-            "entropy": float(ent.item()),
-            "entropy_disc": float(ent_disc.item()),
-            "cont_std_mean": float(torch.exp(cur.cont_logstd).mean().item()),
-            "is_ratio_mean": float(ratio_np.mean()) if ratio_np.size else None,
-            "is_clip_frac": float(np.mean(np.abs(lr_np) > math.log(1.0 + POLICY_RATIO_CLIP))) if lr_np.size else None,
-            "winnie_mse": float(((cur.value_winnie - target).square() * w_mask).sum().item() / max(1.0, float(w_mask.sum().item()))) if float(w_mask.sum().item()) > 0 else None,
-            "lou_mse": float(((cur.value_lou - target).square() * l_mask).sum().item() / max(1.0, float(l_mask.sum().item()))) if float(l_mask.sum().item()) > 0 else None,
-            "reward_abs": float(reward.abs().mean().item()),
-            "cart_temp": float(torch.clamp(torch.exp(model.log_temp_cart), 0.5, 16.0).item()),
-            "cell_temp": float(torch.clamp(torch.exp(model.log_temp_cell), 0.5, 16.0).item()),
-        }
-    return {
-        "total": total,
-        "actor_pg": actor_loss,
-        "critic_winnie": w_loss,
-        "critic_lou": l_loss,
-        "critic_both": w_loss + l_loss,
-        "dynamics": dyn_loss,
-    }, diag
-
-
-def compute_batch_adv_stats(model: PlanWally, batch: list[PlanTransition], device: str = "cpu") -> tuple[float, float]:
-    """Compute batch-wide TD advantage mean & std so opponent-strength shifts cannot bias PPO updates."""
-    errs = []
-    with torch.no_grad():
-        for tr in batch:
-            obs_in = torch.as_tensor(tr.obs_in, dtype=torch.float32, device=device)
-            carts_in = torch.as_tensor(tr.carts_in, dtype=torch.float32, device=device)
-            teams_in = torch.as_tensor(tr.teams_in, dtype=torch.float32, device=device)
-            evt_in = torch.as_tensor(np.array(tr.events_in, copy=True), dtype=torch.float32, device=device) if len(tr.events_in) else None
-            geo_in = _geo_to_torch(tr.geo_in, device)
-            h_in = torch.as_tensor(tr.h_in, dtype=torch.float32, device=device) if tr.h_in is not None else None
-            obs_out = torch.as_tensor(tr.obs_out, dtype=torch.float32, device=device)
-            carts_out = torch.as_tensor(tr.carts_out, dtype=torch.float32, device=device)
-            teams_out = torch.as_tensor(tr.teams_out, dtype=torch.float32, device=device)
-            evt_out = torch.as_tensor(np.array(tr.events_out, copy=True), dtype=torch.float32, device=device) if len(tr.events_out) else None
-            geo_out = _geo_to_torch(tr.geo_out, device)
-            h_out = torch.as_tensor(tr.h_out, dtype=torch.float32, device=device) if tr.h_out is not None else None
-            cur = model(obs_in, carts_in, teams_in, evt_in, geo=geo_in, h_prev=h_in)
-            nxt = model(obs_out, carts_out, teams_out, evt_out, geo=geo_out, h_prev=h_out)
-            wm = torch.as_tensor(tr.winner_mask, dtype=torch.bool, device=device)
-            nwm = torch.as_tensor(tr.next_winner_mask, dtype=torch.bool, device=device)
-            disc = torch.as_tensor(tr.discount, dtype=torch.float32, device=device)
-            succ = torch.clamp(torch.as_tensor(tr.successor_rows, dtype=torch.long, device=device), min=0, max=max(0, obs_out.shape[0] - 1))
-            vs = torch.as_tensor(tr.successor_rows >= 0, dtype=torch.float32, device=device)
-            val = torch.where(wm, cur.value_winnie, cur.value_lou)
-            boot = torch.where(nwm, nxt.value_winnie[succ], nxt.value_lou[succ])
-            boot = torch.where((wm == nwm) & (disc > 0) & (vs > 0), boot, 0.0)
-            reward = torch.as_tensor(tr.reward, dtype=torch.float32, device=device)
-            err = (reward + disc * boot - val).cpu().numpy()
-            am = tr.actor_mask.astype(bool)
-            if np.any(am):
-                errs.append(err[am])
-    if not errs:
-        return 0.0, 1.0
-    cat = np.concatenate(errs)
-    return float(cat.mean()), float(max(cat.std(), 1e-3))
-
-
 def probe_plan_cross_server_mccandlish(
     model: PlanWally,
     transitions: list[PlanTransition],
     *,
     device: str = "cpu",
     max_per_server: int = 16,
+    loss_cfg: LossConfig = DEFAULT_LOSS_CONFIG,
     components: tuple[str, ...] = ("total", "actor_pg", "critic_winnie", "critic_lou", "critic_both", "dynamics"),
 ) -> dict:
     by_srv: dict[int, list[PlanTransition]] = {}
@@ -983,7 +801,7 @@ def probe_plan_cross_server_mccandlish(
 
     per_srv = min(max_per_server, min(len(by_srv[s]) for s in servers))
     sample_all = [tr for s in servers for tr in by_srv[s][-per_srv:]]
-    adv_mean, adv_std = compute_batch_adv_stats(model, sample_all, device=device)
+    adv_mean, adv_std = compute_batch_adv_stats(model, sample_all, device=device, loss_cfg=loss_cfg)
 
     params = list(model.named_parameters())
     names = [n for n, _ in params]
@@ -995,7 +813,9 @@ def probe_plan_cross_server_mccandlish(
         sub = by_srv[s][-per_srv:]
         sums = {c: {n: None for n in names} for c in components}
         for tr in sub:
-            comps, diag = plan_losses_for_transition(model, tr, device=device, adv_mean=adv_mean, adv_std=adv_std)
+            comps, diag = plan_losses_for_transition(
+                model, tr, device=device, loss_cfg=loss_cfg, adv_mean=adv_mean, adv_std=adv_std,
+            )
             all_diags.append(diag)
             active = [c for c in components if comps[c].requires_grad]
             for idx, c in enumerate(active):
@@ -1044,14 +864,19 @@ def probe_plan_cross_server_mccandlish(
             c for g_a, g_c in zip(rep_grads["actor_pg"], rep_grads["critic_both"])
             if (c := grad_cosine(g_a, g_c)) is not None
         ])) if rep_grads["actor_pg"] else None,
-        "diagnostics": {k: _m(k) for k in ("loss_total", "loss_actor", "loss_w", "loss_l", "loss_dyn", "entropy",
-                                          "is_ratio_mean", "is_clip_frac", "winnie_mse", "lou_mse", "reward_abs",
-                                          "cart_temp", "cell_temp")},
+        "diagnostics": {
+            k: _m(k)
+            for k in (
+                "loss_total", "loss_actor", "loss_w", "loss_l", "loss_dyn", "entropy",
+                "is_ratio_mean", "is_clip_frac", "winnie_mse", "lou_mse", "reward_abs",
+                "cart_temp", "cell_temp",
+            )
+        },
     }
 
 
 @torch.no_grad()
-def ema_update(ema_model: PlanWally, live_model: PlanWally, decay: float = 0.95) -> None:
+def ema_update(ema_model: PlanWally, live_model: PlanWally, decay: float = DEFAULT_OPTIMIZER_CONFIG.ema_decay) -> None:
     for p_ema, p_live in zip(ema_model.parameters(), live_model.parameters()):
         p_ema.mul_(decay).add_(p_live, alpha=1.0 - decay)
     project_unit_norm_(ema_model)
