@@ -433,8 +433,8 @@ async function refresh(force=false){
   }
   svs.forEach(s=>{
     const endpoint = `${String(s.host).trim()}:${Number(s.port)}`;
-    const connectCmd = `+connect ${endpoint}`;
-    const cliCmd = `${CLIENT_LAUNCHER} -window ${connectCmd}`;
+    const consoleCmd = `connect ${endpoint}`;
+    const cliCmd = `${CLIENT_LAUNCHER} -window +connect ${endpoint}`;
     const tr = document.createElement('tr');
 
     const cells = [
@@ -463,9 +463,15 @@ async function refresh(force=false){
     const wrap = document.createElement('div');
     wrap.className = 'actions';
 
-    const bConn = document.createElement('button');
-    bConn.textContent = `Copy ${connectCmd}`;
-    bConn.addEventListener('click', () => copyText(connectCmd, bConn));
+    const bAddr = document.createElement('button');
+    bAddr.textContent = `Copy ${endpoint}`;
+    bAddr.title = 'Paste into Xonotic Multiplayer -> Address box';
+    bAddr.addEventListener('click', () => copyText(endpoint, bAddr));
+
+    const bCon = document.createElement('button');
+    bCon.textContent = 'Copy console';
+    bCon.title = consoleCmd + ' (for in-game ~ console)';
+    bCon.addEventListener('click', () => copyText(consoleCmd, bCon));
 
     const bCli = document.createElement('button');
     bCli.textContent = 'Copy CLI';
@@ -477,7 +483,8 @@ async function refresh(force=false){
     bLaunch.className = 'launch';
     bLaunch.addEventListener('click', () => launchClient(String(s.host).trim(), Number(s.port), bLaunch));
 
-    wrap.appendChild(bConn);
+    wrap.appendChild(bAddr);
+    wrap.appendChild(bCon);
     wrap.appendChild(bCli);
     wrap.appendChild(bLaunch);
     actTd.appendChild(wrap);
