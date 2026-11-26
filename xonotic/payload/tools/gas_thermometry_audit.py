@@ -30,15 +30,17 @@ from solver.strat.plan_runner import MultiServerPlanHarness
 from solver.xonwire import CART_KIND, OBSERVATION_KIND, TEAM_KIND, Engine, RuntimeFrames
 
 
-def _tile_of(x: float, y: float, tiles: list[dict]) -> int:
+def _tile_of(x: float, y: float, z: float, tiles: list[dict]) -> int:
     for t in tiles:
         if t["x0"] <= x <= t["x1"] and t["y0"] <= y <= t["y1"]:
-            return int(t["id"])
-    # Inside a joint throat: assign nearest tile center
+            if "z0" not in t or (t["z0"] <= z <= t["z1"]):
+                return int(t["id"])
+    # Inside a joint throat or slightly outside AABB: assign nearest tile center
     best_id, best_d2 = -1, float("inf")
     for t in tiles:
         cx, cy = t["center"][0], t["center"][1]
-        d2 = (x - cx) ** 2 + (y - cy) ** 2
+        cz = t["center"][2] if len(t["center"]) >= 3 else 0.0
+        d2 = (x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2
         if d2 < best_d2:
             best_d2, best_id = d2, int(t["id"])
     return best_id
@@ -91,6 +93,7 @@ def run_gas_audit(
     joint_vn2_samples: list[list[float]] = [[] for _ in joints]
 
     prev_pos: dict[int, np.ndarray] = {}
+    prev_tile: dict[int, int] = {}
     prev_alive: dict[int, bool] = {}
     pos_hist: dict[int, tuple[float, np.ndarray]] = {}
     spawn_coords: list[tuple[int, np.ndarray]] = []
@@ -153,6 +156,7 @@ def run_gas_audit(
                     if not alive:
                         prev_alive[eid] = False
                         prev_pos.pop(eid, None)
+                        prev_tile.pop(eid, None)
                         pos_hist.pop(eid, None)
                         continue
                     alive_n += 1
@@ -166,16 +170,43 @@ def run_gas_audit(
                         pos_hist[eid] = (now_t, p)
 
                     # Bulk tile density & temperature accumulation
-                    tid = _tile_of(p[0], p[1], tiles)
+                    tid = _tile_of(p[0], p[1], p[2], tiles)
                     if 0 <= tid < len(tiles):
                         tile_occ_sum[tid] += 1.0
                         tile_v2_sum[tid] += v_xy2
                         tile_v_sum[tid] += v_xy
                         tile_cnt[tid] += 1
 
-                    # Membrane joint crossing & throat thermometry
+                    # Membrane joint crossing & throat thermometry (physical doorways + B3313 portal membranes)
                     p_old = prev_pos.get(eid)
+                    t_old_id = prev_tile.get(eid)
                     for ji, jt in enumerate(joints):
+                        if jt.get("type") == "portal":
+                            ta, tb = int(jt["tile_a"]), int(jt["tile_b"])
+                            hw = 0.5 * float(jt["width"]) + 48.0
+                            hl = 112.0
+                            # Check vestibule proximity on either side of the portal membrane
+                            for o_key, n_key in (("origin", "normal"), ("origin_b", "normal_b")):
+                                if o_key not in jt:
+                                    continue
+                                ox, oy, oz = float(jt[o_key][0]), float(jt[o_key][1]), float(jt[o_key][2])
+                                nx, ny = float(jt[n_key][0]), float(jt[n_key][1])
+                                tx, ty = -ny, nx
+                                dx, dy, dz = p[0] - ox, p[1] - oy, p[2] - oz
+                                if abs(dz) <= 112.0 and abs(dx * nx + dy * ny) <= hl and abs(dx * tx + dy * ty) <= hw:
+                                    vn = v[0] * nx + v[1] * ny
+                                    joint_v2_samples[ji].append(v_xy2)
+                                    joint_vn2_samples[ji].append(float(vn * vn))
+                            # Portal transit crossing when a live player jumps tile_a <-> tile_b
+                            if prev_alive.get(eid, False) and t_old_id is not None and t_old_id != tid:
+                                if (t_old_id == ta and tid == tb) or (t_old_id == tb and tid == ta):
+                                    joint_crossings[ji] += 1
+                                    n_use = jt["normal_b"] if tid == tb else jt["normal"]
+                                    vn = v[0] * float(n_use[0]) + v[1] * float(n_use[1])
+                                    joint_v2_samples[ji].append(v_xy2)
+                                    joint_vn2_samples[ji].append(float(vn * vn))
+                            continue
+
                         ox, oy = float(jt["origin"][0]), float(jt["origin"][1])
                         nx, ny = float(jt["normal"][0]), float(jt["normal"][1])
                         tx, ty = -ny, nx
@@ -213,6 +244,7 @@ def run_gas_audit(
                         pos_hist[eid] = (now_t, p)
 
                     prev_pos[eid] = p
+                    prev_tile[eid] = tid
                     prev_alive[eid] = True
     finally:
         harness._stop_servers(procs, logs)
