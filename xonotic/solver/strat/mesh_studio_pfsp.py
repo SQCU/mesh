@@ -87,7 +87,7 @@ MODEL_KWARGS = dict(
     use_mealy=True,
 )
 MODULE_GROUPS = ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "skill_id_head", "dynamics_head")
-MAP_SLOWMO = {"boil": 1.0, "stormkeep": 1.2, "catharsis": 1.8, "afterslime": 1.8}
+MAP_SLOWMO = {"boil": 1.0, "stormkeep": 1.2, "catharsis": 1.8, "afterslime": 1.8, "vorix": 1.3, "dance": 1.3, "glowplant": 1.3}
 
 
 def _init_mesh_world(device: str):
@@ -1025,6 +1025,7 @@ def main():
     ap.add_argument("--base-port", type=int, default=26000)
     ap.add_argument("--elo-duration-s", type=float, default=32.0)
     ap.add_argument("--init-ckpt", default="", help="Optional EMA checkpoint path on rank 0 to resume training study")
+    ap.add_argument("--train-maps", default="boil,boil,stormkeep,stormkeep,catharsis,catharsis", help="Comma-separated 6-map training pool")
     args = ap.parse_args()
 
     device = args.device
@@ -1079,7 +1080,7 @@ def main():
     if rank == 0:
         torch.save({"model": main_ema.state_dict(), "spec": main_ema.spec()}, ckpt_dir / "main_init_ema.pt")
 
-    train_maps = ["boil", "boil", "stormkeep", "stormkeep", "catharsis", "catharsis"]
+    train_maps = [m.strip() for m in args.train_maps.split(",") if m.strip()]
     fp_iter0_ref: dict | None = None
     win_rates_vs_opp: dict[str, float] = {}
     pfsp_wins: dict[str, float] = defaultdict(float)
