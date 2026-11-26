@@ -644,15 +644,19 @@ def plan_logp(
     return lp_cont + lp_cart + lp_rival + lp_cell
 
 
-def plan_entropy(out: PlanOutput) -> torch.Tensor:
-    h_cont = (out.cont_logstd + 0.5 * math.log(2.0 * math.pi * math.e)).sum(dim=-1)
+def plan_discrete_entropy(out: PlanOutput) -> torch.Tensor:
     p_cart = F.softmax(out.cart_logits, dim=-1)
     h_cart = -(p_cart * F.log_softmax(out.cart_logits, dim=-1)).sum(dim=-1)
     p_riv = F.softmax(out.rival_logits, dim=-1)
     h_riv = -(p_riv * F.log_softmax(out.rival_logits, dim=-1)).sum(dim=-1)
     p_cell = F.softmax(out.cell_logits, dim=-1)
     h_cell = -(p_cell * F.log_softmax(out.cell_logits, dim=-1)).sum(dim=-1)
-    return h_cont + h_cart + h_riv + h_cell
+    return h_cart + h_riv + h_cell
+
+
+def plan_entropy(out: PlanOutput) -> torch.Tensor:
+    h_cont = (out.cont_logstd + 0.5 * math.log(2.0 * math.pi * math.e)).sum(dim=-1)
+    return h_cont + plan_discrete_entropy(out)
 
 
 def pack_plan_rows(
@@ -789,6 +793,8 @@ class PlanTransition:
     map_name: str = "boil"
     priv_skill_in: np.ndarray | None = None
     priv_skill_out: np.ndarray | None = None
+    gae_adv: np.ndarray | None = None
+    gae_ret: np.ndarray | None = None
 
 
 def plan_losses_for_transition(
@@ -839,19 +845,25 @@ def plan_losses_for_transition(
     valid_succ = torch.as_tensor(tr.successor_rows >= 0, dtype=torch.float32, device=device)
 
     val = torch.where(wm, cur.value_winnie, cur.value_lou)
-    boot = torch.where(nwm, nxt.value_winnie[succ], nxt.value_lou[succ])
-    boot = torch.where((wm == nwm) & (disc > 0) & (valid_succ > 0), boot, 0.0)
-    target = reward + disc * boot.detach()
-    error = target - val
+    if tr.gae_adv is not None and tr.gae_ret is not None:
+        raw_adv = torch.as_tensor(tr.gae_adv, dtype=torch.float32, device=device)
+        target = torch.as_tensor(tr.gae_ret, dtype=torch.float32, device=device)
+    else:
+        boot = torch.where(nwm, nxt.value_winnie[succ], nxt.value_lou[succ])
+        boot = torch.where((wm == nwm) & (disc > 0) & (valid_succ > 0), boot, 0.0)
+        target = reward + disc * boot.detach()
+        raw_adv = (target - val).detach()
 
     logpi = plan_logp(cur, cont, cart_pick, rival_pick, cell_pick)
     log_ratio = torch.clamp(logpi - beh_lp, -POLICY_LOG_RATIO_BOUND, POLICY_LOG_RATIO_BOUND)
-    adv_norm = (error.detach() - float(adv_mean)) / max(float(adv_std), 1e-4)
+    adv_norm = (raw_adv - float(adv_mean)) / max(float(adv_std), 1e-4)
     adv = torch.clamp(adv_norm, -3.0, 3.0)
     am_sum = torch.clamp(am.sum(), min=1.0)
     surrogate = clipped_policy_surrogate(log_ratio, adv, POLICY_RATIO_CLIP)
     ent = (plan_entropy(cur) * am).sum() / am_sum
-    actor_loss = actor_weight * (-(surrogate * am).sum() / am_sum - entropy_coef * ent)
+    ent_disc = (plan_discrete_entropy(cur) * am).sum() / am_sum
+    # Regularize discrete pointer entropy only; avoid normalized-1D Aurora ratchet on continuous cont_logstd
+    actor_loss = actor_weight * (-(surrogate * am).sum() / am_sum - entropy_coef * ent_disc)
 
     w_mask = wm.to(torch.float32)
     l_mask = (~wm).to(torch.float32)
@@ -885,6 +897,8 @@ def plan_losses_for_transition(
             "loss_skill": float(skill_loss.item()),
             "skill_id_mse": skill_mse,
             "entropy": float(ent.item()),
+            "entropy_disc": float(ent_disc.item()),
+            "cont_std_mean": float(torch.exp(cur.cont_logstd).mean().item()),
             "is_ratio_mean": float(ratio_np.mean()) if ratio_np.size else None,
             "is_clip_frac": float(np.mean(np.abs(lr_np) > math.log(1.0 + POLICY_RATIO_CLIP))) if lr_np.size else None,
             "winnie_mse": float(((cur.value_winnie - target).square() * w_mask).sum().item() / max(1.0, float(w_mask.sum().item()))) if float(w_mask.sum().item()) > 0 else None,

@@ -143,10 +143,85 @@ def _make_grouped_aurora(model: PlanWally, lr: float, scalar_lr: float) -> Auror
     return opt
 
 
+def _attach_full_episode_gae_(
+    model: PlanWally,
+    by_session: dict[int, list[PlanTransition]],
+    device: str,
+    gae_lambda: float = 0.95,
+) -> None:
+    """Compute exact per-bot full-episode GAE(lambda) advantages and lambda-returns across each
+    complete contiguous episode BEFORE striding into the large multi-episode batch."""
+    with torch.no_grad():
+        for trs in by_session.values():
+            if not trs:
+                continue
+            T = len(trs)
+            v_in_list: list[np.ndarray] = []
+            for tr in trs:
+                obs_in = torch.as_tensor(tr.obs_in, dtype=torch.float32, device=device)
+                carts_in = torch.as_tensor(tr.carts_in, dtype=torch.float32, device=device)
+                teams_in = torch.as_tensor(tr.teams_in, dtype=torch.float32, device=device)
+                evt_in = torch.as_tensor(np.array(tr.events_in, copy=True), dtype=torch.float32, device=device) if len(tr.events_in) else None
+                geo_in = _geo_to_torch(tr.geo_in, device)
+                h_in = torch.as_tensor(tr.h_in, dtype=torch.float32, device=device) if tr.h_in is not None else None
+                priv_in = torch.as_tensor(tr.priv_skill_in, dtype=torch.float32, device=device) if tr.priv_skill_in is not None else None
+                cur = model(obs_in, carts_in, teams_in, evt_in, geo=geo_in, h_prev=h_in, priv_skill=priv_in)
+                wm = torch.as_tensor(tr.winner_mask, dtype=torch.bool, device=device)
+                v_in_list.append(torch.where(wm, cur.value_winnie, cur.value_lou).cpu().numpy().astype(np.float32))
+
+            last = trs[-1]
+            obs_last = torch.as_tensor(last.obs_out, dtype=torch.float32, device=device)
+            carts_last = torch.as_tensor(last.carts_out, dtype=torch.float32, device=device)
+            teams_last = torch.as_tensor(last.teams_out, dtype=torch.float32, device=device)
+            evt_last = torch.as_tensor(np.array(last.events_out, copy=True), dtype=torch.float32, device=device) if len(last.events_out) else None
+            geo_last = _geo_to_torch(last.geo_out, device)
+            h_last = torch.as_tensor(last.h_out, dtype=torch.float32, device=device) if last.h_out is not None else None
+            priv_last = torch.as_tensor(last.priv_skill_out, dtype=torch.float32, device=device) if last.priv_skill_out is not None else None
+            nxt_last = model(obs_last, carts_last, teams_last, evt_last, geo=geo_last, h_prev=h_last, priv_skill=priv_last)
+            last_vw = nxt_last.value_winnie.cpu().numpy().astype(np.float32)
+            last_vl = nxt_last.value_lou.cpu().numpy().astype(np.float32)
+
+            next_adv: np.ndarray | None = None
+            next_id_map: dict[int, int] = {}
+            for t in range(T - 1, -1, -1):
+                tr = trs[t]
+                v_in = v_in_list[t]
+                n = len(v_in)
+                adv = np.zeros((n,), dtype=np.float32)
+                eids = tr.obs_in[:, OBS["ID"]].astype(np.int64)
+                for i in range(n):
+                    disc = float(tr.discount[i])
+                    succ = int(tr.successor_rows[i])
+                    same_role = bool(tr.winner_mask[i]) == bool(tr.next_winner_mask[i])
+                    v_next = 0.0
+                    gae_next = 0.0
+                    if same_role and disc > 0.0 and succ >= 0:
+                        if t == T - 1:
+                            if succ < len(last_vw):
+                                v_next = float(last_vw[succ] if tr.next_winner_mask[i] else last_vl[succ])
+                        else:
+                            j = next_id_map.get(int(eids[i]), -1)
+                            if j >= 0 and bool(trs[t + 1].winner_mask[j]) == bool(tr.next_winner_mask[i]):
+                                v_next = float(v_in_list[t + 1][j])
+                                gae_next = float(next_adv[j])
+                    delta = float(tr.reward[i]) + disc * v_next - float(v_in[i])
+                    adv[i] = delta + disc * gae_lambda * gae_next
+                tr.gae_adv = adv
+                tr.gae_ret = (adv + v_in).astype(np.float32)
+                next_adv = adv
+                next_id_map = {int(eids[i]): i for i in range(n)}
+
+
 def _sync_adv_stats(model: PlanWally, batch: list[PlanTransition], torch_mesh, world_size: int, device: str) -> tuple[float, float]:
     errs = []
     with torch.no_grad():
         for tr in batch:
+            am = tr.actor_mask.astype(bool)
+            if not np.any(am):
+                continue
+            if tr.gae_adv is not None:
+                errs.append(tr.gae_adv[am])
+                continue
             obs_in = torch.as_tensor(tr.obs_in, dtype=torch.float32, device=device)
             carts_in = torch.as_tensor(tr.carts_in, dtype=torch.float32, device=device)
             teams_in = torch.as_tensor(tr.teams_in, dtype=torch.float32, device=device)
@@ -175,9 +250,7 @@ def _sync_adv_stats(model: PlanWally, batch: list[PlanTransition], torch_mesh, w
             boot = torch.where((wm == nwm) & (disc > 0) & (vs > 0), boot, 0.0)
             reward = torch.as_tensor(tr.reward, dtype=torch.float32, device=device)
             err = (reward + disc * boot - val).cpu().numpy()
-            am = tr.actor_mask.astype(bool)
-            if np.any(am):
-                errs.append(err[am])
+            errs.append(err[am])
     cat = np.concatenate(errs) if errs else np.zeros((0,), dtype=np.float32)
     stats = torch_mesh.empty((3,), dtype=torch.float32, device=device)
     stats[0] = float(cat.size)
@@ -693,6 +766,8 @@ def _large_batch_rdma_aurora_update(
         "loss_total": _m("loss_total"),
         "skill_id_mse": _m("skill_id_mse"),
         "entropy": _m("entropy"),
+        "entropy_disc": _m("entropy_disc"),
+        "cont_std_mean": _m("cont_std_mean"),
         "snr_4studio": summarize_mccandlish_pairs([ep0_snr]) if ep0_snr is not None else None,
         "snr_4studio_by_group": {g: summarize_mccandlish_pairs([gp]) for g, gp in ep0_group_snr.items()},
     }
@@ -1046,6 +1121,7 @@ def main():
             regression=regression, native_bots=native_bots,
             duration_s=args.episode_duration_s, rng_seed=50000 + idx_it * 100 + rank,
         )
+        _attach_full_episode_gae_(t_model, col["by_session_transitions"], device=device, gae_lambda=0.95)
         batch = _stride_batch_across_episodes(col["by_session_transitions"], args.local_batch)
         upd = _large_batch_rdma_aurora_update(
             t_model, t_ema, t_opt, batch,
@@ -1095,7 +1171,8 @@ def main():
                 "b_global": upd["b_global"],
                 "rollout_s": col["rollout_wall_s"], "update_s": upd["update_wall_s"],
                 "rdma_ms": upd["mean_rdma_ms"], "grad_norm": upd["grad_norm"],
-                "entropy": upd["entropy"], "skill_id_mse": upd["skill_id_mse"],
+                "entropy": upd["entropy"], "entropy_disc": upd["entropy_disc"],
+                "cont_std_mean": upd["cont_std_mean"], "skill_id_mse": upd["skill_id_mse"],
                 "online_skill_id_corr": col["online_skill_id_corr"],
                 "fsq_codes": col["fsq_unique_codes"], "fsq_ent": col["fsq_entropy_bits"],
                 "snr_4studio": snr,
@@ -1108,7 +1185,7 @@ def main():
                 f"act_eff={(bg.get('action_head') or {}).get('step_efficiency')} "
                 f"gram_eff={(bg.get('gram_cgt') or {}).get('step_efficiency')} "
                 f"sk_eff={(bg.get('skill_id_head') or {}).get('step_efficiency')} "
-                f"sk_r={rec['online_skill_id_corr']} fsq={rec['fsq_ent']}",
+                f"std={rec['cont_std_mean']:.3f} sk_r={rec['online_skill_id_corr']} fsq={rec['fsq_ent']}",
                 flush=True,
             )
 
