@@ -10,7 +10,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from payload.tools.strategy_io_schema import CS, EVT, EVT_WIDTH, OBS, OBS_WIDTH, TS
+from payload.tools.strategy_io_schema import BOT_CONFIGURATION_COLUMNS, CS, EVT, EVT_WIDTH, OBS, OBS_WIDTH, TS
 
 from .aurora import Aurora, aurora_init_weight_
 from .game_value import cgt_tensor_features
@@ -145,10 +145,12 @@ def prenormalize_obs(obs: torch.Tensor, geo: dict[str, torch.Tensor] | None) -> 
     x[:, OBS["HEALTH"]] = (x[:, OBS["HEALTH"]] - 100.0) / 100.0
     x[:, OBS["ARMOR"]] = (x[:, OBS["ARMOR"]] - 50.0) / 100.0
     x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] = x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] / 50.0
-    # Zero out non-stationary absolute clock / sequence counters that leak wall time across waves
+    # Zero out non-stationary absolute clock / sequence counters AND all 13 bot-configuration
+    # mechanical skill columns so the actor NEVER cheats on bot metadata and must infer latent
+    # mechanical skill online from behavior (100% compatible with human players).
     for col in ("ENGINE_TIME", "SPAWN_TIME", "STRENGTH_FINISHED", "RESPONSE_SEQ", "RESPONSE_TIME",
                 "APPLIED_SEQUENCE", "OUTCOME_A_SEQ", "OUTCOME_B_SEQ", "CELL_X", "CELL_Y",
-                "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME"):
+                "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME", *BOT_CONFIGURATION_COLUMNS):
         if col == "STRENGTH_FINISHED":
             rem = torch.clamp(obs[:, OBS["STRENGTH_FINISHED"]] - obs[:, OBS["ENGINE_TIME"]], min=0.0, max=30.0) / 30.0
             x[:, OBS[col]] = rem
@@ -223,6 +225,7 @@ class PlanOutput(NamedTuple):
     dyn_action: torch.Tensor
     h_next: torch.Tensor
     fsq_codes: torch.Tensor | None
+    pred_skill: torch.Tensor | None = None
 
 
 class PlanSample(NamedTuple):
@@ -430,6 +433,13 @@ class PlanWally(nn.Module):
         self.value_proj = MPLinear(d, 2)
         self.value_gain = nn.Parameter(torch.tensor(0.5))
         self.value_bias = nn.Parameter(torch.zeros(2))
+        # Asymmetric critic conditioning on privileged roster skill (training-only; never touches actor!)
+        self.value_priv_proj = MPLinear(3, 2)
+        self.value_priv_gain = nn.Parameter(torch.tensor(0.15))
+        # Auxiliary online skill-ID head: supervises Mealy h_t + Linear-Gram to infer latent mechanical Elo
+        self.skill_id_proj = MPLinear(d, 1)
+        self.skill_id_gain = nn.Parameter(torch.tensor(0.5))
+        self.skill_id_bias = nn.Parameter(torch.zeros(1))
         self.dyn_drift_proj = MPLinear(d, 1)
         self.dyn_drift_gain = nn.Parameter(torch.tensor(0.25))
         self.dyn_action_proj = MPLinear(d, PLAN_CONT_DIM)
@@ -446,6 +456,7 @@ class PlanWally(nn.Module):
         geo: dict[str, torch.Tensor] | None = None,
         h_prev: torch.Tensor | None = None,
         world=None,
+        priv_skill: torch.Tensor | None = None,
     ) -> PlanOutput:
         n, j, k = obs.shape[0], carts.shape[0], teams.shape[0]
         device, dtype = obs.device, obs.dtype
@@ -563,11 +574,27 @@ class PlanWally(nn.Module):
         cell_logits = temp_v * (mp_unit_vec(self.cell_q(p_h)) @ mp_unit_vec(self.cell_k(vcell_h)).T)
 
         vals = torch.clamp(self.value_gain, 0.05, 5.0) * self.value_proj(p_h) + self.value_bias
+        if priv_skill is not None and priv_skill.shape[0] == n:
+            ps = priv_skill.to(device=device, dtype=dtype)
+            obs_t = obs[:, OBS["TEAM"]].to(torch.float32)
+            t_mem = (obs_t[:, None] == team_ids[None, :]).to(dtype)
+            t_cnt = torch.clamp(t_mem.sum(dim=0), min=1.0)
+            t_mean = (t_mem.T @ ps) / t_cnt
+            own_mean = t_mem @ t_mean
+            if k > 1:
+                rival_mask = obs_t[:, None] != team_ids[None, :]
+                rival_vals = t_mean[None, :].expand(n, k).masked_fill(~rival_mask, -1e4)
+                rival_max = rival_vals.max(dim=-1).values
+            else:
+                rival_max = torch.zeros_like(ps)
+            priv_feat = torch.stack((ps, own_mean, rival_max), dim=-1)
+            vals = vals + torch.clamp(self.value_priv_gain, 0.0, 2.0) * self.value_priv_proj(priv_feat)
+        pred_skill = (torch.clamp(self.skill_id_gain, 0.05, 3.0) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
         dyn_drift = (torch.clamp(self.dyn_drift_gain, 0.05, 2.0) * self.dyn_drift_proj(p_h)).squeeze(-1)
         dyn_action = torch.clamp(self.dyn_action_gain, 0.05, 2.0) * self.dyn_action_proj(p_h)
         return PlanOutput(
             cont_mean, cont_logstd, cart_logits, rival_logits, cell_logits,
-            vals[:, 0], vals[:, 1], dyn_drift, dyn_action, h_next, fsq_codes,
+            vals[:, 0], vals[:, 1], dyn_drift, dyn_action, h_next, fsq_codes, pred_skill,
         )
 
     def spec(self) -> dict:
@@ -696,8 +723,10 @@ def plan_module_group(param_name: str) -> str:
                 "cart_q", "cart_k", "rival_q", "rival_k", "cell_q", "cell_k",
                 "log_temp_cart", "log_temp_rival", "log_temp_cell"):
         return "action_head"
-    if root in ("value_proj", "value_gain", "value_bias"):
+    if root in ("value_proj", "value_gain", "value_bias", "value_priv_proj", "value_priv_gain"):
         return "value_head"
+    if root in ("skill_id_proj", "skill_id_gain", "skill_id_bias"):
+        return "skill_id_head"
     if root in ("dyn_drift_proj", "dyn_drift_gain", "dyn_action_proj", "dyn_action_gain"):
         return "dynamics_head"
     return "other"
@@ -758,6 +787,8 @@ class PlanTransition:
     h_in: np.ndarray | None = None
     h_out: np.ndarray | None = None
     map_name: str = "boil"
+    priv_skill_in: np.ndarray | None = None
+    priv_skill_out: np.ndarray | None = None
 
 
 def plan_losses_for_transition(
@@ -769,6 +800,7 @@ def plan_losses_for_transition(
     actor_weight: float = 1.0,
     critic_weight: float = 0.5,
     dyn_weight: float = 0.25,
+    skill_id_weight: float = 0.25,
     adv_mean: float = 0.0,
     adv_std: float = 1.0,
     world=None,
@@ -779,6 +811,7 @@ def plan_losses_for_transition(
     evt_in = torch.as_tensor(np.array(tr.events_in, copy=True), dtype=torch.float32, device=device) if len(tr.events_in) else None
     geo_in = _geo_to_torch(tr.geo_in, device)
     h_in = torch.as_tensor(tr.h_in, dtype=torch.float32, device=device) if tr.h_in is not None else None
+    priv_in = torch.as_tensor(tr.priv_skill_in, dtype=torch.float32, device=device) if tr.priv_skill_in is not None else None
 
     obs_out = torch.as_tensor(tr.obs_out, dtype=torch.float32, device=device)
     carts_out = torch.as_tensor(tr.carts_out, dtype=torch.float32, device=device)
@@ -786,10 +819,11 @@ def plan_losses_for_transition(
     evt_out = torch.as_tensor(np.array(tr.events_out, copy=True), dtype=torch.float32, device=device) if len(tr.events_out) else None
     geo_out = _geo_to_torch(tr.geo_out, device)
     h_out = torch.as_tensor(tr.h_out, dtype=torch.float32, device=device) if tr.h_out is not None else None
+    priv_out = torch.as_tensor(tr.priv_skill_out, dtype=torch.float32, device=device) if tr.priv_skill_out is not None else None
 
-    cur = model(obs_in, carts_in, teams_in, evt_in, geo=geo_in, h_prev=h_in, world=world)
+    cur = model(obs_in, carts_in, teams_in, evt_in, geo=geo_in, h_prev=h_in, world=world, priv_skill=priv_in)
     with torch.no_grad():
-        nxt = model(obs_out, carts_out, teams_out, evt_out, geo=geo_out, h_prev=h_out, world=world)
+        nxt = model(obs_out, carts_out, teams_out, evt_out, geo=geo_out, h_prev=h_out, world=world, priv_skill=priv_out)
 
     cont = torch.as_tensor(tr.cont, dtype=torch.float32, device=device)
     cart_pick = torch.as_tensor(tr.cart_pick, dtype=torch.long, device=device)
@@ -831,7 +865,14 @@ def plan_losses_for_transition(
     pred_drho = cur.dyn_drift + (cur.dyn_action * cont).sum(dim=-1)
     dyn_loss = dyn_weight * (F.smooth_l1_loss(pred_drho, obs_drho, reduction="none", beta=0.25) * valid_succ).sum() / torch.clamp(valid_succ.sum(), min=1.0)
 
-    total = actor_loss + w_loss + l_loss + dyn_loss
+    if priv_in is not None and cur.pred_skill is not None:
+        skill_loss = skill_id_weight * F.smooth_l1_loss(cur.pred_skill, priv_in, beta=0.5)
+        skill_mse = float((cur.pred_skill.detach() - priv_in).square().mean().item())
+    else:
+        skill_loss = torch.zeros((), dtype=torch.float32, device=device)
+        skill_mse = None
+
+    total = actor_loss + w_loss + l_loss + dyn_loss + skill_loss
     with torch.no_grad():
         lr_np = log_ratio.detach().cpu().numpy()[tr.actor_mask.astype(bool)] if np.any(tr.actor_mask) else np.empty((0,))
         ratio_np = np.exp(np.clip(lr_np, -20.0, 20.0)) if lr_np.size else np.empty((0,))
@@ -841,6 +882,8 @@ def plan_losses_for_transition(
             "loss_w": float(w_loss.item()),
             "loss_l": float(l_loss.item()),
             "loss_dyn": float(dyn_loss.item()),
+            "loss_skill": float(skill_loss.item()),
+            "skill_id_mse": skill_mse,
             "entropy": float(ent.item()),
             "is_ratio_mean": float(ratio_np.mean()) if ratio_np.size else None,
             "is_clip_frac": float(np.mean(np.abs(lr_np) > math.log(1.0 + POLICY_RATIO_CLIP))) if lr_np.size else None,

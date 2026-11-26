@@ -98,7 +98,18 @@ class MultiServerPlanHarness:
                 best_m = m
         return best_name, best_m
 
-    def _spawn_servers(self, work_dir: Path, sock: str, seeds: list[int], base_port: int, map_names: list[str] | None = None):
+    def _spawn_servers(
+        self,
+        work_dir: Path,
+        sock: str,
+        seeds: list[int],
+        base_port: int,
+        map_names: list[str] | None = None,
+        bot_config_files: list[Path | None] | None = None,
+        skill: int = 5,
+        extra_cvars: list[dict[str, float]] | None = None,
+        slowmo_per_server: list[float] | None = None,
+    ):
         procs, logs = [], []
         maps = map_names if (map_names is not None and len(map_names) == len(seeds)) else ["boil"] * len(seeds)
         for idx, (seed, mname) in enumerate(zip(seeds, maps)):
@@ -109,6 +120,12 @@ class MultiServerPlanHarness:
                 dst = sv_data / item.name
                 if not dst.exists():
                     os.symlink(item, dst)
+            bcfg_name = None
+            if bot_config_files is not None and idx < len(bot_config_files) and bot_config_files[idx] is not None:
+                src_bcfg = Path(bot_config_files[idx])
+                dst_bcfg = sv_data / "custom_bots.txt"
+                dst_bcfg.write_text(src_bcfg.read_text())
+                bcfg_name = "custom_bots.txt"
             logf = open(work_dir / f"server_{idx}_{mname}.log", "w")
             logs.append(logf)
             env = dict(os.environ)
@@ -132,12 +149,22 @@ class MultiServerPlanHarness:
                 "+g_spawn_swizzle", "1",
                 "+bot_join_empty", "1",
                 "+bot_number", "9",
-                "+skill", "5",
+                "+skill", str(int(skill)),
                 "+g_payload_speed", str(self.payload_speed),
                 "+g_payload_strategy_interval", str(self.strategy_interval),
             ]
-            if self.slowmo != 1.0:
-                cmd.extend(["+slowmo", str(self.slowmo)])
+            if bcfg_name is not None:
+                cmd.extend(["+bot_prefix", "", "+bot_suffix", "", "+bot_config_file", bcfg_name])
+            if extra_cvars is not None and idx < len(extra_cvars) and extra_cvars[idx]:
+                for ck, cv in extra_cvars[idx].items():
+                    cmd.extend([f"+{ck}", str(cv)])
+            sv_slowmo = (
+                float(slowmo_per_server[idx])
+                if (slowmo_per_server is not None and idx < len(slowmo_per_server))
+                else float(self.slowmo)
+            )
+            if sv_slowmo != 1.0:
+                cmd.extend(["+slowmo", str(sv_slowmo)])
             cmd.extend(["+map", str(mname)])
             procs.append(subprocess.Popen(cmd, cwd=self.basedir, env=env, stdout=logf, stderr=subprocess.STDOUT))
             pub_host = os.environ.get("MESH_PUBLIC_HOST", "127.0.0.1")
@@ -205,6 +232,10 @@ class MultiServerPlanHarness:
         device: str = "cpu",
         base_port: int = 27000,
         map_names: list[str] | None = None,
+        bot_config_files: list[Path | None] | None = None,
+        skill: int = 5,
+        extra_cvars: list[dict[str, float]] | None = None,
+        slowmo_per_server: list[float] | None = None,
         custom_plan_fn: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, MapManifold | None], np.ndarray] | None = None,
     ) -> dict:
         """Run G concurrent live Xonotic servers in PLAN-only mode over loopback UDP,
@@ -213,7 +244,14 @@ class MultiServerPlanHarness:
         engine = Engine("udp://127.0.0.1:0", self.framebytes)
         sock = engine.path
         inbox = RuntimeFrames(self.framebytes, plan_only=True)
-        procs, logs = self._spawn_servers(work_dir, sock, seeds, base_port, map_names=map_names)
+        procs, logs = self._spawn_servers(
+            work_dir, sock, seeds, base_port,
+            map_names=map_names,
+            bot_config_files=bot_config_files,
+            skill=skill,
+            extra_cvars=extra_cvars,
+            slowmo_per_server=slowmo_per_server,
+        )
 
         routes: dict[int, tuple[int, object]] = {}
         sess_order: dict[int, int] = {}
