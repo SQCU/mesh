@@ -441,6 +441,9 @@ void payload_think(entity this)
 	vector cart_center = this.origin + this.view_ofs;
 	if(!this.plc_wp || wasfreed(this.plc_wp) || vdist(this.plc_wp.origin - cart_center, >, 160))
 		this.plc_wp = payload_nearest_waypoint(cart_center);
+	this.blacklisted = false;
+	if(this.plc_wp && !wasfreed(this.plc_wp))
+		this.nearestwaypoint = this.plc_wp;
 	WaypointSprite_UpdateHealth(this.sprite, s_new);
 	payload_update_links(this);
 
@@ -604,6 +607,8 @@ void payload_cart_configure(entity cart)
 	_setmodel(cart, PLC_CART_MODEL);
 	cart.effects |= EF_NODRAW;
 	cart.solid = SOLID_BBOX;
+	cart.navigation_dynamicgoal = true;
+	cart.blacklisted = false;
 	set_movetype(cart, MOVETYPE_PUSH);
 	setsize(cart, PLC_CART_MIN, PLC_CART_MAX);
 	cart.view_ofs = -PLC_CART_RIDE_OFS;
@@ -789,6 +794,7 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 		plan_ds = bound(-600, this.plc_pl_f_cart_ds, 600);
 	IL_EACH(g_payload_carts, true,
 	{
+		it.blacklisted = false;
 		vector cpos = it.origin + it.view_ofs;
 		if (vdist(cpos - org, >, sradius))
 			continue;

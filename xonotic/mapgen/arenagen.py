@@ -209,12 +209,10 @@ class ArenaBuilder:
             ux, uy = math.cos(ang), math.sin(ang)
             # Radial route from hub to ring
             self.nav_chains.append([(160.0 * ux, 160.0 * uy, 0.0), (R * ux, R * uy, 0.0)])
-            # Symmetric 90-degree arc along ring (alternating direction for opposing flow!)
+            # Symmetric 90-degree arc along ring (120-deg separated origins so carts never start adjacent)
             k0 = ci * (n_ring // 3) + 1
             k1 = (ci + 1) * (n_ring // 3) - 1
             arc = ring_pts[k0 : k1 + 1]
-            if ci % 2 == 1:
-                arc = list(reversed(arc))
             self.cart_tracks.append(arc)
             # Inner baffle wall between center and mid-arc (gives real tactical cover!)
             mid_ang = math.radians(120.0 * ci + 60.0)
