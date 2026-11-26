@@ -227,12 +227,16 @@ def _run_solo_cart_probe(harness: MultiServerPlanHarness, mapname: str, work_dir
                     if 1 <= eid <= harness.maxclients and tm == 1:
                         plan[eid - 1, 0] = float(eid)
                         plan[eid - 1, 1] = float(target_c)
-                        plan[eid - 1, 2:7] = np.array([2.0, -2.0, -2.0, -2.0, -2.0], dtype=np.float32)
+                        w_carts = [-2.0, -2.0, -2.0]
+                        if 0 <= target_c < 3:
+                            w_carts[target_c] = 2.0
+                        # w0, w1, w2 = cart weights; w3 = +2.0 (boost all carts); w4 = -2.0 (ignore enemies)
+                        plan[eid - 1, 2:7] = np.array([w_carts[0], w_carts[1], w_carts[2], 2.0, -2.0], dtype=np.float32)
                         plan[eid - 1, 7] = 0.0
                         plan[eid - 1, 8] = 0.0
                         plan[eid - 1, 9] = 0.0
                         plan[eid - 1, 10] = 0.0
-                        plan[eid - 1, 14] = 2.0
+                        plan[eid - 1, 14] = -2.0
                         plan[eid - 1, 15] = 0.6
                 dest = routes.get(sess)
                 if dest is not None:

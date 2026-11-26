@@ -319,6 +319,11 @@ class ArenaBuilder:
             mouth_approach = ((R + 140.0) * math.cos(ang0), (R + 140.0) * math.sin(ang0), 0.0)
             self.nav_chains.append([mouth_approach] + pts + [(0.0, 0.0, peak_z)])
 
+        # Outer z=0 ground ring connecting all 3 team bays directly to all 3 spiral ramp mouths
+        outer_r = R + 140.0
+        outer_ring = [(outer_r * math.cos(2 * math.pi * k / 24), outer_r * math.sin(2 * math.pi * k / 24), 0.0) for k in range(25)]
+        self.nav_chains.append(outer_ring)
+
         # 3 wide return ramps from central terrace (z=peak_z) back down to ground + team bases (60, 180, 300 deg)
         bay_r = R + 260.0
         for ti in range(3):
