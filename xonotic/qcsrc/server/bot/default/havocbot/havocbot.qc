@@ -48,8 +48,15 @@ void havocbot_ai(entity this)
 	if (bot_ispaused(this))
 		return;
 
-	if (bot_strategytoken == this && !bot_strategytoken_taken)
+	bool has_strategy_slot = (bot_strategytoken == this && !bot_strategytoken_taken)
+		|| (currentbots > 16 && bot_strategytoken_budget > 0 && !(IS_DEAD(this) || STAT(FROZEN, this))
+			&& (!this.goalcurrent || navigation_goalrating_timeout(this)));
+	if (has_strategy_slot)
 	{
+		if (currentbots > 16 && (this.aistatus & AI_STATUS_STUCK))
+			this.aistatus &= ~AI_STATUS_STUCK;
+		if (!this.goalcurrent)
+			navigation_goalrating_timeout_force(this);
 		if(this.havocbot_blockhead)
 		{
 			this.havocbot_blockhead = false;
@@ -97,7 +104,10 @@ void havocbot_ai(entity this)
 			}
 		}
 
-		bot_strategytoken_taken = true;
+		if (bot_strategytoken == this)
+			bot_strategytoken_taken = true;
+		if (bot_strategytoken_budget > 0)
+			bot_strategytoken_budget -= 1;
 	}
 
 	if (this.goalcurrent && wasfreed(this.goalcurrent))

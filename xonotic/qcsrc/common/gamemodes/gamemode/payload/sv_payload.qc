@@ -516,8 +516,12 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 		node.plc_cart = this;
 		node.plc_idx = guard;
 		this.plc_checkpoint_count += (node.spawnflags & PLC_CHECKPOINT) != 0;
-		if(guard == 0 || (node.spawnflags & PLC_CHECKPOINT))
-			waypoint_spawn(node.origin, node.origin, WAYPOINTFLAG_GENERATED);
+		if(guard == 0 || ((node.spawnflags & PLC_CHECKPOINT) && payload_cart_count <= 12))
+		{
+			entity near_wp = payload_nearest_waypoint(node.origin);
+			if(!near_wp || vdist(near_wp.origin - node.origin, >, 280))
+				waypoint_spawn(node.origin, node.origin, WAYPOINTFLAG_GENERATED);
+		}
 		++guard;
 		if(node.curvetarget != "")
 			node.plc_curve = find(NULL, targetname, node.curvetarget);

@@ -72,6 +72,7 @@ entity bot_list;
 
 float bot_strategytoken_taken;
 entity bot_strategytoken;
+int bot_strategytoken_budget;
 
 float botframe_spawnedwaypoints;
 float botframe_nextthink;

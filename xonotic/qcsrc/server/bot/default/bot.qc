@@ -774,6 +774,7 @@ void bot_serverframe()
 
 	if (bot_list)
 	{
+		bot_strategytoken_budget = max(1, ceil(currentbots / 16));
 
 		if (bot_strategytoken_taken)
 		{
