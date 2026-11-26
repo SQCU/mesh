@@ -85,36 +85,27 @@ def discover_fleet_nodes() -> list[dict]:
     return nodes
 
 
-def probe_darkplaces_server(host: str, port: int, timeout: float = 0.35) -> dict:
-    """Query a live DarkPlaces/Xonotic UDP server with Quake3/DP `getstatus`."""
+def probe_darkplaces_server(host: str, port: int, timeout: float = 0.85) -> dict:
+    """Query a live DarkPlaces/Xonotic UDP server with compact `getinfo` (~280B, never
+    fragments over Tailscale MTU even at N=255 bots)."""
     t0 = time.perf_counter()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(timeout)
     try:
-        sock.sendto(b"\xff\xff\xff\xffgetstatus\n", (host, int(port)))
-        raw, _ = sock.recvfrom(8192)
+        sock.sendto(b"\xff\xff\xff\xffgetinfo\n", (host, int(port)))
+        raw, _ = sock.recvfrom(65535)
         ping_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     except OSError:
         return {"online": False, "host": host, "port": int(port)}
     finally:
         sock.close()
 
-    if not raw.startswith(b"\xff\xff\xff\xffstatusResponse"):
+    if not (raw.startswith(b"\xff\xff\xff\xffinfoResponse") or raw.startswith(b"\xff\xff\xff\xffstatusResponse")):
         return {"online": False, "host": host, "port": int(port)}
     lines = raw.decode("latin-1", errors="replace").splitlines()
     kv_line = lines[1] if len(lines) > 1 else ""
     parts = kv_line.lstrip("\\").split("\\")
     info = {parts[i]: parts[i + 1] for i in range(0, len(parts) - 1, 2)}
-    players = []
-    for pl in lines[2:]:
-        pl = pl.strip()
-        if not pl:
-            continue
-        toks = pl.split(None, 2)
-        score = int(toks[0]) if len(toks) > 0 and toks[0].lstrip("-").isdigit() else 0
-        ping = int(toks[1]) if len(toks) > 1 and toks[1].isdigit() else 0
-        name = toks[2].strip('"') if len(toks) > 2 else ""
-        players.append({"score": score, "ping": ping, "name": name})
 
     return {
         "online": True,
@@ -124,11 +115,11 @@ def probe_darkplaces_server(host: str, port: int, timeout: float = 0.35) -> dict
         "hostname": info.get("hostname", ""),
         "mapname": info.get("mapname", ""),
         "gamename": info.get("gamename", ""),
-        "clients": int(info.get("clients", len(players))),
+        "clients": int(info.get("clients", 0)),
         "maxclients": int(info.get("sv_maxclients", 16)),
         "bots": int(info.get("bots", 0)),
         "qcstatus": info.get("qcstatus", ""),
-        "players": players,
+        "players": [],
         "connect_cmd": f"+connect {host}:{int(port)}",
         "scope": "loopback" if host in ("127.0.0.1", "localhost") else "remote_studio",
     }
