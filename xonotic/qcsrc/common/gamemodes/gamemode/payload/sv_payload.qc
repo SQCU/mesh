@@ -459,7 +459,11 @@ void payload_think(entity this)
 	}
 	vector cart_center = this.origin + this.view_ofs;
 	if(!this.plc_wp || wasfreed(this.plc_wp) || vdist(this.plc_wp.origin - cart_center, >, 160))
+	{
 		this.plc_wp = payload_nearest_waypoint(cart_center);
+		if(!this.plc_wp && bot_waypoints_for_items && time > 2)
+			this.plc_wp = waypoint_spawn(cart_center, cart_center, WAYPOINTFLAG_GENERATED);
+	}
 	this.blacklisted = false;
 	if(this.plc_wp && !wasfreed(this.plc_wp))
 		this.nearestwaypoint = this.plc_wp;
@@ -535,12 +539,6 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 		node.plc_cart = this;
 		node.plc_idx = guard;
 		this.plc_checkpoint_count += (node.spawnflags & PLC_CHECKPOINT) != 0;
-		if(guard == 0 || (node.spawnflags & PLC_CHECKPOINT))
-		{
-			entity near_wp = payload_nearest_waypoint(node.origin);
-			if(!near_wp || vdist(near_wp.origin - node.origin, >, 280))
-				waypoint_spawn(node.origin, node.origin, WAYPOINTFLAG_GENERATED);
-		}
 		++guard;
 		if(node.curvetarget != "")
 			node.plc_curve = find(NULL, targetname, node.curvetarget);
@@ -791,15 +789,17 @@ entity payload_nearest_waypoint(vector cpos)
 {
 	entity best_wp = NULL;
 	float best_dist = 1000000000;
-	IL_EACH(g_waypoints, !(it.wpflags & WAYPOINTFLAG_TELEPORT) && vdist(it.origin - cpos, <, 800),
+	for (entity it = findradius(cpos, 800); it; it = it.chain)
 	{
+		if (it.classname != "waypoint" || (it.wpflags & WAYPOINTFLAG_TELEPORT))
+			continue;
 		float d = vlen2(it.origin - cpos);
 		if (d < best_dist)
 		{
 			best_wp = it;
 			best_dist = d;
 		}
-	});
+	}
 	return best_wp;
 }
 
