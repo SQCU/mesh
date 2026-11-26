@@ -662,29 +662,19 @@ def _large_batch_rdma_aurora_update(
             ep0_snr = gpair
             ep0_group_snr = grp_pairs
 
-        grp_scales: dict[int, float] = {}
-        for gi, grp_name in enumerate(optimizer._group_names):
-            gp = grp_pairs.get(grp_name)
-            if gp is None:
-                grp_scales[gi] = 0.0
+        off_g = 0
+        for p in params:
+            sz = p.numel()
+            if p.grad is None:
+                p.grad = mean_g[off_g : off_g + sz].view_as(p.data).clone()
             else:
-                eff_g = float(gp.get("step_efficiency") or 0.0)
-                grp_scales[gi] = max(0.15, math.sqrt(eff_g)) if float(gp.get("signal_sq") or 0.0) > 0.0 else 0.0
-
-        if any(v > 0.0 for v in grp_scales.values()):
-            off_g = 0
-            for p in params:
-                sz = p.numel()
-                if p.grad is None:
-                    p.grad = mean_g[off_g : off_g + sz].view_as(p.data).clone()
-                else:
-                    p.grad.copy_(mean_g[off_g : off_g + sz].view_as(p.data))
-                off_g += sz
-            gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
-            gnorms.append(gn)
-            optimizer.step(group_lr_scales=grp_scales)
-            project_unit_norm_(model)
-            ema_update(ema_model, model, decay=ema_decay)
+                p.grad.copy_(mean_g[off_g : off_g + sz].view_as(p.data))
+            off_g += sz
+        gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip).item())
+        gnorms.append(gn)
+        optimizer.step()
+        project_unit_norm_(model)
+        ema_update(ema_model, model, decay=ema_decay)
 
     _broadcast_model_(model, torch_mesh, rank, world_size, device)
     _broadcast_model_(ema_model, torch_mesh, rank, world_size, device)
