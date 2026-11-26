@@ -69,6 +69,68 @@ NATIVE_BOTS: list[dict] = [
     {"name": "Resurrection", "model": "umbra",           "skin": 0, "shirt":  1, "pants":  1, "vec": ( 0.0, -0.5, -0.5,  0.0,  2.0, -1.0, -1.0, -1.0,  0.0, -1.0,  1.0,  1.0)},
 ]
 
+# Empirically calibrated from 96 live 4-Studio 1v1 DM duels across native HavocBot space (ridge=40.0,
+# R^2=0.664, LOO R^2=+0.440, LOO RMSE=51.7 Elo, anchor s05_Neutral=1000.0).
+CALIBRATED_NATIVE_REGRESSION: dict = {
+    "feature_names": ["intercept", "base_skill", "log1p_base_skill", *SKILL_FIELD_NAMES],
+    "weights": [
+        929.2899, 9.6428, 1.7357, 0.6691, 3.2524, 0.5211, 1.8221,
+        2.2705, -5.7903, -3.0233, -6.2523, 0.1331, -2.4793, 5.1195, 0.7342,
+    ],
+    "r2": 0.664,
+    "rmse_elo": 40.06,
+    "loo_r2": 0.4401,
+    "loo_rmse_elo": 51.71,
+    "elo_min": 822.8,
+    "elo_max": 1134.4,
+    "elo_span": 311.6,
+    "elo_mean": 989.2,
+    "elo_std": 69.1,
+}
+
+
+def sample_native_lobby_roster(
+    rng: np.random.Generator,
+    regression: dict | None = None,
+    native_bots: list[dict] | None = None,
+    distribution: str | None = None,
+) -> tuple[str, list[dict]]:
+    """Sample a 9-bot (3 teams x 3 bots) native HavocBot roster by drawing target 1v1 DM Elos
+    from a natural lobby distribution and inverting the calibrated native parameter map."""
+    reg = regression or CALIBRATED_NATIVE_REGRESSION
+    lo = float(reg.get("elo_min", 830.0))
+    hi = float(reg.get("elo_max", 1130.0))
+    mu = float(reg.get("elo_mean", 990.0))
+    kind = distribution or str(rng.choice(
+        ("gaussian_lobby", "team_skewed", "within_team_skewed", "uniform_native"),
+        p=[0.35, 0.30, 0.25, 0.10],
+    ))
+    if kind == "gaussian_lobby":
+        targets = np.clip(rng.normal(mu, 75.0, size=9), lo, hi).tolist()
+    elif kind == "team_skewed":
+        # Three distinct team mechanical tiers drawn within native calibrated bounds, seats permuted
+        tier_means = np.asarray([lo + 0.15 * (hi - lo), mu, hi - 0.10 * (hi - lo)])
+        tier_means = tier_means[rng.permutation(3)]
+        targets = []
+        for tm_mu in tier_means:
+            targets.extend(np.clip(rng.normal(tm_mu, 28.0, size=3), lo, hi).tolist())
+    elif kind == "within_team_skewed":
+        # Each team mixes a top-tier native bot with lower-tier teammates (carry + support mix)
+        targets = []
+        for _ in range(3):
+            t_elos = [
+                float(np.clip(rng.normal(hi - 0.08 * (hi - lo), 25.0), lo, hi)),
+                float(np.clip(rng.normal(mu, 35.0), lo, hi)),
+                float(np.clip(rng.normal(lo + 0.18 * (hi - lo), 25.0), lo, hi)),
+            ]
+            targets.extend(t_elos)
+    else:
+        targets = rng.uniform(lo, hi, size=9).tolist()
+
+    teams = [1, 1, 1, 2, 2, 2, 3, 3, 3]
+    entries = sample_roster_from_target_elos(targets, reg, rng, native_bots=native_bots, teams=teams)
+    return kind, entries
+
 
 def load_native_bots(pk3_path: Path | None = None) -> list[dict]:
     """Load the exact native bots.txt roster from Xonotic's data pk3 if available, else NATIVE_BOTS."""
