@@ -84,4 +84,46 @@ The held-out evaluation and per-group RDMA SNR table isolate two concrete struct
    - Meanwhile, `action_head` had `signal_sq <= 0` (`step_efficiency = None`) on **`8 / 13` iterations**, causing our per-group SNR gate (`grp_scales[action_head] = 0.0`) to freeze the policy readout while the trunk moved underneath it, and `entropy_coef = 0.008` increased policy entropy monotonically (`8.745 → 8.827`) on the remaining iterations.
    - By contrast, `exploiter_1` had positive `action_head` efficiency on 2 of 3 iterations, reduced entropy (`8.733 → 8.695`), beat `main_mid` (`1503.8` vs `1428.1` Score Elo), and hit `15.64` mean raw score (`14.5×` `default`) on zero-shot `afterslime`. After adding `exploiter_1` to the league pool (`m07..m10`), `main_final` recovered `+52.3` Score Elo (`1428.1 → 1480.4`) and `+80.7` Composite Elo (`1400.0 → 1480.7`) over `main_mid`.
 2. **1-Step TD(0) advantage discarding full-episode trajectory credit assignment:**
-   - Although we collected complete `24 s` (`60–108` tick) episodes, `_sync_adv_stats` and `plan_losses_for_transition` still computed single-tick `0.4 s` TD(0) residuals (`r_t + γ V(s_{t+1}) - V(s_t)`) instead of full-episode **GAE($\lambda = 0.95$)** before striding into the `B_global = 1,024` batch. Computing GAE($\lambda$) across each full episode trajectory and detaching (or down-weighting) auxiliary gradients into the policy trunk when `action_head` is gated is the clean next closed-form fix.
+   - Although we collected complete `24 s` (`60–108` tick) episodes, `_sync_adv_stats` and `plan_losses_for_transition` still computed single-tick `0.4 s` TD(0) residuals (`r_t + γ V(s_{t+1}) - V(s_t)`) instead of full-episode **GAE($\lambda = 0.95$)** before striding into the `B_global = 1,024` batch.
+
+---
+
+## 5. Controlled Ablation: Zero-Clamping SNR Gate Removed (`5791cd182`)
+
+Re-ran the **exact same 4-Studio protocol** (`312` episodes, `B_global = 1,024`, `2` PPO epochs, `lr = 0.010`, `scalar_lr = 5e-3`, `1,046.86 s` wall time, identical 48-match held-out eval) with the per-group SNR zero-clamp removed so Aurora's Nesterov momentum controller stepped every parameter group unconditionally while retaining McCandlish `B_noise` / `step_efficiency` strictly as diagnostics.
+
+### 5.1 Side-by-Side Controlled Comparison
+
+| Metric | With Zero-Clamp (`65a221c87`) | Without Zero-Clamp (`5791cd182`) | Delta |
+|---|---:|---:|---:|
+| `action_head` positive-SNR iters (peak eff) | `5 / 13` (peak `0.25`) | **`7 / 13` (peak `0.71`)** | `+2` iters / `+0.46` peak |
+| Held-out Skill-ID `early (0–8 s)` `r` / `MSE` | `+0.2983` / `1.0572` | **`+0.3471` / `1.0079`** | **`+0.0488` / `-0.0493`** |
+| Held-out Skill-ID `late (8 s+)` `r` / `MSE` | `+0.4088` / `0.8752` | **`+0.4754` / `0.8332`** | **`+0.0666` / `-0.0420`** |
+| Wide FFN dead units / `grad_norm_cv` | `0 / 1024` / `1.3544` | **`0 / 1024` / `1.1951`** | tighter CV (`-0.1593`) |
+| EDM2 `max_dev_from_1` (`33` layers, `7,521` rows) | `0.0` | **`0.0`** | exact |
+| `main_init` Score Elo (mean raw score) | `1569.6` (`3.98`) | `1458.4` (`0.17`) | — *(init baseline)* |
+| `main_mid` Score Elo (mean raw score) | `1428.1` (`0.61`) | **`1488.0` (`2.54`)** | **`+59.9` Elo** (`+29.6` vs init) |
+| `exploiter_1` Score Elo (mean raw score) | `1503.8` (`4.15`) | **`1510.1` (`4.97`)** | **`+6.3` Elo (`3.1× default`)** |
+| `exploiter_1` $\alpha$-Rank (Score / Comp) | `0.1910` / `0.1374` | **`0.2524` / `0.1889`** | **`+0.0614` / `+0.0515`** |
+| `main_final` Score Elo (mean raw score) | `1480.4` (`3.16`) | `1466.9` (`1.35`) | `-13.5` Elo |
+
+### 5.2 Per-Map Held-Out Highlights (No Zero-Clamp, `48` Matches)
+
+| Policy | Score Elo (95% CI) | Mean Score | Composite Elo (95% CI) | Mean Comp | $\alpha$-Rank (Score / Comp) |
+|---|---:|---:|---:|---:|---:|
+| `script_cart_rush` | **1517.7** `[1411.2, 1655.1]` | 3.41 | **1511.3** `[1343.9, 1704.1]` | 6.27 | **0.2591** / 0.2849 |
+| `exploiter_1` | **1510.1** `[1419.1, 1602.9]` | **4.97** | 1490.5 `[1344.7, 1648.7]` | **7.31** | **0.2524** / 0.1889 |
+| `default` | 1500.0 `[1500.0, 1500.0]` | 1.62 | 1500.0 `[1500.0, 1500.0]` | 3.23 | 0.2232 / **0.2957** |
+| `main_mid` | 1488.0 `[1412.9, 1577.3]` | 2.54 | 1459.2 `[1354.2, 1559.4]` | 4.42 | 0.1328 / 0.0797 |
+| `main_final` | 1466.9 `[1408.4, 1523.2]` | 1.35 | 1453.4 `[1360.4, 1535.6]` | 2.60 | 0.0370 / 0.0304 |
+| `main_init` | 1458.4 `[1401.3, 1508.9]` | 0.17 | 1490.5 `[1394.8, 1587.3]` | 1.02 | 0.0955 / 0.1204 |
+
+- **`boil` (`12` matches):** `script_cart_rush` `1569.8` (`12.84`), `exploiter_1` `1509.4` (`12.18` vs `default` `4.93`), `main_mid` `1434.3` (`3.93`), `main_final` `1431.4` (`2.51`), `main_init` `1430.8` (`0.67`).
+- **`stormkeep` (`12` matches):** `main_mid` **`1567.2` Score Elo (`6.24` raw score = `10.6×` `default`'s `0.59`)**, `exploiter_1` `1534.5` Score / **`1651.8` Composite Elo (`7.72` raw score)**, `script_cart_rush` `1518.0`, `main_final` `1477.8` (`2.87`), `main_init` `1456.6` (`0.00`).
+
+### 5.3 Next Bottleneck Exposed by the Controlled Re-Run
+Removing the zero-clamp cleanly fixed `action_head` starvation (`main_mid` beat `main_init` by `+29.6` Score Elo / `14.9×` raw score, `exploiter_1` beat `default` at `1510.1` Score Elo / `3.1×` raw score, and held-out masked Skill-ID jumped to `r = +0.4754`), and isolated the exact reason `main_final` drifted slightly below `main_mid`:
+
+- **Normalized-scalar entropy ratchet:** Because Aurora normalizes 1D scalar parameter updates (`g_eff / rms`), a positive `entropy_coef` on `log_std` acts as a constant-velocity ratchet whenever 1-step TD(0) advantage gradients on `log_std` are noisier than the deterministic entropy bonus. Across `m01..m10`, policy entropy rose monotonically every single iteration (`8.760 → 8.905` at `main_mid` → `9.008` at `main_final`, `+0.248` nats), washing out `main_final`'s action sharpness while `exploiter_1` (3 iterations, `8.739 → 8.763`) stayed sharp.
+- **Remedies for the next iteration:** (1) Replace 1-step `0.4 s` TD(0) with full-episode **GAE($\lambda = 0.95$)** computed across each collected `24 s` episode before striding; (2) remove the positive `entropy_coef` ratchet on `log_std` (use a target-entropy or `0` continuous entropy bonus under Aurora's normalized 1D updates).
+
