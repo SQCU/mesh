@@ -152,7 +152,7 @@ def _design_features(base_skill: float, vec12: tuple[float, ...] | np.ndarray) -
     return np.concatenate(([1.0, s, math.log1p(s)], np.asarray(vec12, dtype=np.float64)))
 
 
-def fit_native_elo_regression(competitors: list[dict], ratings: dict[str, dict], ridge: float = 1.0) -> dict:
+def fit_native_elo_regression(competitors: list[dict], ratings: dict[str, dict], ridge: float = 40.0) -> dict:
     """Fit ridge regression from native HavocBot parameters `(base_skill, log1p(base_skill), theta_12d)`
     to empirical 1v1 DM Elo, reporting in-sample & leave-one-out R^2 and RMSE (Elo points)."""
     X_rows, y_vals, ids = [], [], []
@@ -455,7 +455,7 @@ def main():
         all_matches = [m for g in gathered for m in g["matches"]]
         elo = compute_multiteam_elo(all_matches, anchor_arm="s05_Neutral", anchor_elo=1000.0)
         ratings = elo.get("ratings") or {}
-        reg = fit_native_elo_regression(competitors, ratings, ridge=1.0)
+        reg = fit_native_elo_regression(competitors, ratings, ridge=40.0)
         # Also verify inverse sampler round-trip on a realistic human-like lobby [700..1300]
         demo_targets = [700.0, 800.0, 900.0, 1000.0, 1050.0, 1100.0, 1150.0, 1200.0, 1300.0]
         demo_roster = sample_roster_from_target_elos(demo_targets, reg, np.random.default_rng(7), native_bots)
