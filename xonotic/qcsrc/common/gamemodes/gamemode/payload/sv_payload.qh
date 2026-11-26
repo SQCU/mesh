@@ -14,6 +14,7 @@ void generic_plat_blocked(entity this, entity blocker);
 .float height;
 
 #define autocvar_g_payload_point_limit cvar("g_payload_point_limit")
+float payload_point_limit();
 
 IntrusiveList g_payload_nodes;
 IntrusiveList g_payload_links;

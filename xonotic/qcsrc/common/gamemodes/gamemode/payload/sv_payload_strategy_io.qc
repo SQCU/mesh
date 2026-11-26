@@ -474,7 +474,7 @@ void payload_strategy_gather(float nclients)
 		row.plc_ts_f_score = payload_score[j + 1];
 		row.plc_ts_f_checkpoints_held = payload_checkpoints_held[j + 1];
 		row.plc_ts_f_checkpoint_rate = autocvar_g_payload_checkpoint_rate;
-		row.plc_ts_f_score_limit = autocvar_g_payload_point_limit;
+		row.plc_ts_f_score_limit = payload_point_limit();
 		row.plc_ts_f_episode = payload_episode;
 		row.plc_ts_f_finished = payload_score_finished;
 	}
