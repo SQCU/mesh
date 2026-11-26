@@ -1,6 +1,7 @@
 #!/bin/sh
 mesh_repo=$(cd "$(dirname "$0")/.." && pwd)
 mesh_build=${Q3MAP2_BUILD_ROOT:-$mesh_repo/.build/netradiant}
+[ -d /opt/homebrew/lib ] && export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:+${DYLD_LIBRARY_PATH}:}/opt/homebrew/lib"
 for mesh_compiler in "$mesh_build/current/install/q3map2" "$mesh_repo/xonotic/netradiant-custom/install/q3map2" "${HOME:-}/dox/xonotic/netradiant-custom/install/q3map2"; do
   [ -x "$mesh_compiler" ] && exec "$mesh_compiler" "$@"
 done

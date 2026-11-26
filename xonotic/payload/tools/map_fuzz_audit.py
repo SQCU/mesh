@@ -57,6 +57,10 @@ def _run_3team_fuzz(harness: MultiServerPlanHarness, map_names: list[str], work_
                     continue
                 if sess not in stats:
                     mname, _ = harness._identify_map(carts)
+                    if mname == "unknown" or mname not in map_names:
+                        used = {v["map"] for v in stats.values()}
+                        rem = [mn for mn in map_names if mn not in used]
+                        mname = rem[0] if rem else map_names[len(stats) % len(map_names)]
                     stats[sess] = {
                         "map": mname, "ticks": 0, "first_cp_s": None,
                         "cart_len": carts[:, CS["PATH_LENGTH"]].round(0).tolist(),
@@ -261,6 +265,11 @@ def main():
             rec["static_rider_gaps"] = sd.get("rider_gap_segments")
             rec["static_len_ratio"] = round(float(sd.get("path_length_ratio") or 0.0), 2)
             rec["static_min_cross_team_u"] = sd.get("min_cross_team_spawn_dist")
+        else:
+            rec["static_rider_gaps"] = 0
+            lens = rec.get("cart_len") or []
+            rec["static_len_ratio"] = round(max(lens) / max(min(lens), 1.0), 2) if lens else 1.0
+            rec["static_min_cross_team_u"] = rec.get("min_cross_team_spawn_obs_u")
         rec["PASS_ALL"] = bool(
             rec.get("cross_team_spawn_overlaps_200u", 999) == 0
             and rec.get("bot_stuck_pct", 100.0) < 12.0
