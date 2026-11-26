@@ -83,25 +83,23 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	drawstring_aspect(titlepos, title, vec2(mySize.x, titleh), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 
 	int n = 0;
-	int n_active = 0;
 	for(int c = 0; c < PLC_MAX_CARTS; ++c)
 	{
 		payload_cart_read(c);
 		if(plc_r_present)
-		{
 			++n;
-			if(plc_r_frac > 0.001 || plc_r_ctrl > 0 || plc_r_lead > 0)
-				++n_active;
-		}
 	}
 	if(n < 1)
 		n = 1;
-	int max_rows = min(n, 12);
+	int cols = max(1, ceil(n / 16));
+	int rows = max(1, ceil(n / cols));
 
 	float pipband = mySize.y * 0.16;
 	float rowarea = mySize.y - pipband;
-	float rowh = rowarea / max_rows;
-	float barh = rowh * 0.5;
+	float rowh = rowarea / rows;
+	float barh = max(2, rowh * 0.55);
+	float colw = mySize.x / cols;
+	float colpad = (cols > 1) ? 3 : 0;
 
 	int pipslot = 0;
 	for(int c = 0; c < PLC_MAX_CARTS; ++c)
@@ -122,14 +120,10 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	}
 
 	int slot = 0;
-	for(int pass = 0; pass < 2 && slot < max_rows; ++pass)
-	for(int c = 0; c < PLC_MAX_CARTS && slot < max_rows; ++c)
+	for(int c = 0; c < PLC_MAX_CARTS; ++c)
 	{
 		payload_cart_read(c);
-		if(!plc_r_present && !(n == 1 && c == 0 && pass == 0))
-			continue;
-		bool is_act = (plc_r_frac > 0.001 || plc_r_ctrl > 0 || plc_r_lead > 0);
-		if((pass == 0 && !is_act && n > max_rows) || (pass == 1 && is_act))
+		if(!plc_r_present && !(n == 1 && c == 0))
 			continue;
 
 		float f = plc_r_frac;
@@ -137,8 +131,10 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 		vector teamcol = plc_r_color;
 		vector motcol = plc_r_color2;
 
-		vector rp = myPos + vec2(0, pipband + slot * rowh + (rowh - barh) * 0.5);
-		vector rs = vec2(mySize.x, barh);
+		int col_i = floor(slot / rows);
+		int row_i = slot - col_i * rows;
+		vector rp = myPos + vec2(col_i * colw, pipband + row_i * rowh + (rowh - barh) * 0.5);
+		vector rs = vec2(max(4, colw - colpad), barh);
 
 		drawfill(rp, rs, '0.08 0.08 0.08', panel_fg_alpha * 0.6, DRAWFLAG_NORMAL);
 		if(f > 0)
@@ -149,7 +145,7 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 			motcol, panel_fg_alpha * plc_r_glow, DRAWFLAG_NORMAL);
 
 		float gy = rp.y + barh * 0.5 - barh * 0.18;
-		vector gc = myPos + vec2(mySize.x - barh * 0.4, gy);
+		vector gc = vec2(rp.x + rs.x - barh * 0.4, gy);
 		if(regress)
 			drawfill(gc, vec2(barh * 0.36, barh * 0.36), plc_r_inkcolor, panel_fg_alpha, DRAWFLAG_ADDITIVE);
 		else if(!stall)
@@ -161,9 +157,7 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	if(autocvar_hud_panel_modicons_payload_layout)
 	{
 		payload_cart_read(0);
-		string hdr = (n > max_rows)
-			? sprintf("%d carts (%d active, showing %d)", n, n_active, slot)
-			: _("Cart paths / checkpoint control");
-		drawstring_aspect(myPos, hdr, vec2(mySize.x, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+		drawstring_aspect(myPos, _("Cart paths / checkpoint control"),
+			vec2(mySize.x, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 	}
 }

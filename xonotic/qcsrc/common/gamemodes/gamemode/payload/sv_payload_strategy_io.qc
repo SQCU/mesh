@@ -181,7 +181,7 @@ float payload_str_within2(vector a, vector b)
 	return (max(dx, dy) <= 2);
 }
 
-const float PLC_STR_EVT_CAP = 512;
+const float PLC_STR_EVT_CAP = 4096;
 
 void payload_str_deposit(float kind, float observer, float team, float subject, vector position, vector cell, vector target_cell, float respawn_time, float health, float link_length, float amount, float response_seq)
 {

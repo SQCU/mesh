@@ -853,7 +853,7 @@ def main():
     K, J, M = args.teams, args.carts, args.tiles
     if args.sample:
         d = sample_gas_world_params(args.seed)
-        K, J, M = d["teams"], d["carts"], min(12, d["tiles"])
+        K, J, M = d["teams"], d["carts"], d["tiles"]
 
     pool = [s.strip() for s in args.maps.split(",") if s.strip()] if args.maps else None
     specs = sample_variant_specs(M, seed=args.seed, base_pool=pool, include_nexus=args.include_nexus)

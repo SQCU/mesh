@@ -350,14 +350,14 @@ def _collect_full_episodes(
     train_arm: str,
     regression: dict,
     native_bots: list[dict],
-    duration_s: float,
+    max_wall_s: float = 600.0,
+    point_limit: float | None = None,
     gamma: float = 0.95,
     rng_seed: int = 1000,
     map_specs: list[dict] | None = None,
 ) -> dict:
-    """Run G concurrent FULL live episodes on this Studio with calibrated native HavocBot rosters
-    (per-bot isolated `bot_base_skill`), returning all transitions strided cleanly across the
-    complete match horizon."""
+    """Run G concurrent live episodes on this Studio until EVERY match genuinely scores out
+    (`tick.cartstate.finished`), collecting 100% of transitions unconditionally."""
     work_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(rng_seed)
 
@@ -402,6 +402,7 @@ def _collect_full_episodes(
         bots_per_server=bots_per_sv,
         maxclients_per_server=maxc_per_sv,
         meta_per_server=meta_per_sv,
+        point_limit=point_limit,
     )
 
     routes: dict[int, tuple[int, object]] = {}
@@ -414,13 +415,18 @@ def _collect_full_episodes(
     telemetry_by_sess: dict[int, list[dict]] = defaultdict(list)
     by_session_transitions: dict[int, list[PlanTransition]] = defaultdict(list)
     live_dims: dict[int, dict] = {}
+    finished_sessions: set[int] = set()
+    sess_first_episode: dict[int, tuple] = {}
+    expected_sessions = len(seeds)
     skill_pred_pairs: list[tuple[float, float]] = []
     fp_train_acc = PhaseSpaceAccumulator(label=f"train:{train_arm}", cell_size=256.0)
     fp_default_acc = PhaseSpaceAccumulator(label="ref:default", cell_size=256.0)
 
     t0 = time.monotonic()
     try:
-        while time.monotonic() - t0 < duration_s:
+        while len(finished_sessions) < expected_sessions and (time.monotonic() - t0) < max_wall_s:
+            if all(p.poll() is not None for p in procs):
+                break
             readable, _, _ = select.select([engine], [], [], 0.05)
             if not readable:
                 continue
@@ -430,6 +436,8 @@ def _collect_full_episodes(
                     routes[s] = (node, address)
             while (ready := inbox.take()) is not None:
                 (session, tick_id), records, event_batches = ready
+                if int(session) in finished_sessions:
+                    continue
                 if session not in sess_order:
                     sess_order[session] = len(sess_order)
                     obs_mems[session] = ObservationMemory()
@@ -451,6 +459,11 @@ def _collect_full_episodes(
                 cell_centroids = sess_manifold.cell_centroids if sess_manifold is not None else None
 
                 ep_id = ObservationMemory.identity(session, team_rows[0, TS["EPISODE"]])
+                if session not in sess_first_episode:
+                    sess_first_episode[session] = ep_id
+                elif ep_id != sess_first_episode[session]:
+                    finished_sessions.add(int(session))
+                    continue
                 mem = obs_mems[session]
                 mem.observe(ep_id, event_batches)
                 evt_rows = mem.rows
@@ -537,7 +550,7 @@ def _collect_full_episodes(
                                 codes_np = out.fsq_codes.detach().cpu().numpy().astype(np.int64)
                                 for bi in np.flatnonzero(sel):
                                     fsq_code_counts[tuple(int(v) for v in codes_np[bi])] += 1
-                            if out.pred_skill is not None and (time.monotonic() - t0) >= 8.0 and len(skill_pred_pairs) < 4000:
+                            if out.pred_skill is not None and (time.monotonic() - t0) >= 8.0:
                                 ps_hat = out.pred_skill.detach().cpu().numpy()
                                 for bi in range(n_bots):
                                     skill_pred_pairs.append((float(ps_hat[bi]), float(priv_skill_np[bi])))
@@ -633,7 +646,7 @@ def _collect_full_episodes(
                             obs_in=prev["obs"].copy(), carts_in=prev["carts"].copy(),
                             teams_in=prev["teams"].copy(), events_in=prev["events"].copy(),
                             obs_out=obs_rows.copy(), carts_out=cart_rows.copy(),
-                            teams_out=team_rows.copy(), events_out=evt_rows[-64:].copy() if len(evt_rows) > 64 else evt_rows.copy(),
+                            teams_out=team_rows.copy(), events_out=evt_rows.copy(),
                             cont=prev["cont"].copy(), cart_pick=prev["cart_pick"].copy(),
                             rival_pick=prev["rival_pick"].copy(), cell_pick=prev["cell_pick"].copy(),
                             behavior_logp=prev["logp"].copy(), reward=rew.astype(np.float32),
@@ -644,10 +657,14 @@ def _collect_full_episodes(
                             priv_skill_in=prev["priv_skill"].copy(), priv_skill_out=priv_skill_np.copy(),
                         ))
 
+                if tick.cartstate.finished:
+                    finished_sessions.add(int(session))
+                    continue
+
                 prev_state[session] = {
                     "episode": ep_id, "tick": tick,
                     "obs": obs_rows.copy(), "carts": cart_rows.copy(),
-                    "teams": team_rows.copy(), "events": evt_rows[-64:].copy() if len(evt_rows) > 64 else evt_rows.copy(),
+                    "teams": team_rows.copy(), "events": evt_rows.copy(),
                     "geo": geo_np, "h_in": train_h_in.copy() if train_h_in is not None else None,
                     "arms": bot_arms.copy(), "cont": cont_all,
                     "cart_pick": cart_all, "rival_pick": rival_all,
@@ -657,15 +674,15 @@ def _collect_full_episodes(
         harness._stop_servers(procs, logs)
         engine.close()
 
-    local_comp_matches = []
+    local_score_matches = []
     for sess_id, recs in sorted(telemetry_by_sess.items()):
         mot = extract_behavioral_motifs(recs)
-        comp_map = {}
+        sc_map = {}
         for _, ti in (mot.get("per_team") or {}).items():
             a = ti["arm"]
-            comp_map[a] = float(ti["score_end"]) + 5.0 * int(ti["max_checkpoints_held"]) + 0.1 * int(ti["cart_push_ticks"])
-        if len(comp_map) >= 2:
-            local_comp_matches.append(comp_map)
+            sc_map[a] = max(sc_map.get(a, -1e9), float(ti["score_end"]))
+        if len(sc_map) >= 2:
+            local_score_matches.append(sc_map)
 
     tot_c = sum(fsq_code_counts.values())
     fsq_ent = 0.0
@@ -683,8 +700,10 @@ def _collect_full_episodes(
         "rollout_wall_s": round(time.monotonic() - t0, 2),
         "by_session_transitions": dict(by_session_transitions),
         "n_episodes": len(by_session_transitions),
+        "n_score_outs": len(finished_sessions),
+        "n_expected_sessions": expected_sessions,
         "n_raw_transitions": sum(len(v) for v in by_session_transitions.values()),
-        "local_comp_matches": local_comp_matches,
+        "local_comp_matches": local_score_matches,
         "fsq_unique_codes": len(fsq_code_counts),
         "fsq_entropy_bits": round(fsq_ent, 3),
         "online_skill_id_corr": skill_corr,
@@ -695,12 +714,13 @@ def _collect_full_episodes(
     }
 
 
-def _stride_batch_across_episodes(by_session: dict[int, list[PlanTransition]], target_local: int) -> list[PlanTransition]:
-    """Select `target_local` transitions evenly strided across EVERY episode so all maps, rosters,
-    and full episode horizons (early/mid/late match) are uniformly represented in every update."""
+def _collect_training_transitions(by_session: dict[int, list[PlanTransition]], target_local: int = 0) -> list[PlanTransition]:
+    """Return transitions across all episodes unconditionally when target_local <= 0."""
     sessions = [s for s in sorted(by_session) if by_session[s]]
     if not sessions:
         return []
+    if target_local <= 0:
+        return [tr for s in sessions for tr in by_session[s]]
     per_ep = target_local // len(sessions)
     rem = target_local - per_ep * len(sessions)
     out: list[PlanTransition] = []
@@ -830,7 +850,8 @@ def _eval_triplet_native(
     arm_models: dict[str, PlanWally | None],
     team_arms: tuple[str, ...],
     mapname: str,
-    duration_s: float,
+    max_wall_s: float = 600.0,
+    point_limit: float | None = None,
     device: str,
     base_port: int,
     regression: dict,
@@ -868,6 +889,7 @@ def _eval_triplet_native(
         bots_per_server=[sv_n] * len(seeds),
         maxclients_per_server=[sv_maxc] * len(seeds),
         meta_per_server=[map_spec or {}] * len(seeds),
+        point_limit=point_limit,
     )
     routes: dict[int, tuple[int, object]] = {}
     sess_order: dict[int, int] = {}
@@ -875,12 +897,17 @@ def _eval_triplet_native(
     obs_mems: dict[int, ObservationMemory] = {}
     mealy_states: dict[tuple[int, str], dict[int, np.ndarray]] = defaultdict(dict)
     telemetry_by_sess: dict[int, list[dict]] = defaultdict(list)
+    finished_sessions: set[int] = set()
+    sess_first_episode: dict[int, tuple] = {}
+    expected_sessions = len(seeds)
     skill_preds_early: list[tuple[float, float]] = []
     skill_preds_late: list[tuple[float, float]] = []
     t_start = time.monotonic()
 
     try:
-        while time.monotonic() - t_start < duration_s:
+        while len(finished_sessions) < expected_sessions and (time.monotonic() - t_start) < max_wall_s:
+            if all(p.poll() is not None for p in procs):
+                break
             readable, _, _ = select.select([engine], [], [], 0.05)
             if not readable:
                 continue
@@ -890,6 +917,8 @@ def _eval_triplet_native(
                     routes[s] = (node, address)
             while (ready := inbox.take()) is not None:
                 (session, tick_id), records, event_batches = ready
+                if int(session) in finished_sessions:
+                    continue
                 if session not in sess_order:
                     sess_order[session] = len(sess_order)
                     obs_mems[session] = ObservationMemory()
@@ -905,6 +934,11 @@ def _eval_triplet_native(
                 _, sess_manifold = sess_maps[session]
                 cell_centroids = sess_manifold.cell_centroids if sess_manifold is not None else None
                 ep_id = ObservationMemory.identity(session, team_rows[0, TS["EPISODE"]])
+                if session not in sess_first_episode:
+                    sess_first_episode[session] = ep_id
+                elif ep_id != sess_first_episode[session]:
+                    finished_sessions.add(int(session))
+                    continue
                 mem = obs_mems[session]
                 mem.observe(ep_id, event_batches)
                 evt_rows = mem.rows
@@ -956,9 +990,8 @@ def _eval_triplet_native(
                         if out.pred_skill is not None and arm_name == "main_final":
                             ph = out.pred_skill.detach().cpu().numpy()
                             dst_list = skill_preds_early if elapsed_s < 8.0 else skill_preds_late
-                            if len(dst_list) < 2000:
-                                for bi in range(n_bots):
-                                    dst_list.append((float(ph[bi]), float(priv_skill_np[bi])))
+                            for bi in range(n_bots):
+                                dst_list.append((float(ph[bi]), float(priv_skill_np[bi])))
                         samp = sample_plan(out, deterministic=False)
                         h_nxt = out.h_next.detach().cpu().numpy()
                         for bi in range(n_bots):
@@ -988,6 +1021,8 @@ def _eval_triplet_native(
                     "game_value": formal_value_record(tick.game_value, tick.cartstate),
                     "learning": {}, "policy_updates": {},
                 })
+                if tick.cartstate.finished:
+                    finished_sessions.add(int(session))
     finally:
         harness._stop_servers(procs, logs)
         engine.close()
@@ -999,14 +1034,16 @@ def _eval_triplet_native(
         for _, ti in (mot.get("per_team") or {}).items():
             a = ti["arm"]
             sc = float(ti["score_end"])
-            sc_m[a] = sc
-            cp_m[a] = sc + 5.0 * int(ti["max_checkpoints_held"]) + 0.1 * int(ti["cart_push_ticks"])
+            sc_m[a] = max(sc_m.get(a, -1e9), sc)
+            cp_m[a] = max(cp_m.get(a, -1e9), sc)
         if len(sc_m) >= 2:
             score_matches.append(sc_m)
             comp_matches.append(cp_m)
     return {
         "score_matches": score_matches,
         "composite_matches": comp_matches,
+        "n_score_outs": len(finished_sessions),
+        "n_expected_sessions": expected_sessions,
         "skill_preds_early": skill_preds_early,
         "skill_preds_late": skill_preds_late,
     }
@@ -1025,7 +1062,7 @@ def _audit_dead_neurons(model: PlanWally, harness: MultiServerPlanHarness, work_
         base_port=base_port,
         map_names=["boil", "stormkeep"],
     )
-    trs = res["transitions"][:12]
+    trs = res["transitions"]
     if not trs:
         return {"error": "no transitions"}
     model.zero_grad(set_to_none=True)
@@ -1057,13 +1094,13 @@ def main():
     ap.add_argument("--calibration-json", default="")
     ap.add_argument("--main-iters", type=int, default=10)
     ap.add_argument("--exploiter-iters", type=int, default=3)
-    ap.add_argument("--episode-duration-s", type=float, default=24.0)
-    ap.add_argument("--local-batch", type=int, default=256)
+    ap.add_argument("--max-episode-wall-s", type=float, default=600.0, help="Deadlock ceiling only; matches run until real QuakeC score-out")
+    ap.add_argument("--point-limit", type=float, default=120.0, help="Per-(J/K) g_payload_point_limit so matches finish cleanly by scoring out")
+    ap.add_argument("--local-batch", type=int, default=0, help="0 = train unconditionally on 100% of collected transitions")
     ap.add_argument("--ppo-epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=0.010)
     ap.add_argument("--scalar-lr", type=float, default=5e-3)
     ap.add_argument("--base-port", type=int, default=26000)
-    ap.add_argument("--elo-duration-s", type=float, default=32.0)
     ap.add_argument("--init-ckpt", default="", help="Optional EMA checkpoint path on rank 0 to resume training study")
     ap.add_argument("--train-maps", default="boil,boil,stormkeep,stormkeep,catharsis,catharsis", help="Comma-separated 6-map training pool")
     ap.add_argument("--supermap-manifest", default="", help="Optional JSON manifest of gas-normalized B3313 supermaps (K, J, N, M)")
@@ -1205,11 +1242,12 @@ def main():
             server_configs=scfg, base_port=args.base_port + (idx_it % 5) * 10,
             arm_models=arm_models, train_arm=t_arm,
             regression=regression, native_bots=native_bots,
-            duration_s=args.episode_duration_s, rng_seed=50000 + idx_it * 100 + rank,
+            max_wall_s=args.max_episode_wall_s, point_limit=args.point_limit,
+            rng_seed=50000 + idx_it * 100 + rank,
             map_specs=iter_specs,
         )
         _attach_full_episode_gae_(t_model, col["by_session_transitions"], device=device, gae_lambda=0.95)
-        batch = _stride_batch_across_episodes(col["by_session_transitions"], args.local_batch)
+        batch = _collect_training_transitions(col["by_session_transitions"], args.local_batch)
         upd = _large_batch_rdma_aurora_update(
             t_model, t_ema, t_opt, batch,
             rank=rank, world_size=world_size, torch_mesh=torch_mesh, device=device,
@@ -1217,17 +1255,23 @@ def main():
             ema_decay=0.88, grad_clip=1.0, iter_id=idx_it,
         )
 
-        # Update PFSP win-rates & gather live observed (K, J, N) dims globally across all Studios
+        # Update PFSP win-rates & gather live observed (K, J, N) dims + score-out counts globally across all Studios
         if world_size > 1:
             all_m_list = [None for _ in range(world_size)]
             all_d_list = [None for _ in range(world_size)]
+            all_so_list = [None for _ in range(world_size)]
             dist.all_gather_object(all_m_list, col["local_comp_matches"])
             dist.all_gather_object(all_d_list, col.get("live_dims") or [])
+            dist.all_gather_object(all_so_list, (col.get("n_score_outs", 0), col.get("n_expected_sessions", 0)))
             iter_matches = [m for sub in all_m_list for m in sub]
             iter_dims = [d for sub in all_d_list for d in sub]
+            iter_score_outs = sum(x[0] for x in all_so_list)
+            iter_expected = sum(x[1] for x in all_so_list)
         else:
             iter_matches = col["local_comp_matches"]
             iter_dims = col.get("live_dims") or []
+            iter_score_outs = col.get("n_score_outs", 0)
+            iter_expected = col.get("n_expected_sessions", 0)
 
         if role == "main":
             for m in iter_matches:
@@ -1272,6 +1316,7 @@ def main():
             bg = upd.get("snr_4studio_by_group") or {}
             rec = {
                 "iter": it_name, "role": role, "episodes_global": len(iter_dims) or col["n_episodes"] * world_size,
+                "score_outs_global": iter_score_outs, "expected_episodes_global": iter_expected,
                 "live_dims": iter_dims,
                 "raw_transitions_global_est": col["n_raw_transitions"] * world_size,
                 "b_global": upd["b_global"],
@@ -1299,7 +1344,7 @@ def main():
                 ns = [d["bots"] for d in iter_dims]
                 dim_str = f" K=[{min(ks)}..{max(ks)}] J=[{min(js)}..{max(js)}] N=[{min(ns)}..{max(ns)}]"
             print(
-                f"[{it_name}:{role:9s}] ep={rec['episodes_global']}{dim_str} B={rec['b_global']} "
+                f"[{it_name}:{role:9s}] score_outs={iter_score_outs}/{iter_expected}{dim_str} B={rec['b_global']} "
                 f"roll={rec['rollout_s']}s upd={rec['update_s']}s eff={snr.get('step_efficiency')} "
                 f"act_eff={(bg.get('action_head') or {}).get('step_efficiency')} "
                 f"sk_r={rec['online_skill_id_corr']} std={rec['cont_std_mean']:.3f} "
@@ -1309,7 +1354,7 @@ def main():
 
     train_wall_s = round(time.monotonic() - t_train0, 2)
 
-    # ── Held-Out 4-Studio Parallel Multi-Map CRN Elo + alpha-Rank + Skill-ID Audit ──
+    # ── Held-Out 4-Studio Parallel Multi-Map CRN Elo + alpha-Rank + Skill-ID Audit (Play-to-Score-Out) ──
     if supermap_specs:
         my_eval_spec = supermap_specs[rank % len(supermap_specs)]
         my_map = my_eval_spec["name"]
@@ -1327,12 +1372,14 @@ def main():
         ("script_cart_rush", "main_mid", "main_final"),
     ]
     local_sc, local_cp, local_sk_early, local_sk_late = [], [], [], []
+    local_eval_so = 0
+    local_eval_exp = 0
     for ti, trip in enumerate(eval_triplets):
         er = _eval_triplet_native(
             harness, out_dir / f"elo_r{rank}_{my_map}_t{ti}",
             seeds=[75000 + ti * 100 + j for j in range(eval_n_seeds)],
             arm_models=eval_models, team_arms=trip,
-            mapname=my_map, duration_s=args.elo_duration_s,
+            mapname=my_map, max_wall_s=args.max_episode_wall_s, point_limit=args.point_limit,
             device=device, base_port=args.base_port + 200 + ti * 10,
             regression=regression, native_bots=native_bots,
             rng_seed=88000 + rank * 100 + ti,
@@ -1340,13 +1387,16 @@ def main():
         )
         local_sc.extend(er["score_matches"])
         local_cp.extend(er["composite_matches"])
+        local_eval_so += int(er.get("n_score_outs", 0))
+        local_eval_exp += int(er.get("n_expected_sessions", 0))
         local_sk_early.extend(er["skill_preds_early"])
         local_sk_late.extend(er["skill_preds_late"])
 
     local_payload = {
         "rank": rank, "host": os.uname().nodename, "map": my_map,
         "score_matches": local_sc, "composite_matches": local_cp,
-        "skill_preds_early": local_sk_early[:1500], "skill_preds_late": local_sk_late[:1500],
+        "eval_score_outs": local_eval_so, "eval_expected": local_eval_exp,
+        "skill_preds_early": local_sk_early, "skill_preds_late": local_sk_late,
     }
     if world_size > 1:
         gathered = [None for _ in range(world_size)]

@@ -113,6 +113,7 @@ class MultiServerPlanHarness:
         bots_per_server: list[int] | None = None,
         maxclients_per_server: list[int] | None = None,
         meta_per_server: list[dict] | None = None,
+        point_limit: float | None = None,
     ):
         procs, logs = [], []
         maps = map_names if (map_names is not None and len(map_names) == len(seeds)) else ["boil"] * len(seeds)
@@ -166,6 +167,8 @@ class MultiServerPlanHarness:
                 "+g_payload_speed", str(self.payload_speed),
                 "+g_payload_strategy_interval", str(self.strategy_interval),
             ]
+            if point_limit is not None and float(point_limit) > 0:
+                cmd.extend(["+g_payload_point_limit", str(float(point_limit))])
             if bcfg_name is not None:
                 cmd.extend(["+bot_prefix", "", "+bot_suffix", "", "+bot_config_file", bcfg_name])
             if extra_cvars is not None and idx < len(extra_cvars) and extra_cvars[idx]:
@@ -576,24 +579,18 @@ class MultiServerPlanHarness:
                         distinct_groups = sorted({tr.session for tr in fresh_buf})
                         if len(fresh_buf) >= next_batch_target and len(distinct_groups) >= min_groups_per_step:
                             mdl = arm_models[train_arm]
-                            max_accum = max(min_batch_transitions * 2, 48)
                             upd_info = self._ppo_update_with_snr(
                                 mdl, optimizer, fresh_buf, distinct_groups,
                                 ppo_epochs=ppo_epochs, grad_clip=grad_clip, device=device,
                                 step_id=len(update_logs),
                                 online_snr_pairs=online_snr_pairs,
                                 online_group_pairs=online_group_pairs,
-                                allow_snr_defer=(len(fresh_buf) < max_accum),
                             )
-                            if upd_info.get("deferred"):
-                                deferred_batches += 1
-                                next_batch_target = len(fresh_buf) + min_batch_transitions
-                            else:
-                                fresh_buf = []
-                                next_batch_target = int(min_batch_transitions)
-                                if ema_model is not None:
-                                    ema_update(ema_model, mdl, decay=ema_decay)
-                                update_logs.append(upd_info)
+                            fresh_buf = []
+                            next_batch_target = int(min_batch_transitions)
+                            if ema_model is not None:
+                                ema_update(ema_model, mdl, decay=ema_decay)
+                            update_logs.append(upd_info)
         finally:
             self._stop_servers(procs, logs)
             engine.close()
@@ -730,10 +727,6 @@ class MultiServerPlanHarness:
                 pair = mccandlish_pair_from_grads(
                     [g0, g1], b0_transitions=0.5 * len(ordered), b0_rows=0.5 * len(ordered) * 9.0, generation=step_id
                 )
-                # McCandlish SNR gate: if halves oppose (signal_sq <= 0), defer & grow batch instead of stepping on noise!
-                if allow_snr_defer and pair is not None and float(pair["signal_sq"]) <= 0.0:
-                    optimizer.zero_grad(set_to_none=True)
-                    return {"step": step_id, "batch": len(batch), "groups": len(groups), "deferred": True, "cosine": pair.get("cosine")}
                 if pair is not None:
                     online_snr_pairs.append(pair)
                 for grp in ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "dynamics_head"):

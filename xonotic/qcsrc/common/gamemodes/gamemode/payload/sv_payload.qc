@@ -55,7 +55,8 @@ int autocvar_g_payload_node_sprites = 0;
 
 float payload_point_limit()
 {
-	return autocvar_g_payload_point_limit * max(1, floor(payload_cart_count / 3));
+	float per_team_carts = (payload_teams > 0) ? (payload_cart_count / payload_teams) : payload_cart_count;
+	return autocvar_g_payload_point_limit * max(1, per_team_carts);
 }
 
 void payload_EventLog(string mode, float t)
@@ -534,7 +535,7 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 		node.plc_cart = this;
 		node.plc_idx = guard;
 		this.plc_checkpoint_count += (node.spawnflags & PLC_CHECKPOINT) != 0;
-		if(guard == 0 || ((node.spawnflags & PLC_CHECKPOINT) && payload_cart_count <= 12))
+		if(guard == 0 || (node.spawnflags & PLC_CHECKPOINT))
 		{
 			entity near_wp = payload_nearest_waypoint(node.origin);
 			if(!near_wp || vdist(near_wp.origin - node.origin, >, 280))
@@ -560,7 +561,7 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 	}
 	this.plc_length = d;
 
-	if((autocvar_g_payload_pathlinks > 1 || (autocvar_g_payload_pathlinks && payload_cart_count <= 16)) && guard > 1)
+	if(autocvar_g_payload_pathlinks && guard > 1)
 	{
 		int stride = max(1, floor((guard - 1) / PLC_RIBBON_SEG));
 		entity samp = first;
@@ -581,9 +582,8 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 
 	entity wp = WP_PayloadCart;
-	float wp_maxd = (payload_cart_count > 12) ? 2400 : 0;
 	if(!this.sprite)
-		WaypointSprite_Spawn(wp, 0, wp_maxd, this, this.view_ofs + PLC_SPRITE_OFS, NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
+		WaypointSprite_Spawn(wp, 0, 0, this, this.view_ofs + PLC_SPRITE_OFS, NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
 
 	if(this.sprite)
 		this.sprite.wp_extra = this.plc_cart_id;
@@ -819,8 +819,6 @@ void havocbot_goalrating_payload_carts(entity this, float ratingscale, vector or
 	{
 		it.blacklisted = false;
 		vector cpos = it.origin + it.view_ofs;
-		if (!(has_plan && plan_cart >= 0 && it.plc_cart_id == plan_cart) && vdist(cpos - org, >, sradius))
-			continue;
 		float weight = 1.4;
 		if (it.plc_ctrl == myteam)
 			weight = (it.plc_s < it.plc_length * 0.98) ? (archetype == 0 ? 2.0 : 1.3) : 0.4;
