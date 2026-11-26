@@ -2460,6 +2460,11 @@ void CL_Init (void)
 	Cvar_RegisterVariable (&cl_sidespeed);
 	Cvar_RegisterVariable (&cl_movespeedkey);
 	Cvar_RegisterVariable (&cl_yawspeed);
+	{
+		extern cvar_t cl_orbit_yawrate, cl_orbit_speed;
+		Cvar_RegisterVariable (&cl_orbit_yawrate);
+		Cvar_RegisterVariable (&cl_orbit_speed);
+	}
 	Cvar_RegisterVariable (&cl_pitchspeed);
 	Cvar_RegisterVariable (&cl_anglespeedkey);
 	Cvar_RegisterVariable (&cl_shownet);

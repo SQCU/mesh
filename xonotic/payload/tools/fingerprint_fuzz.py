@@ -98,7 +98,16 @@ def run_live_fingerprint(
             while (ready := inbox.take()) is not None:
                 _, recs, evts = ready
                 obs_raw = recs.get(OBSERVATION_KIND, (None, None))[1]
-                evt_raw = np.concatenate(evts, axis=0) if evts else None
+                if isinstance(evts, dict):
+                    vals = [v for v in evts.values() if v is not None and len(v) > 0]
+                    evt_raw = np.concatenate(vals, axis=0) if vals else None
+                elif isinstance(evts, (list, tuple)) and len(evts) > 0:
+                    vals = [v for v in evts if v is not None and len(v) > 0]
+                    evt_raw = np.concatenate(vals, axis=0) if vals else None
+                elif isinstance(evts, np.ndarray) and len(evts) > 0:
+                    evt_raw = evts
+                else:
+                    evt_raw = None
                 acc.update(obs_raw, evt_raw)
     finally:
         proc.terminate()

@@ -55,6 +55,7 @@ from solver.strat.mech_calibration import (
     write_native_bots_txt,
 )
 from solver.strat.outer_validation import compute_multiteam_elo, extract_behavioral_motifs
+from solver.strat.phase_fingerprint import PhaseSpaceAccumulator, compare_fingerprints, strip_raw_maps
 from solver.strat.plan_policy import (
     PLAN_CONT_DIM,
     PLAN_WIDTH,
@@ -394,6 +395,8 @@ def _collect_full_episodes(
     telemetry_by_sess: dict[int, list[dict]] = defaultdict(list)
     by_session_transitions: dict[int, list[PlanTransition]] = defaultdict(list)
     skill_pred_pairs: list[tuple[float, float]] = []
+    fp_train_acc = PhaseSpaceAccumulator(label=f"train:{train_arm}", cell_size=256.0)
+    fp_default_acc = PhaseSpaceAccumulator(label="ref:default", cell_size=256.0)
 
     t0 = time.monotonic()
     try:
@@ -446,6 +449,22 @@ def _collect_full_episodes(
                     tr_idxs = [bi for bi in range(n_bots) if bot_arms[bi] == train_arm]
                     if len(tr_idxs) >= 2:
                         bot_arms[tr_idxs[0]] = "default"
+
+                # Accumulate live 5-layer Phase-Space & Markov-Flow fingerprints per policy arm!
+                if isinstance(event_batches, dict):
+                    ev_vals = [v for v in event_batches.values() if v is not None and len(v) > 0]
+                    step_evts = np.concatenate(ev_vals, axis=0) if ev_vals else None
+                elif isinstance(event_batches, (list, tuple)) and len(event_batches) > 0:
+                    ev_vals = [v for v in event_batches if v is not None and len(v) > 0]
+                    step_evts = np.concatenate(ev_vals, axis=0) if ev_vals else None
+                else:
+                    step_evts = None
+                tr_team_set = {int(bot_teams[bi]) for bi in range(n_bots) if bot_arms[bi] == train_arm}
+                df_team_set = {int(bot_teams[bi]) for bi in range(n_bots) if bot_arms[bi] == "default"}
+                if tr_team_set:
+                    fp_train_acc.update(obs_raw, step_evts, team_filter=tr_team_set)
+                if df_team_set:
+                    fp_default_acc.update(obs_raw, step_evts, team_filter=df_team_set)
 
                 cont_all = np.zeros((n_bots, PLAN_CONT_DIM), dtype=np.float32)
                 cart_all = np.zeros((n_bots,), dtype=np.int64)
@@ -643,6 +662,8 @@ def _collect_full_episodes(
         "fsq_entropy_bits": round(fsq_ent, 3),
         "online_skill_id_corr": skill_corr,
         "roster_kinds": roster_kinds,
+        "fp_train": fp_train_acc.finalize(),
+        "fp_default": fp_default_acc.finalize(),
     }
 
 
@@ -1052,6 +1073,7 @@ def main():
         torch.save({"model": main_ema.state_dict(), "spec": main_ema.spec()}, ckpt_dir / "main_init_ema.pt")
 
     train_maps = ["boil", "boil", "stormkeep", "stormkeep", "catharsis", "catharsis"]
+    fp_iter0_ref: dict | None = None
     win_rates_vs_opp: dict[str, float] = {}
     pfsp_wins: dict[str, float] = defaultdict(float)
     pfsp_games: dict[str, float] = defaultdict(float)
@@ -1163,6 +1185,20 @@ def main():
                 torch.save({"model": exp_ema.state_dict(), "spec": exp_ema.spec()}, ckpt_dir / "exploiter_1_ema.pt")
 
         if rank == 0:
+            fp_tr = col.get("fp_train")
+            fp_df = col.get("fp_default")
+            if fp_iter0_ref is None and fp_tr is not None and fp_tr.get("alive_samples", 0) > 0:
+                fp_iter0_ref = fp_tr
+            drift_vs_default = (
+                compare_fingerprints(fp_tr, fp_df)
+                if (fp_tr and fp_df and fp_tr.get("alive_samples", 0) > 20 and fp_df.get("alive_samples", 0) > 20)
+                else None
+            )
+            drift_vs_iter0 = (
+                compare_fingerprints(fp_tr, fp_iter0_ref)
+                if (fp_tr and fp_iter0_ref and fp_tr.get("alive_samples", 0) > 20)
+                else None
+            )
             snr = upd.get("snr_4studio") or {}
             bg = upd.get("snr_4studio_by_group") or {}
             rec = {
@@ -1177,15 +1213,21 @@ def main():
                 "fsq_codes": col["fsq_unique_codes"], "fsq_ent": col["fsq_entropy_bits"],
                 "snr_4studio": snr,
                 "snr_4studio_by_group": bg,
+                "phase_fingerprint_train": strip_raw_maps(fp_tr) if fp_tr else None,
+                "drift_vs_default": drift_vs_default,
+                "drift_vs_iter0": drift_vs_iter0,
             }
             iter_reports.append(rec)
+            w_def = (drift_vs_default or {}).get("weirdness_index")
+            jsd_f = (drift_vs_default or {}).get("flux_jsd")
+            sig_tr = ((fp_tr or {}).get("L2_markov_flux") or {}).get("entropy_production_sigma")
+            flgs = (drift_vs_default or {}).get("flags") or []
             print(
                 f"[{it_name}:{role:9s}] ep={rec['episodes_global']} B={rec['b_global']} "
                 f"roll={rec['rollout_s']}s upd={rec['update_s']}s eff={snr.get('step_efficiency')} "
                 f"act_eff={(bg.get('action_head') or {}).get('step_efficiency')} "
-                f"gram_eff={(bg.get('gram_cgt') or {}).get('step_efficiency')} "
-                f"sk_eff={(bg.get('skill_id_head') or {}).get('step_efficiency')} "
-                f"std={rec['cont_std_mean']:.3f} sk_r={rec['online_skill_id_corr']} fsq={rec['fsq_ent']}",
+                f"sk_r={rec['online_skill_id_corr']} std={rec['cont_std_mean']:.3f} "
+                f"| FP sig={sig_tr} flux_jsd={jsd_f} weird={w_def} flags={flgs}",
                 flush=True,
             )
 

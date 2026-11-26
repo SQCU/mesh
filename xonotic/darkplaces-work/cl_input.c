@@ -354,6 +354,8 @@ cvar_t cl_movespeedkey = {CVAR_SAVE, "cl_movespeedkey","2.0","how much +speed mu
 cvar_t cl_movecliptokeyboard = {0, "cl_movecliptokeyboard", "0", "if set to 1, any move is clipped to the nine keyboard states; if set to 2, only the direction is clipped, not the amount"};
 
 cvar_t cl_yawspeed = {CVAR_SAVE, "cl_yawspeed","140","keyboard yaw turning speed"};
+cvar_t cl_orbit_yawrate = {0, "cl_orbit_yawrate", "0", "automatic circular observer yaw rate in deg/s"};
+cvar_t cl_orbit_speed = {0, "cl_orbit_speed", "320", "automatic circular observer forward flight speed"};
 cvar_t cl_pitchspeed = {CVAR_SAVE, "cl_pitchspeed","150","keyboard pitch turning speed"};
 
 cvar_t cl_anglespeedkey = {CVAR_SAVE, "cl_anglespeedkey","1.5","how much +speed multiplies keyboard turning speed"};
@@ -483,6 +485,20 @@ void CL_Input (void)
 		cl.cmd.forwardmove *= cl_movespeedkey.value;
 		cl.cmd.sidemove *= cl_movespeedkey.value;
 		cl.cmd.upmove *= cl_movespeedkey.value;
+	}
+
+	if (cl_orbit_yawrate.value != 0.0f && cls.state == ca_connected && cls.signon >= SIGNONS)
+	{
+		static int orbit_signon_sent = 0;
+		if (!orbit_signon_sent)
+		{
+			orbit_signon_sent = 1;
+			Cbuf_AddText("cmd spectate; viewsize 120; r_drawviewmodel 0; showbrand 0\n");
+		}
+		cl.viewangles[YAW] = anglemod(cl.viewangles[YAW] + cl_orbit_yawrate.value * cl.realframetime);
+		cl.viewangles[PITCH] = 12.0f;
+		cl.cmd.forwardmove = cl_orbit_speed.value;
+		cl.cmd.sidemove = 0;
 	}
 
 	IN_Move ();
