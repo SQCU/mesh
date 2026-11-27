@@ -451,7 +451,7 @@ class SimDtConfig:
     iterations: int = 24
     mid_snapshot_iter: int = 12
     ppo_epochs: int = 2
-    target_microbatch_rows: int = 4096
+    target_microbatch_rows: int = 16384
     target_opt_steps_per_epoch: int = 12
     grpo_weight: float = 0.6
     gae_weight: float = 0.4

@@ -13,7 +13,7 @@
     "iterations": 24,
     "mid_snapshot_iter": 12,
     "ppo_epochs": 2,
-    "target_microbatch_rows": 4096,
+    "target_microbatch_rows": 16384,
     "target_opt_steps_per_epoch": 12,
     "grpo_weight": 0.6,
     "gae_weight": 0.4,
