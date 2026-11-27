@@ -57,7 +57,7 @@ NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitR
 	mkdir -p .build
 	clang++ -O2 -std=c++17 -fobjc-arc -shared -fPIC -o $@ mesh-phase.mm -L.build -lmesh -Wl,-rpath,@loader_path \
 	  -framework Metal -framework MetalPerformanceShaders -framework Foundation
-.build/libmesh-graph.dylib: mesh-graph.mm mesh-graph.h $(MESH_H) .build/libmesh.dylib Makefile
+.build/libmesh-graph.dylib: mesh-graph.mm mesh-graph.h mesh-simdt.h $(MESH_H) .build/libmesh.dylib Makefile
 	mkdir -p .build
 	clang++ -O3 -std=c++20 -fobjc-arc -shared -fPIC -o $@ mesh-graph.mm -L.build -lmesh -Wl,-rpath,@loader_path \
 	  -framework Metal -framework MetalPerformanceShaders -framework Foundation

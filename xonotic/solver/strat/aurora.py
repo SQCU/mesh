@@ -60,16 +60,17 @@ def aurora_polar_update(
 
     target_lev = float(n) / float(m)
     work_dtype = torch.bfloat16 if G.dtype in (torch.bfloat16, torch.float16) else G.dtype
+    eps_w = max(float(eps), 1e-4) if work_dtype in (torch.bfloat16, torch.float16) else float(eps)
     G_w = G.to(work_dtype)
-    row_norm = G_w.norm(dim=-1).clamp_min(eps)
+    row_norm = G_w.norm(dim=-1).clamp_min(eps_w)
     D = (row_norm.mean() / row_norm).pow(pp_beta).clamp(d_init_clamp[0], d_init_clamp[1])
-    P = polar_newton_schulz(D[:, None] * G_w, steps=ns_steps, eps=eps, coeffs=ns_coeffs)
+    P = polar_newton_schulz(D[:, None] * G_w, steps=ns_steps, eps=eps_w, coeffs=ns_coeffs)
     for _ in range(pp_iterations):
-        row_sq = P.square().sum(dim=-1).clamp_min(eps)
+        row_sq = P.square().sum(dim=-1).clamp_min(eps_w)
         ratio = (target_lev / row_sq).pow(pp_beta)
         D = (D * ratio).clamp(d_iter_clamp[0], d_iter_clamp[1])
-        D = D / D.mean().clamp_min(eps)
-        P = polar_newton_schulz(D[:, None] * G_w, steps=ns_steps, eps=eps, coeffs=ns_coeffs)
+        D = D / D.mean().clamp_min(eps_w)
+        P = polar_newton_schulz(D[:, None] * G_w, steps=ns_steps, eps=eps_w, coeffs=ns_coeffs)
 
     return P.to(G.dtype), {"row_leverage_cv": 0.0, "tall": 1.0}
 

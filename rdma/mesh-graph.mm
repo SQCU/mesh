@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "mesh-graph.h"
+#include "mesh-simdt.h"
 extern "C" {
 #include "mesh-call.h"
 #include "mesh-codec.h"
@@ -1289,9 +1290,13 @@ template <typename T, int UM, int UN, int SM, int SN, int KS>
   const int k_group = simd_group_id / (SM * SN), sg = simd_group_id % (SM * SN);
   const int m_off = (tile_m * SM + sg % SM) * TSM, n_off = (tile_n * SN + sg / SM) * TSN;
   const int rows = params->M - m_off, cols = params->N - n_off;
-  A += int64_t(m_off) * lda; B += int64_t(n_off) * ldb; D += int64_t(m_off) * params->ldd + n_off;
-  tensor_t tA((device T*)A, extents_t(K, rows), strides_t{1, lda});
-  tensor_t tB((device T*)B, extents_t(K, cols), strides_t{1, ldb});
+  const bool in_bounds = (rows > 0 && cols > 0);
+  const int s_rows = in_bounds ? rows : 1, s_cols = in_bounds ? cols : 1;
+  A += in_bounds ? (int64_t(m_off) * lda) : 0;
+  B += in_bounds ? (int64_t(n_off) * ldb) : 0;
+  D += in_bounds ? (int64_t(m_off) * params->ldd + n_off) : 0;
+  tensor_t tA((device T*)A, extents_t(K, s_rows), strides_t{1, lda});
+  tensor_t tB((device T*)B, extents_t(K, s_cols), strides_t{1, ldb});
   auto a_chunk = [&](int k) { return tA.template slice<BK, TSM>(k, 0); };
   auto b_chunk = [&](int k) { return tB.template slice<BK, TSN>(k, 0); };
   using a_chunk_t = decltype(a_chunk(0));
@@ -1305,7 +1310,7 @@ template <typename T, int UM, int UN, int SM, int SN, int KS>
   for (int it = 0; it < params->k_iters; it++) {
     if ((it & 3) == 0) threadgroup_barrier(mem_flags::mem_none);
     const int k = (it * KS + k_group) * BK;
-    if (k >= K) continue;
+    if (k >= K || !in_bounds) continue;
     auto a = a_chunk(k); Areg.load(a);
     auto b = b_chunk(k); op.run(Areg, b, Dacc);
   }
@@ -1326,10 +1331,10 @@ template <typename T, int UM, int UN, int SM, int SN, int KS>
         UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] += part[i];
       }
   }
-  if (k_group == 0) {
+  if (k_group == 0 && in_bounds) {
     auto Dout = op.template get_destination_cooperative_tensor<a_chunk_t, b_chunk_t, T>();
     UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = static_cast<T>(Dacc[i]);
-    tensor_t tD(D, extents_t(cols, rows), strides_t{1, params->ldd});
+    tensor_t tD(D, extents_t(s_cols, s_rows), strides_t{1, params->ldd});
     auto d = tD.template slice<TSN, TSM>(0, 0);
     Dout.store(d);
   }
@@ -1465,11 +1470,12 @@ template <typename T, int UM, int UN, int SM, int SN, int KS>
 #define WIDE(NV, KL) template [[host_name("gemm_rows_wide_" #NV "_" #KL)]] [[kernel]] void gemm_rows_wide<bfloat, NV, KL>(const device bfloat*, const device bfloat*, device bfloat*, constant int*, uint3, uint3, uint, uint);
 WIDE(2, 16) WIDE(3, 16) WIDE(4, 16) WIDE(5, 16) WIDE(2, 32) WIDE(3, 32) WIDE(4, 32) WIDE(5, 32)
 #define NAX(UM, SM, KS) template [[host_name("gemm_rows_nax_" #UM "_" #SM "_" #KS)]] [[kernel]] void gemm_rows_nax<bfloat, UM, 2, SM, 1, KS>(const device bfloat*, const device bfloat*, device bfloat*, const constant ThinParams*, uint, uint3);
-NAX(1, 1, 4) NAX(2, 1, 4) NAX(2, 2, 3) NAX(2, 3, 2) NAX(2, 4, 2) NAX(2, 5, 1) NAX(2, 6, 1) NAX(2, 7, 1) NAX(2, 8, 1)
+NAX(1, 1, 4) NAX(2, 1, 4) NAX(2, 1, 1) NAX(2, 2, 1) NAX(2, 2, 3) NAX(2, 3, 2) NAX(2, 4, 1) NAX(2, 4, 2) NAX(2, 5, 1) NAX(2, 6, 1) NAX(2, 7, 1) NAX(2, 8, 1)
+template [[host_name("gemm_rows_nax_2_2_2_2_1")]] [[kernel]] void gemm_rows_nax<bfloat, 2, 2, 2, 2, 1>(const device bfloat*, const device bfloat*, device bfloat*, const constant ThinParams*, uint, uint3);
 #define WIDE_P(NV, KL) template [[host_name("gemm_publish_wide_" #NV "_" #KL)]] [[kernel]] void gemm_publish_wide<bfloat, NV, KL>(const device bfloat*, const device bfloat*, device bfloat*, constant int*, device uchar*, device ulong*, device atomic_uint*, constant uint*, uint3, uint3, uint, uint, uint);
 WIDE_P(2, 16) WIDE_P(3, 16) WIDE_P(4, 16) WIDE_P(5, 16) WIDE_P(2, 32) WIDE_P(3, 32) WIDE_P(4, 32) WIDE_P(5, 32)
 #define NAX_P(UM, SM, KS) template [[host_name("gemm_publish_nax_" #UM "_" #SM "_" #KS)]] [[kernel]] void gemm_publish_nax<bfloat, UM, 2, SM, 1, KS>(const device bfloat*, const device bfloat*, device bfloat*, const constant ThinParams*, device uchar*, device ulong*, device atomic_uint*, constant uint*, uint, uint3, uint3, uint);
-NAX_P(1, 1, 4) NAX_P(2, 1, 4) NAX_P(2, 2, 3) NAX_P(2, 3, 2) NAX_P(2, 4, 2) NAX_P(2, 5, 1) NAX_P(2, 6, 1) NAX_P(2, 7, 1) NAX_P(2, 8, 1)
+NAX_P(1, 1, 4) NAX_P(2, 1, 4) NAX_P(2, 1, 1) NAX_P(2, 2, 1) NAX_P(2, 2, 3) NAX_P(2, 3, 2) NAX_P(2, 4, 1) NAX_P(2, 4, 2) NAX_P(2, 5, 1) NAX_P(2, 6, 1) NAX_P(2, 7, 1) NAX_P(2, 8, 1)
 )MSL";
 }
 
@@ -1490,6 +1496,7 @@ struct mesh_graph {
   id<MTLCommandQueue> q = nil;
   id<MTLLibrary> lib_core = nil;
   id<MTLLibrary> lib_gemm = nil;
+  id<MTLLibrary> lib_simdt = nil;
   std::unordered_map<std::string, id<MTLComputePipelineState>> psos;
 
   id<MTLBuffer> table_buf = nil;
@@ -1835,11 +1842,32 @@ static void encode_linear_core(mesh_graph *g, id<MTLComputeCommandEncoder> enc, 
           threadsPerThreadgroup:MTLSizeMake(32 * (kl / 8), 1, 1)];
       return;
     }
-    // 3. M=16..128 aligned (M%16==0, N%32==0, K%64==0): Metal 4 MPP NAX tensor ops!
-    if ((M == 16 || (M >= 32 && M <= 128 && M % 32 == 0)) && N % 32 == 0 && K % 64 == 0) {
+    // 3. M>=16 aligned (M==16 || M%32==0, N%32==0, K%64==0): Metal 4 MPP NAX tensor ops!
+    if ((M == 16 || (M >= 32 && M % 32 == 0)) && N % 32 == 0 && K % 64 == 0) {
+      if (!do_pub && M >= 128 && M % 64 == 0 && N >= 64 && N % 64 == 0) {
+        id<MTLComputePipelineState> pso = get_pso(g, g->lib_gemm, "gemm_rows_nax_2_2_2_2_1");
+        const int tm = static_cast<int>(M) / 64;
+        const int tn = static_cast<int>(N) / 64;
+        const int k_iters = (static_cast<int>(K) + 63) / 64;
+        const int params[9] = {static_cast<int>(M), static_cast<int>(N), static_cast<int>(K), static_cast<int>(K),
+                               static_cast<int>(K), static_cast<int>(N), tn, tm, k_iters};
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bw.mtl offset:bw.off atIndex:1];
+        [enc setBuffer:by.mtl offset:by.off atIndex:3];
+        [enc setBytes:params length:sizeof(params) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake(tm * tn, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        return;
+      }
       const int um = (M == 16) ? 1 : 2;
-      const int sm = (um == 2 && N > 64 && M > 64) ? std::min<int>(8, (static_cast<int>(M) + 31) / 32) : 1;
-      const int ks = (sm == 1) ? 4 : 1 + 4 / sm;
+      int sm = 1, ks = 4;
+      if (M > 128) {
+        sm = (M % 128 == 0) ? 4 : ((M % 64 == 0) ? 2 : 1);
+        ks = 1;
+      } else {
+        sm = (um == 2 && N > 64 && M > 64) ? std::min<int>(8, (static_cast<int>(M) + 31) / 32) : 1;
+        ks = (sm == 1) ? 4 : 1 + 4 / sm;
+      }
       const std::string kn = std::string((do_pub && !is_had8) ? "gemm_publish_nax_" : "gemm_rows_nax_") +
                              std::to_string(um) + "_" + std::to_string(sm) + "_" + std::to_string(ks);
       id<MTLComputePipelineState> pso = get_pso(g, g->lib_gemm, kn);
@@ -1926,12 +1954,8 @@ static void encode_publish_only(mesh_graph *g, id<MTLComputeCommandEncoder> enc,
   }
 }
 
-// Encode the ENTIRE lowered FX graph into ONE single MTLCommandBuffer + ONE single MTLComputeCommandEncoder!
-static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
-  const uint32_t g_slot = static_cast<uint32_t>((g->step_gen++) % kGenSlots);
-  id<MTLCommandBuffer> cb = [g->q commandBufferWithUnretainedReferences];
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-
+// Encode the ENTIRE lowered FX graph into an existing MTLComputeCommandEncoder!
+static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uint32_t step_idx, uint32_t g_slot) {
   for (const auto &op : g->ops) {
     switch (op.kind) {
       case MG_OP_EMBEDDING: {
@@ -2333,11 +2357,251 @@ static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
         [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         break;
       }
+      case MG_OP_PLAN_PRENORM: {
+        const BufSlot &bo = g->bufs[op.in[0]], &bc = g->bufs[op.in[1]], &bt = g->bufs[op.in[2]];
+        const BufSlot &bgeo = g->bufs[op.in[3]], &bncfg = g->bufs[op.in[4]], &bmeta = g->bufs[op.in[5]];
+        const BufSlot &boo = g->bufs[op.out[0]], &bco = g->bufs[op.out[1]], &bto = g->bufs[op.out[2]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_plan_prenorm")];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:0];
+        [enc setBuffer:bc.mtl offset:bc.off atIndex:1];
+        [enc setBuffer:bt.mtl offset:bt.off atIndex:2];
+        [enc setBuffer:bgeo.mtl offset:bgeo.off atIndex:3];
+        [enc setBuffer:bncfg.mtl offset:bncfg.off atIndex:4];
+        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:5];
+        [enc setBuffer:boo.mtl offset:boo.off atIndex:6];
+        [enc setBuffer:bco.mtl offset:bco.off atIndex:7];
+        [enc setBuffer:bto.mtl offset:bto.off atIndex:8];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:9];
+        [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_PLAN_EMBED_CAT: {
+        const BufSlot &bo = g->bufs[op.in[0]], &bc = g->bufs[op.in[1]], &bt = g->bufs[op.in[2]];
+        const BufSlot &bte = g->bufs[op.in[3]], &bsc = g->bufs[op.in[4]], &bx = g->bufs[op.out[0]];
+        const uint32_t rows = op.u[0] * (op.u[1] + op.u[2] + op.u[3]);
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_plan_embed_cat")];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:0];
+        [enc setBuffer:bc.mtl offset:bc.off atIndex:1];
+        [enc setBuffer:bt.mtl offset:bt.off atIndex:2];
+        [enc setBuffer:bte.mtl offset:bte.off atIndex:3];
+        [enc setBuffer:bsc.mtl offset:bsc.off atIndex:4];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:5];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:6];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake((rows + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MP_NORM: {
+        const BufSlot &bx = g->bufs[op.in[0]], &by = g->bufs[op.out[0]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_norm")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:by.mtl offset:by.off atIndex:1];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MP_LERP: {
+        const BufSlot &ba = g->bufs[op.in[0]], &bb = g->bufs[op.in[1]], &bsc = g->bufs[op.in[2]], &bo = g->bufs[op.out[0]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_lerp")];
+        [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
+        [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
+        [enc setBuffer:bsc.mtl offset:bsc.off atIndex:2];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MP_SWIGLU: {
+        const BufSlot &bgu = g->bufs[op.in[0]], &bhid = g->bufs[op.out[0]];
+        const uint32_t rows = op.u[0], H = op.u[1];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_swiglu")];
+        [enc setBuffer:bgu.mtl offset:bgu.off atIndex:0];
+        [enc setBuffer:bhid.mtl offset:bhid.off atIndex:1];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
+        [enc dispatchThreads:MTLSizeMake(H, rows, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(H, 256), 1, 1)];
+        break;
+      }
+      case MG_OP_CGT_GRAM_STAGE1: {
+        const BufSlot &bxn = g->bufs[op.in[0]], &bv = g->bufs[op.in[1]], &br = g->bufs[op.in[2]];
+        const BufSlot &bwp = g->bufs[op.in[3]], &bmeta = g->bufs[op.in[4]], &bsc = g->bufs[op.in[5]];
+        const BufSlot &bglob = g->bufs[op.out[0]], &btin = g->bufs[op.out[1]];
+        const uint32_t E = op.u[0], N = op.u[1], J = op.u[2], K = op.u[3], D = op.u[4], R = op.u[5], sc_bp = op.u[6];
+        const uint32_t M_ent = N + J + K;
+        const uint32_t M_tot = E * M_ent;
+        // 1. In-place mp_norm(v_raw) & mp_norm(r_raw)
+        {
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_norm")];
+          const uint32_t uv[2] = {M_tot, D};
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:0];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+          [enc setBytes:uv length:sizeof(uv) atIndex:2];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
+          [enc dispatchThreadgroups:MTLSizeMake((M_tot + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          const uint32_t ur[2] = {M_tot, R};
+          [enc setBuffer:br.mtl offset:br.off atIndex:0];
+          [enc setBuffer:br.mtl offset:br.off atIndex:1];
+          [enc setBytes:ur length:sizeof(ur) atIndex:2];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
+          [enc dispatchThreadgroups:MTLSizeMake((M_tot + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        // 2. Global Gram (associative 9KB SRAM G=(r@r^T)*inv_m for M_ent<=48, else 4KB tiled kv_sh)
+        {
+          const uint32_t ug[4] = {E, M_ent, D, R};
+          if (M_ent <= 48u) {
+            [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_global_gram_small")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+            [enc setBuffer:bglob.mtl offset:bglob.off atIndex:2];
+            [enc setBytes:ug length:sizeof(ug) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          } else {
+            [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_global_gram")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+            [enc setBuffer:bglob.mtl offset:bglob.off atIndex:2];
+            [enc setBytes:ug length:sizeof(ug) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((D + 31u) / 32u, E, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          }
+        }
+        // 3. Team pool + blend_pool -> t_in
+        {
+          const uint32_t up[6] = {E, N, J, K, D, sc_bp};
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_team_pool")];
+          [enc setBuffer:bxn.mtl offset:bxn.off atIndex:0];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+          [enc setBuffer:bwp.mtl offset:bwp.off atIndex:2];
+          [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:3];
+          [enc setBuffer:bsc.mtl offset:bsc.off atIndex:4];
+          [enc setBuffer:btin.mtl offset:btin.off atIndex:5];
+          [enc setBytes:up length:sizeof(up) atIndex:6];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:7];
+          [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        }
+        break;
+      }
+      case MG_OP_CGT_TEAM_RIVAL: {
+        const BufSlot &bq = g->bufs[op.in[0]], &bk = g->bufs[op.in[1]], &bv = g->bufs[op.in[2]], &bo = g->bufs[op.out[0]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_team_rival")];
+        [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+        [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+        [enc setBuffer:bv.mtl offset:bv.off atIndex:2];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        break;
+      }
+      case MG_OP_CGT_BCAST_MERGE: {
+        const BufSlot &bg = g->bufs[op.in[0]], &btb = g->bufs[op.in[1]], &bmeta = g->bufs[op.in[2]], &bo = g->bufs[op.out[0]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_bcast_merge")];
+        [enc setBuffer:bg.mtl offset:bg.off atIndex:0];
+        [enc setBuffer:btb.mtl offset:btb.off atIndex:1];
+        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:2];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        break;
+      }
+      case MG_OP_PLAN_SLICE_NORM: {
+        const BufSlot &bx = g->bufs[op.in[0]];
+        const BufSlot &bp = g->bufs[op.out[0]], &bc = g->bufs[op.out[1]], &bt = g->bufs[op.out[2]];
+        const uint32_t rows = op.u[0] * (op.u[1] + op.u[2] + op.u[3]);
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_plan_slice_norm")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bp.mtl offset:bp.off atIndex:1];
+        [enc setBuffer:bc.mtl offset:bc.off atIndex:2];
+        [enc setBuffer:bt.mtl offset:bt.off atIndex:3];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake((rows + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_BILINEAR_LOGITS: {
+        const BufSlot &bq = g->bufs[op.in[0]], &bk = g->bufs[op.in[1]], &bmeta = g->bufs[op.in[2]], &bsc = g->bufs[op.in[3]];
+        const BufSlot &bo = g->bufs[op.out[0]];
+        const uint32_t rows = op.u[0] * op.u[1];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_bilinear_logits")];
+        [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+        [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:2];
+        [enc setBuffer:bsc.mtl offset:bsc.off atIndex:3];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:4];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:5];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake((rows + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_PLAN_POST_PACK: {
+        const BufSlot &bhr = g->bufs[op.in[0]], &bcl = g->bufs[op.in[1]], &brl = g->bufs[op.in[2]];
+        const BufSlot &bhp = g->bufs[op.in[3]], &bmeta = g->bufs[op.in[4]];
+        const BufSlot &bmask = (op.in[5] >= 0 ? g->bufs[op.in[5]] : bhr);
+        const BufSlot &bho = g->bufs[op.out[0]];
+        const BufSlot &bpl = (op.out[1] >= 0 ? g->bufs[op.out[1]] : bho);
+        const BufSlot &bsmp = (op.out[2] >= 0 ? g->bufs[op.out[2]] : bho);
+        const uint32_t rows = op.u[0] * op.u[1];
+        uint32_t up[8];
+        memcpy(up, op.u, sizeof(up));
+        up[6] = step_idx;
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_plan_post_pack")];
+        [enc setBuffer:bhr.mtl offset:bhr.off atIndex:0];
+        [enc setBuffer:bcl.mtl offset:bcl.off atIndex:1];
+        [enc setBuffer:brl.mtl offset:brl.off atIndex:2];
+        [enc setBuffer:bhp.mtl offset:bhp.off atIndex:3];
+        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:4];
+        [enc setBuffer:bmask.mtl offset:bmask.off atIndex:5];
+        [enc setBuffer:bho.mtl offset:bho.off atIndex:6];
+        [enc setBuffer:bpl.mtl offset:bpl.off atIndex:7];
+        [enc setBuffer:bsmp.mtl offset:bsmp.off atIndex:8];
+        [enc setBytes:up length:sizeof(up) atIndex:9];
+        [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(rows, 256), 1, 1)];
+        break;
+      }
+      case MG_OP_SIMDT_STEP: {
+        const BufSlot &bwb = g->bufs[op.in[0]], &bsb = g->bufs[op.in[1]], &bpl = g->bufs[op.in[2]], &bcfg = g->bufs[op.in[3]];
+        const BufSlot &bmask = (op.in[4] >= 0 ? g->bufs[op.in[4]] : bpl);
+        const BufSlot &btr = (op.out[0] >= 0 ? g->bufs[op.out[0]] : bsb);
+        const uint32_t E = op.u[0];
+        const uint32_t tg_th = std::min<uint32_t>(128u, std::max<uint32_t>(32u, ((op.u[1] + 31u) / 32u) * 32u));
+        const uint32_t s_u[1] = {step_idx};
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_simdt_step")];
+        [enc setBuffer:bwb.mtl offset:bwb.off atIndex:0];
+        [enc setBuffer:bsb.mtl offset:bsb.off atIndex:1];
+        [enc setBuffer:bpl.mtl offset:bpl.off atIndex:2];
+        [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:3];
+        [enc setBuffer:bmask.mtl offset:bmask.off atIndex:4];
+        [enc setBuffer:btr.mtl offset:btr.off atIndex:5];
+        [enc setBytes:s_u length:sizeof(s_u) atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_th, 1, 1)];
+        break;
+      }
+      case MG_OP_SIMDT_OBS: {
+        const BufSlot &bwb = g->bufs[op.in[0]], &bsb = g->bufs[op.in[1]];
+        const BufSlot &bo = g->bufs[op.out[0]], &bc = g->bufs[op.out[1]], &bt = g->bufs[op.out[2]];
+        const uint32_t E = op.u[0];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_simdt_obs")];
+        [enc setBuffer:bwb.mtl offset:bwb.off atIndex:0];
+        [enc setBuffer:bsb.mtl offset:bsb.off atIndex:1];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:2];
+        [enc setBuffer:bc.mtl offset:bc.off atIndex:3];
+        [enc setBuffer:bt.mtl offset:bt.off atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
       default:
         break;
     }
   }
+}
 
+static id<MTLCommandBuffer> encode_step(mesh_graph *g, uint32_t step_idx) {
+  const uint32_t g_slot = static_cast<uint32_t>((g->step_gen++) % kGenSlots);
+  id<MTLCommandBuffer> cb = [g->q commandBufferWithUnretainedReferences];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  encode_ops_into(g, enc, step_idx, g_slot);
   [enc endEncoding];
   return cb;
 }
@@ -2366,6 +2630,13 @@ mesh_graph_t *mesh_graph_create(int world_size, int rank, const char *comm_id, i
   g->lib_gemm = [g->dev newLibraryWithSource:src_gemm options:opts error:&err];
   if (!g->lib_gemm) {
     fprintf(stderr, "mesh-graph: gemm MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    delete g;
+    return nullptr;
+  }
+  NSString *src_simdt = [NSString stringWithUTF8String:mesh_simdt::build_simdt_msl().c_str()];
+  g->lib_simdt = [g->dev newLibraryWithSource:src_simdt options:nil error:&err];
+  if (!g->lib_simdt) {
+    fprintf(stderr, "mesh-graph: simdt MSL compile error: %s\n", err.localizedDescription.UTF8String);
     delete g;
     return nullptr;
   }
@@ -2625,6 +2896,36 @@ double mesh_graph_run(mesh_graph_t *g, uint32_t n_steps, uint32_t warm_steps,
       std::sort(step_ms.begin(), step_ms.end());
       return step_ms[step_ms.size() / 2];
     }
+    return wall_ms / static_cast<double>(n_steps);
+  }
+}
+
+double mesh_graph_run_fused(mesh_graph_t *g, uint32_t n_steps, uint32_t warm_steps, double *out_wall_ms) {
+  if (!g || n_steps == 0) return 0.0;
+  @autoreleasepool {
+    if (warm_steps > 0) {
+      id<MTLCommandBuffer> wcb = [g->q commandBufferWithUnretainedReferences];
+      id<MTLComputeCommandEncoder> wenc = [wcb computeCommandEncoder];
+      for (uint32_t w = 0; w < warm_steps; w++) {
+        const uint32_t g_slot = static_cast<uint32_t>((g->step_gen++) % kGenSlots);
+        encode_ops_into(g, wenc, 0, g_slot);
+      }
+      [wenc endEncoding];
+      [wcb commit];
+      [wcb waitUntilCompleted];
+    }
+    const uint64_t t0 = now_ns();
+    id<MTLCommandBuffer> cb = [g->q commandBufferWithUnretainedReferences];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    for (uint32_t k = 0; k < n_steps; k++) {
+      const uint32_t g_slot = static_cast<uint32_t>((g->step_gen++) % kGenSlots);
+      encode_ops_into(g, enc, k, g_slot);
+    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    const double wall_ms = (static_cast<double>(now_ns() - t0)) * 1e-6;
+    if (out_wall_ms) *out_wall_ms = wall_ms;
     return wall_ms / static_cast<double>(n_steps);
   }
 }

@@ -9,10 +9,20 @@ from .batched_grpo_pfsp import (
     update_batched_grpo_ppo,
 )
 from .engine import DeltaTimePayloadEngine, SimRulesConfig, SimSnapshot
+from .metal_runtime import (
+    CompiledPlanWally,
+    CompiledRolloutGraph,
+    MetalDeltaTimePayloadEngine,
+    MetalSimSnapshot,
+)
 from .world_graph import WorldGraphIR, build_gas_world_graph, world_graph_from_vfs_bundle
 
 __all__ = [
     "DeltaTimePayloadEngine",
+    "MetalDeltaTimePayloadEngine",
+    "MetalSimSnapshot",
+    "CompiledPlanWally",
+    "CompiledRolloutGraph",
     "SimRulesConfig",
     "SimSnapshot",
     "WorldGraphIR",

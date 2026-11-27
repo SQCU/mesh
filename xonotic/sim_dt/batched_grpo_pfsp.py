@@ -44,6 +44,7 @@ if str(REPO_ROOT / "xonotic") not in sys.path:
 from mapgen.bsp_stream import sample_world_spec, synthesize_world_bundle
 from payload.tools.strategy_io_schema import CS, OBS, TS
 from sim_dt.engine import DeltaTimePayloadEngine, SimRulesConfig
+from sim_dt.metal_runtime import CompiledPlanWally, MetalDeltaTimePayloadEngine, _load_mesh_graph_lib
 from sim_dt.world_graph import WorldGraphIR, build_gas_world_graph
 from solver.strat.aurora import Aurora
 from solver.strat.league_curriculum import (
@@ -403,6 +404,7 @@ def act_batched_league(
     train_arm: str = "main",
     deterministic_eval: bool = False,
     pack_cfg: ActionPackConfig = ActionPackConfig(),
+    compiled_arms: dict[str, CompiledPlanWally] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any] | None]:
     """Dispatch GPU-batched policies across all K teams in E parallel matches.
 
@@ -437,8 +439,12 @@ def act_batched_league(
         h_prev = h_states.get(arm)
         if h_prev is not None and h_prev.shape != (e, n, model.d):
             h_prev = None
-        out = model.forward_batched(obs, carts, teams, geo=geo, h_prev=h_prev)
-        h_states[arm] = out.h_next.detach()
+        if compiled_arms is not None and arm in compiled_arms:
+            out = compiled_arms[arm].forward(obs, carts, teams, geo=geo)
+        else:
+            out = model.forward_batched(obs, carts, teams, geo=geo, h_prev=h_prev)
+            if out.h_next is not None:
+                h_states[arm] = out.h_next.detach()
         det = deterministic_eval and (arm != train_arm)
         smp = sample_plan(out, deterministic=det)
         packed = pack_plan_tensor(obs, teams, smp, active_mask=mask, pack_cfg=pack_cfg)
@@ -499,6 +505,7 @@ def collect_grpo_rollout_group(
     device: torch.device,
     rng: np.random.Generator,
     seed_base: int,
+    backend: str = "mps",
 ) -> dict[str, Any]:
     """Warm up B base matches to mid-game, snapshot, fork into B*G counterfactual branches,
     roll H steps in lockstep on GPU, and compute hybrid GRPO + Winnie/Lou GAE advantages."""
@@ -510,19 +517,40 @@ def collect_grpo_rollout_group(
     N = int(world.players_default)
     J = int(world.carts)
     K = int(world.teams)
+    CP = int(world.max_checkpoints)
     rules = SimRulesConfig(point_limit_base=float(sc.point_limit_base))
+
+    main_mdl = arm_models["main"]
+    assert main_mdl is not None
+    stripped_ok = (
+        not main_mdl.use_fsq and not main_mdl.use_mealy and not main_mdl.use_manifold_encoders
+        and not main_mdl.use_cart_dist_bias and not main_mdl.use_cell_head and not main_mdl.use_aux_skill_head
+    )
+    use_metal = (backend == "metal") and stripped_ok and (N <= 128 and J <= 32 and K <= 16 and CP <= 16)
+    roll_dev = torch.device("cpu") if use_metal else device
 
     t0 = time.perf_counter()
 
+    # Compile active neural arms once for Metal 4 NAX GIL-free execution
+    warm_compiled: dict[str, CompiledPlanWally] | None = None
+    grp_compiled: dict[str, CompiledPlanWally] | None = None
+    if use_metal:
+        active_neural = sorted({a for a in seat_arms if arm_models.get(a) is not None})
+        warm_compiled = {a: CompiledPlanWally(arm_models[a], E=B, N=N, J=J, K=K, pack_cfg=cfg.action_pack) for a in active_neural}
+        grp_compiled = {a: CompiledPlanWally(arm_models[a], E=E, N=N, J=J, K=K, pack_cfg=cfg.action_pack) for a in active_neural}
+
     # 1. Warm up B base environments to contested mid-match savestates
-    base_eng = DeltaTimePayloadEngine(world, num_envs=B, num_players=N, rules=rules, device=device, base_seed=seed_base)
+    if use_metal:
+        base_eng: Any = MetalDeltaTimePayloadEngine(world, num_envs=B, num_players=N, rules=rules, base_seed=seed_base)
+    else:
+        base_eng = DeltaTimePayloadEngine(world, num_envs=B, num_players=N, rules=rules, device=device, base_seed=seed_base)
     warmup_steps = int(rng.integers(sc.warmup_steps_min, max(sc.warmup_steps_min + 1, sc.warmup_steps_max + 1)))
     h_warm: dict[str, torch.Tensor | None] = {}
     for _ in range(warmup_steps):
         obs_w, carts_w, teams_w, geo_w = base_eng.observe_tensors()
         plan_w, hp_w, _ = act_batched_league(
             obs_w, carts_w, teams_w, geo_w, seat_arms, arm_models, h_warm,
-            train_arm="main", pack_cfg=cfg.action_pack,
+            train_arm="main", pack_cfg=cfg.action_pack, compiled_arms=warm_compiled,
         )
         base_eng.apply_plan(plan_w, hp_w)
         base_eng.step(sc.dt, mode=sc.mode)
@@ -532,42 +560,47 @@ def collect_grpo_rollout_group(
 
     # 2. O(1) GPU Savestate + Counterfactual Group Fork (B -> B * G)
     snap = base_eng.snapshot()
-    grp_eng = DeltaTimePayloadEngine.fork_group(
-        world, snap, group_size=G, rules=rules,
-        common_random_numbers=bool(sc.common_random_numbers),
-        seed_stride=10007,
-    )
+    if use_metal:
+        grp_eng: Any = MetalDeltaTimePayloadEngine.fork_group(
+            world, snap, group_size=G, rules=rules,
+            common_random_numbers=bool(sc.common_random_numbers),
+            seed_stride=10007,
+        )
+    else:
+        grp_eng = DeltaTimePayloadEngine.fork_group(
+            world, snap, group_size=G, rules=rules,
+            common_random_numbers=bool(sc.common_random_numbers),
+            seed_stride=10007,
+        )
     h_grp: dict[str, torch.Tensor | None] = {}
     for arm, hv in h_warm.items():
         if hv is not None:
             h_grp[arm] = hv.repeat_interleave(G, dim=0).clone()
 
-    # Preallocate on-device BF16 rollout buffers [H, E, ...] (zero uncompressed FP32 activation storage)
-    main_mdl = arm_models["main"]
-    assert main_mdl is not None
+    # Preallocate BF16 rollout buffers [H, E, ...] (zero uncompressed FP32 activation storage)
     act_dtype = main_mdl.enc_obs.weight.dtype
     d_model = int(main_mdl.d)
-    buf_obs = torch.empty((H, E, N, obs_w.shape[-1]), device=device, dtype=act_dtype)
-    buf_carts = torch.empty((H, E, J, carts_w.shape[-1]), device=device, dtype=act_dtype)
-    buf_teams = torch.empty((H, E, K, teams_w.shape[-1]), device=device, dtype=act_dtype)
-    buf_obs_next = torch.empty((H, E, N, obs_w.shape[-1]), device=device, dtype=act_dtype)
-    buf_carts_next = torch.empty((H, E, J, carts_w.shape[-1]), device=device, dtype=act_dtype)
-    buf_teams_next = torch.empty((H, E, K, teams_w.shape[-1]), device=device, dtype=act_dtype)
-    buf_h_in = torch.empty((H, E, N, d_model), device=device, dtype=act_dtype) if main_mdl.use_mealy else None
-    buf_cont = torch.empty((H, E, N, 11), device=device, dtype=act_dtype)
-    buf_cart_pick = torch.empty((H, E, N), device=device, dtype=torch.int16)
-    buf_rival_pick = torch.empty((H, E, N), device=device, dtype=torch.int16)
-    buf_cell_pick = torch.empty((H, E, N), device=device, dtype=torch.int16) if main_mdl.use_cell_head else None
-    buf_beh_logp = torch.empty((H, E, N), device=device, dtype=torch.float32)
-    buf_reward = torch.empty((H, E, N), device=device, dtype=torch.float32)
-    buf_wm_in = torch.empty((H, E, N), device=device, dtype=torch.bool)
-    buf_wm_out = torch.empty((H, E, N), device=device, dtype=torch.bool)
-    buf_val_w = torch.empty((H, E, N), device=device, dtype=torch.float32)
-    buf_val_l = torch.empty((H, E, N), device=device, dtype=torch.float32)
-    buf_alive_env = torch.empty((H, E), device=device, dtype=torch.bool)
-    buf_actor_mask = torch.empty((H, E, N), device=device, dtype=torch.bool)
+    buf_obs = torch.empty((H, E, N, obs_w.shape[-1]), device=roll_dev, dtype=act_dtype)
+    buf_carts = torch.empty((H, E, J, carts_w.shape[-1]), device=roll_dev, dtype=act_dtype)
+    buf_teams = torch.empty((H, E, K, teams_w.shape[-1]), device=roll_dev, dtype=act_dtype)
+    buf_obs_next = torch.empty((H, E, N, obs_w.shape[-1]), device=roll_dev, dtype=act_dtype)
+    buf_carts_next = torch.empty((H, E, J, carts_w.shape[-1]), device=roll_dev, dtype=act_dtype)
+    buf_teams_next = torch.empty((H, E, K, teams_w.shape[-1]), device=roll_dev, dtype=act_dtype)
+    buf_h_in = torch.empty((H, E, N, d_model), device=roll_dev, dtype=act_dtype) if main_mdl.use_mealy else None
+    buf_cont = torch.empty((H, E, N, 11), device=roll_dev, dtype=act_dtype)
+    buf_cart_pick = torch.empty((H, E, N), device=roll_dev, dtype=torch.int16)
+    buf_rival_pick = torch.empty((H, E, N), device=roll_dev, dtype=torch.int16)
+    buf_cell_pick = torch.empty((H, E, N), device=roll_dev, dtype=torch.int16) if main_mdl.use_cell_head else None
+    buf_beh_logp = torch.empty((H, E, N), device=roll_dev, dtype=torch.float32)
+    buf_reward = torch.empty((H, E, N), device=roll_dev, dtype=torch.float32)
+    buf_wm_in = torch.empty((H, E, N), device=roll_dev, dtype=torch.bool)
+    buf_wm_out = torch.empty((H, E, N), device=roll_dev, dtype=torch.bool)
+    buf_val_w = torch.empty((H, E, N), device=roll_dev, dtype=torch.float32)
+    buf_val_l = torch.empty((H, E, N), device=roll_dev, dtype=torch.float32)
+    buf_alive_env = torch.empty((H, E), device=roll_dev, dtype=torch.bool)
+    buf_actor_mask = torch.empty((H, E, N), device=roll_dev, dtype=torch.bool)
 
-    geo = {"map_center": world.map_center.to(device), "map_radius": world.map_radius.to(device)}
+    geo = {"map_center": world.map_center.to(roll_dev), "map_radius": world.map_radius.to(roll_dev)}
     start_scores = grp_eng.t_score.clone()
 
     for t in range(H):
@@ -579,7 +612,7 @@ def collect_grpo_rollout_group(
 
         plan, hp, tdata = act_batched_league(
             obs_in_c, carts_in_c, teams_in_c, geo, seat_arms, arm_models, h_grp,
-            train_arm="main", pack_cfg=cfg.action_pack,
+            train_arm="main", pack_cfg=cfg.action_pack, compiled_arms=grp_compiled,
         )
         assert tdata is not None
         grp_eng.apply_plan(plan, hp)
@@ -621,7 +654,10 @@ def collect_grpo_rollout_group(
 
     # Bootstrap value at t = H
     obs_f, carts_f, teams_f, _ = grp_eng.observe_tensors()
-    out_f = main_mdl.forward_batched(obs_f, carts_f, teams_f, geo=geo, h_prev=h_grp.get("main"))
+    if grp_compiled is not None and "main" in grp_compiled:
+        out_f = grp_compiled["main"].forward(obs_f, carts_f, teams_f, geo=geo)
+    else:
+        out_f = main_mdl.forward_batched(obs_f, carts_f, teams_f, geo=geo, h_prev=h_grp.get("main"))
     v_boot_last = torch.where(buf_wm_out[H - 1], out_f.value_winnie.to(torch.float32), out_f.value_lou.to(torch.float32))
     v_boot_last = torch.where((~grp_eng.t_finished)[:, None], v_boot_last, torch.zeros_like(v_boot_last))
 
@@ -629,8 +665,8 @@ def collect_grpo_rollout_group(
     gamma = float(cfg.losses.gamma)
     lam = float(cfg.losses.gae_lambda)
     val_in = torch.where(buf_wm_in, buf_val_w, buf_val_l)  # [H, E, N]
-    gae_adv = torch.zeros((H, E, N), device=device, dtype=torch.float32)
-    next_gae = torch.zeros((E, N), device=device, dtype=torch.float32)
+    gae_adv = torch.zeros((H, E, N), device=roll_dev, dtype=torch.float32)
+    next_gae = torch.zeros((E, N), device=roll_dev, dtype=torch.float32)
     for t in range(H - 1, -1, -1):
         still_going = buf_alive_env[t][:, None] & (buf_alive_env[t + 1][:, None] if t + 1 < H else (~grp_eng.t_finished)[:, None])
         same_role = buf_wm_in[t] == buf_wm_out[t]
@@ -644,7 +680,7 @@ def collect_grpo_rollout_group(
     gae_ret = gae_adv + val_in  # [H, E, N]
 
     # 4. Exact Counterfactual Within-Group GRPO Advantage [B, G] over pure CGT sparse W/L return
-    disc_pows = (gamma ** torch.arange(H, device=device, dtype=torch.float32)).view(H, 1, 1)
+    disc_pows = (gamma ** torch.arange(H, device=roll_dev, dtype=torch.float32)).view(H, 1, 1)
     main_mask_0 = buf_actor_mask[0].to(torch.float32)
     main_cnt = main_mask_0.sum(dim=-1).clamp_min(1.0)
     ep_ret_agent = (buf_reward * disc_pows).sum(dim=0) + (gamma ** H) * v_boot_last
@@ -665,6 +701,32 @@ def collect_grpo_rollout_group(
     gae_var = (((gae_adv - gae_mean) ** 2) * am_f).sum() / am_sum
     gae_norm = (gae_adv - gae_mean) / gae_var.clamp_min(1e-6).sqrt()
     blended_adv = float(sc.grpo_weight) * grpo_adv + float(sc.gae_weight) * gae_norm
+
+    score_outs_n = int(grp_eng.t_finished.sum().item())
+    if use_metal:
+        # Clean up Metal rollout graphs & move compact BF16 rollout batch to training device
+        for c in (warm_compiled or {}).values():
+            c.close()
+        for c in (grp_compiled or {}).values():
+            c.close()
+        base_eng.close()
+        grp_eng.close()
+        if roll_dev != device:
+            buf_obs = buf_obs.to(device)
+            buf_carts = buf_carts.to(device)
+            buf_teams = buf_teams.to(device)
+            buf_obs_next = buf_obs_next.to(device)
+            buf_carts_next = buf_carts_next.to(device)
+            buf_teams_next = buf_teams_next.to(device)
+            buf_cont = buf_cont.to(device)
+            buf_cart_pick = buf_cart_pick.to(device)
+            buf_rival_pick = buf_rival_pick.to(device)
+            buf_beh_logp = buf_beh_logp.to(device)
+            blended_adv = blended_adv.to(device)
+            gae_ret = gae_ret.to(device)
+            buf_wm_in = buf_wm_in.to(device)
+            buf_actor_mask = buf_actor_mask.to(device)
+            geo = {k: v.to(device) for k, v in geo.items()}
 
     # Pairwise win-rates vs each opponent team over the rollout window for PFSP
     opp_wr_obs: dict[str, list[float]] = defaultdict(list)
@@ -701,7 +763,7 @@ def collect_grpo_rollout_group(
             "sim_s": round(total_sim_s, 1),
             "speedup_x": round(total_sim_s / max(wall_s, 1e-6), 1),
             "warmup_steps": warmup_steps,
-            "score_outs": int(grp_eng.t_finished.sum().item()),
+            "score_outs": score_outs_n,
             "grpo_ret_mean": round(float(grp_ret.mean().item()), 4),
             "grpo_within_std": round(float(grp_ret.std(dim=1, unbiased=False).mean().item()), 4),
             "main_dscore_mean": round(float(d_scores[:, 0].mean().item()), 2),
@@ -1141,6 +1203,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="GPU-resident batched GRPO + PFSP trainer on DeltaTimePayloadEngine")
     ap.add_argument("--config", type=str, default=str(CONFIGS_DIR / "sim_dt_grpo_pfsp.json"))
     ap.add_argument("--device", type=str, default="auto")
+    ap.add_argument("--backend", type=str, default="auto", choices=("auto", "metal", "mps"), help="Rollout execution backend: compiled Metal 4 (libmesh-graph.dylib) or PyTorch MPS")
     ap.add_argument("--out-dir", type=str, default="/tmp/sim_dt_grpo_pfsp_run")
     ap.add_argument("--iterations", type=int, default=0, help="Override config iterations if > 0")
     ap.add_argument("--base-envs", type=int, default=0, help="Override config base_envs if > 0")
@@ -1226,9 +1289,17 @@ def main() -> None:
     pfsp_pool = ["default", *SCRIPTED_ANCHORS, "main_init", "ema"]
     pfsp_wr: dict[str, float] = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
 
+    rollout_backend = args.backend
+    if rollout_backend == "auto":
+        try:
+            _load_mesh_graph_lib()
+            rollout_backend = "metal"
+        except Exception:
+            rollout_backend = "mps"
+
     n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"[sim_dt-grpo] device={device} dtype={model_dtype} params={n_params:,} ({n_params * 2 / 1e6:.2f} MB) "
+        f"[sim_dt-grpo] device={device} rollout_backend={rollout_backend} dtype={model_dtype} params={n_params:,} ({n_params * 2 / 1e6:.2f} MB) "
         f"iters={sc.iterations} B={sc.base_envs} G={sc.group_size} (E={sc.base_envs * sc.group_size}) "
         f"H={sc.rollout_horizon} dt={sc.dt}s target_mb_rows={sc.target_microbatch_rows} crn={sc.common_random_numbers}",
         flush=True,
@@ -1263,6 +1334,7 @@ def main() -> None:
 
         rollout = collect_grpo_rollout_group(
             world, cfg, arm_models, seats, device=device, rng=rng, seed_base=cfg.seeds.match_base + it * 1009,
+            backend=rollout_backend,
         )
         upd = update_batched_grpo_ppo(
             model, ema_model, optimizer, rollout, cfg=cfg, entropy_coef=ent_coef, device=device,

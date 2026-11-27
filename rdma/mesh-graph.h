@@ -51,7 +51,20 @@ enum mesh_graph_op_kind {
   MG_OP_ALLREDUCE         = 12, /* standalone flat-DMA all-reduce (publish + await + sum + retire) */
   MG_OP_CONCAT            = 13, /* concat along last dim: out[M, K0+K1] = cat(a[M,K0], b[M,K1]) */
   MG_OP_SPEC_VERIFY_COMMIT = 14, /* in-GPU lossless greedy spec verify + pos/anchor update + hidden select + stats */
-  MG_OP_WRITE_TOK_SLOT    = 15  /* write 1 int32 token from src[0] into dst[slot_idx] */
+  MG_OP_WRITE_TOK_SLOT    = 15, /* write 1 int32 token from src[0] into dst[slot_idx] */
+  MG_OP_PLAN_PRENORM      = 16, /* fused CGT features + prenormalize obs/carts/teams + asinh + mp_norm + NAX pad */
+  MG_OP_PLAN_EMBED_CAT    = 17, /* fused mp_norm + type_embed mp_lerp + concat [N,J,K] + mp_norm into x[E,M,D] */
+  MG_OP_MP_NORM           = 18, /* pure BF16 rms_norm(x, eps) without weight tensor */
+  MG_OP_MP_LERP           = 19, /* fused mp_norm(mp_lerp(a, norm_b?mp_norm(b):b, sigmoid_buf[idx])) */
+  MG_OP_MP_SWIGLU         = 20, /* fused mp_silu(gate, scale) * up from packed [M, 2*H] -> [M, H] */
+  MG_OP_CGT_GRAM_STAGE1   = 21, /* fused global Gram (16KB TG SRAM) + pool_score + team_pool + blend_pool */
+  MG_OP_CGT_TEAM_RIVAL    = 22, /* fused norm(q_t,k_t,v_t) + team rival Gram (q@k^T/sqrt(K))@v -> t_mixed */
+  MG_OP_CGT_BCAST_MERGE   = 23, /* fused norm(t_bcast) + t_global + broadcast + mp_norm(mp_norm(global_raw) + team_vals) */
+  MG_OP_PLAN_SLICE_NORM   = 24, /* fused mp_norm(x) + split [E,M,D] -> p_h[E*N,D], c_h[E*J,D], t_h[E*K,D] */
+  MG_OP_BILINEAR_LOGITS   = 25, /* fused temp * dot(unit(Q), unit(K)) with optional own-team mask */
+  MG_OP_PLAN_POST_PACK    = 26, /* fused cont_mean, values, dyn + optional det/stoch sample & pack_plan[E,N,16] */
+  MG_OP_SIMDT_STEP        = 27, /* fused TG-SRAM DeltaTimePayloadEngine step (score, carts, goals, kinematics, combat) */
+  MG_OP_SIMDT_OBS         = 28  /* emit BF16 obs[E,N,84], carts[E,J,18], teams[E,K,7] from simdt SoA state */
 };
 
 enum mesh_graph_ew_subop {
@@ -98,6 +111,9 @@ int           mesh_graph_compile(mesh_graph_t *g);
    Returns steady-state ms/step (median of interior steps when n_steps >= 4, else wall_ms / n_steps). */
 double        mesh_graph_run(mesh_graph_t *g, uint32_t n_steps, uint32_t warm_steps,
                              int32_t *out_tokens, uint32_t out_tok_stride, double *out_wall_ms);
+
+/* Execute n_steps inside ONE single MTLCommandBuffer + ONE MTLComputeCommandEncoder (zero per-step CB latency). */
+double        mesh_graph_run_fused(mesh_graph_t *g, uint32_t n_steps, uint32_t warm_steps, double *out_wall_ms);
 
 /* Non-blocking single-step submit + wait for Saguaro / SSD async overlap (verifier CB in flight while speculator runs). */
 void         *mesh_graph_submit_step(mesh_graph_t *g, uint32_t step_idx);
