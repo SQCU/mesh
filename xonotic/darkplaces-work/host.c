@@ -3,6 +3,9 @@
 #include "quakedef.h"
 
 #include <time.h>
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#endif
 #include "libcurl.h"
 #ifdef CONFIG_CD
 #include "cdaudio.h"
@@ -861,6 +864,10 @@ void Host_Main(void)
 		}
 
 		host_framecount++;
+#ifdef __APPLE__
+		if ((host_framecount & 255) == 1)
+			malloc_zone_pressure_relief(NULL, 0);
+#endif
 	}
 }
 

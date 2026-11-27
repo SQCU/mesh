@@ -236,9 +236,11 @@ void payload_str_deposit(float kind, float observer, float team, float subject, 
 
 void payload_str_outcome(entity actor, float kind, entity subject, float value)
 {
+	if (autocvar_g_payload_plan_only && !autocvar_g_payload_use_view)
+		return;
+	float seq = autocvar_g_payload_use_view ? mesh_view_stat(actor, 0) : plc_str_plan_done;
 	payload_str_deposit(kind, etof(actor), Team_TeamToIndex(actor.team),
-		etof(subject), actor.origin, payload_str_cell_of(actor.origin), '0 0 0', 0, 0, 0, value,
-		mesh_view_stat(actor, 0));
+		etof(subject), actor.origin, payload_str_cell_of(actor.origin), '0 0 0', 0, 0, 0, value, seq);
 }
 
 void payload_str_round(float winner)
