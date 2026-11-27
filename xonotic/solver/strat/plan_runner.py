@@ -212,6 +212,7 @@ class MultiServerPlanHarness:
                 self.dp_bin, "-xonotic",
                 "-basedir", self.basedir,
                 "-userdir", str(sv_userdir),
+                "-sessionid", f"s{os.getpid()}_{idx}",
                 "+exec", "gamemodes-payload.cfg",
                 "+sv_public", "0",
                 "+port", str(base_port + idx),

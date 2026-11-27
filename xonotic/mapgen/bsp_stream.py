@@ -1051,7 +1051,7 @@ def _compile_boxes_to_ibsp(
     def _build_bsp(b_ids: list[int], depth: int = 0) -> int:
         u_min = np.min([box_aabbs[i][0] for i in b_ids], axis=0)
         u_max = np.max([box_aabbs[i][1] for i in b_ids], axis=0)
-        if len(b_ids) <= 4 or depth >= 14:
+        if len(b_ids) <= 6 or depth >= 8:
             leaf_idx = len(leafs_out)
             lf0 = len(lf_out)
             lb0 = len(lb_out)
@@ -1074,7 +1074,7 @@ def _compile_boxes_to_ibsp(
         split_d = float(np.median(mids))
         right = [i for i in b_ids if float(box_aabbs[i][1][axis]) > split_d]
         left = [i for i in b_ids if float(box_aabbs[i][0][axis]) < split_d]
-        if not right or not left or (len(right) == len(b_ids) and len(left) == len(b_ids)):
+        if not right or not left or len(right) >= len(b_ids) or len(left) >= len(b_ids) or (len(right) + len(left)) > int(1.6 * len(b_ids)):
             leaf_idx = len(leafs_out)
             lf0 = len(lf_out)
             lb0 = len(lb_out)
