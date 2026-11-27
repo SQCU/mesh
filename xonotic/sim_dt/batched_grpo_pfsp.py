@@ -1024,9 +1024,10 @@ def eval_darkplaces_transfer(
                             if bool(np.any(team_rows[:, TS["FINISHED"]] > 0.5)):
                                 finished = True
 
+                            sv_maxc_obs = max(maxc, len(obs_raw))
                             bot_teams = obs_rows[:, OBS["TEAM"]].astype(np.int64)
                             bot_arms = np.asarray([seat_arms[(int(t) - 1) % len(seat_arms)] for t in bot_teams], dtype=object)
-                            plan_mat = np.zeros((maxc, PLAN_WIDTH), dtype=np.float32)
+                            plan_mat = np.zeros((sv_maxc_obs, PLAN_WIDTH), dtype=np.float32)
 
                             obs_t = torch.as_tensor(obs_rows, dtype=torch.float32, device=device)
                             carts_t = torch.as_tensor(cart_rows, dtype=torch.float32, device=device)
@@ -1044,7 +1045,7 @@ def eval_darkplaces_transfer(
                                 if arm == "default":
                                     continue
                                 if arm in SCRIPTED_ANCHORS:
-                                    sp_mat = scripted_plan_rows(arm, obs_rows, cart_rows, team_rows, bot_arms, maxclients=maxc)
+                                    sp_mat = scripted_plan_rows(arm, obs_rows, cart_rows, team_rows, bot_arms, maxclients=sv_maxc_obs)
                                     m_nz = sp_mat[:, 0] > 0.5
                                     plan_mat[m_nz] = sp_mat[m_nz]
                                     continue
@@ -1066,14 +1067,14 @@ def eval_darkplaces_transfer(
                                     hn = out.h_next.detach().cpu().numpy()
                                     for bi in range(len(obs_rows)):
                                         mealy_states[arm][int(round(float(obs_rows[bi, OBS["ID"]])))] = hn[bi]
-                                packed = pack_plan_rows(obs_rows, team_rows, smp, bot_arms, {arm}, maxclients=maxc, pack_cfg=cfg.action_pack)
+                                packed = pack_plan_rows(obs_rows, team_rows, smp, bot_arms, {arm}, maxclients=sv_maxc_obs, pack_cfg=cfg.action_pack)
                                 m_nz = packed[:, 0] > 0.5
                                 plan_mat[m_nz] = packed[m_nz]
 
                             if session in routes:
                                 node, addr = routes[session]
-                                for pkt in frames(session, tick_id, harness.framebytes, ((PLAN_KIND, plan_mat),)):
-                                    engine.send(node, addr, pkt)
+                                req_id = records[OBSERVATION_KIND][0]["req_id"]
+                                engine.send(addr, node, frames(PLAN_KIND, req_id, tick_id, plan_mat, harness.framebytes, session))
                 finally:
                     harness._stop_servers(procs, logs)
                     engine.close()
