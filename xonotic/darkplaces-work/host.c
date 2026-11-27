@@ -29,6 +29,7 @@ jmp_buf host_abortframe;
 
 cvar_t host_framerate = {0, "host_framerate","0", "locks frame timing to this value in seconds, 0.05 is 20fps for example, note that this can easily run too fast, use cl_maxfps if you want to limit your framerate instead, or sys_ticrate to limit server speed"};
 cvar_t cl_maxphysicsframesperserverframe = {0, "cl_maxphysicsframesperserverframe","10", "maximum number of physics frames per server frame"};
+cvar_t sv_headless_unthrottled = {0, "sv_headless_unthrottled","0", "run dedicated server physics unthrottled without realtime sleep or sv_timer loss clamping when no network clients are connected"};
 
 cvar_t host_speeds = {0, "host_speeds","0", "reports how much time is used in server/graphics/sound"};
 cvar_t host_maxwait = {0, "host_maxwait","1000", "maximum sleep time requested from the operating system in millisecond. Larger sleeps will be done using multiple host_maxwait length sleeps. Lowering this value will increase CPU load, but may help working around problems with accuracy of sleep times."};
@@ -596,14 +597,22 @@ void Host_Main(void)
 
 		}
 
-		if (cls.state == ca_dedicated)
+		qboolean headless_fast = (cls.state == ca_dedicated && sv.active && !svs.threaded && sv_headless_unthrottled.integer && !playing);
+		if (headless_fast)
+		{
+			double step = sys_ticrate.value > 0 ? sys_ticrate.value : 0.0138889;
+			if (sv_timer < step)
+				sv_timer = step;
+			wait = 0;
+		}
+		else if (cls.state == ca_dedicated)
 			wait = sv_timer * -1000000.0;
 		else if (!sv.active || svs.threaded)
 			wait = cl_timer * -1000000.0;
 		else
 			wait = max(cl_timer, sv_timer) * -1000000.0;
 
-		if (!cls.timedemo && wait >= 1)
+		if (!cls.timedemo && !headless_fast && wait >= 1)
 		{
 			double time0, delta;
 
@@ -633,7 +642,7 @@ void Host_Main(void)
 
 		if (cl_timer > 0.1)
 			cl_timer = 0.1;
-		if (sv_timer > 0.1)
+		if (!headless_fast && sv_timer > 0.1)
 		{
 			if (!svs.threaded)
 				svs.perf_acc_lost += (sv_timer - 0.1);
@@ -650,7 +659,13 @@ void Host_Main(void)
 			float offset;
 			prvm_prog_t *prog = SVVM_prog;
 
-			if (sys_ticrate.value <= 0)
+			if (headless_fast)
+			{
+				advancetime = sys_ticrate.value > 0 ? sys_ticrate.value : 0.0138889;
+				framelimit = 1;
+				sv_timer = advancetime;
+			}
+			else if (sys_ticrate.value <= 0)
 				advancetime = sv_timer;
 			else if (cl.islocalgame && !sv_fixedframeratesingleplayer.integer)
 			{
@@ -877,6 +892,7 @@ static void Host_InitSession(void)
 	int i;
 	Cvar_RegisterVariable(&sessionid);
 	Cvar_RegisterVariable(&locksession);
+	Cvar_RegisterVariable(&sv_headless_unthrottled);
 
 	if ((i = COM_CheckParm("-sessionid")) && (i + 1 < com_argc))
 	{

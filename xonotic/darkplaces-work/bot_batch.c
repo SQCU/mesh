@@ -208,19 +208,22 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 	data = active ? (float *)Mem_Alloc(tempmempool, (size_t)BOT_BATCH_FIELDS * padded * sizeof(float)) : NULL;
 	kernelrows = active ? (vcellplanrow_t *)Mem_Alloc(tempmempool, (size_t)active * sizeof(*kernelrows)) : NULL;
 	active = 0;
+	qboolean use_view = Cvar_VariableValue("g_payload_use_view") != 0.0f;
 	for (row = 0; row < plan.count; row++)
 	{
 		prvm_edict_t *actor = plan.rows[row].actor;
 		uint32_t csnum;
 		prvm_edict_t *client;
-		prvm_view_t *previous;
+		prvm_view_t *previous = NULL;
 		if (!PRVM_EDICTFIELDFLOAT(actor, pending))
 			continue;
-		previous = PRVM_ViewBegin(prog, PRVM_NUM_FOR_EDICT(actor));
+		if (use_view)
+			previous = PRVM_ViewBegin(prog, PRVM_NUM_FOR_EDICT(actor));
 		csnum = (uint32_t)PRVM_EDICTREADINT(actor, csfield, ev_entity);
 		if (!csnum || csnum >= (uint32_t)prog->max_edicts)
 		{
-			PRVM_ViewEnd(prog, previous);
+			if (use_view)
+				PRVM_ViewEnd(prog, previous);
 			VM_Warning(prog, "bot_controller_batch: pending edict %u has invalid client state %u in %s; scalar fallback remains pending\n", first + plan.rows[row].stable, csnum, prog->name);
 			continue;
 		}
@@ -243,14 +246,16 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 		data[BOT_BATCH_DUCK_TIME * padded + active] = PRVM_EDICTREADFLOAT(actor, ducktime);
 		data[BOT_BATCH_RANDOM * padded + active] = PRVM_EDICTREADFLOAT(actor, randomfield);
 		data[BOT_BATCH_NOW * padded + active] = PRVM_G_READFLOAT(OFS_PARM0);
-		prog->view->global_readonly[OFS_PARM2] = 1;
+		if (prog->view)
+			prog->view->global_readonly[OFS_PARM2] = 1;
 		data[BOT_BATCH_SKILL * padded + active] = (hasbaseskill >= 0 && baseskill >= 0 && PRVM_EDICTREADFLOAT(actor, hasbaseskill) != 0.0f)
 			? PRVM_EDICTREADFLOAT(actor, baseskill)
 			: PRVM_G_READFLOAT(OFS_PARM2);
 		data[BOT_BATCH_MAXSPEED * padded + active] = PRVM_G_READFLOAT(OFS_PARM3);
 		data[BOT_BATCH_TRIGGER * padded + active] = PRVM_G_READFLOAT(OFS_PARM4);
 		data[BOT_BATCH_DISTANCE * padded + active] = PRVM_G_READFLOAT(OFS_PARM5);
-		PRVM_ViewEnd(prog, previous);
+		if (use_view)
+			PRVM_ViewEnd(prog, previous);
 		active++;
 	}
 	botbatchstats.input_coordinates = (uint64_t)active * 19;

@@ -338,6 +338,7 @@ entity plc_nav_targets;
 #define autocvar_g_payload_vcell_log cvar("g_payload_vcell_log")
 #define autocvar_g_payload_strategy_interval cvar("g_payload_strategy_interval")
 #define autocvar_g_payload_plan_only cvar("g_payload_plan_only")
+#define autocvar_g_payload_use_view cvar("g_payload_use_view")
 
 void payload_strategy_attach();
 float payload_str_cart_pool_run();

@@ -375,7 +375,10 @@ float bot_controller_batch_run()
 	IL_EACH(g_players, IS_BOT_CLIENT(it) && it.bot_batch_pending,
 	{
 		bot_batch_fallback_total += 1;
-		mesh_view_run(it, bot_controller_batch_fallback);
+		if (cvar("g_payload_use_view"))
+			mesh_view_run(it, bot_controller_batch_fallback);
+		else
+			bot_controller_batch_fallback(it);
 	});
 	if (!waves)
 	{

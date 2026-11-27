@@ -86,16 +86,17 @@ void payload_strategy_reset_player(entity player)
 
 void payload_str_measure(entity player, float coordinate, float amount)
 {
-	bool a = !player.plc_str_outcome_a_used || player.plc_str_outcome_a_seq == mesh_view_stat(player, 0);
+	float seq = autocvar_g_payload_use_view ? mesh_view_stat(player, 0) : plc_str_plan_done;
+	bool a = !player.plc_str_outcome_a_used || player.plc_str_outcome_a_seq == seq;
 	if (a && !player.plc_str_outcome_a_used)
 	{
 		player.plc_str_outcome_a_used = 1;
-		player.plc_str_outcome_a_seq = mesh_view_stat(player, 0);
+		player.plc_str_outcome_a_seq = seq;
 	}
 	if (!a && !player.plc_str_outcome_b_used)
 	{
 		player.plc_str_outcome_b_used = 1;
-		player.plc_str_outcome_b_seq = mesh_view_stat(player, 0);
+		player.plc_str_outcome_b_seq = seq;
 	}
 	if (a)
 	{
@@ -514,8 +515,9 @@ void payload_strategy_gather(float nclients)
 		it.plc_ob_f_cell_y = it.plc_str_cell_y;
 		it.plc_ob_f_alive   = IS_DEAD(it) ? 0 : 1;
 		it.plc_ob_f_control = IS_BOT_CLIENT(it) ? 1 : 0;
-		it.plc_ob_f_view_faults = mesh_view_stat(it, 9);
-		it.plc_ob_f_view_fault_sequence = mesh_view_stat(it, 10);
+		bool use_view = autocvar_g_payload_use_view != 0;
+		it.plc_ob_f_view_faults = use_view ? mesh_view_stat(it, 9) : 0;
+		it.plc_ob_f_view_fault_sequence = use_view ? mesh_view_stat(it, 10) : 0;
 		it.plc_ob_f_snapshots_superseded = plc_str_snapshots_superseded;
 		it.plc_ob_f_havocbot_keyboardskill = it.havocbot_keyboardskill;
 		it.plc_ob_f_bot_moveskill = it.bot_moveskill;
@@ -530,17 +532,17 @@ void payload_strategy_gather(float nclients)
 		it.plc_ob_f_bot_thinkskill = it.bot_thinkskill;
 		it.plc_ob_f_bot_aiskill = it.bot_aiskill;
 		it.plc_ob_f_bot_global_skill = BOT_SKILL(it);
-		float obs_resp_seq = mesh_view_stat(it, 4);
-		float obs_app_seq = mesh_view_stat(it, 0);
+		float obs_resp_seq = use_view ? mesh_view_stat(it, 4) : 0;
+		float obs_app_seq = use_view ? mesh_view_stat(it, 0) : 0;
 		if (autocvar_g_payload_plan_only && it.plc_pl_f_id == etof(it) && plc_str_plan_done > 0)
 		{
 			obs_resp_seq = plc_str_plan_done;
 			obs_app_seq = plc_str_plan_done;
 		}
 		it.plc_ob_f_response_seq = obs_resp_seq;
-		it.plc_ob_f_response_time = mesh_view_stat(it, 5);
+		it.plc_ob_f_response_time = use_view ? mesh_view_stat(it, 5) : 0;
 		it.plc_ob_f_applied_seq = obs_app_seq;
-		it.plc_ob_f_applied_latency = mesh_view_stat(it, 6);
+		it.plc_ob_f_applied_latency = use_view ? mesh_view_stat(it, 6) : 0;
 		it.plc_ob_f_enemy_damage_dealt = it.plc_str_enemy_damage_dealt;
 		it.plc_ob_f_enemy_damage_taken = it.plc_str_enemy_damage_taken;
 		it.plc_ob_f_enemy_kills = it.plc_str_enemy_kills;
@@ -548,15 +550,16 @@ void payload_strategy_gather(float nclients)
 		it.plc_ob_f_pickups = it.plc_str_pickups;
 		it.plc_ob_f_cart_push = it.plc_str_cart_push;
 		it.plc_ob_f_cart_contest = it.plc_str_cart_contest;
+		float cur_outcome_seq = use_view ? mesh_view_stat(it, 0) : plc_str_plan_done;
 		if (!it.plc_str_outcome_a_used)
 		{
 			it.plc_str_outcome_a_used = 1;
-			it.plc_str_outcome_a_seq = mesh_view_stat(it, 0);
+			it.plc_str_outcome_a_seq = cur_outcome_seq;
 		}
-		else if (it.plc_str_outcome_a_seq != mesh_view_stat(it, 0) && !it.plc_str_outcome_b_used)
+		else if (it.plc_str_outcome_a_seq != cur_outcome_seq && !it.plc_str_outcome_b_used)
 		{
 			it.plc_str_outcome_b_used = 1;
-			it.plc_str_outcome_b_seq = mesh_view_stat(it, 0);
+			it.plc_str_outcome_b_seq = cur_outcome_seq;
 		}
 		it.plc_ob_f_outcome_a_seq = it.plc_str_outcome_a_seq;
 		it.plc_ob_f_outcome_a_enemy_damage_dealt = it.plc_str_outcome_a_enemy_damage_dealt;
@@ -661,8 +664,11 @@ void payload_strategy_step(entity leadcart)
 	}
 	if (mesh_stat(plc_str_h_obs, MESH_STAT_PENDING) == 0)
 	{
-		FOREACH_CLIENT(IS_PLAYER(it), { payload_perceive(it); });
-		payload_emit_cell_links();
+		if (!autocvar_g_payload_plan_only)
+		{
+			FOREACH_CLIENT(IS_PLAYER(it), { payload_perceive(it); });
+			payload_emit_cell_links();
+		}
 		payload_strategy_gather(nclients);
 	}
 	else

@@ -221,6 +221,8 @@ class MultiServerPlanHarness:
                 "+g_payload", "1",
                 "+g_payload_teams_override", str(sv_teams),
                 "+g_payload_plan_only", "1",
+                "+g_payload_use_view", "0",
+                "+sv_headless_unthrottled", "1",
                 "+g_warmup", "0",
                 "+g_start_delay", "0",
                 "+g_payload_warmup", "1",

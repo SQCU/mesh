@@ -149,7 +149,10 @@ void bot_think_stock(entity this)
 
 void bot_think(entity this)
 {
-	mesh_view_run(this, bot_think_stock);
+	if (cvar("g_payload_use_view"))
+		mesh_view_run(this, bot_think_stock);
+	else
+		bot_think_stock(this);
 }
 
 void bot_setnameandstuff(entity this)
