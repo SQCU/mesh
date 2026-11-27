@@ -49,6 +49,20 @@ MG_OP_BILINEAR_LOGITS = 25
 MG_OP_PLAN_POST_PACK = 26
 MG_OP_SIMDT_STEP = 27
 MG_OP_SIMDT_OBS = 28
+MG_OP_LINEAR_DX = 29
+MG_OP_LINEAR_DW = 30
+MG_OP_PLAN_LOSS_BWD = 31
+MG_OP_BILINEAR_BWD = 32
+MG_OP_PLAN_SLICE_BWD = 33
+MG_OP_MP_NORM_BWD = 34
+MG_OP_MP_LERP_BWD = 35
+MG_OP_MP_SWIGLU_BWD = 36
+MG_OP_CGT_BCAST_BWD = 37
+MG_OP_CGT_RIVAL_BWD = 38
+MG_OP_CGT_STAGE1_BWD = 39
+MG_OP_PLAN_EMBED_BWD = 40
+MG_OP_UNIT_W_BWD = 41
+MG_OP_ZERO_F32 = 42
 
 
 class MeshGraphOp(ctypes.Structure):
@@ -363,7 +377,7 @@ class CompiledPlanWally:
         w["cart_k"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
         w["rival_q"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
         w["rival_k"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
-        w["heads_packed"] = self._add_buf(32 * D * 2, MG_BUF_WEIGHT)
+        w["heads_packed"] = self._add_buf(64 * D * 2, MG_BUF_WEIGHT)
 
         # Static shared activation arena (zero dynamic allocation per step!)
         # Layout sized with generous non-aliasing slots for peak live tensors.
@@ -383,7 +397,7 @@ class CompiledPlanWally:
         s_e = alloc_slot(max(EK_pad * D, EJ_pad * D, EN_pad * D) * 2)
         s_f = alloc_slot(max(EK_pad * D, EK_pad * Rt, EN_pad * D) * 2)
         s_g = alloc_slot(max(EK_pad * D, EK_pad * Rt, EJ_pad * D) * 2)
-        s_h = alloc_slot(max(EK_pad * D, EN_pad * 32) * 2)
+        s_h = alloc_slot(max(EK_pad * D, EN_pad * 64) * 2)
 
         self.buf_arena = self._add_buf(off, MG_BUF_ARENA)
         b_x = self._add_view(self.buf_arena, *s_x)
@@ -552,7 +566,7 @@ class CompiledPlanWally:
         self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_d, w["cart_k"]), out_bufs=(b_b,), u=(EJ_pad, D, D)))
         self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_c, w["rival_q"]), out_bufs=(b_f,), u=(EN_pad, D, D)))
         self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_e, w["rival_k"]), out_bufs=(b_g,), u=(EK_pad, D, D)))
-        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_c, w["heads_packed"]), out_bufs=(b_h,), u=(EN_pad, 32, D)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_c, w["heads_packed"]), out_bufs=(b_h,), u=(EN_pad, 64, D)))
 
         # 7. Bilinear cart & rival logits
         self._add_op(_make_op(
@@ -654,7 +668,7 @@ class CompiledPlanWally:
         put("rival_q", _unit_weight_bf16(model.rival_q.weight, eps))
         put("rival_k", _unit_weight_bf16(model.rival_k.weight, eps))
 
-        hp_w = torch.zeros((32, self.d), dtype=torch.bfloat16)
+        hp_w = torch.zeros((64, self.d), dtype=torch.bfloat16)
         hp_w[0:11] = _unit_weight_bf16(model.cont_proj.weight, eps)
         hp_w[11:13] = _unit_weight_bf16(model.value_proj.weight, eps)
         hp_w[13:14] = _unit_weight_bf16(model.dyn_drift_proj.weight, eps)
@@ -894,8 +908,8 @@ class MetalDeltaTimePayloadEngine:
         self.J = int(self.world.carts)
         self.N = int(num_players if num_players is not None else self.world.players_default)
         self.CP = int(self.world.max_checkpoints)
-        assert self.N <= 128 and self.J <= 32 and self.K <= 16 and self.CP <= 16, (
-            f"MetalDeltaTimePayloadEngine TG SRAM bounds: N<=128, J<=32, K<=16, CP<=16 (got {self.N},{self.J},{self.K},{self.CP})"
+        assert self.N <= 128 and self.J <= 64 and self.K <= 16 and self.CP <= 16, (
+            f"MetalDeltaTimePayloadEngine TG SRAM bounds: N<=128, J<=64, K<=16, CP<=16 (got {self.N},{self.J},{self.K},{self.CP})"
         )
 
         world_blob, self.layout = _build_world_blob(self.world, self.E, self.N, self.rules)
@@ -1161,6 +1175,27 @@ class MetalDeltaTimePayloadEngine:
             meta_u32[:, 4] = (seeds >> np.uint64(32)).astype(np.uint32)
         return eng
 
+    def state_views(self) -> dict[str, torch.Tensor]:
+        """Zero-copy writable CPU unified-memory views into the live GPU state buffer."""
+        L = self.layout
+        E, N, J, K = self.E, self.N, self.J, self.K
+        u8 = self._state_u8
+        p_f1 = u8[:, L["soff_p_f1"] : L["soff_p_f1"] + 15 * N * 4].view(np.float32).reshape(E, 15, N)
+        p_i1 = u8[:, L["soff_p_i1"] : L["soff_p_i1"] + 8 * N * 4].view(np.int32).reshape(E, 8, N)
+        return {
+            "p_pos": torch.from_numpy(u8[:, L["soff_p_pos"] : L["soff_p_pos"] + N * 12].view(np.float32).reshape(E, N, 3)),
+            "p_hp": torch.from_numpy(p_f1[:, 0, :]),
+            "p_respawn_t": torch.from_numpy(p_f1[:, 2, :]),
+            "p_goal_timer": torch.from_numpy(p_f1[:, 3, :]),
+            "p_team": torch.from_numpy(p_i1[:, 0, :]),
+            "p_alive": torch.from_numpy(p_i1[:, 1, :]),
+            "p_goal_cart": torch.from_numpy(p_i1[:, 6, :]),
+            "c_pos": torch.from_numpy(u8[:, L["soff_c_pos"] : L["soff_c_pos"] + J * 12].view(np.float32).reshape(E, J, 3)),
+            "c_s": torch.from_numpy(u8[:, L["soff_c_f1"] : L["soff_c_f1"] + J * 4].view(np.float32).reshape(E, J)),
+            "t_score": torch.from_numpy(u8[:, L["soff_t_score"] : L["soff_t_score"] + K * 4].view(np.float32).reshape(E, K)),
+            "t_cp_held": torch.from_numpy(u8[:, L["soff_t_cp_held"] : L["soff_t_cp_held"] + K * 4].view(np.int32).reshape(E, K)),
+        }
+
     # Zero-copy state inspection properties
     @property
     def c_s(self) -> torch.Tensor:
@@ -1338,3 +1373,806 @@ class CompiledRolloutGraph:
             "t_score": self.engine.t_score,
             "traj": self.traj_view[:n_steps] if record_traj else None,
         }
+
+
+# ============================================================================
+# 4. CompiledPlanTrainer — Full Metal 4 NAX Forward + Loss + Backward Graph!
+# ============================================================================
+
+class CompiledPlanTrainer:
+    """
+    Full forward + PPO/GRPO/Winnie-Lou/Dynamics loss + analytical backward + FP32
+    gradient accumulation for stripped BF16 PlanWally inside ONE Metal 4 command buffer.
+    Zero PyTorch MPS eager forward/backward; zero BF16 AccumulateGrad overflow.
+    """
+
+    def __init__(
+        self,
+        model: PlanWally,
+        E_mb: int,
+        N: int,
+        J: int,
+        K: int,
+    ):
+        assert not model.use_fsq and not model.use_mealy and not model.use_manifold_encoders
+        assert not model.use_cart_dist_bias and not model.use_cell_head and not model.use_aux_skill_head
+        self.lib = _load_mesh_graph_lib()
+        self.E = int(E_mb)
+        self.N = int(N)
+        self.J = int(J)
+        self.K = int(K)
+        self.M_ent = self.N + self.J + self.K
+        self.d = int(model.d)
+        self.h = int(model.h)
+        self.r_gram = int(model.r_gram)
+        self.r_team = int(model.r_dpp)
+        self.depth = int(model.depth)
+        self.recurrent = bool(model.recurrent)
+        self.mc = model.model_cfg
+        self.nc = model.norm_cfg
+
+        self.g = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+        if not self.g:
+            raise RuntimeError("mesh_graph_create failed for CompiledPlanTrainer")
+
+        self._w_bufs: dict[str, int] = {}
+        self._gw_bufs: dict[str, int] = {}
+        self._gw_shapes: dict[str, tuple[int, ...]] = {}
+        self._build_graph(model)
+        self.sync_weights_(model)
+        rc = self.lib.mesh_graph_compile(self.g)
+        if rc != 0:
+            raise RuntimeError(f"mesh_graph_compile failed for CompiledPlanTrainer: {rc}")
+
+    def close(self) -> None:
+        if getattr(self, "g", None):
+            self.lib.mesh_graph_destroy(self.g)
+            self.g = None
+
+    def __del__(self) -> None:
+        self.close()
+
+    def _add_buf(self, nbytes: int, kind: int = MG_BUF_STATE) -> int:
+        return int(self.lib.mesh_graph_add_buffer(self.g, int(max(64, nbytes)), int(kind), None, -1, 0))
+
+    def _add_op(self, op: MeshGraphOp) -> None:
+        self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
+
+    def _add_w_and_gw(self, key: str, rows: int, cols: int) -> None:
+        self._w_bufs[key] = self._add_buf(rows * cols * 2, MG_BUF_WEIGHT)
+        self._gw_bufs[key] = self._add_buf(rows * cols * 4, MG_BUF_STATE)
+        self._gw_shapes[key] = (rows, cols)
+
+    def _build_graph(self, model: PlanWally) -> None:
+        E, N, J, K, M_ent = self.E, self.N, self.J, self.K, self.M_ent
+        D, H, Rg, Rt = self.d, self.h, self.r_gram, self.r_team
+        # Pad ALL row counts to multiples of 64 for Metal 4 NAX forward, dX, and dW!
+        EN_pad = _align(E * N, 64)
+        EJ_pad = _align(E * J, 64)
+        EK_pad = _align(E * K, 64)
+        EM_pad = _align(E * M_ent, 64)
+        M_tot = E * M_ent
+        K_tot = E * K
+        EN_tot = E * N
+
+        # IO & target buffers
+        self.buf_obs = self._add_buf(E * N * OBS_WIDTH * 2, MG_BUF_STATE)
+        self.buf_carts = self._add_buf(E * J * CART_WIDTH * 2, MG_BUF_STATE)
+        self.buf_teams = self._add_buf(E * K * TEAM_WIDTH * 2, MG_BUF_STATE)
+        self.buf_geo = self._add_buf(4 * 4, MG_BUF_STATE)
+        self.buf_ncfg = self._add_buf(16 * 4, MG_BUF_WEIGHT)
+        self.buf_ent_meta = self._add_buf(E * (M_ent + K) * 4, MG_BUF_STATE)
+
+        self.buf_targ_f = self._add_buf(EN_tot * 17 * 4, MG_BUF_STATE)
+        self.buf_targ_i = self._add_buf(EN_tot * 2 * 4, MG_BUF_STATE)
+        self.buf_lcfg = self._add_buf(16 * 4, MG_BUF_STATE)
+        self.buf_hp = self._add_buf(48 * 4, MG_BUF_STATE)
+
+        n_uniq_blk = 1 if self.recurrent else self.depth
+        self._sc_blk_base = 3
+        self._sc_step_base = 3 + 4 * n_uniq_blk
+        n_scalars = self._sc_step_base + (self.depth if self.recurrent else 0)
+        self.buf_scalars = self._add_buf(max(16, n_scalars) * 4, MG_BUF_STATE)
+
+        # Scalar grads [64] & diag_out [8] (FP32 atomic accumulators!)
+        # Layout of sc_grads:
+        #   [0..10]: cont_gain, [11..21]: cont_bias, [22..32]: cont_logstd,
+        #   [33]: val_gain, [34..35]: val_bias, [36]: dyn_drift_gain, [37]: dyn_act_gain,
+        #   [38]: log_temp_cart, [39]: log_temp_rival, [40]: type_blend,
+        #   [41..41+4*n_uniq_blk-1]: blk blend_{pool,mut,gram,ffn},
+        #   [41+4*n_uniq_blk..]: step_blends[0..depth-1]
+        self._sg_blk_base = 41
+        self._sg_step_base = 41 + 4 * n_uniq_blk
+        self.buf_sc_grads = self._add_buf(max(64, self._sg_step_base + self.depth) * 4, MG_BUF_STATE)
+        self.buf_diag = self._add_buf(8 * 4, MG_BUF_STATE)
+
+        # Weights + FP32 accumulated weight grads
+        self._add_w_and_gw("enc_obs", D, 128)
+        self._add_w_and_gw("enc_cart", D, 64)
+        self._add_w_and_gw("enc_team", D, 64)
+        self._w_bufs["type_embed"] = self._add_buf(3 * D * 2, MG_BUF_WEIGHT)
+        self._gw_bufs["type_embed"] = self._add_buf(3 * D * 4, MG_BUF_STATE)
+        self._gw_shapes["type_embed"] = (3, D)
+
+        for bi in range(n_uniq_blk):
+            p = f"b{bi}."
+            self._add_w_and_gw(p + "val_proj", D, D)
+            self._add_w_and_gw(p + "global_metric", Rg, D)
+            self._w_bufs[p + "pool_score"] = self._add_buf(D * 2, MG_BUF_WEIGHT)
+            self._gw_bufs[p + "pool_score"] = self._add_buf(D * 4, MG_BUF_STATE)
+            self._gw_shapes[p + "pool_score"] = (1, D)
+            self._add_w_and_gw(p + "team_metric", Rt, D)
+            self._add_w_and_gw(p + "rival_metric", Rt, D)
+            self._add_w_and_gw(p + "team_val_proj", D, D)
+            self._add_w_and_gw(p + "team_mutate_proj", D, D)
+            self._add_w_and_gw(p + "team_bcast_proj", D, D)
+            self._add_w_and_gw(p + "gram_out", D, D)
+            self._add_w_and_gw(p + "ffn_gate_up", 2 * H, D)
+            self._add_w_and_gw(p + "ffn_down", D, H)
+
+        self._add_w_and_gw("cart_q", D, D)
+        self._add_w_and_gw("cart_k", D, D)
+        self._add_w_and_gw("rival_q", D, D)
+        self._add_w_and_gw("rival_k", D, D)
+        self._add_w_and_gw("heads_packed", 64, D)
+        w = self._w_bufs
+        gw = self._gw_bufs
+
+        # Write static NormConfig
+        ncfg_arr = np.array([
+            self.nc.mp_norm_eps, self.nc.map_radius_min, self.nc.pos_fallback_scale, self.nc.vel_scale,
+            self.nc.health_offset, self.nc.health_scale, self.nc.armor_offset, self.nc.armor_scale,
+            self.nc.ammo_scale, self.nc.strength_max_s, self.nc.cart_len_scale, self.nc.cart_speed_scale,
+            0.0, 0.0, 0.0, 0.0,
+        ], dtype=np.float32)
+        _copy_f32_to_ptr(ncfg_arr, self.lib.mesh_graph_buffer_ptr(self.g, self.buf_ncfg))
+
+        eps_n = float(self.nc.mp_norm_eps)
+        eps_l = float(self.nc.mp_lerp_eps)
+        eps_u = float(self.nc.mp_unit_vec_eps)
+        inv_silu = 1.0 / float(self.nc.mp_silu_scale)
+
+        # Saved forward activations (clean non-aliased BF16 buffers)
+        b_obs_pre = self._add_buf(EN_pad * 128 * 2, MG_BUF_STATE)
+        b_cart_pre = self._add_buf(EJ_pad * 64 * 2, MG_BUF_STATE)
+        b_team_pre = self._add_buf(EK_pad * 64 * 2, MG_BUF_STATE)
+        b_obs_enc = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        b_cart_enc = self._add_buf(EJ_pad * D * 2, MG_BUF_STATE)
+        b_team_enc = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+
+        # Forward encoder
+        self._add_op(_make_op(
+            MG_OP_PLAN_PRENORM,
+            in_bufs=(self.buf_obs, self.buf_carts, self.buf_teams, self.buf_geo, self.buf_ncfg, self.buf_ent_meta),
+            out_bufs=(b_obs_pre, b_cart_pre, b_team_pre),
+            u=(E, N, J, K, 128, 64, 64, 0),
+        ))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_obs_pre, w["enc_obs"]), out_bufs=(b_obs_enc,), u=(EN_pad, D, 128)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_cart_pre, w["enc_cart"]), out_bufs=(b_cart_enc,), u=(EJ_pad, D, 64)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_team_pre, w["enc_team"]), out_bufs=(b_team_enc,), u=(EK_pad, D, 64)))
+
+        x_states = [self._add_buf(EM_pad * D * 2, MG_BUF_STATE) for _ in range(self.depth + 1)]
+        self._add_op(_make_op(
+            MG_OP_PLAN_EMBED_CAT,
+            in_bufs=(b_obs_enc, b_cart_enc, b_team_enc, w["type_embed"], self.buf_scalars),
+            out_bufs=(x_states[0],),
+            u=(E, N, J, K, D, 0),
+            f=(eps_n, eps_l),
+        ))
+
+        # Per-step saved forward activations for depth steps
+        st_acts: list[dict[str, int]] = []
+        for s in range(self.depth):
+            bi = 0 if self.recurrent else s
+            p = f"b{bi}."
+            sc0 = self._sc_blk_base + 4 * bi
+            a = {
+                "xn": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "v_raw": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "v_norm": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "r_raw": self._add_buf(EM_pad * Rg * 2, MG_BUF_STATE),
+                "r_norm": self._add_buf(EM_pad * Rg * 2, MG_BUF_STATE),
+                "global_raw": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "t_in": self._add_buf(EK_pad * D * 2, MG_BUF_STATE),
+                "qt_raw": self._add_buf(EK_pad * Rt * 2, MG_BUF_STATE),
+                "kt_raw": self._add_buf(EK_pad * Rt * 2, MG_BUF_STATE),
+                "vt_raw": self._add_buf(EK_pad * D * 2, MG_BUF_STATE),
+                "t_mixed": self._add_buf(EK_pad * D * 2, MG_BUF_STATE),
+                "t_mut_raw": self._add_buf(EK_pad * D * 2, MG_BUF_STATE),
+                "t_mut": self._add_buf(EK_pad * D * 2, MG_BUF_STATE),
+                "tb_raw": self._add_buf(EK_pad * D * 2, MG_BUF_STATE),
+                "gram_in": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "gram_out_raw": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "x_mid": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "gate_up": self._add_buf(EM_pad * 2 * H * 2, MG_BUF_STATE),
+                "hid": self._add_buf(EM_pad * H * 2, MG_BUF_STATE),
+                "ffn_raw": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+                "x_new": self._add_buf(EM_pad * D * 2, MG_BUF_STATE),
+            }
+            st_acts.append(a)
+
+            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(x_states[s],), out_bufs=(a["xn"],), u=(M_tot, D), f=(eps_n,)))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["xn"], w[p + "val_proj"]), out_bufs=(a["v_raw"],), u=(EM_pad, D, D)))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["xn"], w[p + "global_metric"]), out_bufs=(a["r_raw"],), u=(EM_pad, Rg, D)))
+            # Normalize into separate v_norm/r_norm so v_raw/r_raw stay preserved for backward!
+            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(a["v_raw"],), out_bufs=(a["v_norm"],), u=(M_tot, D), f=(eps_n,)))
+            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(a["r_raw"],), out_bufs=(a["r_norm"],), u=(M_tot, Rg), f=(eps_n,)))
+            self._add_op(_make_op(
+                MG_OP_CGT_GRAM_STAGE1,
+                in_bufs=(a["xn"], a["v_norm"], a["r_norm"], w[p + "pool_score"], self.buf_ent_meta, self.buf_scalars),
+                out_bufs=(a["global_raw"], a["t_in"]),
+                u=(E, N, J, K, D, Rg, sc0 + 0),
+                f=(eps_n, eps_l),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["t_in"], w[p + "team_metric"]), out_bufs=(a["qt_raw"],), u=(EK_pad, Rt, D)))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["t_in"], w[p + "rival_metric"]), out_bufs=(a["kt_raw"],), u=(EK_pad, Rt, D)))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["t_in"], w[p + "team_val_proj"]), out_bufs=(a["vt_raw"],), u=(EK_pad, D, D)))
+            self._add_op(_make_op(
+                MG_OP_CGT_TEAM_RIVAL,
+                in_bufs=(a["qt_raw"], a["kt_raw"], a["vt_raw"]),
+                out_bufs=(a["t_mixed"],),
+                u=(E, K, D, Rt),
+                f=(eps_n,),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["t_mixed"], w[p + "team_mutate_proj"]), out_bufs=(a["t_mut_raw"],), u=(EK_pad, D, D)))
+            self._add_op(_make_op(
+                MG_OP_MP_LERP,
+                in_bufs=(a["t_in"], a["t_mut_raw"], self.buf_scalars),
+                out_bufs=(a["t_mut"],),
+                u=(K_tot, D, sc0 + 1, 1),
+                f=(eps_n, eps_l),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["t_mut"], w[p + "team_bcast_proj"]), out_bufs=(a["tb_raw"],), u=(EK_pad, D, D)))
+            self._add_op(_make_op(
+                MG_OP_CGT_BCAST_MERGE,
+                in_bufs=(a["global_raw"], a["tb_raw"], self.buf_ent_meta),
+                out_bufs=(a["gram_in"],),
+                u=(E, M_ent, K, D),
+                f=(eps_n,),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["gram_in"], w[p + "gram_out"]), out_bufs=(a["gram_out_raw"],), u=(EM_pad, D, D)))
+            self._add_op(_make_op(
+                MG_OP_MP_LERP,
+                in_bufs=(a["xn"], a["gram_out_raw"], self.buf_scalars),
+                out_bufs=(a["x_mid"],),
+                u=(M_tot, D, sc0 + 2, 1),
+                f=(eps_n, eps_l),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["x_mid"], w[p + "ffn_gate_up"]), out_bufs=(a["gate_up"],), u=(EM_pad, 2 * H, D)))
+            self._add_op(_make_op(MG_OP_MP_SWIGLU, in_bufs=(a["gate_up"],), out_bufs=(a["hid"],), u=(M_tot, H), f=(inv_silu,)))
+            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["hid"], w[p + "ffn_down"]), out_bufs=(a["ffn_raw"],), u=(EM_pad, D, H)))
+            if self.recurrent:
+                self._add_op(_make_op(
+                    MG_OP_MP_LERP,
+                    in_bufs=(a["x_mid"], a["ffn_raw"], self.buf_scalars),
+                    out_bufs=(a["x_new"],),
+                    u=(M_tot, D, sc0 + 3, 1),
+                    f=(eps_n, eps_l),
+                ))
+                self._add_op(_make_op(
+                    MG_OP_MP_LERP,
+                    in_bufs=(x_states[s], a["x_new"], self.buf_scalars),
+                    out_bufs=(x_states[s + 1],),
+                    u=(M_tot, D, self._sc_step_base + s, 0),
+                    f=(eps_n, eps_l),
+                ))
+            else:
+                self._add_op(_make_op(
+                    MG_OP_MP_LERP,
+                    in_bufs=(a["x_mid"], a["ffn_raw"], self.buf_scalars),
+                    out_bufs=(x_states[s + 1],),
+                    u=(M_tot, D, sc0 + 3, 1),
+                    f=(eps_n, eps_l),
+                ))
+
+        # Forward final slice & heads
+        b_ph = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        b_ch = self._add_buf(EJ_pad * D * 2, MG_BUF_STATE)
+        b_th = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        b_cq = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        b_ck = self._add_buf(EJ_pad * D * 2, MG_BUF_STATE)
+        b_rq = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        b_rk = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        b_hr = self._add_buf(EN_pad * 64 * 2, MG_BUF_STATE)
+        b_clg = self._add_buf(EN_tot * J * 2, MG_BUF_STATE)
+        b_rlg = self._add_buf(EN_tot * K * 2, MG_BUF_STATE)
+
+        self._add_op(_make_op(MG_OP_PLAN_SLICE_NORM, in_bufs=(x_states[self.depth],), out_bufs=(b_ph, b_ch, b_th), u=(E, N, J, K, D), f=(eps_n,)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_ph, w["cart_q"]), out_bufs=(b_cq,), u=(EN_pad, D, D)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_ch, w["cart_k"]), out_bufs=(b_ck,), u=(EJ_pad, D, D)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_ph, w["rival_q"]), out_bufs=(b_rq,), u=(EN_pad, D, D)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_th, w["rival_k"]), out_bufs=(b_rk,), u=(EK_pad, D, D)))
+        self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_ph, w["heads_packed"]), out_bufs=(b_hr,), u=(EN_pad, 64, D)))
+        self._add_op(_make_op(MG_OP_BILINEAR_LOGITS, in_bufs=(b_cq, b_ck, self.buf_ent_meta, self.buf_scalars), out_bufs=(b_clg,), u=(E, N, J, D, 1, 0, M_ent), f=(eps_u, float(self.mc.rival_own_mask_fill))))
+        self._add_op(_make_op(MG_OP_BILINEAR_LOGITS, in_bufs=(b_rq, b_rk, self.buf_ent_meta, self.buf_scalars), out_bufs=(b_rlg,), u=(E, N, K, D, 2, 1 if K >= 2 else 0, M_ent), f=(eps_u, float(self.mc.rival_own_mask_fill))))
+
+        # ======================== BACKWARD PASS ========================
+        # Reusable backward gradient buffers (all zero-initialized so padded rows stay 0!)
+        bd_hr = self._add_buf(EN_pad * 64 * 2, MG_BUF_STATE)
+        bd_clg = self._add_buf(EN_tot * J * 2, MG_BUF_STATE)
+        bd_rlg = self._add_buf(EN_tot * K * 2, MG_BUF_STATE)
+        bd_cq = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        bd_ck = self._add_buf(EJ_pad * D * 2, MG_BUF_STATE)
+        bd_rq = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        bd_rk = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_ph = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        bd_ch = self._add_buf(EJ_pad * D * 2, MG_BUF_STATE)
+        bd_th = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+
+        bd_x = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_x_prev = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_x_new = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_x_mid = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_ffn_raw = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_hid = self._add_buf(EM_pad * H * 2, MG_BUF_STATE)
+        bd_gu = self._add_buf(EM_pad * 2 * H * 2, MG_BUF_STATE)
+        bd_xn = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_gram_out = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_gram_in = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_glob = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_tb = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_tmut = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_tmut_raw = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_tin = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_tmixed = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_qt = self._add_buf(EK_pad * Rt * 2, MG_BUF_STATE)
+        bd_kt = self._add_buf(EK_pad * Rt * 2, MG_BUF_STATE)
+        bd_vt = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        bd_vnorm = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_rnorm = self._add_buf(EM_pad * Rg * 2, MG_BUF_STATE)
+        bd_vraw = self._add_buf(EM_pad * D * 2, MG_BUF_STATE)
+        bd_rraw = self._add_buf(EM_pad * Rg * 2, MG_BUF_STATE)
+
+        # 1. Loss + head backward
+        self._add_op(_make_op(
+            MG_OP_PLAN_LOSS_BWD,
+            in_bufs=(b_hr, b_clg, b_rlg, self.buf_hp, self.buf_targ_f, self.buf_targ_i),
+            out_bufs=(bd_hr, bd_clg, bd_rlg),
+            u=(EN_tot, J, K, EN_pad, self.buf_lcfg, self.buf_sc_grads, self.buf_diag),
+        ))
+
+        # 2. Bilinear logits backward
+        t_lo, t_hi = float(self.mc.temp_bounds[0]), float(self.mc.temp_bounds[1])
+        self._add_op(_make_op(
+            MG_OP_BILINEAR_BWD,
+            in_bufs=(b_cq, b_ck, bd_clg, self.buf_ent_meta, self.buf_scalars, self.buf_sc_grads),
+            out_bufs=(bd_cq, bd_ck),
+            u=(E, N, J, D, 1, 0, M_ent, 38),
+            f=(eps_u, t_lo, t_hi, float(EN_pad)),
+        ))
+        self._add_op(_make_op(
+            MG_OP_BILINEAR_BWD,
+            in_bufs=(b_rq, b_rk, bd_rlg, self.buf_ent_meta, self.buf_scalars, self.buf_sc_grads),
+            out_bufs=(bd_rq, bd_rk),
+            u=(E, N, K, D, 2, 1 if K >= 2 else 0, M_ent, 39),
+            f=(eps_u, t_lo, t_hi, float(EN_pad)),
+        ))
+
+        # 3. Head linear dW & dX
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_hr, b_ph), out_bufs=(gw["heads_packed"],), u=(64, D, EN_pad, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_cq, b_ph), out_bufs=(gw["cart_q"],), u=(D, D, EN_pad, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_ck, b_ch), out_bufs=(gw["cart_k"],), u=(D, D, EJ_pad, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_rq, b_ph), out_bufs=(gw["rival_q"],), u=(D, D, EN_pad, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_rk, b_th), out_bufs=(gw["rival_k"],), u=(D, D, EK_pad, 1)))
+
+        self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_hr, w["heads_packed"]), out_bufs=(bd_ph,), u=(EN_pad, D, 64, 0)))
+        self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_cq, w["cart_q"]), out_bufs=(bd_ph,), u=(EN_pad, D, D, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_rq, w["rival_q"]), out_bufs=(bd_ph,), u=(EN_pad, D, D, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_ck, w["cart_k"]), out_bufs=(bd_ch,), u=(EJ_pad, D, D, 0)))
+        self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_rk, w["rival_k"]), out_bufs=(bd_th,), u=(EK_pad, D, D, 0)))
+
+        # 4. Slice norm backward -> bd_x
+        self._add_op(_make_op(
+            MG_OP_PLAN_SLICE_BWD,
+            in_bufs=(x_states[self.depth], bd_ph, bd_ch, bd_th),
+            out_bufs=(bd_x,),
+            u=(E, N, J, K, D, EM_pad),
+            f=(eps_n,),
+        ))
+
+        # 5. Reverse loop through depth steps
+        cur_dx = bd_x
+        nxt_dx = bd_x_prev
+        for s in range(self.depth - 1, -1, -1):
+            bi = 0 if self.recurrent else s
+            p = f"b{bi}."
+            sc0 = self._sc_blk_base + 4 * bi
+            sg0 = self._sg_blk_base + 4 * bi
+            a = st_acts[s]
+
+            if self.recurrent:
+                self._add_op(_make_op(
+                    MG_OP_MP_LERP_BWD,
+                    in_bufs=(x_states[s], a["x_new"], cur_dx, self.buf_scalars),
+                    out_bufs=(nxt_dx, bd_x_new, self.buf_sc_grads),
+                    u=(M_tot, D, self._sc_step_base + s, 0, self._sg_step_base + s, 0, EM_pad),
+                    f=(eps_n, eps_l),
+                ))
+                dx_blk_out = bd_x_new
+            else:
+                dx_blk_out = cur_dx
+
+            # FFN residual lerp bwd -> bd_x_mid, bd_ffn_raw
+            self._add_op(_make_op(
+                MG_OP_MP_LERP_BWD,
+                in_bufs=(a["x_mid"], a["ffn_raw"], dx_blk_out, self.buf_scalars),
+                out_bufs=(bd_x_mid, bd_ffn_raw, self.buf_sc_grads),
+                u=(M_tot, D, sc0 + 3, 1, sg0 + 3, 0, EM_pad),
+                f=(eps_n, eps_l),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_ffn_raw, a["hid"]), out_bufs=(gw[p + "ffn_down"],), u=(D, H, EM_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_ffn_raw, w[p + "ffn_down"]), out_bufs=(bd_hid,), u=(EM_pad, H, D, 0)))
+            self._add_op(_make_op(MG_OP_MP_SWIGLU_BWD, in_bufs=(a["gate_up"], bd_hid), out_bufs=(bd_gu,), u=(M_tot, H, EM_pad), f=(inv_silu,)))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_gu, a["x_mid"]), out_bufs=(gw[p + "ffn_gate_up"],), u=(2 * H, D, EM_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_gu, w[p + "ffn_gate_up"]), out_bufs=(bd_x_mid,), u=(EM_pad, D, 2 * H, 1)))
+
+            # Gram residual lerp bwd -> bd_xn, bd_gram_out
+            self._add_op(_make_op(
+                MG_OP_MP_LERP_BWD,
+                in_bufs=(a["xn"], a["gram_out_raw"], bd_x_mid, self.buf_scalars),
+                out_bufs=(bd_xn, bd_gram_out, self.buf_sc_grads),
+                u=(M_tot, D, sc0 + 2, 1, sg0 + 2, 0, EM_pad),
+                f=(eps_n, eps_l),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_gram_out, a["gram_in"]), out_bufs=(gw[p + "gram_out"],), u=(D, D, EM_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_gram_out, w[p + "gram_out"]), out_bufs=(bd_gram_in,), u=(EM_pad, D, D, 0)))
+
+            # Broadcast merge bwd -> bd_glob, bd_tb
+            self._add_op(_make_op(
+                MG_OP_CGT_BCAST_BWD,
+                in_bufs=(a["global_raw"], a["tb_raw"], bd_gram_in, self.buf_ent_meta),
+                out_bufs=(bd_glob, bd_tb),
+                u=(E, M_ent, K, D, EM_pad, EK_pad),
+                f=(eps_n,),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_tb, a["t_mut"]), out_bufs=(gw[p + "team_bcast_proj"],), u=(D, D, EK_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_tb, w[p + "team_bcast_proj"]), out_bufs=(bd_tmut,), u=(EK_pad, D, D, 0)))
+
+            # Team mutate lerp bwd -> bd_tin, bd_tmut_raw
+            self._add_op(_make_op(
+                MG_OP_MP_LERP_BWD,
+                in_bufs=(a["t_in"], a["t_mut_raw"], bd_tmut, self.buf_scalars),
+                out_bufs=(bd_tin, bd_tmut_raw, self.buf_sc_grads),
+                u=(K_tot, D, sc0 + 1, 1, sg0 + 1, 0, EK_pad),
+                f=(eps_n, eps_l),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_tmut_raw, a["t_mixed"]), out_bufs=(gw[p + "team_mutate_proj"],), u=(D, D, EK_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_tmut_raw, w[p + "team_mutate_proj"]), out_bufs=(bd_tmixed,), u=(EK_pad, D, D, 0)))
+
+            # Team rival Gram bwd -> bd_qt, bd_kt, bd_vt
+            self._add_op(_make_op(
+                MG_OP_CGT_RIVAL_BWD,
+                in_bufs=(a["qt_raw"], a["kt_raw"], a["vt_raw"], bd_tmixed),
+                out_bufs=(bd_qt, bd_kt, bd_vt),
+                u=(E, K, D, Rt),
+                f=(eps_n,),
+            ))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_qt, a["t_in"]), out_bufs=(gw[p + "team_metric"],), u=(Rt, D, EK_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_kt, a["t_in"]), out_bufs=(gw[p + "rival_metric"],), u=(Rt, D, EK_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_vt, a["t_in"]), out_bufs=(gw[p + "team_val_proj"],), u=(D, D, EK_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_qt, w[p + "team_metric"]), out_bufs=(bd_tin,), u=(EK_pad, D, Rt, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_kt, w[p + "rival_metric"]), out_bufs=(bd_tin,), u=(EK_pad, D, Rt, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_vt, w[p + "team_val_proj"]), out_bufs=(bd_tin,), u=(EK_pad, D, D, 1)))
+
+            # Stage 1 bwd: team_pool + global_gram -> bd_vnorm, bd_rnorm, bd_xn (+=), d_w_pool (+=), d_blend_pool (+=)
+            self._add_op(_make_op(
+                MG_OP_CGT_STAGE1_BWD,
+                in_bufs=(a["xn"], a["v_norm"], a["r_norm"], bd_tin, bd_glob, self.buf_ent_meta),
+                out_bufs=(bd_vnorm, bd_rnorm, bd_xn),
+                u=(
+                    E | (N << 16), J | (K << 16), D | (Rg << 16), (sc0 + 0) | ((sg0 + 0) << 16),
+                    w[p + "pool_score"], self.buf_scalars, gw[p + "pool_score"], self.buf_sc_grads,
+                ),
+                f=(eps_n, eps_l),
+            ))
+            # Backprop through mp_norm(v_raw) & mp_norm(r_raw)
+            self._add_op(_make_op(MG_OP_MP_NORM_BWD, in_bufs=(a["v_raw"], bd_vnorm), out_bufs=(bd_vraw,), u=(M_tot, D, 0, EM_pad), f=(eps_n,)))
+            self._add_op(_make_op(MG_OP_MP_NORM_BWD, in_bufs=(a["r_raw"], bd_rnorm), out_bufs=(bd_rraw,), u=(M_tot, Rg, 0, EM_pad), f=(eps_n,)))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_vraw, a["xn"]), out_bufs=(gw[p + "val_proj"],), u=(D, D, EM_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_rraw, a["xn"]), out_bufs=(gw[p + "global_metric"],), u=(Rg, D, EM_pad, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_vraw, w[p + "val_proj"]), out_bufs=(bd_xn,), u=(EM_pad, D, D, 1)))
+            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_rraw, w[p + "global_metric"]), out_bufs=(bd_xn,), u=(EM_pad, D, Rg, 1)))
+
+            # Backprop through xn = mp_norm(x_in[s]) -> accum into nxt_dx!
+            self._add_op(_make_op(
+                MG_OP_MP_NORM_BWD,
+                in_bufs=(x_states[s], bd_xn),
+                out_bufs=(nxt_dx,),
+                u=(M_tot, D, 1 if self.recurrent else 0, EM_pad),
+                f=(eps_n,),
+            ))
+            cur_dx, nxt_dx = nxt_dx, cur_dx
+
+        # 6. Encoder backward -> d_obs_enc, d_cart_enc, d_team_enc, d_type_embed, d_type_blend
+        bd_obs_enc = self._add_buf(EN_pad * D * 2, MG_BUF_STATE)
+        bd_cart_enc = self._add_buf(EJ_pad * D * 2, MG_BUF_STATE)
+        bd_team_enc = self._add_buf(EK_pad * D * 2, MG_BUF_STATE)
+        self._add_op(_make_op(
+            MG_OP_PLAN_EMBED_BWD,
+            in_bufs=(b_obs_enc, b_cart_enc, b_team_enc, w["type_embed"], cur_dx, self.buf_scalars),
+            out_bufs=(bd_obs_enc, bd_cart_enc, bd_team_enc),
+            u=(E | (N << 16), J | (K << 16), D, 0 | (40 << 16), gw["type_embed"], self.buf_sc_grads),
+            f=(eps_n, eps_l),
+        ))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_obs_enc, b_obs_pre), out_bufs=(gw["enc_obs"],), u=(D, 128, EN_pad, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_cart_enc, b_cart_pre), out_bufs=(gw["enc_cart"],), u=(D, 64, EJ_pad, 1)))
+        self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_team_enc, b_team_pre), out_bufs=(gw["enc_team"],), u=(D, 64, EK_pad, 1)))
+
+        # Host zero-copy views
+        self.obs_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_obs), (E, N, OBS_WIDTH))
+        self.carts_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_carts), (E, J, CART_WIDTH))
+        self.teams_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_teams), (E, K, TEAM_WIDTH))
+        self.geo_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_geo), (4,))
+        self.targ_f_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_targ_f), (E, N, 17))
+        self.targ_i_view = _ptr_to_torch_i32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_targ_i), (E, N, 2))
+        self.lcfg_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_lcfg), (16,))
+        self.sc_grads_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_sc_grads), (max(64, self._sg_step_base + self.depth),))
+        self.diag_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_diag), (8,))
+        self._gw_views = {
+            k: _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bid), self._gw_shapes[k])
+            for k, bid in self._gw_bufs.items()
+        }
+
+    def zero_grads_(self) -> None:
+        self.sc_grads_view.zero_()
+        self.diag_view.zero_()
+        for v in self._gw_views.values():
+            v.zero_()
+
+    @torch.no_grad()
+    def sync_weights_(self, model: PlanWally) -> None:
+        eps = float(self.nc.unit_norm_eps)
+        mc = model.model_cfg
+        nc = model.norm_cfg
+        w = self._w_bufs
+
+        def put(key: str, tensor: torch.Tensor) -> None:
+            _copy_bf16_to_ptr(tensor, self.lib.mesh_graph_buffer_ptr(self.g, w[key]))
+
+        put("enc_obs", _unit_weight_bf16(model.enc_obs.weight, eps, pad_in=128))
+        put("enc_cart", _unit_weight_bf16(model.enc_cart.weight, eps, pad_in=64))
+        put("enc_team", _unit_weight_bf16(model.enc_team.weight, eps, pad_in=64))
+        te_n = F.rms_norm(model.type_embed.detach().to(device="cpu", dtype=torch.bfloat16), (self.d,), eps=max(nc.mp_norm_eps, 1e-4))
+        put("type_embed", te_n[:3])
+
+        n_uniq_blk = 1 if self.recurrent else self.depth
+        scalars = [
+            float(torch.sigmoid(model.type_blend.detach().float()).item()),
+            float(torch.clamp(torch.exp(model.log_temp_cart.detach().float()), mc.temp_bounds[0], mc.temp_bounds[1]).item()),
+            float(torch.clamp(torch.exp(model.log_temp_rival.detach().float()), mc.temp_bounds[0], mc.temp_bounds[1]).item()),
+        ]
+        for bi in range(n_uniq_blk):
+            blk = model.blocks[bi]
+            p = f"b{bi}."
+            put(p + "val_proj", _unit_weight_bf16(blk.val_proj.weight, eps))
+            put(p + "global_metric", _unit_weight_bf16(blk.global_metric.weight, eps))
+            put(p + "pool_score", _unit_weight_bf16(blk.pool_score.weight, eps).view(-1))
+            put(p + "team_metric", _unit_weight_bf16(blk.team_metric.weight, eps))
+            put(p + "rival_metric", _unit_weight_bf16(blk.rival_metric.weight, eps))
+            put(p + "team_val_proj", _unit_weight_bf16(blk.team_val_proj.weight, eps))
+            put(p + "team_mutate_proj", _unit_weight_bf16(blk.team_mutate_proj.weight, eps))
+            put(p + "team_bcast_proj", _unit_weight_bf16(blk.team_bcast_proj.weight, eps))
+            put(p + "gram_out", _unit_weight_bf16(blk.gram_out.weight, eps))
+            wg = _unit_weight_bf16(blk.ffn_gate.weight, eps)
+            wu = _unit_weight_bf16(blk.ffn_up.weight, eps)
+            put(p + "ffn_gate_up", torch.cat((wg, wu), dim=0))
+            put(p + "ffn_down", _unit_weight_bf16(blk.ffn_down.weight, eps))
+            scalars.extend([
+                float(torch.sigmoid(blk.blend_pool.detach().float()).item()),
+                float(torch.sigmoid(blk.blend_team_mut.detach().float()).item()),
+                float(torch.sigmoid(blk.blend_gram.detach().float()).item()),
+                float(torch.sigmoid(blk.blend_ffn.detach().float()).item()),
+            ])
+        if self.recurrent:
+            sb = torch.sigmoid(model.step_blends.detach().float()).cpu().tolist()
+            scalars.extend(float(v) for v in sb[: self.depth])
+        _copy_f32_to_ptr(np.asarray(scalars, dtype=np.float32), self.lib.mesh_graph_buffer_ptr(self.g, self.buf_scalars))
+
+        put("cart_q", _unit_weight_bf16(model.cart_q.weight, eps))
+        put("cart_k", _unit_weight_bf16(model.cart_k.weight, eps))
+        put("rival_q", _unit_weight_bf16(model.rival_q.weight, eps))
+        put("rival_k", _unit_weight_bf16(model.rival_k.weight, eps))
+
+        hp_w = torch.zeros((64, self.d), dtype=torch.bfloat16)
+        hp_w[0:11] = _unit_weight_bf16(model.cont_proj.weight, eps)
+        hp_w[11:13] = _unit_weight_bf16(model.value_proj.weight, eps)
+        hp_w[13:14] = _unit_weight_bf16(model.dyn_drift_proj.weight, eps)
+        hp_w[14:25] = _unit_weight_bf16(model.dyn_action_proj.weight, eps)
+        put("heads_packed", hp_w)
+
+        hp = np.zeros((48,), dtype=np.float32)
+        hp[0:11] = torch.clamp(model.cont_gain.detach().float(), -mc.cont_gain_bound, mc.cont_gain_bound).cpu().numpy()
+        hp[11:22] = model.cont_bias.detach().float().cpu().numpy()
+        hp[22:33] = torch.clamp(model.cont_logstd.detach().float(), mc.cont_logstd_bounds[0], mc.cont_logstd_bounds[1]).cpu().numpy()
+        hp[33] = float(torch.clamp(model.value_gain.detach().float(), mc.value_gain_bounds[0], mc.value_gain_bounds[1]).item())
+        hp[34:36] = model.value_bias.detach().float().cpu().numpy()
+        hp[36] = float(torch.clamp(model.dyn_drift_gain.detach().float(), mc.dyn_gain_bounds[0], mc.dyn_gain_bounds[1]).item())
+        hp[37] = float(torch.clamp(model.dyn_action_gain.detach().float(), mc.dyn_gain_bounds[0], mc.dyn_gain_bounds[1]).item())
+        hp[38] = float(mc.cont_mean_scale)
+        hp[42] = float(mc.cont_gain_bound)
+        hp[43] = float(mc.cont_logstd_bounds[0])
+        hp[44] = float(mc.cont_logstd_bounds[1])
+        hp[45] = float(mc.value_gain_bounds[0])
+        _copy_f32_to_ptr(hp, self.lib.mesh_graph_buffer_ptr(self.g, self.buf_hp))
+
+    def set_geo(self, geo: dict[str, torch.Tensor] | None) -> None:
+        if geo is not None and "map_center" in geo and "map_radius" in geo:
+            self.geo_view[0:3].copy_(geo["map_center"].detach().to(device="cpu", dtype=torch.float32).view(3))
+            self.geo_view[3] = float(geo["map_radius"].detach().to(device="cpu", dtype=torch.float32).item())
+        else:
+            self.geo_view.zero_()
+
+    @torch.no_grad()
+    def microbatch_fwd_bwd(
+        self,
+        obs: torch.Tensor,
+        carts: torch.Tensor,
+        teams: torch.Tensor,
+        cont: torch.Tensor,
+        cart_pick: torch.Tensor,
+        rival_pick: torch.Tensor,
+        beh_logp: torch.Tensor,
+        adv: torch.Tensor,
+        gae_ret: torch.Tensor,
+        obs_drho: torch.Tensor,
+        actor_mask: torch.Tensor,
+        wm_in: torch.Tensor,
+        *,
+        lcfg: Any,
+        entropy_coef: float,
+        grad_scale: float = 1.0,
+    ) -> dict[str, float]:
+        """Run one fused Metal 4 NAX forward + loss + backward microbatch accumulating FP32 grads."""
+        B_cur = int(obs.shape[0])
+        assert B_cur <= self.E
+        if B_cur == self.E:
+            self.obs_view.copy_(obs.detach().to(device="cpu", dtype=torch.bfloat16))
+            self.carts_view.copy_(carts.detach().to(device="cpu", dtype=torch.bfloat16))
+            self.teams_view.copy_(teams.detach().to(device="cpu", dtype=torch.bfloat16))
+            tf = self.targ_f_view
+            ti = self.targ_i_view
+            tf[:, :, 0:11].copy_(cont.detach().to(device="cpu", dtype=torch.float32))
+            tf[:, :, 11].copy_(beh_logp.detach().to(device="cpu", dtype=torch.float32))
+            tf[:, :, 12].copy_(adv.detach().to(device="cpu", dtype=torch.float32))
+            tf[:, :, 13].copy_(gae_ret.detach().to(device="cpu", dtype=torch.float32))
+            tf[:, :, 14].copy_(obs_drho.detach().to(device="cpu", dtype=torch.float32))
+            am_cpu = actor_mask.detach().to(device="cpu", dtype=torch.float32)
+            wm_cpu = wm_in.detach().to(device="cpu", dtype=torch.float32)
+            tf[:, :, 15].copy_(am_cpu)
+            tf[:, :, 16].copy_(wm_cpu)
+            ti[:, :, 0].copy_(cart_pick.detach().to(device="cpu", dtype=torch.int32))
+            ti[:, :, 1].copy_(rival_pick.detach().to(device="cpu", dtype=torch.int32))
+            am_sum = max(float(am_cpu.sum().item()), 1.0)
+            wm_sum = max(float(wm_cpu.sum().item()), 1.0)
+            lm_sum = max(float((1.0 - wm_cpu).sum().item()), 1.0)
+            inv_en = 1.0 / float(self.E * self.N)
+        else:
+            # Partial tail batch: zero masks on trailing padded envs so they contribute 0 loss/grad
+            self.obs_view.zero_(); self.carts_view.zero_(); self.teams_view.zero_()
+            self.obs_view[:B_cur].copy_(obs.detach().to(device="cpu", dtype=torch.bfloat16))
+            self.carts_view[:B_cur].copy_(carts.detach().to(device="cpu", dtype=torch.bfloat16))
+            self.teams_view[:B_cur].copy_(teams.detach().to(device="cpu", dtype=torch.bfloat16))
+            tf = self.targ_f_view; ti = self.targ_i_view
+            tf.zero_(); ti.zero_()
+            tf[B_cur:, :, 16] = -1.0
+            tf[:B_cur, :, 0:11].copy_(cont.detach().to(device="cpu", dtype=torch.float32))
+            tf[:B_cur, :, 11].copy_(beh_logp.detach().to(device="cpu", dtype=torch.float32))
+            tf[:B_cur, :, 12].copy_(adv.detach().to(device="cpu", dtype=torch.float32))
+            tf[:B_cur, :, 13].copy_(gae_ret.detach().to(device="cpu", dtype=torch.float32))
+            tf[:B_cur, :, 14].copy_(obs_drho.detach().to(device="cpu", dtype=torch.float32))
+            am_cpu = actor_mask.detach().to(device="cpu", dtype=torch.float32)
+            wm_cpu = wm_in.detach().to(device="cpu", dtype=torch.float32)
+            tf[:B_cur, :, 15].copy_(am_cpu)
+            tf[:B_cur, :, 16].copy_(wm_cpu)
+            ti[:B_cur, :, 0].copy_(cart_pick.detach().to(device="cpu", dtype=torch.int32))
+            ti[:B_cur, :, 1].copy_(rival_pick.detach().to(device="cpu", dtype=torch.int32))
+            am_sum = max(float(am_cpu.sum().item()), 1.0)
+            wm_sum = max(float(wm_cpu.sum().item()), 1.0)
+            lm_sum = max(float((1.0 - wm_cpu).sum().item()), 1.0)
+            inv_en = 1.0 / float(B_cur * self.N)
+
+        self.diag_view.zero_()
+        mc = self.mc
+        lc = np.array([
+            float(lcfg.actor_weight), float(lcfg.critic_weight), float(lcfg.dyn_weight), float(entropy_coef),
+            float(lcfg.ratio_clip), float(lcfg.log_ratio_bound), float(lcfg.critic_huber_beta), float(lcfg.dyn_huber_beta),
+            1.0 / am_sum, 1.0 / wm_sum, 1.0 / lm_sum, inv_en,
+            float(grad_scale), float(mc.value_gain_bounds[1]), float(mc.dyn_gain_bounds[0]), float(mc.dyn_gain_bounds[1]),
+        ], dtype=np.float32)
+        self.lcfg_view.copy_(torch.from_numpy(lc))
+
+        wall = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run_fused(self.g, 1, 0, ctypes.byref(wall))
+        d = self.diag_view.tolist()
+        return {
+            "loss_actor": d[0],
+            "loss_w": d[1],
+            "loss_l": d[2],
+            "loss_dyn": d[3],
+            "loss_total": d[0] + d[1] + d[2] + d[3],
+            "entropy_disc": d[4],
+            "entropy": d[5],
+            "clip_frac": d[6],
+        }
+
+    @torch.no_grad()
+    def export_grads_to_model_(self, model: PlanWally) -> None:
+        """Apply exact unit-norm tangent projection to accumulated FP32 grads and write model.parameters().grad."""
+        eps_w = max(float(self.nc.unit_norm_eps), 1e-4)
+        eps_n = max(float(self.nc.mp_norm_eps), 1e-4)
+        dev = model.enc_obs.weight.device
+        dt = model.enc_obs.weight.dtype
+
+        def set_unit_grad(param: torch.nn.Parameter, g_wu_full: torch.Tensor) -> None:
+            k_in = param.shape[1]
+            g_wu = g_wu_full[:, :k_in]
+            w_f = param.detach().to(device="cpu", dtype=torch.float32)
+            nrm = w_f.norm(dim=-1, keepdim=True)
+            inv = 1.0 / nrm.clamp_min(eps_w)
+            wu = w_f * inv
+            proj = torch.where(nrm >= eps_w, (g_wu * wu).sum(dim=-1, keepdim=True), torch.zeros_like(nrm))
+            g_w = (g_wu - proj * wu) * inv
+            param.grad = g_w.to(device=dev, dtype=dt)
+
+        gw = self._gw_views
+        set_unit_grad(model.enc_obs.weight, gw["enc_obs"])
+        set_unit_grad(model.enc_cart.weight, gw["enc_cart"])
+        set_unit_grad(model.enc_team.weight, gw["enc_team"])
+
+        # type_embed: backprop through mp_norm(type_embed[0..2])
+        te_w = model.type_embed.detach().to(device="cpu", dtype=torch.float32)
+        g_te_n = gw["type_embed"]
+        inv_te = torch.rsqrt(te_w[:3].square().mean(dim=-1, keepdim=True) + eps_n)
+        y_te = te_w[:3] * inv_te
+        g_te = torch.zeros_like(te_w)
+        g_te[:3] = inv_te * (g_te_n - (g_te_n * y_te).mean(dim=-1, keepdim=True) * y_te)
+        model.type_embed.grad = g_te.to(device=dev, dtype=dt)
+
+        sg = self.sc_grads_view
+        model.type_blend.grad = sg[40].to(device=dev, dtype=dt)
+        model.log_temp_cart.grad = sg[38].to(device=dev, dtype=dt)
+        model.log_temp_rival.grad = sg[39].to(device=dev, dtype=dt)
+
+        n_uniq_blk = 1 if self.recurrent else self.depth
+        for bi in range(n_uniq_blk):
+            blk = model.blocks[bi]
+            p = f"b{bi}."
+            sg0 = self._sg_blk_base + 4 * bi
+            set_unit_grad(blk.val_proj.weight, gw[p + "val_proj"])
+            set_unit_grad(blk.global_metric.weight, gw[p + "global_metric"])
+            set_unit_grad(blk.pool_score.weight, gw[p + "pool_score"])
+            set_unit_grad(blk.team_metric.weight, gw[p + "team_metric"])
+            set_unit_grad(blk.rival_metric.weight, gw[p + "rival_metric"])
+            set_unit_grad(blk.team_val_proj.weight, gw[p + "team_val_proj"])
+            set_unit_grad(blk.team_mutate_proj.weight, gw[p + "team_mutate_proj"])
+            set_unit_grad(blk.team_bcast_proj.weight, gw[p + "team_bcast_proj"])
+            set_unit_grad(blk.gram_out.weight, gw[p + "gram_out"])
+            g_gu = gw[p + "ffn_gate_up"]
+            set_unit_grad(blk.ffn_gate.weight, g_gu[: self.h])
+            set_unit_grad(blk.ffn_up.weight, g_gu[self.h : 2 * self.h])
+            set_unit_grad(blk.ffn_down.weight, gw[p + "ffn_down"])
+            blk.blend_pool.grad = sg[sg0 + 0].to(device=dev, dtype=dt)
+            blk.blend_team_mut.grad = sg[sg0 + 1].to(device=dev, dtype=dt)
+            blk.blend_gram.grad = sg[sg0 + 2].to(device=dev, dtype=dt)
+            blk.blend_ffn.grad = sg[sg0 + 3].to(device=dev, dtype=dt)
+        if self.recurrent:
+            model.step_blends.grad = sg[self._sg_step_base : self._sg_step_base + self.depth].to(device=dev, dtype=dt)
+
+        set_unit_grad(model.cart_q.weight, gw["cart_q"])
+        set_unit_grad(model.cart_k.weight, gw["cart_k"])
+        set_unit_grad(model.rival_q.weight, gw["rival_q"])
+        set_unit_grad(model.rival_k.weight, gw["rival_k"])
+
+        g_hp = gw["heads_packed"]
+        set_unit_grad(model.cont_proj.weight, g_hp[0:11])
+        set_unit_grad(model.value_proj.weight, g_hp[11:13])
+        set_unit_grad(model.dyn_drift_proj.weight, g_hp[13:14])
+        set_unit_grad(model.dyn_action_proj.weight, g_hp[14:25])
+
+        model.cont_gain.grad = sg[0:11].to(device=dev, dtype=dt)
+        model.cont_bias.grad = sg[11:22].to(device=dev, dtype=dt)
+        model.cont_logstd.grad = sg[22:33].to(device=dev, dtype=dt)
+        model.value_gain.grad = sg[33].to(device=dev, dtype=dt)
+        model.value_bias.grad = sg[34:36].to(device=dev, dtype=dt)
+        model.dyn_drift_gain.grad = sg[36].to(device=dev, dtype=dt)
+        model.dyn_action_gain.grad = sg[37].to(device=dev, dtype=dt)

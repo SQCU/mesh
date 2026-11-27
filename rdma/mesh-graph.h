@@ -64,7 +64,21 @@ enum mesh_graph_op_kind {
   MG_OP_BILINEAR_LOGITS   = 25, /* fused temp * dot(unit(Q), unit(K)) with optional own-team mask */
   MG_OP_PLAN_POST_PACK    = 26, /* fused cont_mean, values, dyn + optional det/stoch sample & pack_plan[E,N,16] */
   MG_OP_SIMDT_STEP        = 27, /* fused TG-SRAM DeltaTimePayloadEngine step (score, carts, goals, kinematics, combat) */
-  MG_OP_SIMDT_OBS         = 28  /* emit BF16 obs[E,N,84], carts[E,J,18], teams[E,K,7] from simdt SoA state */
+  MG_OP_SIMDT_OBS         = 28, /* emit BF16 obs[E,N,84], carts[E,J,18], teams[E,K,7] from simdt SoA state */
+  MG_OP_LINEAR_DX         = 29, /* backward dX[M,K] = dY[M,N] @ W[N,K] (+= if u[3]==1) via Metal 4 NAX */
+  MG_OP_LINEAR_DW         = 30, /* backward grad_W_f32[N,K] += dY[M,N]^T @ X[M,K] via Metal 4 NAX (FP32 accum!) */
+  MG_OP_PLAN_LOSS_BWD     = 31, /* fused PPO/GRPO + entropy + Winnie/Lou + Dynamics loss & head backward */
+  MG_OP_BILINEAR_BWD      = 32, /* exact backward of bilinear logits -> dQ, dK, d_log_temp */
+  MG_OP_PLAN_SLICE_BWD    = 33, /* merge d_p_h/d_c_h/d_t_h + mp_norm_bwd(x_final) -> d_x */
+  MG_OP_MP_NORM_BWD       = 34, /* exact backward of mp_norm (accum_dx optional) */
+  MG_OP_MP_LERP_BWD       = 35, /* exact backward of mp_norm(mp_lerp(a, norm_b?mp_norm(b):b, sigmoid(logit))) */
+  MG_OP_MP_SWIGLU_BWD     = 36, /* exact backward of mp_silu(gate)*up -> d_gate_up[M, 2*H] */
+  MG_OP_CGT_BCAST_BWD     = 37, /* exact backward of cgt_bcast_merge -> d_global_raw, d_tb_raw */
+  MG_OP_CGT_RIVAL_BWD     = 38, /* exact backward of cgt_team_rival -> d_qt_raw, d_kt_raw, d_vt_raw */
+  MG_OP_CGT_STAGE1_BWD    = 39, /* exact backward of team_pool + global_gram + norm(v,r) -> d_v_raw, d_r_raw, d_xn, d_w_pool */
+  MG_OP_PLAN_EMBED_BWD    = 40, /* exact backward of plan_embed_cat -> d_obs/cart/team_enc, d_type_embed, d_type_blend */
+  MG_OP_UNIT_W_BWD        = 41, /* tangent projection of FP32 grad_Wu through F.normalize(W) -> grad_W */
+  MG_OP_ZERO_F32          = 42  /* fast GPU zero of FP32 buffer */
 };
 
 enum mesh_graph_ew_subop {

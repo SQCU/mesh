@@ -10,6 +10,7 @@ from .batched_grpo_pfsp import (
 )
 from .engine import DeltaTimePayloadEngine, SimRulesConfig, SimSnapshot
 from .metal_runtime import (
+    CompiledPlanTrainer,
     CompiledPlanWally,
     CompiledRolloutGraph,
     MetalDeltaTimePayloadEngine,
@@ -22,6 +23,7 @@ __all__ = [
     "MetalDeltaTimePayloadEngine",
     "MetalSimSnapshot",
     "CompiledPlanWally",
+    "CompiledPlanTrainer",
     "CompiledRolloutGraph",
     "SimRulesConfig",
     "SimSnapshot",

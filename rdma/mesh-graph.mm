@@ -28,6 +28,7 @@
 
 #include "mesh-graph.h"
 #include "mesh-simdt.h"
+#include "mesh-simdt-bwd.h"
 extern "C" {
 #include "mesh-call.h"
 #include "mesh-codec.h"
@@ -1476,6 +1477,134 @@ template [[host_name("gemm_rows_nax_2_2_2_2_1")]] [[kernel]] void gemm_rows_nax<
 WIDE_P(2, 16) WIDE_P(3, 16) WIDE_P(4, 16) WIDE_P(5, 16) WIDE_P(2, 32) WIDE_P(3, 32) WIDE_P(4, 32) WIDE_P(5, 32)
 #define NAX_P(UM, SM, KS) template [[host_name("gemm_publish_nax_" #UM "_" #SM "_" #KS)]] [[kernel]] void gemm_publish_nax<bfloat, UM, 2, SM, 1, KS>(const device bfloat*, const device bfloat*, device bfloat*, const constant ThinParams*, device uchar*, device ulong*, device atomic_uint*, constant uint*, uint, uint3, uint3, uint);
 NAX_P(1, 1, 4) NAX_P(2, 1, 4) NAX_P(2, 1, 1) NAX_P(2, 2, 1) NAX_P(2, 2, 3) NAX_P(2, 3, 2) NAX_P(2, 4, 1) NAX_P(2, 4, 2) NAX_P(2, 5, 1) NAX_P(2, 6, 1) NAX_P(2, 7, 1) NAX_P(2, 8, 1)
+
+// Metal 4 MPP NAX backward dX[M, N] = A[M, K] @ B[K, N] (transA=false, transB=false; optional += accum!)
+struct BwdParams { int M, N, K, lda, ldb, ldd, tiles_n, tiles_m, k_iters, accum; };
+template <typename T, int UM, int UN, int SM, int SN, int KS>
+[[kernel, max_total_threads_per_threadgroup(SM * SN * KS * 32)]] void gemm_nt_nax(
+    const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], device T* D [[buffer(3)]],
+    const constant BwdParams* params [[buffer(4)]], uint simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint3 tid [[threadgroup_position_in_grid]]) {
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using tensor_t = metal::tensor<device T, extents_t, metal::tensor_inline>;
+  constexpr int TSM = 16 * UM, TSN = 16 * UN, BK = 64;
+  const int K = params->K, lda = params->lda, ldb = params->ldb;
+  const int tgp = tid.x, tile_m = tgp % params->tiles_m, tile_n = tgp / params->tiles_m;
+  const int k_group = simd_group_id / (SM * SN), sg = simd_group_id % (SM * SN);
+  const int m_off = (tile_m * SM + sg % SM) * TSM, n_off = (tile_n * SN + sg / SM) * TSN;
+  const int rows = params->M - m_off, cols = params->N - n_off;
+  const bool in_bounds = (rows > 0 && cols > 0);
+  const int s_rows = in_bounds ? rows : 1, s_cols = in_bounds ? cols : 1;
+  A += in_bounds ? (int64_t(m_off) * lda) : 0;
+  B += in_bounds ? int64_t(n_off) : 0;
+  D += in_bounds ? (int64_t(m_off) * params->ldd + n_off) : 0;
+  tensor_t tA((device T*)A, extents_t(K, s_rows), strides_t{1, lda});
+  tensor_t tB((device T*)B, extents_t(s_cols, K), strides_t{1, ldb});
+  auto a_chunk = [&](int k) { return tA.template slice<BK, TSM>(k, 0); };
+  auto b_chunk = [&](int k) { return tB.template slice<TSN, BK>(0, k); };
+  using a_chunk_t = decltype(a_chunk(0));
+  using b_chunk_t = decltype(b_chunk(0));
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(TSM, TSN, BK, false, false, true,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto Dacc = op.template get_destination_cooperative_tensor<a_chunk_t, b_chunk_t, float>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] = 0.0f;
+  auto Areg = op.template get_left_input_cooperative_tensor<T, T, float>();
+  for (int it = 0; it < params->k_iters; it++) {
+    if ((it & 3) == 0) threadgroup_barrier(mem_flags::mem_none);
+    const int k = (it * KS + k_group) * BK;
+    if (k >= K || !in_bounds) continue;
+    auto a = a_chunk(k); Areg.load(a);
+    auto b = b_chunk(k); op.run(Areg, b, Dacc);
+  }
+  if (k_group == 0 && in_bounds) {
+    tensor_t tD(D, extents_t(s_cols, s_rows), strides_t{1, params->ldd});
+    auto d = tD.template slice<TSN, TSM>(0, 0);
+    auto Dout = op.template get_destination_cooperative_tensor<a_chunk_t, b_chunk_t, T>();
+    if (params->accum) {
+      Dout.load(d);
+      UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = static_cast<T>(float(Dout[i]) + Dacc[i]);
+    } else {
+      UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = static_cast<T>(Dacc[i]);
+    }
+    Dout.store(d);
+  }
+}
+
+// Metal 4 MPP NAX backward dW_f32[N, K] += dY[M, N]^T @ X[M, K] (transA=true, transB=false, FP32 output!)
+template <typename T, int UM, int UN, int SM, int SN, int KS>
+[[kernel, max_total_threads_per_threadgroup(SM * SN * KS * 32)]] void gemm_gradw_nax(
+    const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], device float* D [[buffer(3)]],
+    const constant BwdParams* params [[buffer(4)]], uint simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint3 tid [[threadgroup_position_in_grid]]) {
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using tensor_t = metal::tensor<device T, extents_t, metal::tensor_inline>;
+  using f32_tensor_t = metal::tensor<device float, extents_t, metal::tensor_inline>;
+  constexpr int TSM = 16 * UM, TSN = 16 * UN, BK = 64;
+  const int K = params->K, lda = params->lda, ldb = params->ldb;
+  const int tgp = tid.x, tile_m = tgp % params->tiles_m, tile_n = tgp / params->tiles_m;
+  const int k_group = simd_group_id / (SM * SN), sg = simd_group_id % (SM * SN);
+  const int m_off = (tile_m * SM + sg % SM) * TSM, n_off = (tile_n * SN + sg / SM) * TSN;
+  const int rows = params->M - m_off, cols = params->N - n_off;
+  const bool in_bounds = (rows > 0 && cols > 0);
+  const int s_rows = in_bounds ? rows : 1, s_cols = in_bounds ? cols : 1;
+  A += in_bounds ? int64_t(m_off) : 0;
+  B += in_bounds ? int64_t(n_off) : 0;
+  D += in_bounds ? (int64_t(m_off) * params->ldd + n_off) : 0;
+  tensor_t tA((device T*)A, extents_t(s_rows, K), strides_t{1, lda});
+  tensor_t tB((device T*)B, extents_t(s_cols, K), strides_t{1, ldb});
+  auto a_chunk = [&](int k) { return tA.template slice<TSM, BK>(0, k); };
+  auto b_chunk = [&](int k) { return tB.template slice<TSN, BK>(0, k); };
+  using a_chunk_t = decltype(a_chunk(0));
+  using b_chunk_t = decltype(b_chunk(0));
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(TSM, TSN, BK, true, false, true,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto Dacc = op.template get_destination_cooperative_tensor<a_chunk_t, b_chunk_t, float>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] = 0.0f;
+  auto Areg = op.template get_left_input_cooperative_tensor<T, T, float>();
+  for (int it = 0; it < params->k_iters; it++) {
+    if ((it & 3) == 0) threadgroup_barrier(mem_flags::mem_none);
+    const int k = (it * KS + k_group) * BK;
+    if (k >= K || !in_bounds) continue;
+    auto a = a_chunk(k); Areg.load(a);
+    auto b = b_chunk(k); op.run(Areg, b, Dacc);
+  }
+  if (KS > 1) {
+    using tg_tensor_t = metal::tensor<threadgroup float, extents_t, metal::tensor_inline>;
+    constexpr int kBlockSize = TSM * TSN;
+    threadgroup float partials[(KS > 1 ? KS - 1 : 1) * SM * SN * kBlockSize];
+    if (k_group > 0) {
+      tg_tensor_t tP(partials + ((k_group - 1) * SM * SN + sg) * kBlockSize, extents_t(TSN, TSM), strides_t{1, TSN});
+      Dacc.store(tP);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (k_group == 0)
+      for (int g = 0; g < KS - 1; g++) {
+        tg_tensor_t tP(partials + (g * SM * SN + sg) * kBlockSize, extents_t(TSN, TSM), strides_t{1, TSN});
+        auto part = op.template get_destination_cooperative_tensor<a_chunk_t, b_chunk_t, float>();
+        part.load(tP);
+        UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] += part[i];
+      }
+  }
+  if (k_group == 0 && in_bounds) {
+    f32_tensor_t tD(D, extents_t(s_cols, s_rows), strides_t{1, params->ldd});
+    auto d = tD.template slice<TSN, TSM>(0, 0);
+    if (params->accum) {
+      auto Dcur = op.template get_destination_cooperative_tensor<a_chunk_t, b_chunk_t, float>();
+      Dcur.load(d);
+      UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] += Dcur[i];
+    }
+    Dacc.store(d);
+  }
+}
+
+template [[host_name("gemm_nt_nax_2_2_2_2_1")]] [[kernel]] void gemm_nt_nax<bfloat, 2, 2, 2, 2, 1>(const device bfloat*, const device bfloat*, device bfloat*, const constant BwdParams*, uint, uint3);
+template [[host_name("gemm_nt_nax_2_2_1_1_1")]] [[kernel]] void gemm_nt_nax<bfloat, 2, 2, 1, 1, 1>(const device bfloat*, const device bfloat*, device bfloat*, const constant BwdParams*, uint, uint3);
+template [[host_name("gemm_gradw_nax_2_2_1_1_4")]] [[kernel]] void gemm_gradw_nax<bfloat, 2, 2, 1, 1, 4>(const device bfloat*, const device bfloat*, device float*, const constant BwdParams*, uint, uint3);
+template [[host_name("gemm_gradw_nax_2_2_1_1_1")]] [[kernel]] void gemm_gradw_nax<bfloat, 2, 2, 1, 1, 1>(const device bfloat*, const device bfloat*, device float*, const constant BwdParams*, uint, uint3);
 )MSL";
 }
 
@@ -1497,6 +1626,7 @@ struct mesh_graph {
   id<MTLLibrary> lib_core = nil;
   id<MTLLibrary> lib_gemm = nil;
   id<MTLLibrary> lib_simdt = nil;
+  id<MTLLibrary> lib_simdt_bwd = nil;
   std::unordered_map<std::string, id<MTLComputePipelineState>> psos;
 
   id<MTLBuffer> table_buf = nil;
@@ -2591,6 +2721,312 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         break;
       }
+      case MG_OP_LINEAR_DX: {
+        // dX[M, K_in] = dY[M, N_out] @ W[N_out, K_in]; u = {M, K_in, N_out, accum}
+        const BufSlot &bdy = g->bufs[op.in[0]], &bw = g->bufs[op.in[1]], &bdx = g->bufs[op.out[0]];
+        const int M = static_cast<int>(op.u[0]), N = static_cast<int>(op.u[1]), K = static_cast<int>(op.u[2]);
+        const int accum = static_cast<int>(op.u[3]);
+        const bool use_64 = (M >= 64 && M % 64 == 0 && N >= 64 && N % 64 == 0);
+        id<MTLComputePipelineState> pso = get_pso(g, g->lib_gemm, use_64 ? "gemm_nt_nax_2_2_2_2_1" : "gemm_nt_nax_2_2_1_1_1");
+        const int tm = use_64 ? (M / 64) : ((M + 31) / 32);
+        const int tn = use_64 ? (N / 64) : ((N + 31) / 32);
+        const int k_iters = (K + 63) / 64;
+        const int params[10] = {M, N, K, K, N, N, tn, tm, k_iters, accum};
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bdy.mtl offset:bdy.off atIndex:0];
+        [enc setBuffer:bw.mtl offset:bw.off atIndex:1];
+        [enc setBuffer:bdx.mtl offset:bdx.off atIndex:3];
+        [enc setBytes:params length:sizeof(params) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake(tm * tn, 1, 1) threadsPerThreadgroup:MTLSizeMake(use_64 ? 128 : 32, 1, 1)];
+        break;
+      }
+      case MG_OP_LINEAR_DW: {
+        // grad_W_f32[N, K] += dY[M, N]^T @ X[M, K]; u = {N, K, M, accum}
+        const BufSlot &bdy = g->bufs[op.in[0]], &bx = g->bufs[op.in[1]], &bdw = g->bufs[op.out[0]];
+        const int M_out = static_cast<int>(op.u[0]), N_out = static_cast<int>(op.u[1]), K_red = static_cast<int>(op.u[2]);
+        const int accum = static_cast<int>(op.u[3]);
+        const bool use_ks4 = (K_red >= 256);
+        id<MTLComputePipelineState> pso = get_pso(g, g->lib_gemm, use_ks4 ? "gemm_gradw_nax_2_2_1_1_4" : "gemm_gradw_nax_2_2_1_1_1");
+        const int tm = (M_out + 31) / 32;
+        const int tn = (N_out + 31) / 32;
+        const int ks = use_ks4 ? 4 : 1;
+        const int k_iters = ((K_red + 63) / 64 + ks - 1) / ks;
+        const int params[10] = {M_out, N_out, K_red, M_out, N_out, N_out, tn, tm, k_iters, accum};
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:bdy.mtl offset:bdy.off atIndex:0];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:1];
+        [enc setBuffer:bdw.mtl offset:bdw.off atIndex:3];
+        [enc setBytes:params length:sizeof(params) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake(tm * tn, 1, 1) threadsPerThreadgroup:MTLSizeMake(32 * ks, 1, 1)];
+        break;
+      }
+      case MG_OP_PLAN_LOSS_BWD: {
+        const BufSlot &bhr = g->bufs[op.in[0]], &bcl = g->bufs[op.in[1]], &brl = g->bufs[op.in[2]];
+        const BufSlot &bhp = g->bufs[op.in[3]], &btf = g->bufs[op.in[4]], &bti = g->bufs[op.in[5]];
+        const BufSlot &bdh = g->bufs[op.out[0]], &bdcl = g->bufs[op.out[1]], &bdrl = g->bufs[op.out[2]];
+        // Extra buffers passed via u[4]=lcfg, u[5]=sc_grads, u[6]=diag_out
+        const BufSlot &blcfg = g->bufs[op.u[4]], &bscg = g->bufs[op.u[5]], &bdiag = g->bufs[op.u[6]];
+        const uint32_t rows_pad = op.u[3];
+        const uint32_t up[4] = {op.u[0], op.u[1], op.u[2], rows_pad};
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_plan_loss_bwd")];
+        [enc setBuffer:bhr.mtl offset:bhr.off atIndex:0];
+        [enc setBuffer:bcl.mtl offset:bcl.off atIndex:1];
+        [enc setBuffer:brl.mtl offset:brl.off atIndex:2];
+        [enc setBuffer:bhp.mtl offset:bhp.off atIndex:3];
+        [enc setBuffer:btf.mtl offset:btf.off atIndex:4];
+        [enc setBuffer:bti.mtl offset:bti.off atIndex:5];
+        [enc setBuffer:blcfg.mtl offset:blcfg.off atIndex:6];
+        [enc setBuffer:bdh.mtl offset:bdh.off atIndex:7];
+        [enc setBuffer:bdcl.mtl offset:bdcl.off atIndex:8];
+        [enc setBuffer:bdrl.mtl offset:bdrl.off atIndex:9];
+        [enc setBuffer:bscg.mtl offset:bscg.off atIndex:10];
+        [enc setBuffer:bdiag.mtl offset:bdiag.off atIndex:11];
+        [enc setBytes:up length:sizeof(up) atIndex:12];
+        [enc dispatchThreads:MTLSizeMake(rows_pad, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(rows_pad, 256), 1, 1)];
+        break;
+      }
+      case MG_OP_BILINEAR_BWD: {
+        const BufSlot &bq = g->bufs[op.in[0]], &bk = g->bufs[op.in[1]], &bdl = g->bufs[op.in[2]];
+        const BufSlot &bmeta = g->bufs[op.in[3]], &bsc = g->bufs[op.in[4]], &bscg = g->bufs[op.in[5]];
+        const BufSlot &bdq = g->bufs[op.out[0]], &bdk = g->bufs[op.out[1]];
+        const uint32_t E = op.u[0], N = op.u[1], C = op.u[2], D = op.u[3];
+        const uint32_t EN_pad = static_cast<uint32_t>(op.f[3]);
+        const uint32_t EC_pad = ((E * C + 63u) / 64u) * 64u;
+        {
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_bilinear_logits_bwd_q")];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+          [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+          [enc setBuffer:bdl.mtl offset:bdl.off atIndex:2];
+          [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:3];
+          [enc setBuffer:bsc.mtl offset:bsc.off atIndex:4];
+          [enc setBuffer:bdq.mtl offset:bdq.off atIndex:5];
+          [enc setBuffer:bscg.mtl offset:bscg.off atIndex:6];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:7];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:8];
+          [enc dispatchThreadgroups:MTLSizeMake((EN_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        {
+          uint32_t uk[8];
+          memcpy(uk, op.u, sizeof(uk));
+          uk[7] = EC_pad;
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_bilinear_logits_bwd_k")];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+          [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+          [enc setBuffer:bdl.mtl offset:bdl.off atIndex:2];
+          [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:3];
+          [enc setBuffer:bsc.mtl offset:bsc.off atIndex:4];
+          [enc setBuffer:bdk.mtl offset:bdk.off atIndex:5];
+          [enc setBytes:uk length:sizeof(uk) atIndex:6];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:7];
+          [enc dispatchThreadgroups:MTLSizeMake((EC_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        break;
+      }
+      case MG_OP_PLAN_SLICE_BWD: {
+        const BufSlot &bx = g->bufs[op.in[0]], &bdp = g->bufs[op.in[1]], &bdc = g->bufs[op.in[2]], &bdt = g->bufs[op.in[3]];
+        const BufSlot &bdx = g->bufs[op.out[0]];
+        const uint32_t rows_pad = op.u[5];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_plan_slice_norm_bwd")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bdp.mtl offset:bdp.off atIndex:1];
+        [enc setBuffer:bdc.mtl offset:bdc.off atIndex:2];
+        [enc setBuffer:bdt.mtl offset:bdt.off atIndex:3];
+        [enc setBuffer:bdx.mtl offset:bdx.off atIndex:4];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:5];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake((rows_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MP_NORM_BWD: {
+        const BufSlot &bx = g->bufs[op.in[0]], &bdy = g->bufs[op.in[1]], &bdx = g->bufs[op.out[0]];
+        const uint32_t rows_pad = std::max(op.u[0], op.u[3]);
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_mp_norm_bwd")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bdy.mtl offset:bdy.off atIndex:1];
+        [enc setBuffer:bdx.mtl offset:bdx.off atIndex:2];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake((rows_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MP_LERP_BWD: {
+        const BufSlot &ba = g->bufs[op.in[0]], &bb = g->bufs[op.in[1]], &bdy = g->bufs[op.in[2]], &bsc = g->bufs[op.in[3]];
+        const BufSlot &bda = g->bufs[op.out[0]], &bdb = g->bufs[op.out[1]], &bscg = g->bufs[op.out[2]];
+        const uint32_t rows_pad = std::max(op.u[0], op.u[6]);
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_mp_lerp_bwd")];
+        [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
+        [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
+        [enc setBuffer:bdy.mtl offset:bdy.off atIndex:2];
+        [enc setBuffer:bsc.mtl offset:bsc.off atIndex:3];
+        [enc setBuffer:bda.mtl offset:bda.off atIndex:4];
+        [enc setBuffer:bdb.mtl offset:bdb.off atIndex:5];
+        [enc setBuffer:bscg.mtl offset:bscg.off atIndex:6];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:7];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:8];
+        [enc dispatchThreadgroups:MTLSizeMake((rows_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MP_SWIGLU_BWD: {
+        const BufSlot &bgu = g->bufs[op.in[0]], &bdh = g->bufs[op.in[1]], &bdgu = g->bufs[op.out[0]];
+        const uint32_t H = op.u[1], rows_pad = std::max(op.u[0], op.u[2]);
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_mp_swiglu_bwd")];
+        [enc setBuffer:bgu.mtl offset:bgu.off atIndex:0];
+        [enc setBuffer:bdh.mtl offset:bdh.off atIndex:1];
+        [enc setBuffer:bdgu.mtl offset:bdgu.off atIndex:2];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:4];
+        [enc dispatchThreads:MTLSizeMake(H, rows_pad, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(H, 256), 1, 1)];
+        break;
+      }
+      case MG_OP_CGT_BCAST_BWD: {
+        const BufSlot &bg = g->bufs[op.in[0]], &btb = g->bufs[op.in[1]], &bdgi = g->bufs[op.in[2]], &bmeta = g->bufs[op.in[3]];
+        const BufSlot &bdg = g->bufs[op.out[0]], &bdtb = g->bufs[op.out[1]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_bcast_merge_bwd")];
+        [enc setBuffer:bg.mtl offset:bg.off atIndex:0];
+        [enc setBuffer:btb.mtl offset:btb.off atIndex:1];
+        [enc setBuffer:bdgi.mtl offset:bdgi.off atIndex:2];
+        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:3];
+        [enc setBuffer:bdg.mtl offset:bdg.off atIndex:4];
+        [enc setBuffer:bdtb.mtl offset:bdtb.off atIndex:5];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:6];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        break;
+      }
+      case MG_OP_CGT_RIVAL_BWD: {
+        const BufSlot &bq = g->bufs[op.in[0]], &bk = g->bufs[op.in[1]], &bv = g->bufs[op.in[2]], &bdt = g->bufs[op.in[3]];
+        const BufSlot &bdq = g->bufs[op.out[0]], &bdk = g->bufs[op.out[1]], &bdv = g->bufs[op.out[2]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_team_rival_bwd")];
+        [enc setBuffer:bq.mtl offset:bq.off atIndex:0];
+        [enc setBuffer:bk.mtl offset:bk.off atIndex:1];
+        [enc setBuffer:bv.mtl offset:bv.off atIndex:2];
+        [enc setBuffer:bdt.mtl offset:bdt.off atIndex:3];
+        [enc setBuffer:bdq.mtl offset:bdq.off atIndex:4];
+        [enc setBuffer:bdk.mtl offset:bdk.off atIndex:5];
+        [enc setBuffer:bdv.mtl offset:bdv.off atIndex:6];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:7];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:8];
+        [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        break;
+      }
+      case MG_OP_CGT_STAGE1_BWD: {
+        // in[0]=xn, in[1]=v_norm, in[2]=r_norm, in[3]=w_pool, in[4]=d_t_in, in[5]=d_glob
+        // out[0]=d_v_norm, out[1]=d_r_norm, out[2]=d_xn (accumulated!)
+        // Extra buffer ids in f/u? Use u[7]=packed or split: actually encode via two tiny clean calls!
+        // Here: in[0]=xn, in[1]=v_norm, in[2]=r_norm, in[3]=w_pool, in[4]=ent_meta, in[5]=scalars
+        // And out[0]=d_v_norm, out[1]=d_r_norm, out[2]=d_xn; extra bufs in op.u[5..7]? No, wait:
+        // Pass buf IDs directly: in[0]=xn, in[1]=v_norm, in[2]=r_norm, in[3]=d_t_in, in[4]=d_glob, in[5]=ent_meta
+        // out[0]=d_v_norm, out[1]=d_r_norm, out[2]=d_xn; and u[4..7] = {w_pool_buf, scalars_buf, d_w_pool_buf, sc_grads_buf}!
+        // And dims E, N, J, K in u[0..3], D/R/sc_bp/sg_bp in f[0..3] (or float bitcast)? Even cleaner:
+        // Pack (E, N, J, K) + (D, R, sc_bp, sg_bp) via:
+        //   u[0] = E | (N << 16), u[1] = J | (K << 16), u[2] = D | (R << 16), u[3] = sc_bp | (sg_bp << 16)
+        //   u[4] = w_pool_buf, u[5] = scalars_buf, u[6] = d_w_pool_buf, u[7] = sc_grads_buf!
+        const uint32_t E = op.u[0] & 0xFFFFu, N = op.u[0] >> 16;
+        const uint32_t J = op.u[1] & 0xFFFFu, K = op.u[1] >> 16;
+        const uint32_t D = op.u[2] & 0xFFFFu, R = op.u[2] >> 16;
+        const uint32_t sc_bp = op.u[3] & 0xFFFFu, sg_bp = op.u[3] >> 16;
+        const uint32_t M_ent = N + J + K;
+        const BufSlot &bxn = g->bufs[op.in[0]], &bv = g->bufs[op.in[1]], &br = g->bufs[op.in[2]];
+        const BufSlot &bdtin = g->bufs[op.in[3]], &bdglob = g->bufs[op.in[4]], &bmeta = g->bufs[op.in[5]];
+        const BufSlot &bdv = g->bufs[op.out[0]], &bdr = g->bufs[op.out[1]], &bdxn = g->bufs[op.out[2]];
+        const BufSlot &bwp = g->bufs[op.u[4]], &bsc = g->bufs[op.u[5]], &bdwp = g->bufs[op.u[6]], &bscg = g->bufs[op.u[7]];
+        // 1. Team pool backward (initializes d_v_norm, accumulates d_xn, d_w_pool, d_blend_pool)
+        {
+          const uint32_t up[7] = {E, N, J, K, D, sc_bp, sg_bp};
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_team_pool_bwd")];
+          [enc setBuffer:bxn.mtl offset:bxn.off atIndex:0];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+          [enc setBuffer:bwp.mtl offset:bwp.off atIndex:2];
+          [enc setBuffer:bdtin.mtl offset:bdtin.off atIndex:3];
+          [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:4];
+          [enc setBuffer:bsc.mtl offset:bsc.off atIndex:5];
+          [enc setBuffer:bdv.mtl offset:bdv.off atIndex:6];
+          [enc setBuffer:bdxn.mtl offset:bdxn.off atIndex:7];
+          [enc setBuffer:bdwp.mtl offset:bdwp.off atIndex:8];
+          [enc setBuffer:bscg.mtl offset:bscg.off atIndex:9];
+          [enc setBytes:up length:sizeof(up) atIndex:10];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:11];
+          [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        }
+        // 2. Global Gram backward (accumulates into d_v_norm, writes d_r_norm)
+        {
+          const uint32_t ug[4] = {E, M_ent, D, R};
+          if (M_ent <= 48u) {
+            [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_global_gram_bwd_small")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:2];
+            [enc setBuffer:bdv.mtl offset:bdv.off atIndex:3];
+            [enc setBuffer:bdr.mtl offset:bdr.off atIndex:4];
+            [enc setBytes:ug length:sizeof(ug) atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          } else {
+            [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_global_gram_bwd_dv")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:1];
+            [enc setBuffer:bdv.mtl offset:bdv.off atIndex:2];
+            [enc setBytes:ug length:sizeof(ug) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((D + 31u) / 32u, E, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_global_gram_bwd_dr")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:2];
+            [enc setBuffer:bdr.mtl offset:bdr.off atIndex:3];
+            [enc setBytes:ug length:sizeof(ug) atIndex:4];
+            [enc dispatchThreadgroups:MTLSizeMake((R + 31u) / 32u, E, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          }
+        }
+        break;
+      }
+      case MG_OP_PLAN_EMBED_BWD: {
+        const BufSlot &bo = g->bufs[op.in[0]], &bc = g->bufs[op.in[1]], &bt = g->bufs[op.in[2]];
+        const BufSlot &bte = g->bufs[op.in[3]], &bdx = g->bufs[op.in[4]], &bsc = g->bufs[op.in[5]];
+        const BufSlot &bdo = g->bufs[op.out[0]], &bdc = g->bufs[op.out[1]], &bdt = g->bufs[op.out[2]];
+        // u[0]=E|(N<<16), u[1]=J|(K<<16), u[2]=D, u[3]=sc_tb|(sg_tb<<16), u[4]=d_te_norm_buf, u[5]=sc_grads_buf
+        const uint32_t E = op.u[0] & 0xFFFFu, N = op.u[0] >> 16;
+        const uint32_t J = op.u[1] & 0xFFFFu, K = op.u[1] >> 16;
+        const uint32_t D = op.u[2], sc_tb = op.u[3] & 0xFFFFu, sg_tb = op.u[3] >> 16;
+        const BufSlot &bdte = g->bufs[op.u[4]], &bscg = g->bufs[op.u[5]];
+        const uint32_t up[7] = {E, N, J, K, D, sc_tb, sg_tb};
+        const uint32_t rows = E * (N + J + K);
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_plan_embed_cat_bwd")];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:0];
+        [enc setBuffer:bc.mtl offset:bc.off atIndex:1];
+        [enc setBuffer:bt.mtl offset:bt.off atIndex:2];
+        [enc setBuffer:bte.mtl offset:bte.off atIndex:3];
+        [enc setBuffer:bdx.mtl offset:bdx.off atIndex:4];
+        [enc setBuffer:bsc.mtl offset:bsc.off atIndex:5];
+        [enc setBuffer:bdo.mtl offset:bdo.off atIndex:6];
+        [enc setBuffer:bdc.mtl offset:bdc.off atIndex:7];
+        [enc setBuffer:bdt.mtl offset:bdt.off atIndex:8];
+        [enc setBuffer:bdte.mtl offset:bdte.off atIndex:9];
+        [enc setBuffer:bscg.mtl offset:bscg.off atIndex:10];
+        [enc setBytes:up length:sizeof(up) atIndex:11];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake((rows + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_UNIT_W_BWD: {
+        const BufSlot &bw = g->bufs[op.in[0]], &bgwu = g->bufs[op.in[1]], &bgw = g->bufs[op.out[0]];
+        const uint32_t N = op.u[0];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_unit_w_bwd")];
+        [enc setBuffer:bw.mtl offset:bw.off atIndex:0];
+        [enc setBuffer:bgwu.mtl offset:bgwu.off atIndex:1];
+        [enc setBuffer:bgw.mtl offset:bgw.off atIndex:2];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake((N + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_ZERO_F32: {
+        const BufSlot &bb = g->bufs[op.out[0]];
+        const uint32_t n = op.u[0];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_zero_f32")];
+        [enc setBuffer:bb.mtl offset:bb.off atIndex:0];
+        [enc setBytes:&n length:sizeof(n) atIndex:1];
+        [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(n, 256), 1, 1)];
+        break;
+      }
       default:
         break;
     }
@@ -2637,6 +3073,13 @@ mesh_graph_t *mesh_graph_create(int world_size, int rank, const char *comm_id, i
   g->lib_simdt = [g->dev newLibraryWithSource:src_simdt options:nil error:&err];
   if (!g->lib_simdt) {
     fprintf(stderr, "mesh-graph: simdt MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    delete g;
+    return nullptr;
+  }
+  NSString *src_bwd = [NSString stringWithUTF8String:mesh_simdt::build_simdt_bwd_msl().c_str()];
+  g->lib_simdt_bwd = [g->dev newLibraryWithSource:src_bwd options:nil error:&err];
+  if (!g->lib_simdt_bwd) {
+    fprintf(stderr, "mesh-graph: simdt_bwd MSL compile error: %s\n", err.localizedDescription.UTF8String);
     delete g;
     return nullptr;
   }

@@ -904,7 +904,7 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
   const uint e = row / N;
   const uint n = row % N;
 
-  const device bfloat* hr = heads_raw + ulong(row) * 32ul;
+  const device bfloat* hr = heads_raw + ulong(row) * 64ul;
   device bfloat* ho = head_out + ulong(row) * 25ul;
   const float cm_sc = hp[38];
 
@@ -1192,22 +1192,22 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     for (uint ch = 8u; ch <= 14u; ch++) p_f1[ch * N + tid] = 0.0f;
   }
 
-  // Threadgroup SRAM mirrors (~10 KB total)
+  // Threadgroup SRAM mirrors (~16.1 KB total; supports N<=128, J<=64, K<=16, CP<=16)
   threadgroup float sh_p_pos[128 * 3];
   threadgroup int   sh_p_team[128];
   threadgroup uchar sh_p_alive[128];
   threadgroup int   sh_p_tgt[128];
   threadgroup float sh_p_dmg[128];
-  threadgroup float sh_c_pos[32 * 3];
-  threadgroup float sh_c_pos_old[32 * 3];
-  threadgroup float sh_c_s[32];
-  threadgroup int   sh_c_ctrl[32];
-  threadgroup int   sh_c_wp[32];
-  threadgroup float sh_c_totw[32];
-  threadgroup float sh_c_pshare[32];
-  threadgroup float sh_w_jk[32 * 16];
-  threadgroup float sh_dpts[32 * 16];
-  threadgroup int   sh_cph[32 * 16];
+  threadgroup float sh_c_pos[64 * 3];
+  threadgroup float sh_c_pos_old[64 * 3];
+  threadgroup float sh_c_s[64];
+  threadgroup int   sh_c_ctrl[64];
+  threadgroup int   sh_c_wp[64];
+  threadgroup float sh_c_totw[64];
+  threadgroup float sh_c_pshare[64];
+  threadgroup float sh_w_jk[64 * 16];
+  threadgroup float sh_dpts[64 * 16];
+  threadgroup short sh_cph[64 * 16];
   threadgroup float sh_t_score[16];
   threadgroup int   sh_t_cph[16];
   threadgroup float sh_dt_eff;
@@ -1424,7 +1424,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
 
       for (uint k = 0; k < K; k++) {
         sh_dpts[j * 16u + k] = 0.0f;
-        sh_cph[j * 16u + k] = 0;
+        sh_cph[j * 16u + k] = short(0);
       }
       int depth = 0;
       const float v_nz = (fabs(v) > 1e-6f) ? v : 1.0f;
@@ -1445,7 +1445,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         c_cpo[j * CP + ci] = new_o;
         if (new_o > 0) {
           depth++;
-          if (uint(new_o - 1) < K) sh_cph[j * 16u + uint(new_o - 1)]++;
+          if (uint(new_o - 1) < K) sh_cph[j * 16u + uint(new_o - 1)] += short(1);
         }
       }
       c_i1[4u * J + j] = depth;
@@ -1467,7 +1467,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         int ch = 0;
         for (uint j = 0; j < J; j++) {
           dp += sh_dpts[j * 16u + k];
-          ch += sh_cph[j * 16u + k];
+          ch += int(sh_cph[j * 16u + k]);
         }
         if (sh_exact_cross != 0u) sh_t_score[k] = max(sh_t_score[k] + dp, 0.0f);
         sh_t_cph[k] = ch;
