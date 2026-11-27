@@ -362,6 +362,77 @@ class SeedConfig:
 
 
 @dataclass(frozen=True)
+class WorldDistributionConfig:
+    mode: str = "static_maps"
+    use_zero_copy_vfs: bool = True
+    vfs_shm_mb: int = 384
+    vfs_capacity: int = 4096
+    maps_pk3_rel: str = "Xonotic/data/xonotic-20230620-maps.pk3"
+    family_weights: dict[str, float] = field(
+        default_factory=lambda: {"b3313_binary_stitch": 0.65, "gas_world_bsp": 0.35}
+    )
+    teams_min: int = 2
+    teams_max: int = 24
+    teams_dist: str = "lognormal"
+    teams_log_mean: float = 1.887
+    teams_log_std: float = 0.62
+    carts_min_extra: int = 1
+    carts_max: int = 256
+    carts_dist: str = "lognormal"
+    carts_mult_log_mean: float = 1.917
+    carts_mult_log_std: float = 0.58
+    carts_per_team_min: float = 2.0
+    carts_per_team_max: float = 12.0
+    players_min: int = 12
+    players_max: int = 240
+    players_per_team_min: int = 2
+    players_per_team_max: int = 16
+    players_per_team_low: float = 6.0
+    players_per_team_high: float = 14.0
+    tiles_min: int = 1
+    tiles_max: int = 16
+    players_per_tile: float = 12.0
+    max_carts_per_tile: float = 8.0
+    expander_min_degree: int = 3
+    allow_rotations: bool = True
+    tile_size: float = 1792.0
+    joint_widths: tuple[float, ...] = (288.0, 320.0, 352.0, 384.0)
+    joint_length: float = 96.0
+    checkpoints_per_cart: int = 4
+    stock_map_pool: tuple[str, ...] = (
+        "boil", "runningman", "warfare", "stormkeep", "fuse", "solarium",
+        "opium", "trident", "leave_em_behind", "silentsiege", "dance", "atelier",
+    )
+    eval_stream_specs: tuple[dict[str, Any], ...] = (
+        {"seed": 4101, "family": "b3313_binary_stitch", "teams": 5, "carts": 28, "players": 70, "tiles": 6},
+        {"seed": 4102, "family": "gas_world_bsp", "teams": 9, "carts": 52, "players": 108, "tiles": 9},
+        {"seed": 4103, "family": "b3313_binary_stitch", "teams": 10, "carts": 47, "players": 120, "tiles": 10},
+        {"seed": 4104, "family": "b3313_binary_stitch", "teams": 22, "carts": 112, "players": 240, "tiles": 14},
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "WorldDistributionConfig":
+        if not data:
+            return cls()
+        kw: dict[str, Any] = {}
+        for f in cls.__dataclass_fields__:
+            if f not in data:
+                continue
+            v = data[f]
+            if f == "family_weights":
+                kw[f] = {str(k): float(val) for k, val in v.items()}
+            elif f == "joint_widths":
+                kw[f] = _as_tuple(v, float)
+            elif f == "stock_map_pool":
+                kw[f] = tuple(str(x) for x in v)
+            elif f == "eval_stream_specs":
+                kw[f] = tuple(dict(item) for item in v)
+            else:
+                kw[f] = v
+        return cls(**kw)
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     norm: NormConfig = field(default_factory=NormConfig)
@@ -372,6 +443,7 @@ class TrainingConfig:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
+    world: WorldDistributionConfig = field(default_factory=WorldDistributionConfig)
     losses: LossConfig = field(default_factory=lambda: DEFAULT_LOSS_CONFIG)
 
     @classmethod
@@ -388,6 +460,7 @@ class TrainingConfig:
             schedule=ScheduleConfig.from_dict(data.get("schedule")),
             eval=EvalConfig.from_dict(data.get("eval")),
             seeds=SeedConfig.from_dict(data.get("seeds")),
+            world=WorldDistributionConfig.from_dict(data.get("world")),
             losses=LossConfig.from_dict(data.get("losses")),
         )
 

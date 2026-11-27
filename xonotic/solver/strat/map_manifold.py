@@ -413,10 +413,15 @@ def load_map_manifold(ent_path: str | Path, measurements_path: str | Path | None
         measurements_path = Path(measurements_path)
 
     meas = json.loads(measurements_path.read_text()) if measurements_path.exists() else {}
+    return load_map_manifold_from_text(ent_path.read_text(), meas=meas)
+
+
+def load_map_manifold_from_text(ent_text: str, meas: dict | None = None) -> MapManifold:
+    meas = meas or {}
     nav = NavigationRows(meas)
     cp_dists_all = meas.get("checkpoint_distances", [])
 
-    blocks = _parse_ent_blocks(ent_path.read_text())
+    blocks = _parse_ent_blocks(ent_text)
     path_by_name = {b["targetname"]: b for b in blocks if b.get("classname") == "plc_path" and "targetname" in b}
     carts = [b for b in blocks if b.get("classname") == "func_plc_cart"]
 

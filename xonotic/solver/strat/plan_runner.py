@@ -31,7 +31,8 @@ from .losses import (
     LossConfig,
     compute_step_rewards,
 )
-from .map_manifold import MapManifold, load_map_manifold
+from .map_manifold import MapManifold, load_map_manifold, load_map_manifold_from_text
+from .mesh_vfs import MeshVFSStore
 from .outer_validation import extract_behavioral_motifs
 from .plan_policy import (
     PLAN_CONT_DIM,
@@ -74,6 +75,7 @@ class MultiServerPlanHarness:
         stop_sigterm_timeout_s: float = DEFAULT_HARNESS_CONFIG.stop_sigterm_timeout_s,
         stop_sigkill_timeout_s: float = DEFAULT_HARNESS_CONFIG.stop_sigkill_timeout_s,
         manifold: MapManifold | None = None,
+        vfs_store: MeshVFSStore | None = None,
     ):
         stage = Path(DEFAULT_HARNESS_CONFIG.stage_dir).expanduser()
         self.dp_bin = dp_bin or str(stage / DEFAULT_HARNESS_CONFIG.dp_bin_rel)
@@ -88,6 +90,7 @@ class MultiServerPlanHarness:
         self.stop_sigterm_timeout_s = float(stop_sigterm_timeout_s)
         self.stop_sigkill_timeout_s = float(stop_sigkill_timeout_s)
         self.manifold = manifold
+        self.vfs_store = vfs_store
         self.manifolds_by_map: dict[str, MapManifold] = {}
         maps_dir = Path(self.userdir) / "data" / "maps"
         if maps_dir.exists():
@@ -99,8 +102,21 @@ class MultiServerPlanHarness:
         if self.manifold is None:
             self.manifold = self.manifolds_by_map.get("boil") or next(iter(self.manifolds_by_map.values()), None)
 
+    def register_vfs_map_manifold(self, map_name: str, ent_bytes: bytes | str) -> MapManifold:
+        txt = ent_bytes.decode("utf-8", errors="ignore") if isinstance(ent_bytes, (bytes, bytearray)) else str(ent_bytes)
+        m = load_map_manifold_from_text(txt)
+        self.manifolds_by_map[map_name] = m
+        self.manifold = m
+        return m
+
     @classmethod
-    def from_config(cls, cfg: HarnessConfig, *, is_supermap: bool = False) -> "MultiServerPlanHarness":
+    def from_config(
+        cls,
+        cfg: HarnessConfig,
+        *,
+        is_supermap: bool = False,
+        vfs_store: MeshVFSStore | None = None,
+    ) -> "MultiServerPlanHarness":
         stage = Path(cfg.stage_dir).expanduser()
         return cls(
             dp_bin=str(stage / cfg.dp_bin_rel),
@@ -113,6 +129,7 @@ class MultiServerPlanHarness:
             spawn_stagger_s=cfg.spawn_stagger_s,
             stop_sigterm_timeout_s=cfg.stop_sigterm_timeout_s,
             stop_sigkill_timeout_s=cfg.stop_sigkill_timeout_s,
+            vfs_store=vfs_store,
         )
 
     def _identify_map(self, cart_rows: np.ndarray) -> tuple[str, MapManifold | None]:
@@ -151,24 +168,37 @@ class MultiServerPlanHarness:
         procs, logs = [], []
         maps = map_names if (map_names is not None and len(map_names) == len(seeds)) else ["boil"] * len(seeds)
         for idx, (seed, mname) in enumerate(zip(seeds, maps)):
-            sv_userdir = work_dir / f"userdir_{idx}"
-            sv_data = sv_userdir / "data"
-            sv_data.mkdir(parents=True, exist_ok=True)
-            for item in Path(self.userdir, "data").iterdir():
-                dst = sv_data / item.name
-                if not dst.exists():
-                    os.symlink(item, dst)
             bcfg_name = None
-            if bot_config_files is not None and idx < len(bot_config_files) and bot_config_files[idx] is not None:
-                src_bcfg = Path(bot_config_files[idx])
-                dst_bcfg = sv_data / "custom_bots.txt"
-                dst_bcfg.write_text(src_bcfg.read_text())
-                bcfg_name = "custom_bots.txt"
+            if self.vfs_store is not None:
+                sv_userdir = Path(self.userdir)
+                if bot_config_files is not None and idx < len(bot_config_files) and bot_config_files[idx] is not None:
+                    src_bcfg = bot_config_files[idx]
+                    raw_bcfg = src_bcfg.encode("utf-8") if isinstance(src_bcfg, str) and "\n" in src_bcfg else Path(src_bcfg).read_bytes()
+                    bcfg_name = f"vfs_bots_{idx}.txt"
+                    self.vfs_store.put(bcfg_name, raw_bcfg)
+            else:
+                sv_userdir = work_dir / f"userdir_{idx}"
+                sv_data = sv_userdir / "data"
+                sv_data.mkdir(parents=True, exist_ok=True)
+                for item in Path(self.userdir, "data").iterdir():
+                    dst = sv_data / item.name
+                    if not dst.exists():
+                        os.symlink(item, dst)
+                if bot_config_files is not None and idx < len(bot_config_files) and bot_config_files[idx] is not None:
+                    src_bcfg = bot_config_files[idx]
+                    dst_bcfg = sv_data / "custom_bots.txt"
+                    if isinstance(src_bcfg, str) and "\n" in src_bcfg:
+                        dst_bcfg.write_text(src_bcfg)
+                    else:
+                        dst_bcfg.write_text(Path(src_bcfg).read_text())
+                    bcfg_name = "custom_bots.txt"
             logf = open(work_dir / f"server_{idx}_{mname}.log", "w")
             logs.append(logf)
             env = dict(os.environ)
             env["MESH_EXPERT_SOCKET"] = sock
             env["MESH_EXPERT_FRAMEBYTES"] = str(self.framebytes)
+            if self.vfs_store is not None:
+                env["MESH_VFS_PATH"] = self.vfs_store.env_spec
             sv_teams = int(teams_per_server[idx]) if (teams_per_server is not None and idx < len(teams_per_server)) else 3
             sv_bots = int(bots_per_server[idx]) if (bots_per_server is not None and idx < len(bots_per_server)) else 9
             sv_maxc = (

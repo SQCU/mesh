@@ -1,0 +1,33 @@
+{
+  "extends": "training_default.json",
+  "losses_file": "losses.json",
+  "harness": {
+    "point_limit": 40.0,
+    "max_episode_wall_s": 600.0,
+    "base_port": 26300
+  },
+  "schedule": {
+    "out_dir": "~/xonotic-runs/studio4-parametric-stream-pfsp",
+    "supermap_manifest": "",
+    "servers_per_node": 2,
+    "match_supermap_scale_across_ranks": true,
+    "main_iters": 6,
+    "exploiter_iters": 2,
+    "local_batch": 0
+  },
+  "world": {
+    "mode": "parametric_stream",
+    "use_zero_copy_vfs": true,
+    "vfs_shm_mb": 384,
+    "family_weights": {
+      "b3313_binary_stitch": 0.65,
+      "gas_world_bsp": 0.35
+    },
+    "teams_min": 3,
+    "teams_max": 22,
+    "players_min": 24,
+    "players_max": 240,
+    "tiles_min": 2,
+    "tiles_max": 14
+  }
+}

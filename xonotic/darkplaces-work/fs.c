@@ -26,6 +26,7 @@
 
 #include "fs.h"
 #include "wad.h"
+#include "mesh_vfs.h"
 
 #ifndef O_BINARY
 # define O_BINARY 0
@@ -1738,6 +1739,7 @@ void FS_Init (void)
 	}
 
 	FS_Rescan();
+	MeshVFS_Init();
 
 	if (Thread_HasThreads())
 		fs_mutex = Thread_CreateMutex();
@@ -1759,6 +1761,7 @@ void FS_Init_Commands(void)
 
 void FS_Shutdown (void)
 {
+	MeshVFS_Shutdown();
 
 	FS_ClearSearchPath();
 	Mem_FreePool (&fs_mempool);
@@ -2185,11 +2188,16 @@ qfile_t* FS_OpenRealFile (const char* filepath, const char* mode, qboolean quiet
 qfile_t* FS_OpenVirtualFile (const char* filepath, qboolean quiet)
 {
 	qfile_t *result = NULL;
+	const unsigned char *vfs_ptr = NULL;
+	size_t vfs_size = 0;
 	if (FS_CheckNastyPath(filepath, false))
 	{
 		Con_Printf("FS_OpenVirtualFile(\"%s\", %s): nasty filename rejected\n", filepath, quiet ? "true" : "false");
 		return NULL;
 	}
+
+	if (MeshVFS_Lookup(filepath, &vfs_ptr, &vfs_size))
+		return FS_FileFromData(vfs_ptr, vfs_size, quiet);
 
 	if (fs_mutex) Thread_LockMutex(fs_mutex);
 	result = FS_OpenReadFile (filepath, quiet, false, 16);
@@ -2716,6 +2724,9 @@ int FS_FileType (const char *filename)
 	searchpath_t *search;
 	char fullpath[MAX_OSPATH];
 
+	if (MeshVFS_Lookup(filename, NULL, NULL))
+		return FS_FILETYPE_FILE;
+
 	search = FS_FindFile (filename, NULL, true);
 	if(!search)
 		return FS_FILETYPE_NONE;
@@ -2729,6 +2740,8 @@ int FS_FileType (const char *filename)
 
 qboolean FS_FileExists (const char *filename)
 {
+	if (MeshVFS_Lookup(filename, NULL, NULL))
+		return true;
 	return (FS_FindFile (filename, NULL, true) != NULL);
 }
 
@@ -2803,6 +2816,8 @@ fssearch_t *FS_Search(const char *pattern, int caseinsensitive, int quiet)
 	if (basepathlength)
 		memcpy(basepath, pattern, basepathlength);
 	basepath[basepathlength] = 0;
+
+	MeshVFS_SearchAppend(pattern, &resultlist);
 
 	for (searchpath = fs_searchpaths;searchpath;searchpath = searchpath->next)
 	{

@@ -181,5 +181,54 @@
     "eval_match_base": 75000,
     "eval_rng_base": 88000,
     "neuron_audit_seeds": [9901, 9902]
+  },
+  "world": {
+    "mode": "static_maps",
+    "use_zero_copy_vfs": true,
+    "vfs_shm_mb": 384,
+    "vfs_capacity": 4096,
+    "maps_pk3_rel": "Xonotic/data/xonotic-20230620-maps.pk3",
+    "family_weights": {
+      "b3313_binary_stitch": 0.65,
+      "gas_world_bsp": 0.35
+    },
+    "teams_min": 2,
+    "teams_max": 24,
+    "teams_dist": "lognormal",
+    "teams_log_mean": 1.887,
+    "teams_log_std": 0.62,
+    "carts_min_extra": 1,
+    "carts_max": 256,
+    "carts_dist": "lognormal",
+    "carts_mult_log_mean": 1.917,
+    "carts_mult_log_std": 0.58,
+    "carts_per_team_min": 2.0,
+    "carts_per_team_max": 12.0,
+    "players_min": 12,
+    "players_max": 240,
+    "players_per_team_min": 2,
+    "players_per_team_max": 16,
+    "players_per_team_low": 6.0,
+    "players_per_team_high": 14.0,
+    "tiles_min": 1,
+    "tiles_max": 16,
+    "players_per_tile": 12.0,
+    "max_carts_per_tile": 8.0,
+    "expander_min_degree": 3,
+    "allow_rotations": true,
+    "tile_size": 1792.0,
+    "joint_widths": [288.0, 320.0, 352.0, 384.0],
+    "joint_length": 96.0,
+    "checkpoints_per_cart": 4,
+    "stock_map_pool": [
+      "boil", "runningman", "warfare", "stormkeep", "fuse", "solarium",
+      "opium", "trident", "leave_em_behind", "silentsiege", "dance", "atelier"
+    ],
+    "eval_stream_specs": [
+      {"seed": 4101, "family": "b3313_binary_stitch", "teams": 5, "carts": 28, "players": 70, "tiles": 6},
+      {"seed": 4102, "family": "gas_world_bsp", "teams": 9, "carts": 52, "players": 108, "tiles": 9},
+      {"seed": 4103, "family": "b3313_binary_stitch", "teams": 10, "carts": 47, "players": 120, "tiles": 10},
+      {"seed": 4104, "family": "b3313_binary_stitch", "teams": 22, "carts": 112, "players": 240, "tiles": 14}
+    ]
   }
 }

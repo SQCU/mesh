@@ -60,6 +60,7 @@ from solver.strat.mech_calibration import (
     sample_native_lobby_roster,
     write_native_bots_txt,
 )
+from solver.strat.mesh_vfs import MeshVFSStore, pack_vfs_bundle, unpack_vfs_bundle
 from solver.strat.outer_validation import compute_multiteam_elo, extract_behavioral_motifs
 from solver.strat.phase_fingerprint import PhaseSpaceAccumulator, compare_fingerprints, strip_raw_maps
 from solver.strat.plan_policy import (
@@ -85,6 +86,7 @@ from solver.strat.train_config import (
     load_training_config,
 )
 from solver.xonwire import CART_KIND, OBSERVATION_KIND, PLAN_KIND, TEAM_KIND, Engine, RuntimeFrames, frames
+from mapgen.bsp_stream import B3313BinaryStitcher, sample_world_spec, synthesize_world_bundle
 
 
 MODULE_GROUPS = ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "skill_id_head", "dynamics_head")
@@ -122,6 +124,41 @@ def _broadcast_model_(model: PlanWally, torch_mesh, rank: int, world_size: int, 
                 n = p.numel()
                 p.data.copy_(buf[off : off + n].view_as(p.data))
                 off += n
+
+
+def _broadcast_vfs_world(
+    spec: dict | None,
+    vfs_files: dict[str, bytes] | None,
+    torch_mesh,
+    rank: int,
+    world_size: int,
+    device: str,
+) -> tuple[dict, dict[str, bytes]]:
+    if world_size <= 1:
+        assert spec is not None and vfs_files is not None
+        return spec, vfs_files
+    if rank == 0:
+        assert spec is not None and vfs_files is not None
+        blob = pack_vfs_bundle(vfs_files)
+        meta = [spec, len(blob)]
+    else:
+        blob = b""
+        meta = [None, 0]
+    dist.broadcast_object_list(meta, src=0)
+    spec_out, n_bytes = meta[0], int(meta[1])
+    n_words = (n_bytes + 3) // 4
+    buf = torch_mesh.empty((max(1, n_words),), dtype=torch.float32, device=device)
+    if rank == 0 and n_bytes > 0:
+        padded = blob + (b"\x00" * (n_words * 4 - n_bytes))
+        arr = np.frombuffer(padded, dtype=np.float32).copy()
+        buf.copy_(torch.from_numpy(arr).to(device))
+    dist.broadcast(buf, src=0)
+    if rank != 0:
+        raw = buf.cpu().numpy().tobytes()[:n_bytes]
+        vfs_out = unpack_vfs_bundle(raw)
+    else:
+        vfs_out = vfs_files
+    return spec_out, vfs_out
 
 
 def _make_grouped_aurora(model: PlanWally, opt_cfg: OptimizerConfig, lr_mult: float = 1.0) -> Aurora:
@@ -1123,13 +1160,30 @@ def main():
         mpath = Path(cfg.schedule.supermap_manifest).expanduser()
         if mpath.exists():
             supermap_specs = json.loads(mpath.read_text())
+    is_stream = cfg.world.mode == "parametric_stream"
+    vfs_store = (
+        MeshVFSStore(
+            name=f"mvfs_r{rank}_{os.getpid()}",
+            size_mb=cfg.world.vfs_shm_mb,
+            capacity=cfg.world.vfs_capacity,
+        )
+        if cfg.world.use_zero_copy_vfs
+        else None
+    )
+    stitcher = (
+        B3313BinaryStitcher(stage_dir / cfg.world.maps_pk3_rel)
+        if is_stream
+        else None
+    )
     train_maps = list(cfg.schedule.train_maps)
     servers_per_node = (
         int(cfg.schedule.servers_per_node)
         if cfg.schedule.servers_per_node > 0
-        else (3 if supermap_specs else len(train_maps))
+        else (2 if (supermap_specs or is_stream) else len(train_maps))
     )
-    harness = MultiServerPlanHarness.from_config(cfg.harness, is_supermap=bool(supermap_specs))
+    harness = MultiServerPlanHarness.from_config(
+        cfg.harness, is_supermap=bool(supermap_specs or is_stream), vfs_store=vfs_store,
+    )
 
     torch.manual_seed(cfg.seeds.model_init)
     main_live = PlanWally.from_config(cfg.model, cfg.norm).to(device)
@@ -1174,7 +1228,22 @@ def main():
 
     for idx_it, (it_name, role, ent_coef) in enumerate(schedule, start=1):
         rng_sched = np.random.default_rng(cfg.seeds.schedule_base + idx_it * 100 + rank)
-        if supermap_specs:
+        if is_stream:
+            if rank == 0:
+                w_params = sample_world_spec(cfg.seeds.match_base + idx_it * 97, cfg.world)
+                spec0, files0 = synthesize_world_bundle(w_params, cfg.world, stitcher=stitcher, name_prefix=f"tr_{it_name}")
+            else:
+                spec0, files0 = None, None
+            iter_spec, iter_vfs = _broadcast_vfs_world(spec0, files0, torch_mesh, rank, world_size, device)
+            if vfs_store is not None:
+                vfs_store.clear()
+                vfs_store.put_many(iter_vfs)
+            ent_key = f"maps/{iter_spec['name']}.ent"
+            if ent_key in iter_vfs:
+                harness.register_vfs_map_manifold(iter_spec["name"], iter_vfs[ent_key])
+            iter_specs = [iter_spec] * servers_per_node
+            iter_maps = [iter_spec["name"]] * servers_per_node
+        elif supermap_specs:
             if cfg.schedule.match_supermap_scale_across_ranks:
                 iter_spec = supermap_specs[(idx_it - 1) % len(supermap_specs)]
                 iter_specs = [iter_spec] * servers_per_node
@@ -1346,7 +1415,19 @@ def main():
 
     train_wall_s = round(time.monotonic() - t_train0, 2)
 
-    if supermap_specs:
+    if is_stream:
+        eval_pool = list(cfg.world.eval_stream_specs)
+        eval_p = eval_pool[rank % len(eval_pool)]
+        my_eval_spec, eval_vfs = synthesize_world_bundle(eval_p, cfg.world, stitcher=stitcher, name_prefix=f"ev_r{rank}")
+        if vfs_store is not None:
+            vfs_store.clear()
+            vfs_store.put_many(eval_vfs)
+        ent_key = f"maps/{my_eval_spec['name']}.ent"
+        if ent_key in eval_vfs:
+            harness.register_vfs_map_manifold(my_eval_spec["name"], eval_vfs[ent_key])
+        my_map = my_eval_spec["name"]
+        eval_n_seeds = cfg.eval.eval_seeds_supermap
+    elif supermap_specs:
         eval_idxs = [int(round(r * (len(supermap_specs) - 1) / max(1, world_size - 1))) for r in range(world_size)]
         my_eval_spec = supermap_specs[eval_idxs[rank % len(eval_idxs)]]
         my_map = my_eval_spec["name"]
@@ -1461,6 +1542,8 @@ def main():
             "max_dev_from_1": summary["final_weight_norms"].get("max_dev_from_1"),
         }, indent=2), flush=True)
 
+    if vfs_store is not None:
+        vfs_store.close(unlink=True)
     if dist.is_initialized():
         dist.destroy_process_group()
 
