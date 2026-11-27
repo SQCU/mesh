@@ -434,7 +434,14 @@ class B3313BinaryStitcher:
     """Zero-q3map2 in-memory binary IBSP v46 supermap stitcher."""
 
     def __init__(self, maps_pk3: str | Path):
-        self.maps_pk3 = Path(maps_pk3).expanduser()
+        p = Path(maps_pk3).expanduser()
+        if not p.exists():
+            for alt in ("xonotic-maps-all29-ded.pk3", "xonotic-20230620-maps.pk3"):
+                cand = p.parent / alt
+                if cand.exists():
+                    p = cand
+                    break
+        self.maps_pk3 = p
         self._cache: dict[str, ParsedStockBSP] = {}
 
     def get_stock(self, map_name: str) -> ParsedStockBSP:

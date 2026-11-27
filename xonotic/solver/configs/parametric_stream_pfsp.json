@@ -19,6 +19,7 @@
     "mode": "parametric_stream",
     "use_zero_copy_vfs": true,
     "vfs_shm_mb": 384,
+    "maps_pk3_rel": "Xonotic/data/xonotic-maps-all29-ded.pk3",
     "family_weights": {
       "b3313_binary_stitch": 0.65,
       "gas_world_bsp": 0.35

@@ -1229,6 +1229,7 @@ def main():
     for idx_it, (it_name, role, ent_coef) in enumerate(schedule, start=1):
         rng_sched = np.random.default_rng(cfg.seeds.schedule_base + idx_it * 100 + rank)
         if is_stream:
+            t_syn = time.perf_counter()
             if rank == 0:
                 w_params = sample_world_spec(cfg.seeds.match_base + idx_it * 97, cfg.world)
                 spec0, files0 = synthesize_world_bundle(w_params, cfg.world, stitcher=stitcher, name_prefix=f"tr_{it_name}")
@@ -1241,6 +1242,14 @@ def main():
             ent_key = f"maps/{iter_spec['name']}.ent"
             if ent_key in iter_vfs:
                 harness.register_vfs_map_manifold(iter_spec["name"], iter_vfs[ent_key])
+            if rank == 0:
+                dt_syn_ms = (time.perf_counter() - t_syn) * 1e3
+                print(
+                    f"[STREAM:{it_name}] {iter_spec['family']} {iter_spec['name']} "
+                    f"K={iter_spec['teams']} J={iter_spec['carts']} N={iter_spec['players']} M={iter_spec['tiles']} "
+                    f"bsp={iter_spec['bsp_bytes']/1e6:.2f}MB synth+rdma={dt_syn_ms:.1f}ms shm={vfs_store.env_spec if vfs_store else 'none'}",
+                    flush=True,
+                )
             iter_specs = [iter_spec] * servers_per_node
             iter_maps = [iter_spec["name"]] * servers_per_node
         elif supermap_specs:
