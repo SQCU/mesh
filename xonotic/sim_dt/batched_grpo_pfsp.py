@@ -635,14 +635,17 @@ def collect_grpo_rollout_group(
     main_cnt = main_mask_0.sum(dim=-1).clamp_min(1.0)  # [E]
     # Discounted window return + terminal bootstrap per agent, averaged across team 1
     ep_ret_agent = (buf_reward * disc_pows).sum(dim=0) + (gamma ** H) * v_boot_last  # [E, N]
-    # Also include normalized team-1 score-delta advantage vs best rival over the rollout window
+    # Also include normalized team-1 score-delta and checkpoint-held margin vs best rival over the rollout window
     end_scores = grp_eng.t_score
     d_scores = end_scores - start_scores  # [E, K]
+    cp_held_f = grp_eng.t_cp_held.to(torch.float32)  # [E, K]
     if K > 1:
         score_margin = (d_scores[:, 0] - d_scores[:, 1:].max(dim=-1).values) / max(1.0, grp_eng.point_limit * 0.1)
+        cp_margin = (cp_held_f[:, 0] - cp_held_f[:, 1:].max(dim=-1).values) / max(1.0, float(J) / float(K))
     else:
         score_margin = d_scores[:, 0] / max(1.0, grp_eng.point_limit * 0.1)
-    ep_ret_team = ((ep_ret_agent * main_mask_0).sum(dim=-1) / main_cnt) + 0.35 * score_margin  # [E]
+        cp_margin = cp_held_f[:, 0] / max(1.0, float(J))
+    ep_ret_team = ((ep_ret_agent * main_mask_0).sum(dim=-1) / main_cnt) + 0.5 * score_margin + 0.5 * cp_margin  # [E]
 
     grp_ret = ep_ret_team.view(B, G)
     grp_mean = grp_ret.mean(dim=1, keepdim=True)
@@ -937,7 +940,7 @@ def eval_darkplaces_transfer(
         capacity=1024,
     )
     harness = MultiServerPlanHarness.from_config(cfg.harness, vfs_store=vfs)
-    if not harness.dp_bin.exists():
+    if not Path(harness.dp_bin).exists():
         vfs.close()
         return {"error": f"darkplaces binary not found at {harness.dp_bin}"}
 
@@ -1259,27 +1262,7 @@ def main() -> None:
             flush=True,
         )
 
-    dp_eval: dict[str, Any] | None = None
-    if sc.darkplaces_transfer_eval:
-        print("[sim_dt-grpo] Running live zero-copy DarkPlaces transfer eval (sv_headless_unthrottled=1, g_payload_use_view=0)...", flush=True)
-        dp_arms = ["default", "script_cart_rush", "main_init", "main_mid", "main_final"]
-        dp_eval = eval_darkplaces_transfer(arm_models, dp_arms, cfg=cfg, device=device, work_dir=out_dir / "dp_transfer_eval")
-        if "elo" in dp_eval and "ratings" in dp_eval["elo"]:
-            print(
-                f"[sim_dt-grpo] DarkPlaces Transfer Eval ({dp_eval['score_outs']}/{dp_eval['n_matches']} score-outs, "
-                f"mean {dp_eval['mean_dp_speedup_x']}x realtime, {dp_eval['wall_s']}s wall):",
-                flush=True,
-            )
-            for arm in dp_arms:
-                r = dp_eval["elo"]["ratings"].get(arm, {})
-                print(
-                    f"  {arm:20s}: Elo={r.get('elo', 0):6.1f} (CI95={r.get('ci95')}) "
-                    f"alpha-Rank={dp_eval['alpha_rank'].get(arm, 0):.4f} mean_score={r.get('mean_score', 0):.1f}",
-                    flush=True,
-                )
-        else:
-            print(f"[sim_dt-grpo] DarkPlaces Transfer Eval result: {dp_eval}", flush=True)
-
+    rep_path = out_dir / "report.json"
     report = {
         "device": str(device),
         "config": cfg.to_dict(),
@@ -1296,10 +1279,33 @@ def main() -> None:
         },
         "history": history,
         "sim_dt_eval": sim_eval,
-        "darkplaces_transfer_eval": dp_eval,
+        "darkplaces_transfer_eval": None,
     }
-    rep_path = out_dir / "report.json"
     rep_path.write_text(json.dumps(report, indent=2))
+
+    dp_eval: dict[str, Any] | None = None
+    if sc.darkplaces_transfer_eval:
+        print("[sim_dt-grpo] Running live zero-copy DarkPlaces transfer eval (sv_headless_unthrottled=1, g_payload_use_view=0)...", flush=True)
+        dp_arms = ["default", "script_cart_rush", "main_init", "main_mid", "main_final"]
+        dp_eval = eval_darkplaces_transfer(arm_models, dp_arms, cfg=cfg, device=device, work_dir=out_dir / "dp_transfer_eval")
+        report["darkplaces_transfer_eval"] = dp_eval
+        rep_path.write_text(json.dumps(report, indent=2))
+        if "elo" in dp_eval and "ratings" in dp_eval["elo"]:
+            print(
+                f"[sim_dt-grpo] DarkPlaces Transfer Eval ({dp_eval['score_outs']}/{dp_eval['n_matches']} score-outs, "
+                f"mean {dp_eval['mean_dp_speedup_x']}x realtime, {dp_eval['wall_s']}s wall):",
+                flush=True,
+            )
+            for arm in dp_arms:
+                r = dp_eval["elo"]["ratings"].get(arm, {})
+                print(
+                    f"  {arm:20s}: Elo={r.get('elo', 0):6.1f} (CI95={r.get('ci95')}) "
+                    f"alpha-Rank={dp_eval['alpha_rank'].get(arm, 0):.4f} mean_score={r.get('mean_score', 0):.1f}",
+                    flush=True,
+                )
+        else:
+            print(f"[sim_dt-grpo] DarkPlaces Transfer Eval result: {dp_eval}", flush=True)
+
     print(f"[sim_dt-grpo] report saved -> {rep_path}", flush=True)
 
 

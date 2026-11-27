@@ -11,11 +11,11 @@
     "rollout_horizon": 40,
     "iterations": 24,
     "mid_snapshot_iter": 12,
-    "ppo_epochs": 3,
-    "minibatch_envs": 64,
-    "grpo_weight": 0.7,
-    "gae_weight": 0.3,
-    "terminal_win_bonus": 1.5,
+    "ppo_epochs": 2,
+    "minibatch_envs": 512,
+    "grpo_weight": 0.6,
+    "gae_weight": 0.4,
+    "terminal_win_bonus": 2.0,
     "point_limit_base": 160.0,
     "common_random_numbers": true,
     "eval_interval": 6,
@@ -44,8 +44,8 @@
     "tiles_max": 8
   },
   "optimizer": {
-    "lr": 0.0025,
-    "scalar_lr": 0.006,
+    "lr": 0.002,
+    "scalar_lr": 0.004,
     "grad_clip": 1.0
   }
 }
