@@ -981,7 +981,7 @@ def eval_darkplaces_transfer(
                 ep_dir.mkdir(parents=True, exist_ok=True)
                 engine = Engine("udp://127.0.0.1:0", harness.framebytes)
                 inbox = RuntimeFrames(harness.framebytes, plan_only=True)
-                procs, _ = harness._spawn_servers(
+                procs, logs = harness._spawn_servers(
                     ep_dir, engine.path, [sp["seed"] + ti * 13], base_port + si * 20 + ti * 2,
                     map_names=[mapname],
                     skill=cfg.harness.default_skill,
@@ -1075,7 +1075,7 @@ def eval_darkplaces_transfer(
                                 for pkt in frames(session, tick_id, harness.framebytes, ((PLAN_KIND, plan_mat),)):
                                     engine.send(node, addr, pkt)
                 finally:
-                    harness._stop_servers(procs)
+                    harness._stop_servers(procs, logs)
                     engine.close()
 
                 ep_wall = time.monotonic() - ep_t0
@@ -1119,6 +1119,7 @@ def main() -> None:
     ap.add_argument("--base-envs", type=int, default=0, help="Override config base_envs if > 0")
     ap.add_argument("--group-size", type=int, default=0, help="Override config group_size if > 0")
     ap.add_argument("--skip-dp-eval", action="store_true", help="Skip live DarkPlaces transfer evaluation")
+    ap.add_argument("--eval-only-dir", type=str, default="", help="Load main_init/mid/final.pt from dir and run DarkPlaces + sim_dt eval only")
     args = ap.parse_args()
 
     overrides: dict[str, Any] = {}
@@ -1144,6 +1145,42 @@ def main() -> None:
     torch.manual_seed(cfg.seeds.model_init)
     np.random.seed(cfg.seeds.model_init)
     rng = np.random.default_rng(cfg.seeds.schedule_base)
+
+    if args.eval_only_dir:
+        ckpt_dir = Path(args.eval_only_dir).expanduser().resolve()
+        eval_models: dict[str, PlanWally | None] = {}
+        for arm in ("main_init", "main_mid", "main_final"):
+            p = ckpt_dir / f"{arm}.pt"
+            if p.exists():
+                m_i = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device)
+                m_i.load_state_dict(torch.load(p, map_location=device, weights_only=True))
+                m_i.eval()
+                eval_models[arm] = m_i
+        dp_arms = ["default", "script_cart_rush", *[a for a in ("main_init", "main_mid", "main_final") if a in eval_models]]
+        print(f"[sim_dt-grpo] eval-only DarkPlaces transfer eval from {ckpt_dir} arms={dp_arms}", flush=True)
+        dp_eval = eval_darkplaces_transfer(eval_models, dp_arms, cfg=cfg, device=device, work_dir=ckpt_dir / "dp_transfer_eval")
+        if "elo" in dp_eval and "ratings" in dp_eval["elo"]:
+            print(
+                f"[sim_dt-grpo] DarkPlaces Transfer Eval ({dp_eval['score_outs']}/{dp_eval['n_matches']} score-outs, "
+                f"mean {dp_eval['mean_dp_speedup_x']}x realtime, {dp_eval['wall_s']}s wall):",
+                flush=True,
+            )
+            for arm in dp_arms:
+                r = dp_eval["elo"]["ratings"].get(arm, {})
+                print(
+                    f"  {arm:20s}: Elo={r.get('elo', 0):6.1f} (CI95={r.get('ci95')}) "
+                    f"alpha-Rank={dp_eval['alpha_rank'].get(arm, 0):.4f} mean_score={r.get('mean_score', 0):.1f}",
+                    flush=True,
+                )
+        rep_p = ckpt_dir / "report.json"
+        if rep_p.exists():
+            rep = json.loads(rep_p.read_text())
+            rep["darkplaces_transfer_eval"] = dp_eval
+            rep_p.write_text(json.dumps(rep, indent=2))
+            print(f"[sim_dt-grpo] updated -> {rep_p}", flush=True)
+        else:
+            (ckpt_dir / "dp_transfer_report.json").write_text(json.dumps(dp_eval, indent=2))
+        return
 
     model = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device)
     ema_model = clone_plan_model(model).to(device)
