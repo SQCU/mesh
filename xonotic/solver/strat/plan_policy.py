@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from payload.tools.strategy_io_schema import BOT_CONFIGURATION_COLUMNS, CS, EVT, EVT_WIDTH, OBS, OBS_WIDTH, TS
 
 from .aurora import Aurora, aurora_init_weight_
-from .game_value import cgt_tensor_features
+from .game_value import cgt_tensor_features, cgt_tensor_features_batched
 from .grad_snr import (
     grad_cosine,
     mccandlish_pair_from_grads,
@@ -255,9 +255,13 @@ class FSQBottleneck(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         g = torch.clamp(self.in_gain, self.in_gain_bounds[0], self.in_gain_bounds[1])
         z_raw = self.proj_in(x)
-        if z_raw.shape[0] > 1:
+        if z_raw.ndim == 2 and z_raw.shape[0] > 1:
             z_mean = z_raw.mean(dim=0, keepdim=True)
             z_std = z_raw.std(dim=0, keepdim=True, unbiased=False).clamp_min(self.std_min)
+            z_raw = (z_raw - z_mean) / z_std
+        elif z_raw.ndim == 3 and z_raw.shape[1] > 1:
+            z_mean = z_raw.mean(dim=1, keepdim=True)
+            z_std = z_raw.std(dim=1, keepdim=True, unbiased=False).clamp_min(self.std_min)
             z_raw = (z_raw - z_mean) / z_std
         z = torch.tanh(g * z_raw) * self.half_levels
         q = torch.round(z)
@@ -387,6 +391,62 @@ class MPResCGTBlock(nn.Module):
             hid = mp_silu(self.ffn_gate(x), scale=nc.mp_silu_scale) * self.ffn_up(x)
             self._last_ffn_act = hid.detach()
             ffn_out = mp_norm(self.ffn_down(hid), eps=nc.mp_norm_eps)
+        x = mp_norm(mp_lerp(x, ffn_out, torch.sigmoid(self.blend_ffn), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+        return x
+
+    def forward_batched(
+        self,
+        x: torch.Tensor,
+        entity_team_ids: torch.Tensor,
+        team_ids: torch.Tensor,
+        team_slice: tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        """Batched [E, M, d] forward sharing exact weights & math with forward()."""
+        nc = self.norm_cfg
+        xn = mp_norm(x, eps=nc.mp_norm_eps)
+        v = mp_norm(self.val_proj(xn), eps=nc.mp_norm_eps)
+        m_rows = x.shape[1]
+        k_teams = team_ids.shape[1]
+        inv_m = 1.0 / math.sqrt(max(1, m_rows))
+        inv_k = 1.0 / math.sqrt(max(1, k_teams))
+
+        r = mp_norm(self.global_metric(xn), eps=nc.mp_norm_eps)  # [E, M, r_gram]
+        kv_global = torch.einsum("emr,emd->erd", r, v) * inv_m
+        global_vals = mp_norm(torch.einsum("emr,erd->emd", r, kv_global), eps=nc.mp_norm_eps)
+
+        mem_f = (entity_team_ids[:, :, None] == team_ids[:, None, :]).to(x.dtype)  # [E, M, K]
+        pool_w = mem_f * torch.sigmoid(self.pool_score(xn))  # [E, M, K]
+        team_sum = torch.einsum("emk,emd->ekd", pool_w, v)
+        team_den = torch.clamp(pool_w.sum(dim=1).unsqueeze(-1), min=1e-4)
+        team_pool = mp_norm(team_sum / team_den, eps=nc.mp_norm_eps)  # [E, K, d]
+
+        if team_slice is not None and (team_slice[1] - team_slice[0]) == k_teams:
+            t_cur = xn[:, team_slice[0] : team_slice[1]]
+            t_in = mp_norm(mp_lerp(t_cur, team_pool, torch.sigmoid(self.blend_pool), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+        else:
+            t_in = team_pool
+
+        q_t = mp_norm(self.team_metric(t_in), eps=nc.mp_norm_eps)
+        k_t = mp_norm(self.rival_metric(t_in), eps=nc.mp_norm_eps)
+        v_t = mp_norm(self.team_val_proj(t_in), eps=nc.mp_norm_eps)
+        gram_t = torch.einsum("ekr,ejr->ekj", q_t, k_t) * inv_k
+        t_mixed = mp_norm(torch.einsum("ekj,ejd->ekd", gram_t, v_t), eps=nc.mp_norm_eps)
+        t_mut = mp_norm(
+            mp_lerp(t_in, mp_norm(self.team_mutate_proj(t_mixed), eps=nc.mp_norm_eps), torch.sigmoid(self.blend_team_mut), eps=nc.mp_lerp_eps),
+            eps=nc.mp_norm_eps,
+        )
+
+        t_bcast = mp_norm(self.team_bcast_proj(t_mut), eps=nc.mp_norm_eps)  # [E, K, d]
+        has_team = mem_f.sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+        t_global = mp_norm(t_bcast.mean(dim=1, keepdim=True), eps=nc.mp_norm_eps)
+        team_vals = mp_norm(has_team * torch.einsum("emk,ekd->emd", mem_f, t_bcast) + (1.0 - has_team) * t_global, eps=nc.mp_norm_eps)
+
+        gram_merged = mp_norm(self.gram_out(mp_norm(global_vals + team_vals, eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps)
+        x = mp_norm(mp_lerp(xn, gram_merged, torch.sigmoid(self.blend_gram), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+
+        hid = mp_silu(self.ffn_gate(x), scale=nc.mp_silu_scale) * self.ffn_up(x)
+        self._last_ffn_act = hid.detach()
+        ffn_out = mp_norm(self.ffn_down(hid), eps=nc.mp_norm_eps)
         x = mp_norm(mp_lerp(x, ffn_out, torch.sigmoid(self.blend_ffn), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
         return x
 
@@ -667,6 +727,158 @@ class PlanWally(nn.Module):
             vals[:, 0], vals[:, 1], dyn_drift, dyn_action, h_next, fsq_codes, pred_skill,
         )
 
+    def forward_batched(
+        self,
+        obs: torch.Tensor,
+        carts: torch.Tensor,
+        teams: torch.Tensor,
+        geo: dict[str, torch.Tensor] | None = None,
+        h_prev: torch.Tensor | None = None,
+    ) -> PlanOutput:
+        """Zero-copy GPU batched forward over E simultaneous matches: obs[E,N,84], carts[E,J,18], teams[E,K,7]."""
+        mc = self.model_cfg
+        nc = self.norm_cfg
+        e, n, _ = obs.shape
+        j = carts.shape[1]
+        k = teams.shape[1]
+        device, dtype = obs.device, obs.dtype
+        cart_extra, team_extra = cgt_tensor_features_batched(carts, teams)
+
+        tb = torch.sigmoid(self.type_blend)
+        te = mp_norm(self.type_embed, eps=nc.mp_norm_eps)
+
+        # Batched prenormalize_obs
+        xo = obs.clone()
+        if geo is not None and "map_center" in geo and "map_radius" in geo:
+            center = geo["map_center"].to(device, dtype)
+            radius = torch.clamp(geo["map_radius"].to(device, dtype), min=nc.map_radius_min)
+            xo[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1] = (xo[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1] - center[None, None, :]) / radius
+        else:
+            xo[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1] = xo[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1] / nc.pos_fallback_scale
+        xo[:, :, OBS["VEL_X"] : OBS["VEL_Z"] + 1] = xo[:, :, OBS["VEL_X"] : OBS["VEL_Z"] + 1] / nc.vel_scale
+        xo[:, :, OBS["HEALTH"]] = (xo[:, :, OBS["HEALTH"]] - nc.health_offset) / nc.health_scale
+        xo[:, :, OBS["ARMOR"]] = (xo[:, :, OBS["ARMOR"]] - nc.armor_offset) / nc.armor_scale
+        xo[:, :, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] = xo[:, :, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] / nc.ammo_scale
+        for col in (
+            "ENGINE_TIME", "SPAWN_TIME", "STRENGTH_FINISHED", "RESPONSE_SEQ", "RESPONSE_TIME",
+            "APPLIED_SEQUENCE", "OUTCOME_A_SEQ", "OUTCOME_B_SEQ", "CELL_X", "CELL_Y",
+            "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME", *BOT_CONFIGURATION_COLUMNS,
+        ):
+            if col == "STRENGTH_FINISHED":
+                rem = torch.clamp(obs[:, :, OBS["STRENGTH_FINISHED"]] - obs[:, :, OBS["ENGINE_TIME"]], min=0.0, max=nc.strength_max_s) / nc.strength_max_s
+                xo[:, :, OBS[col]] = rem
+            else:
+                xo[:, :, OBS[col]] = 0.0
+        obs_pre = mp_norm(torch.asinh(xo), eps=nc.mp_norm_eps)
+        bot_geo = torch.zeros((e, n, BOT_GEO_DIM), device=device, dtype=dtype)
+        obs_h = mp_lerp(mp_norm(self.enc_obs(torch.cat((obs_pre, bot_geo), dim=-1)), eps=nc.mp_norm_eps), te[0].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
+
+        # Batched prenormalize_carts
+        xc = carts.clone()
+        plen = torch.clamp(xc[:, :, CS["PATH_LENGTH"]], min=1.0)
+        xc[:, :, CS["PATH_POSITION"]] = xc[:, :, CS["PATH_POSITION"]] / plen
+        xc[:, :, CS["PATH_LENGTH"]] = torch.log1p(plen / nc.cart_len_scale)
+        xc[:, :, CS["SPEED"]] = xc[:, :, CS["SPEED"]] / nc.cart_speed_scale
+        if geo is not None and "map_center" in geo and "map_radius" in geo:
+            center = geo["map_center"].to(device, dtype)
+            radius = torch.clamp(geo["map_radius"].to(device, dtype), min=nc.map_radius_min)
+            xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] = (xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] - center[None, None, :]) / radius
+        else:
+            xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] = xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] / nc.pos_fallback_scale
+        c_geo = torch.zeros((e, j, CART_GEO_DIM), device=device, dtype=dtype)
+        cart_pre = mp_norm(torch.asinh(torch.cat((xc, cart_extra, c_geo), dim=-1)), eps=nc.mp_norm_eps)
+        cart_h = mp_lerp(mp_norm(self.enc_cart(cart_pre), eps=nc.mp_norm_eps), te[1].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
+
+        # Batched prenormalize_teams
+        xt = teams.clone()
+        lim = torch.clamp(xt[:, :, TS["SCORE_LIMIT"]], min=1.0)
+        xt[:, :, TS["SCORE"]] = xt[:, :, TS["SCORE"]] / lim
+        xt[:, :, TS["SCORE_LIMIT"]] = 1.0
+        xt[:, :, TS["EPISODE"]] = 0.0
+        team_pre = mp_norm(torch.asinh(torch.cat((xt, team_extra), dim=-1)), eps=nc.mp_norm_eps)
+        team_h = mp_lerp(mp_norm(self.enc_team(team_pre), eps=nc.mp_norm_eps), te[2].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
+
+        if self.mealy_gate is not None:
+            h_in = obs_h.detach() if (h_prev is None or h_prev.shape != (e, n, self.d)) else mp_norm(h_prev, eps=nc.mp_norm_eps)
+            cat_m = torch.cat((obs_h, h_in), dim=-1)
+            z_gate = torch.sigmoid(self.mealy_gate(cat_m))
+            cand = mp_norm(mp_silu(self.mealy_cand(cat_m), scale=nc.mp_silu_scale), eps=nc.mp_norm_eps)
+            h_next = mp_norm(mp_lerp(h_in, cand, z_gate, eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+            obs_h = mp_norm(mp_lerp(obs_h, h_next, torch.tensor(mc.mealy_blend, device=device, dtype=dtype), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+        else:
+            h_next = obs_h.detach()
+
+        x = mp_norm(torch.cat((obs_h, cart_h, team_h), dim=1), eps=nc.mp_norm_eps)  # [E, N+J+K, d]
+        entity_teams = torch.cat(
+            (
+                obs[:, :, OBS["TEAM"]].to(torch.float32),
+                carts[:, :, CS["CONTROL_TEAM"]].to(torch.float32),
+                teams[:, :, TS["ID"]].to(torch.float32),
+            ),
+            dim=1,
+        )
+        team_ids = teams[:, :, TS["ID"]].to(torch.float32)
+        team_slice = (n + j, n + j + k)
+
+        if self.recurrent:
+            blk = self.blocks[0]
+            for step in range(self.depth):
+                x_new = blk.forward_batched(x, entity_teams, team_ids, team_slice=team_slice)
+                x = mp_norm(mp_lerp(x, x_new, torch.sigmoid(self.step_blends[step]), eps=nc.mp_lerp_eps), eps=nc.mp_norm_eps)
+        else:
+            for blk in self.blocks:
+                x = blk.forward_batched(x, entity_teams, team_ids, team_slice=team_slice)
+
+        xn = mp_norm(x, eps=nc.mp_norm_eps)
+        p_h = xn[:, :n]
+        c_h = xn[:, n : n + j]
+        t_h = xn[:, n + j : n + j + k]
+
+        fsq_codes = None
+        if self.fsq is not None:
+            p_h, fsq_codes = self.fsq(p_h)
+
+        g_cont = torch.clamp(self.cont_gain, -mc.cont_gain_bound, mc.cont_gain_bound)
+        cont_mean = mc.cont_mean_scale * torch.tanh(g_cont * self.cont_proj(p_h) + self.cont_bias)
+        cont_logstd = torch.clamp(self.cont_logstd, min=mc.cont_logstd_bounds[0], max=mc.cont_logstd_bounds[1]).view(1, 1, -1).expand(e, n, -1)
+
+        t_lo, t_hi = mc.temp_bounds
+        temp_c = torch.clamp(torch.exp(self.log_temp_cart), t_lo, t_hi)
+        temp_r = torch.clamp(torch.exp(self.log_temp_rival), t_lo, t_hi)
+        temp_v = torch.clamp(torch.exp(self.log_temp_cell), t_lo, t_hi)
+
+        p_pos = obs[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1]
+        c_pos = carts[:, :, CS["POS_X"] : CS["POS_Z"] + 1]
+        d_pc = (p_pos[:, :, None, :] - c_pos[:, None, :, :]).square().sum(dim=-1).clamp_min(nc.mp_unit_vec_eps).sqrt()
+        db_lo, db_hi = mc.cart_dist_bias_bounds
+        dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), db_lo, db_hi) * torch.log1p(d_pc / mc.cart_dist_scale)
+        q_c = mp_unit_vec(self.cart_q(p_h), eps=nc.mp_unit_vec_eps)
+        k_c = mp_unit_vec(self.cart_k(c_h), eps=nc.mp_unit_vec_eps)
+        cart_logits = temp_c * torch.einsum("end,ejd->enj", q_c, k_c) - dist_bias
+
+        q_r = mp_unit_vec(self.rival_q(p_h), eps=nc.mp_unit_vec_eps)
+        k_r = mp_unit_vec(self.rival_k(t_h), eps=nc.mp_unit_vec_eps)
+        rival_logits = temp_r * torch.einsum("end,ekd->enk", q_r, k_r)
+        if k >= 2:
+            own_mask = obs[:, :, OBS["TEAM"]].to(torch.float32)[:, :, None] == team_ids[:, None, :]
+            rival_logits = rival_logits.masked_fill(own_mask, mc.rival_own_mask_fill)
+
+        q_v = mp_unit_vec(self.cell_q(p_h), eps=nc.mp_unit_vec_eps)
+        k_v = mp_unit_vec(self.cell_k(c_h), eps=nc.mp_unit_vec_eps)
+        cell_logits = temp_v * torch.einsum("end,ejd->enj", q_v, k_v)
+
+        vg_lo, vg_hi = mc.value_gain_bounds
+        vals = torch.clamp(self.value_gain, vg_lo, vg_hi) * self.value_proj(p_h) + self.value_bias
+        sg_lo, sg_hi = mc.skill_id_gain_bounds
+        dg_lo, dg_hi = mc.dyn_gain_bounds
+        pred_skill = (torch.clamp(self.skill_id_gain, sg_lo, sg_hi) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
+        dyn_drift = (torch.clamp(self.dyn_drift_gain, dg_lo, dg_hi) * self.dyn_drift_proj(p_h)).squeeze(-1)
+        dyn_action = torch.clamp(self.dyn_action_gain, dg_lo, dg_hi) * self.dyn_action_proj(p_h)
+        return PlanOutput(
+            cont_mean, cont_logstd, cart_logits, rival_logits, cell_logits,
+            vals[:, :, 0], vals[:, :, 1], dyn_drift, dyn_action, h_next, fsq_codes, pred_skill,
+        )
+
     def spec(self) -> dict:
         return {
             "d": self.d,
@@ -752,6 +964,41 @@ def pack_plan_rows(
             out[eid - 1, 13] = nav_w
             out[eid - 1, 14] = float(cont_np[i, 9])
             out[eid - 1, 15] = posture
+    return out
+
+
+@torch.no_grad()
+def pack_plan_tensor(
+    obs: torch.Tensor,
+    teams: torch.Tensor,
+    sample: PlanSample,
+    active_mask: torch.Tensor | None = None,
+    pack_cfg: ActionPackConfig = DEFAULT_ACTION_PACK_CONFIG,
+) -> torch.Tensor:
+    """Zero-copy on-device [E, N, 16] PLAN packer matching pack_plan_rows bit-for-bit."""
+    e, n, _ = obs.shape
+    device = obs.device
+    out = torch.zeros((e, n, PLAN_WIDTH), device=device, dtype=torch.float32)
+    team_ids = teams[:, :, TS["ID"]].to(torch.float32)  # [E, K]
+    r_idx = sample.rival_pick.long().clamp(0, max(0, team_ids.shape[1] - 1))
+    focus_team = team_ids.gather(1, r_idx)
+    u_ds = sample.cont[:, :, 7]
+    cart_ds = (torch.sign(u_ds) * float(pack_cfg.cart_ds_scale) * (u_ds.abs().clamp_min(1e-8) ** float(pack_cfg.cart_ds_power))).clamp(
+        -float(pack_cfg.cart_ds_clip), float(pack_cfg.cart_ds_clip)
+    )
+    posture = torch.tanh(sample.cont[:, :, 10])
+    out[:, :, 0] = obs[:, :, OBS["ID"]]
+    out[:, :, 1] = sample.cart_pick.to(torch.float32)
+    out[:, :, 2:7] = sample.cont[:, :, 0:5]
+    out[:, :, 7] = focus_team
+    out[:, :, 8] = sample.cont[:, :, 5]
+    out[:, :, 9] = sample.cont[:, :, 6]
+    out[:, :, 10] = cart_ds
+    out[:, :, 14] = sample.cont[:, :, 9]
+    out[:, :, 15] = posture
+    if active_mask is not None:
+        m = active_mask.to(device=device, dtype=torch.bool).unsqueeze(-1)
+        out = torch.where(m, out, torch.zeros_like(out))
     return out
 
 

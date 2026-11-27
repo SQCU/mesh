@@ -152,6 +152,77 @@ def cgt_tensor_features(carts, teams, cart_present, team_present, eps_dist=0.05)
         cart_extra = torch.stack((t_deny, t_push, nim_move, nim_mod), dim=-1).to(dtype)
         return cart_extra, team_extra
 
+
+def cgt_tensor_features_batched(carts, teams, eps_dist=0.05):
+    """Batched [E, J, 18], [E, K, 7] -> ([E, J, 4], [E, K, 2]) matching cgt_tensor_features."""
+    import torch
+    from payload.tools.strategy_io_schema import CS, TS
+
+    with torch.no_grad():
+        device, dtype = carts.device, carts.dtype
+        e, j, _ = carts.shape
+        k = teams.shape[1]
+        scores = teams[:, :, TS["SCORE"]].to(torch.float32)
+        held = teams[:, :, TS["CHECKPOINTS_HELD"]].to(torch.float32)
+        rate = teams[:, :, TS["CHECKPOINT_RATE"]].to(torch.float32)
+        limit = torch.clamp(teams[:, :, TS["SCORE_LIMIT"]].to(torch.float32), min=1e-6)
+        rem = torch.clamp(limit - scores, min=1e-6)
+        rho = torch.where(held > 0, (rate * held) / rem, torch.zeros_like(scores))  # [E, K]
+        if k > 1:
+            eye_mask = torch.eye(k, device=device, dtype=torch.bool).unsqueeze(0)
+            other_rho = rho[:, None, :].expand(e, k, k).masked_fill(eye_mask, -1.0)
+            best_other = other_rho.amax(dim=2).clamp(min=0.0)
+        else:
+            best_other = torch.zeros_like(rho)
+        margins = (rho - best_other) / (rho + best_other + 1e-6)
+        rho_norm = torch.tanh(rho)
+        team_extra = torch.stack((rho_norm, margins), dim=-1).to(dtype)  # [E, K, 2]
+
+        path_len = torch.clamp(carts[:, :, CS["PATH_LENGTH"]].to(torch.float32), min=1e-6)
+        pos_frac = torch.clamp(carts[:, :, CS["PATH_POSITION"]].to(torch.float32) / path_len, 0.0, 1.0)
+        cp_count = torch.clamp(carts[:, :, CS["CHECKPOINT_COUNT"]].to(torch.float32), min=1.0)
+        cp_depth = torch.clamp(carts[:, :, CS["CHECKPOINT_DEPTH"]].to(torch.float32), min=0.0)
+        seg = pos_frac * cp_count
+        dist_push = torch.clamp(torch.ceil(seg + 1e-6) - seg, min=eps_dist)
+        dist_deny = torch.clamp(seg - torch.floor(seg - 1e-6), min=eps_dist)
+
+        owner_ids = carts[:, :, CS["CONTROL_TEAM"]].to(torch.float32)  # [E, J]
+        team_ids = teams[:, :, TS["ID"]].to(torch.float32)             # [E, K]
+        owner_match = owner_ids[:, :, None] == team_ids[:, None, :]    # [E, J, K]
+        has_owner = owner_match.any(dim=-1)                            # [E, J]
+        owner_idx = owner_match.to(torch.int64).argmax(dim=-1)         # [E, J]
+        owner_held = held.gather(1, owner_idx)
+        owner_rho = rho.gather(1, owner_idx)
+        owner_best_other = best_other.gather(1, owner_idx)
+
+        delta_rho_deny = torch.where(
+            has_owner & (cp_depth > 0) & (owner_held > 0),
+            owner_rho / torch.clamp(owner_held, min=1.0),
+            torch.zeros_like(owner_rho),
+        )
+        t_deny = torch.tanh(delta_rho_deny / (owner_rho + owner_best_other + 1e-6) / dist_deny)
+        max_rho = rho.amax(dim=-1, keepdim=True).clamp(min=1e-6)
+        max_rate = rate.amax(dim=-1, keepdim=True).clamp(min=0.0)
+        min_rem = rem.amin(dim=-1, keepdim=True).clamp(min=1e-6)
+        delta_rho_push = torch.where(
+            cp_depth < cp_count,
+            max_rate / min_rem,
+            torch.zeros_like(owner_rho),
+        )
+        t_push = torch.tanh((delta_rho_push / (max_rho + delta_rho_push + 1e-6)) / dist_push)
+
+        rem_heaps = torch.clamp((cp_count - cp_depth).round().to(torch.int64), min=0)
+        mod = NIM_BOUNDED_STEP + 1
+        nimbers = rem_heaps % mod
+        b0 = (nimbers & 1).sum(dim=-1, keepdim=True) & 1
+        b1 = ((nimbers >> 1) & 1).sum(dim=-1, keepdim=True) & 1
+        nim_total = b0 | (b1 << 1)
+        target_nim = torch.bitwise_xor(nimbers, nim_total)
+        nim_move = ((nim_total != 0) & (target_nim < nimbers) & ((nimbers - target_nim) <= rem_heaps)).to(torch.float32)
+        nim_mod = nimbers.to(torch.float32) / float(mod)
+        cart_extra = torch.stack((t_deny, t_push, nim_move, nim_mod), dim=-1).to(dtype)
+        return cart_extra, team_extra
+
 def checkpoint_ownership(distances, control, position):
     return np.where(np.asarray(distances, dtype=np.float32) <= np.float32(position), control, -1)
 

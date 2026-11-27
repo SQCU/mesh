@@ -433,6 +433,39 @@ class WorldDistributionConfig:
 
 
 @dataclass(frozen=True)
+class SimDtConfig:
+    dt: float = 0.4
+    mode: str = "analytic"
+    base_envs: int = 32
+    group_size: int = 8
+    warmup_steps_min: int = 15
+    warmup_steps_max: int = 50
+    rollout_horizon: int = 40
+    iterations: int = 24
+    mid_snapshot_iter: int = 12
+    ppo_epochs: int = 3
+    minibatch_envs: int = 64
+    grpo_weight: float = 0.7
+    gae_weight: float = 0.3
+    terminal_win_bonus: float = 1.5
+    point_limit_base: float = 160.0
+    common_random_numbers: bool = True
+    eval_interval: int = 6
+    eval_matches_per_pair: int = 64
+    eval_horizon: int = 180
+    pfsp_update_ema: float = 0.8
+    darkplaces_transfer_eval: bool = True
+    darkplaces_eval_episodes: int = 2
+    darkplaces_point_limit: float = 160.0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "SimDtConfig":
+        if not data:
+            return cls()
+        return cls(**{f: data[f] for f in cls.__dataclass_fields__ if f in data})
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     norm: NormConfig = field(default_factory=NormConfig)
@@ -444,6 +477,7 @@ class TrainingConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     world: WorldDistributionConfig = field(default_factory=WorldDistributionConfig)
+    sim_dt: SimDtConfig = field(default_factory=SimDtConfig)
     losses: LossConfig = field(default_factory=lambda: DEFAULT_LOSS_CONFIG)
 
     @classmethod
@@ -461,6 +495,7 @@ class TrainingConfig:
             eval=EvalConfig.from_dict(data.get("eval")),
             seeds=SeedConfig.from_dict(data.get("seeds")),
             world=WorldDistributionConfig.from_dict(data.get("world")),
+            sim_dt=SimDtConfig.from_dict(data.get("sim_dt")),
             losses=LossConfig.from_dict(data.get("losses")),
         )
 
@@ -472,8 +507,11 @@ def _load_json_chain(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text())
     merged: dict[str, Any] = {}
     if "extends" in raw:
-        parent = (path.parent / raw["extends"]).resolve()
-        merged = _load_json_chain(parent)
+        ext = raw["extends"]
+        parents = [ext] if isinstance(ext, str) else list(ext)
+        for p_rel in parents:
+            parent = (path.parent / p_rel).resolve()
+            merged = _deep_merge(merged, _load_json_chain(parent))
     if "losses_file" in raw:
         lpath = (path.parent / raw["losses_file"]).resolve()
         loss_raw = json.loads(lpath.read_text())

@@ -1,0 +1,51 @@
+{
+  "extends": "training_default.json",
+  "losses_file": "losses.json",
+  "sim_dt": {
+    "dt": 0.4,
+    "mode": "analytic",
+    "base_envs": 32,
+    "group_size": 8,
+    "warmup_steps_min": 15,
+    "warmup_steps_max": 50,
+    "rollout_horizon": 40,
+    "iterations": 24,
+    "mid_snapshot_iter": 12,
+    "ppo_epochs": 3,
+    "minibatch_envs": 64,
+    "grpo_weight": 0.7,
+    "gae_weight": 0.3,
+    "terminal_win_bonus": 1.5,
+    "point_limit_base": 160.0,
+    "common_random_numbers": true,
+    "eval_interval": 6,
+    "eval_matches_per_pair": 64,
+    "eval_horizon": 180,
+    "pfsp_update_ema": 0.8,
+    "darkplaces_transfer_eval": true,
+    "darkplaces_eval_episodes": 2,
+    "darkplaces_point_limit": 160.0
+  },
+  "world": {
+    "mode": "parametric_stream",
+    "teams_min": 4,
+    "teams_max": 12,
+    "teams_dist": "uniform",
+    "carts_per_team_min": 2.0,
+    "carts_per_team_max": 4.5,
+    "carts_dist": "uniform",
+    "players_per_team_min": 6,
+    "players_per_team_max": 12,
+    "players_per_team_low": 6,
+    "players_per_team_high": 10,
+    "players_min": 24,
+    "players_max": 96,
+    "tiles_min": 2,
+    "tiles_max": 8
+  },
+  "optimizer": {
+    "lr": 0.0025,
+    "scalar_lr": 0.006,
+    "grad_clip": 1.0
+  }
+}
