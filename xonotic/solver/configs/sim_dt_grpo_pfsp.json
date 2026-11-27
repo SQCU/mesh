@@ -4,6 +4,7 @@
   "sim_dt": {
     "dt": 0.4,
     "mode": "analytic",
+    "dtype": "bfloat16",
     "base_envs": 32,
     "group_size": 8,
     "warmup_steps_min": 15,
@@ -12,10 +13,11 @@
     "iterations": 24,
     "mid_snapshot_iter": 12,
     "ppo_epochs": 2,
-    "minibatch_envs": 512,
+    "target_microbatch_rows": 4096,
+    "target_opt_steps_per_epoch": 12,
     "grpo_weight": 0.6,
     "gae_weight": 0.4,
-    "terminal_win_bonus": 2.0,
+    "terminal_win_bonus": 0.0,
     "point_limit_base": 160.0,
     "common_random_numbers": true,
     "eval_interval": 6,
@@ -25,6 +27,20 @@
     "darkplaces_transfer_eval": true,
     "darkplaces_eval_episodes": 2,
     "darkplaces_point_limit": 160.0
+  },
+  "losses": {
+    "reward": {
+      "winner_barrier_margin": 0.25,
+      "winner_barrier_weight": 0.5,
+      "potential_shaping_weight": 0.25,
+      "potential_shaping_gamma": 0.95,
+      "loser_potential_self_weight": 0.5,
+      "cart_partial_cp_weight": 0.5,
+      "lane_progress_weight": 0.0,
+      "push_weight": 0.0,
+      "contest_weight": 0.0,
+      "pickup_weight": 0.0
+    }
   },
   "world": {
     "mode": "parametric_stream",
@@ -40,7 +56,7 @@
     "players_per_team_high": 10,
     "players_min": 24,
     "players_max": 96,
-    "tiles_min": 2,
+    "tiles_min": 3,
     "tiles_max": 8
   },
   "optimizer": {

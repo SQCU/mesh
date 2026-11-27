@@ -455,3 +455,23 @@ e1acaf7e):
 Current mesh implementation conversation, 2026-09-07 (user-authored message):
 
 > the one taboo about havocbots we're not allowed to break is allowing the policy to 'strategize' by learning a transform that sets all of the havocbot skill levels to maximum performance in the velocity field interface somehow. they should be available as percepts but be masked out in the output somehow (for some really basic reasons, equivalent to domain randomization in robotics ml)
+
+## 26. Parametric worlds, zero-copy VFS, variable-dt engine, compression, and roofline (November 26–27, 2026)
+
+User-authored directives, verbatim:
+
+> can we identify all weights, constants, magic numbers, etc. in the entire training data flow, move losses into one header, move things that aren't losses into a differnet header, identify inversions of control or unconfigurable variables or evne source-hardcode-only variables, consolidate them all into configuratino files, andbroadly make this more modular and less claudey
+
+> does it articulate a model of training hwere we sample ranges of playercounts, teamcounts, and so on? do we have parametric map families of which we can sample? might we stream map formats to the runtime servers rather than needing aot filesystem written maps? might we use in memory database zero copy strategies for presenting such maps to the runtime servers?
+
+> "each Studio spawns servers_per_node = 2 concurrent servers" servers should almost certainly be rewritten to be simd-like applications which consume huge batches of shared functions multiple data and pipeline well into the simd cpu and literal mps gpu cores on these nodes.
+
+> "headless tick mode" if we want to run servers millions or billions of times faster than reference we should reparameterize this into a delta time problem where we can have variable temporal precision integrations of state spaces over rules which are identical at the integer step parameterization to the reference 'game'
+
+> "unless/until we expose direct per-bot usercmd actions." this is one of the only things in that roundup which seems to be to-spec here! okay. it's clear to me we should be building these interventions you're describing next; we should expect to see multiple orders of magnitude improvement in runtime acceleration for nospectator-playerbot-only-matches and multiple orders of magnitude reduction in hardware thread and memory utilization for paced runtimes
+
+> what is the flops vs memory bandwidth roofline wrt 'scaling'? discuss. we shouldn't pick arbitrary numbers like powers of 2 and presume they do soemthing
+
+> we should also never be using uncompressed fp32 for any operation; review the tensor compression library code that appeared in sm120-chudlets, ~/vllm, etc
+
+> you will probably need to delete most of the project documentation in the mesh/main related to the xonotic project once you find out what literally grounds to literal specifications, block quotes, or anything. ... at some point the written spec that comes from the user-assistant turns must be docuemnted and the research/training/experiment/domain-randomization agneda must be written explicitly and faithfully, rahter htan forgotten or compared against fictional requirements written by claudes

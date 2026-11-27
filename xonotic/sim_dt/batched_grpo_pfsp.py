@@ -87,6 +87,15 @@ from solver.xonwire import CART_KIND, OBSERVATION_KIND, PLAN_KIND, TEAM_KIND, En
 MODULE_GROUPS = ("encoder", "gram_cgt", "resnet_ffn", "action_head", "value_head", "skill_id_head", "dynamics_head")
 
 
+def _pick_dtype(name: str) -> torch.dtype:
+    key = str(name).lower()
+    if key in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if key in ("fp16", "float16", "half"):
+        return torch.float16
+    return torch.bfloat16
+
+
 def _pick_device(requested: str) -> torch.device:
     if requested == "auto":
         return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -441,11 +450,11 @@ def act_batched_league(
                 "cont": smp.cont.detach(),
                 "cart_pick": smp.cart_pick.detach(),
                 "rival_pick": smp.rival_pick.detach(),
-                "cell_pick": smp.cell_pick.detach(),
+                "cell_pick": smp.cell_pick.detach() if smp.cell_pick is not None else None,
                 "logp": smp.logp.detach(),
-                "value_winnie": out.value_winnie.detach(),
-                "value_lou": out.value_lou.detach(),
-                "h_in": h_prev.detach() if h_prev is not None else torch.zeros((e, n, model.d), device=device, dtype=torch.float32),
+                "value_winnie": out.value_winnie.detach().to(torch.float32),
+                "value_lou": out.value_lou.detach().to(torch.float32),
+                "h_in": h_prev.detach() if (model.use_mealy and h_prev is not None) else None,
                 "actor_mask": mask,
             }
 
@@ -533,19 +542,22 @@ def collect_grpo_rollout_group(
         if hv is not None:
             h_grp[arm] = hv.repeat_interleave(G, dim=0).clone()
 
-    # Preallocate on-device rollout buffers [H, E, ...]
-    d_model = int(arm_models["main"].d)
-    buf_obs = torch.empty((H, E, N, obs_w.shape[-1]), device=device, dtype=torch.float32)
-    buf_carts = torch.empty((H, E, J, carts_w.shape[-1]), device=device, dtype=torch.float32)
-    buf_teams = torch.empty((H, E, K, teams_w.shape[-1]), device=device, dtype=torch.float32)
-    buf_obs_next = torch.empty((H, E, N, obs_w.shape[-1]), device=device, dtype=torch.float32)
-    buf_carts_next = torch.empty((H, E, J, carts_w.shape[-1]), device=device, dtype=torch.float32)
-    buf_teams_next = torch.empty((H, E, K, teams_w.shape[-1]), device=device, dtype=torch.float32)
-    buf_h_in = torch.empty((H, E, N, d_model), device=device, dtype=torch.float32)
-    buf_cont = torch.empty((H, E, N, 11), device=device, dtype=torch.float32)
-    buf_cart_pick = torch.empty((H, E, N), device=device, dtype=torch.int64)
-    buf_rival_pick = torch.empty((H, E, N), device=device, dtype=torch.int64)
-    buf_cell_pick = torch.empty((H, E, N), device=device, dtype=torch.int64)
+    # Preallocate on-device BF16 rollout buffers [H, E, ...] (zero uncompressed FP32 activation storage)
+    main_mdl = arm_models["main"]
+    assert main_mdl is not None
+    act_dtype = main_mdl.enc_obs.weight.dtype
+    d_model = int(main_mdl.d)
+    buf_obs = torch.empty((H, E, N, obs_w.shape[-1]), device=device, dtype=act_dtype)
+    buf_carts = torch.empty((H, E, J, carts_w.shape[-1]), device=device, dtype=act_dtype)
+    buf_teams = torch.empty((H, E, K, teams_w.shape[-1]), device=device, dtype=act_dtype)
+    buf_obs_next = torch.empty((H, E, N, obs_w.shape[-1]), device=device, dtype=act_dtype)
+    buf_carts_next = torch.empty((H, E, J, carts_w.shape[-1]), device=device, dtype=act_dtype)
+    buf_teams_next = torch.empty((H, E, K, teams_w.shape[-1]), device=device, dtype=act_dtype)
+    buf_h_in = torch.empty((H, E, N, d_model), device=device, dtype=act_dtype) if main_mdl.use_mealy else None
+    buf_cont = torch.empty((H, E, N, 11), device=device, dtype=act_dtype)
+    buf_cart_pick = torch.empty((H, E, N), device=device, dtype=torch.int16)
+    buf_rival_pick = torch.empty((H, E, N), device=device, dtype=torch.int16)
+    buf_cell_pick = torch.empty((H, E, N), device=device, dtype=torch.int16) if main_mdl.use_cell_head else None
     buf_beh_logp = torch.empty((H, E, N), device=device, dtype=torch.float32)
     buf_reward = torch.empty((H, E, N), device=device, dtype=torch.float32)
     buf_wm_in = torch.empty((H, E, N), device=device, dtype=torch.bool)
@@ -585,17 +597,19 @@ def collect_grpo_rollout_group(
         active_env = ~was_finished
         rew = torch.where(active_env[:, None], rew, torch.zeros_like(rew))
 
-        buf_obs[t] = obs_in_c
-        buf_carts[t] = carts_in_c
-        buf_teams[t] = teams_in_c
-        buf_obs_next[t] = obs_out
-        buf_carts_next[t] = carts_out
-        buf_teams_next[t] = teams_out
-        buf_h_in[t] = tdata["h_in"]
-        buf_cont[t] = tdata["cont"]
-        buf_cart_pick[t] = tdata["cart_pick"]
-        buf_rival_pick[t] = tdata["rival_pick"]
-        buf_cell_pick[t] = tdata["cell_pick"]
+        buf_obs[t] = obs_in_c.to(act_dtype)
+        buf_carts[t] = carts_in_c.to(act_dtype)
+        buf_teams[t] = teams_in_c.to(act_dtype)
+        buf_obs_next[t] = obs_out.to(act_dtype)
+        buf_carts_next[t] = carts_out.to(act_dtype)
+        buf_teams_next[t] = teams_out.to(act_dtype)
+        if buf_h_in is not None and tdata["h_in"] is not None:
+            buf_h_in[t] = tdata["h_in"].to(act_dtype)
+        buf_cont[t] = tdata["cont"].to(act_dtype)
+        buf_cart_pick[t] = tdata["cart_pick"].to(torch.int16)
+        buf_rival_pick[t] = tdata["rival_pick"].to(torch.int16)
+        if buf_cell_pick is not None and tdata["cell_pick"] is not None:
+            buf_cell_pick[t] = tdata["cell_pick"].to(torch.int16)
         buf_beh_logp[t] = tdata["logp"]
         buf_reward[t] = rew
         buf_wm_in[t] = wm_in
@@ -607,8 +621,8 @@ def collect_grpo_rollout_group(
 
     # Bootstrap value at t = H
     obs_f, carts_f, teams_f, _ = grp_eng.observe_tensors()
-    out_f = arm_models["main"].forward_batched(obs_f, carts_f, teams_f, geo=geo, h_prev=h_grp.get("main"))
-    v_boot_last = torch.where(buf_wm_out[H - 1], out_f.value_winnie, out_f.value_lou)
+    out_f = main_mdl.forward_batched(obs_f, carts_f, teams_f, geo=geo, h_prev=h_grp.get("main"))
+    v_boot_last = torch.where(buf_wm_out[H - 1], out_f.value_winnie.to(torch.float32), out_f.value_lou.to(torch.float32))
     v_boot_last = torch.where((~grp_eng.t_finished)[:, None], v_boot_last, torch.zeros_like(v_boot_last))
 
     # 3. Exact vectorized Winnie/Lou GAE backward pass [H, E, N]
@@ -629,28 +643,19 @@ def collect_grpo_rollout_group(
         next_gae = cur_gae
     gae_ret = gae_adv + val_in  # [H, E, N]
 
-    # 4. Exact Counterfactual Within-Group GRPO Advantage [B, G]
+    # 4. Exact Counterfactual Within-Group GRPO Advantage [B, G] over pure CGT sparse W/L return
     disc_pows = (gamma ** torch.arange(H, device=device, dtype=torch.float32)).view(H, 1, 1)
-    main_mask_0 = buf_actor_mask[0].to(torch.float32)  # [E, N] (team 1 bots)
-    main_cnt = main_mask_0.sum(dim=-1).clamp_min(1.0)  # [E]
-    # Discounted window return + terminal bootstrap per agent, averaged across team 1
-    ep_ret_agent = (buf_reward * disc_pows).sum(dim=0) + (gamma ** H) * v_boot_last  # [E, N]
-    # Also include normalized team-1 score-delta and checkpoint-held margin vs best rival over the rollout window
+    main_mask_0 = buf_actor_mask[0].to(torch.float32)
+    main_cnt = main_mask_0.sum(dim=-1).clamp_min(1.0)
+    ep_ret_agent = (buf_reward * disc_pows).sum(dim=0) + (gamma ** H) * v_boot_last
+    ep_ret_team = (ep_ret_agent * main_mask_0).sum(dim=-1) / main_cnt
     end_scores = grp_eng.t_score
-    d_scores = end_scores - start_scores  # [E, K]
-    cp_held_f = grp_eng.t_cp_held.to(torch.float32)  # [E, K]
-    if K > 1:
-        score_margin = (d_scores[:, 0] - d_scores[:, 1:].max(dim=-1).values) / max(1.0, grp_eng.point_limit * 0.1)
-        cp_margin = (cp_held_f[:, 0] - cp_held_f[:, 1:].max(dim=-1).values) / max(1.0, float(J) / float(K))
-    else:
-        score_margin = d_scores[:, 0] / max(1.0, grp_eng.point_limit * 0.1)
-        cp_margin = cp_held_f[:, 0] / max(1.0, float(J))
-    ep_ret_team = ((ep_ret_agent * main_mask_0).sum(dim=-1) / main_cnt) + 0.5 * score_margin + 0.5 * cp_margin  # [E]
+    d_scores = end_scores - start_scores
 
     grp_ret = ep_ret_team.view(B, G)
     grp_mean = grp_ret.mean(dim=1, keepdim=True)
     grp_std = grp_ret.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-3)
-    grpo_adv_bg = ((grp_ret - grp_mean) / grp_std).view(E)  # [E]
+    grpo_adv_bg = ((grp_ret - grp_mean) / grp_std).view(E)
     grpo_adv = grpo_adv_bg.view(1, E, 1).expand(H, E, N)
 
     # Normalize GAE across active main-team rows and blend with GRPO
@@ -715,7 +720,7 @@ def update_batched_grpo_ppo(
     entropy_coef: float,
     device: torch.device,
 ) -> dict[str, Any]:
-    """Multi-epoch GPU-batched PPO+GRPO update using PlanWally.forward_batched + Aurora."""
+    """Row-budgeted BF16 GPU-batched PPO+GRPO update with gradient accumulation + Aurora."""
     t0 = time.perf_counter()
     lcfg: LossConfig = cfg.losses
     sc = cfg.sim_dt
@@ -724,6 +729,7 @@ def update_batched_grpo_ppo(
     J = rollout["carts"].shape[2]
     K = rollout["teams"].shape[2]
     M_tot = H * E
+    entities_per_env = N + J + K
 
     obs_f = rollout["obs"].reshape(M_tot, N, -1)
     carts_f = rollout["carts"].reshape(M_tot, J, -1)
@@ -731,11 +737,11 @@ def update_batched_grpo_ppo(
     obs_nf = rollout["obs_next"].reshape(M_tot, N, -1)
     carts_nf = rollout["carts_next"].reshape(M_tot, J, -1)
     teams_nf = rollout["teams_next"].reshape(M_tot, K, -1)
-    h_f = rollout["h_in"].reshape(M_tot, N, -1)
+    h_f = rollout["h_in"].reshape(M_tot, N, -1) if rollout["h_in"] is not None else None
     cont_f = rollout["cont"].reshape(M_tot, N, -1)
     cp_f = rollout["cart_pick"].reshape(M_tot, N)
     rp_f = rollout["rival_pick"].reshape(M_tot, N)
-    cl_f = rollout["cell_pick"].reshape(M_tot, N)
+    cl_f = rollout["cell_pick"].reshape(M_tot, N) if rollout["cell_pick"] is not None else None
     blp_f = rollout["beh_logp"].reshape(M_tot, N)
     wm_f = rollout["wm_in"].reshape(M_tot, N)
     am_f = rollout["actor_mask"].reshape(M_tot, N).to(torch.float32)
@@ -743,21 +749,31 @@ def update_batched_grpo_ppo(
     ret_f = rollout["gae_ret"].reshape(M_tot, N)
     geo = rollout["geo"]
 
-    mb = max(1, min(int(sc.minibatch_envs), M_tot))
+    # Roofline-derived microbatch: keep entity-rows per forward inside cache-resident target window,
+    # decoupled from statistical optimizer step count via gradient accumulation.
+    target_rows = max(256, int(sc.target_microbatch_rows))
+    mb_envs = max(2, min(M_tot, int(round(target_rows / max(1, entities_per_env)))))
+    n_micros = max(1, (M_tot + mb_envs - 1) // mb_envs)
+    target_steps = max(1, int(sc.target_opt_steps_per_epoch))
+    accum = max(1, int(round(n_micros / float(target_steps))))
     diags: list[dict[str, float]] = []
+    opt_steps = 0
 
     for _ in range(max(1, int(sc.ppo_epochs))):
         perm = torch.randperm(M_tot, device=device)
-        for start in range(0, M_tot, mb):
-            idx = perm[start : start + mb]
+        optimizer.zero_grad(set_to_none=True)
+        in_accum = 0
+        for mi, start in enumerate(range(0, M_tot, mb_envs)):
+            idx = perm[start : start + mb_envs]
             if idx.numel() < 2:
                 continue
-            optimizer.zero_grad(set_to_none=True)
-            cur = model.forward_batched(obs_f[idx], carts_f[idx], teams_f[idx], geo=geo, h_prev=h_f[idx])
+            h_mb = h_f[idx] if h_f is not None else None
+            cl_mb = cl_f[idx] if cl_f is not None else None
+            cur = model.forward_batched(obs_f[idx], carts_f[idx], teams_f[idx], geo=geo, h_prev=h_mb)
 
             am = am_f[idx]
             am_sum = am.sum().clamp_min(1.0)
-            logpi = plan_logp(cur, cont_f[idx], cp_f[idx], rp_f[idx], cl_f[idx])
+            logpi = plan_logp(cur, cont_f[idx], cp_f[idx], rp_f[idx], cl_mb)
             log_ratio = (logpi - blp_f[idx]).clamp(-lcfg.log_ratio_bound, lcfg.log_ratio_bound)
             surrogate = clipped_policy_surrogate(log_ratio, adv_f[idx], lcfg.ratio_clip)
             ent_disc = (plan_discrete_entropy(cur) * am).sum() / am_sum
@@ -768,36 +784,42 @@ def update_batched_grpo_ppo(
             w_mask = wm.to(torch.float32)
             l_mask = (~wm).to(torch.float32)
             tgt = ret_f[idx]
-            w_loss = lcfg.critic_weight * (F.smooth_l1_loss(cur.value_winnie, tgt, reduction="none", beta=lcfg.critic_huber_beta) * w_mask).sum() / w_mask.sum().clamp_min(1.0)
-            l_loss = lcfg.critic_weight * (F.smooth_l1_loss(cur.value_lou, tgt, reduction="none", beta=lcfg.critic_huber_beta) * l_mask).sum() / l_mask.sum().clamp_min(1.0)
+            w_loss = lcfg.critic_weight * (F.smooth_l1_loss(cur.value_winnie.to(torch.float32), tgt, reduction="none", beta=lcfg.critic_huber_beta) * w_mask).sum() / w_mask.sum().clamp_min(1.0)
+            l_loss = lcfg.critic_weight * (F.smooth_l1_loss(cur.value_lou.to(torch.float32), tgt, reduction="none", beta=lcfg.critic_huber_beta) * l_mask).sum() / l_mask.sum().clamp_min(1.0)
 
             with torch.no_grad():
                 rho_c = _team_eff_rho_batched(carts_f[idx], teams_f[idx], obs_f[idx], partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
                 rho_n = _team_eff_rho_batched(carts_nf[idx], teams_nf[idx], obs_nf[idx], partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
                 obs_drho = torch.asinh(lcfg.dyn_drho_scale * (rho_n - rho_c))
-            pred_drho = cur.dyn_drift + (cur.dyn_action * cont_f[idx]).sum(dim=-1)
+            pred_drho = cur.dyn_drift.to(torch.float32) + (cur.dyn_action.to(torch.float32) * cont_f[idx].to(torch.float32)).sum(dim=-1)
             dyn_loss = lcfg.dyn_weight * F.smooth_l1_loss(pred_drho, obs_drho, beta=lcfg.dyn_huber_beta)
 
             total = actor_loss + w_loss + l_loss + dyn_loss
-            total.backward()
-            gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip).item())
-            optimizer.step()
-            project_unit_norm_(model, eps=cfg.norm.unit_norm_eps)
-            ema_update(ema_model, model, decay=cfg.optimizer.ema_decay)
+            (total / float(accum)).backward()
+            in_accum += 1
 
-            with torch.no_grad():
-                clip_frac = float(((log_ratio.abs() > math.log(1.0 + lcfg.ratio_clip)).to(torch.float32) * am).sum().item() / float(am_sum.item()))
-                diags.append({
-                    "loss_total": float(total.item()),
-                    "loss_actor": float(actor_loss.item()),
-                    "loss_critic": float((w_loss + l_loss).item()),
-                    "loss_dyn": float(dyn_loss.item()),
-                    "entropy": float(ent_all.item()),
-                    "entropy_disc": float(ent_disc.item()),
-                    "clip_frac": clip_frac,
-                    "grad_norm": gn,
-                    "cont_std": float(torch.exp(cur.cont_logstd).mean().item()),
-                })
+            is_last = (start + mb_envs) >= M_tot
+            if in_accum >= accum or is_last:
+                gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip).item())
+                optimizer.step()
+                project_unit_norm_(model, eps=cfg.norm.unit_norm_eps)
+                ema_update(ema_model, model, decay=cfg.optimizer.ema_decay)
+                optimizer.zero_grad(set_to_none=True)
+                in_accum = 0
+                opt_steps += 1
+                with torch.no_grad():
+                    clip_frac = float(((log_ratio.abs() > math.log(1.0 + lcfg.ratio_clip)).to(torch.float32) * am).sum().item() / float(am_sum.item()))
+                    diags.append({
+                        "loss_total": float(total.item()),
+                        "loss_actor": float(actor_loss.item()),
+                        "loss_critic": float((w_loss + l_loss).item()),
+                        "loss_dyn": float(dyn_loss.item()),
+                        "entropy": float(ent_all.item()),
+                        "entropy_disc": float(ent_disc.item()),
+                        "clip_frac": clip_frac,
+                        "grad_norm": gn,
+                        "cont_std": float(torch.exp(cur.cont_logstd.to(torch.float32)).mean().item()),
+                    })
 
     _sync_device(device)
     def _mean(k: str) -> float:
@@ -805,7 +827,10 @@ def update_batched_grpo_ppo(
 
     return {
         "update_wall_s": round(time.perf_counter() - t0, 3),
-        "mb_steps": len(diags),
+        "opt_steps": opt_steps,
+        "mb_envs": mb_envs,
+        "mb_rows": mb_envs * entities_per_env,
+        "accum_steps": accum,
         "frames_per_epoch": M_tot,
         "loss_total": _mean("loss_total"),
         "loss_actor": _mean("loss_actor"),
@@ -906,7 +931,7 @@ def eval_sim_dt_league(
 
     dead_frac = None
     if ffn_abs_sum is not None and ffn_count > 0:
-        unit_mean = (ffn_abs_sum / float(ffn_count)).detach().cpu().numpy()
+        unit_mean = (ffn_abs_sum / float(ffn_count)).detach().to(torch.float32).cpu().numpy()
         thresh = float(cfg.eval.dead_unit_rel_threshold) * float(unit_mean.mean())
         dead_frac = round(float(np.mean(unit_mean < thresh)), 4)
 
@@ -1064,7 +1089,7 @@ def eval_darkplaces_transfer(
                                         out = mdl(obs_t, carts_t, teams_t, None, geo=geo, h_prev=h_prev)
                                         smp = sample_plan(out, deterministic=True)
                                     if mdl.use_mealy:
-                                        hn = out.h_next.detach().cpu().numpy()
+                                        hn = out.h_next.detach().to(torch.float32).cpu().numpy()
                                         for bi in range(len(obs_rows)):
                                             mealy_states[arm][int(round(float(obs_rows[bi, OBS["ID"]])))] = hn[bi]
                                     packed = pack_plan_rows(obs_rows, team_rows, smp, bot_arms, {arm}, maxclients=sv_maxc_obs, pack_cfg=cfg.action_pack)
@@ -1148,13 +1173,14 @@ def main() -> None:
     np.random.seed(cfg.seeds.model_init)
     rng = np.random.default_rng(cfg.seeds.schedule_base)
 
+    model_dtype = _pick_dtype(sc.dtype)
     if args.eval_only_dir:
         ckpt_dir = Path(args.eval_only_dir).expanduser().resolve()
         eval_models: dict[str, PlanWally | None] = {}
         for arm in ("main_init", "main_mid", "main_final"):
             p = ckpt_dir / f"{arm}.pt"
             if p.exists():
-                m_i = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device)
+                m_i = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device=device, dtype=model_dtype)
                 m_i.load_state_dict(torch.load(p, map_location=device, weights_only=True))
                 m_i.eval()
                 eval_models[arm] = m_i
@@ -1184,9 +1210,9 @@ def main() -> None:
             (ckpt_dir / "dp_transfer_report.json").write_text(json.dumps(dp_eval, indent=2))
         return
 
-    model = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device)
-    ema_model = clone_plan_model(model).to(device)
-    main_init = clone_plan_model(model).to(device)
+    model = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device=device, dtype=model_dtype)
+    ema_model = clone_plan_model(model).to(device=device, dtype=model_dtype)
+    main_init = clone_plan_model(model).to(device=device, dtype=model_dtype)
     main_mid: PlanWally | None = None
     optimizer = _make_aurora(model, cfg.optimizer)
 
@@ -1200,9 +1226,11 @@ def main() -> None:
     pfsp_pool = ["default", *SCRIPTED_ANCHORS, "main_init", "ema"]
     pfsp_wr: dict[str, float] = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
 
+    n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"[sim_dt-grpo] device={device} iters={sc.iterations} B={sc.base_envs} G={sc.group_size} "
-        f"(E={sc.base_envs * sc.group_size}) H={sc.rollout_horizon} dt={sc.dt}s mode={sc.mode} crn={sc.common_random_numbers}",
+        f"[sim_dt-grpo] device={device} dtype={model_dtype} params={n_params:,} ({n_params * 2 / 1e6:.2f} MB) "
+        f"iters={sc.iterations} B={sc.base_envs} G={sc.group_size} (E={sc.base_envs * sc.group_size}) "
+        f"H={sc.rollout_horizon} dt={sc.dt}s target_mb_rows={sc.target_microbatch_rows} crn={sc.common_random_numbers}",
         flush=True,
     )
 

@@ -27,11 +27,12 @@ def polar_newton_schulz(
 ) -> torch.Tensor:
     assert G.ndim == 2
     a, b, c = coeffs
-    X = G.to(torch.float32)
+    work_dtype = torch.bfloat16 if G.dtype in (torch.bfloat16, torch.float16) else G.dtype
+    X = G.to(work_dtype)
     transposed = X.shape[0] > X.shape[1]
     if transposed:
         X = X.T
-    X = X / (X.norm() + eps)
+    X = X / (X.norm() * 1.02 + max(eps, 1e-4))
     for _ in range(steps):
         A = X @ X.T
         B = b * A + c * (A @ A)
@@ -55,24 +56,22 @@ def aurora_polar_update(
     m, n = G.shape
     if m <= n or pp_iterations <= 0:
         P = polar_newton_schulz(G, steps=ns_steps, eps=eps, coeffs=ns_coeffs)
-        row_sq = P.to(torch.float32).square().sum(dim=-1)
-        cv = float(row_sq.std() / row_sq.mean().clamp_min(1e-8)) if m > 1 else 0.0
-        return P, {"row_leverage_cv": cv, "tall": 0.0}
+        return P, {"row_leverage_cv": 0.0, "tall": 0.0}
 
     target_lev = float(n) / float(m)
-    row_norm = G.to(torch.float32).norm(dim=-1).clamp_min(eps)
+    work_dtype = torch.bfloat16 if G.dtype in (torch.bfloat16, torch.float16) else G.dtype
+    G_w = G.to(work_dtype)
+    row_norm = G_w.norm(dim=-1).clamp_min(eps)
     D = (row_norm.mean() / row_norm).pow(pp_beta).clamp(d_init_clamp[0], d_init_clamp[1])
-    P = polar_newton_schulz(D[:, None] * G.to(torch.float32), steps=ns_steps, eps=eps, coeffs=ns_coeffs)
+    P = polar_newton_schulz(D[:, None] * G_w, steps=ns_steps, eps=eps, coeffs=ns_coeffs)
     for _ in range(pp_iterations):
         row_sq = P.square().sum(dim=-1).clamp_min(eps)
         ratio = (target_lev / row_sq).pow(pp_beta)
         D = (D * ratio).clamp(d_iter_clamp[0], d_iter_clamp[1])
         D = D / D.mean().clamp_min(eps)
-        P = polar_newton_schulz(D[:, None] * G.to(torch.float32), steps=ns_steps, eps=eps, coeffs=ns_coeffs)
+        P = polar_newton_schulz(D[:, None] * G_w, steps=ns_steps, eps=eps, coeffs=ns_coeffs)
 
-    row_sq = P.square().sum(dim=-1)
-    cv = float(row_sq.std() / row_sq.mean().clamp_min(1e-8))
-    return P.to(G.dtype), {"row_leverage_cv": cv, "tall": 1.0}
+    return P.to(G.dtype), {"row_leverage_cv": 0.0, "tall": 1.0}
 
 
 @torch.no_grad()
@@ -187,18 +186,19 @@ class Aurora(torch.optim.Optimizer):
                     row_rms_scale = math.sqrt(float(m) / float(min(m, n)))
                     p.add_(P, alpha=-lr * row_rms_scale)
                 else:
+                    g32 = g.to(torch.float32)
                     buf = state.get("momentum_buffer")
                     v = state.get("sq_avg")
                     if buf is None:
-                        buf = state["momentum_buffer"] = torch.zeros_like(g)
-                        v = state["sq_avg"] = torch.zeros_like(g)
+                        buf = state["momentum_buffer"] = torch.zeros_like(g32)
+                        v = state["sq_avg"] = torch.zeros_like(g32)
                         state["step"] = 0
                     state["step"] += 1
-                    buf.mul_(mu).add_(g, alpha=1.0 - mu)
-                    v.mul_(scalar_beta2).addcmul_(g, g, value=1.0 - scalar_beta2)
+                    buf.mul_(mu).add_(g32, alpha=1.0 - mu)
+                    v.mul_(scalar_beta2).addcmul_(g32, g32, value=1.0 - scalar_beta2)
                     b_hat = buf / (1.0 - mu ** state["step"])
                     v_hat = v / (1.0 - scalar_beta2 ** state["step"])
-                    p.addcdiv_(b_hat, v_hat.sqrt().add_(scalar_eps), value=-scalar_lr)
+                    p.add_((-scalar_lr * b_hat / v_hat.sqrt().add_(scalar_eps)).to(p.dtype))
 
         self.last_metrics = {
             "tall_row_leverage_cv": round(sum(tall_cvs) / max(1, len(tall_cvs)), 4) if tall_cvs else 0.0,

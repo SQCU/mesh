@@ -52,11 +52,11 @@ ITEM_TOK_DIM = 9
 
 
 def mp_norm(x: torch.Tensor, eps: float = DEFAULT_NORM_CONFIG.mp_norm_eps) -> torch.Tensor:
-    return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+    return F.rms_norm(x, (x.shape[-1],), eps=max(float(eps), 1e-4 if x.dtype in (torch.bfloat16, torch.float16) else float(eps)))
 
 
 def mp_unit_vec(x: torch.Tensor, eps: float = DEFAULT_NORM_CONFIG.mp_unit_vec_eps) -> torch.Tensor:
-    return x * torch.rsqrt(x.square().sum(dim=-1, keepdim=True) + eps)
+    return F.normalize(x, p=2, dim=-1, eps=max(float(eps), 1e-4 if x.dtype in (torch.bfloat16, torch.float16) else float(eps)))
 
 
 def mp_silu(x: torch.Tensor, scale: float = DEFAULT_NORM_CONFIG.mp_silu_scale) -> torch.Tensor:
@@ -65,7 +65,8 @@ def mp_silu(x: torch.Tensor, scale: float = DEFAULT_NORM_CONFIG.mp_silu_scale) -
 
 def mp_lerp(a: torch.Tensor, b: torch.Tensor, t: torch.Tensor, eps: float = DEFAULT_NORM_CONFIG.mp_lerp_eps) -> torch.Tensor:
     t_c = torch.clamp(t, 0.0, 1.0)
-    return ((1.0 - t_c) * a + t_c * b) * torch.rsqrt((1.0 - t_c).square() + t_c.square() + eps)
+    e = max(float(eps), 1e-4 if a.dtype in (torch.bfloat16, torch.float16) else float(eps))
+    return ((1.0 - t_c) * a + t_c * b) * torch.rsqrt((1.0 - t_c).square() + t_c.square() + e)
 
 
 class MPLinear(nn.Module):
@@ -95,7 +96,7 @@ class MPLinear(nn.Module):
         self.weight = nn.Parameter(w)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w_unit = self.weight / self.weight.norm(dim=-1, keepdim=True).clamp_min(self.unit_norm_eps)
+        w_unit = F.normalize(self.weight, p=2, dim=-1, eps=max(self.unit_norm_eps, 1e-4))
         return F.linear(x, w_unit)
 
 
@@ -104,14 +105,15 @@ def project_unit_norm_(model: nn.Module, eps: float = DEFAULT_NORM_CONFIG.unit_n
     for m in model.modules():
         if isinstance(m, MPLinear):
             w = m.weight.data
-            w.div_(w.norm(dim=-1, keepdim=True).clamp_min(eps))
+            nrm = w.to(torch.float32).norm(dim=-1, keepdim=True).clamp_min(eps).to(w.dtype)
+            w.div_(nrm)
 
 
 def weight_norm_report(model: nn.Module) -> dict:
     norms = []
     for m in model.modules():
         if isinstance(m, MPLinear):
-            norms.append(m.weight.detach().norm(dim=-1).cpu())
+            norms.append(m.weight.detach().to(torch.float32).norm(dim=-1).cpu())
     if not norms:
         return {"layers": 0}
     cat = torch.cat(norms)
@@ -167,6 +169,8 @@ def prenormalize_obs(
     obs: torch.Tensor,
     geo: dict[str, torch.Tensor] | None,
     norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+    *,
+    mask_bot_config_inputs: bool = False,
 ) -> torch.Tensor:
     x = obs.clone()
     if geo is not None and "map_center" in geo and "map_radius" in geo:
@@ -179,11 +183,14 @@ def prenormalize_obs(
     x[:, OBS["HEALTH"]] = (x[:, OBS["HEALTH"]] - norm_cfg.health_offset) / norm_cfg.health_scale
     x[:, OBS["ARMOR"]] = (x[:, OBS["ARMOR"]] - norm_cfg.armor_offset) / norm_cfg.armor_scale
     x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] = x[:, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] / norm_cfg.ammo_scale
-    for col in (
+    zero_cols = [
         "ENGINE_TIME", "SPAWN_TIME", "STRENGTH_FINISHED", "RESPONSE_SEQ", "RESPONSE_TIME",
         "APPLIED_SEQUENCE", "OUTCOME_A_SEQ", "OUTCOME_B_SEQ", "CELL_X", "CELL_Y",
-        "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME", *BOT_CONFIGURATION_COLUMNS,
-    ):
+        "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME",
+    ]
+    if mask_bot_config_inputs:
+        zero_cols.extend(BOT_CONFIGURATION_COLUMNS)
+    for col in zero_cols:
         if col == "STRENGTH_FINISHED":
             rem = torch.clamp(obs[:, OBS["STRENGTH_FINISHED"]] - obs[:, OBS["ENGINE_TIME"]], min=0.0, max=norm_cfg.strength_max_s) / norm_cfg.strength_max_s
             x[:, OBS[col]] = rem
@@ -198,6 +205,8 @@ def prenormalize_carts(
     cart_extra: torch.Tensor,
     geo: dict[str, torch.Tensor] | None,
     norm_cfg: NormConfig = DEFAULT_NORM_CONFIG,
+    *,
+    include_cart_geo: bool = False,
 ) -> torch.Tensor:
     c = carts.clone()
     plen = torch.clamp(c[:, CS["PATH_LENGTH"]], min=1.0)
@@ -210,8 +219,10 @@ def prenormalize_carts(
         c[:, CS["POS_X"] : CS["POS_Z"] + 1] = (c[:, CS["POS_X"] : CS["POS_Z"] + 1] - center[None, :]) / radius
     else:
         c[:, CS["POS_X"] : CS["POS_Z"] + 1] = c[:, CS["POS_X"] : CS["POS_Z"] + 1] / norm_cfg.pos_fallback_scale
-    c_geo = geo["cart_geo"] if (geo is not None and "cart_geo" in geo) else torch.zeros((carts.shape[0], CART_GEO_DIM), device=carts.device, dtype=carts.dtype)
-    return mp_norm(torch.asinh(torch.cat((c, cart_extra, c_geo), dim=-1)), eps=norm_cfg.mp_norm_eps)
+    if include_cart_geo:
+        c_geo = geo["cart_geo"].to(carts.device, carts.dtype) if (geo is not None and "cart_geo" in geo) else torch.zeros((carts.shape[0], CART_GEO_DIM), device=carts.device, dtype=carts.dtype)
+        return mp_norm(torch.asinh(torch.cat((c, cart_extra, c_geo), dim=-1)), eps=norm_cfg.mp_norm_eps)
+    return mp_norm(torch.asinh(torch.cat((c, cart_extra), dim=-1)), eps=norm_cfg.mp_norm_eps)
 
 
 def prenormalize_teams(
@@ -483,17 +494,25 @@ class PlanWally(nn.Module):
         self.use_fsq = bool(mc.use_fsq if use_fsq is None else use_fsq)
         self.fsq_levels = tuple(int(v) for v in (mc.fsq_levels if fsq_levels is None else fsq_levels))
         self.use_mealy = bool(mc.use_mealy if use_mealy is None else use_mealy)
+        self.use_cart_dist_bias = bool(mc.use_cart_dist_bias)
+        self.use_cell_head = bool(mc.use_cell_head)
+        self.use_manifold_encoders = bool(mc.use_manifold_encoders)
+        self.use_aux_skill_head = bool(mc.use_aux_skill_head)
+        self.mask_bot_config_inputs = bool(mc.mask_bot_config_inputs)
         self.temp_bounds = mc.temp_bounds
 
         eps = nc.unit_norm_eps
-        self.enc_obs = MPLinear(OBS_WIDTH + BOT_GEO_DIM, self.d, unit_norm_eps=eps)
-        self.enc_cart = MPLinear(18 + 4 + CART_GEO_DIM, self.d, unit_norm_eps=eps)
+        obs_in_dim = OBS_WIDTH + (BOT_GEO_DIM if self.use_manifold_encoders else 0)
+        cart_in_dim = 18 + 4 + (CART_GEO_DIM if self.use_manifold_encoders else 0)
+        self.enc_obs = MPLinear(obs_in_dim, self.d, unit_norm_eps=eps)
+        self.enc_cart = MPLinear(cart_in_dim, self.d, unit_norm_eps=eps)
         self.enc_team = MPLinear(7 + 2, self.d, unit_norm_eps=eps)
-        self.enc_evt = MPLinear(EVT_WIDTH, self.d, unit_norm_eps=eps)
-        self.enc_track = MPLinear(TRACK_TOK_DIM, self.d, unit_norm_eps=eps)
-        self.enc_cell = MPLinear(CELL_TOK_DIM, self.d, unit_norm_eps=eps)
-        self.enc_item = MPLinear(ITEM_TOK_DIM, self.d, unit_norm_eps=eps)
-        self.type_embed = nn.Parameter(mp_norm(torch.randn(6, self.d), eps=nc.mp_norm_eps))
+        self.enc_evt = MPLinear(EVT_WIDTH, self.d, unit_norm_eps=eps) if self.use_manifold_encoders else None
+        self.enc_track = MPLinear(TRACK_TOK_DIM, self.d, unit_norm_eps=eps) if self.use_manifold_encoders else None
+        self.enc_cell = MPLinear(CELL_TOK_DIM, self.d, unit_norm_eps=eps) if self.use_manifold_encoders else None
+        self.enc_item = MPLinear(ITEM_TOK_DIM, self.d, unit_norm_eps=eps) if self.use_manifold_encoders else None
+        n_types = 6 if self.use_manifold_encoders else 3
+        self.type_embed = nn.Parameter(mp_norm(torch.randn(n_types, self.d), eps=nc.mp_norm_eps))
         self.type_blend = nn.Parameter(torch.tensor(float(mc.type_blend_init_logit)))
 
         if self.use_mealy:
@@ -539,22 +558,37 @@ class PlanWally(nn.Module):
         self.cart_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
         self.rival_q = MPLinear(self.d, self.d, unit_norm_eps=eps)
         self.rival_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
-        self.cell_q = MPLinear(self.d, self.d, unit_norm_eps=eps)
-        self.cell_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
         log_t0 = math.log(max(float(mc.temp_init), 1e-4))
         self.log_temp_cart = nn.Parameter(torch.tensor(log_t0))
         self.log_temp_rival = nn.Parameter(torch.tensor(log_t0))
-        self.log_temp_cell = nn.Parameter(torch.tensor(log_t0))
-        self.log_cart_dist_bias = nn.Parameter(torch.tensor(math.log(max(float(mc.cart_dist_bias_init), 1e-4))))
+        if self.use_cell_head:
+            self.cell_q = MPLinear(self.d, self.d, unit_norm_eps=eps)
+            self.cell_k = MPLinear(self.d, self.d, unit_norm_eps=eps)
+            self.log_temp_cell = nn.Parameter(torch.tensor(log_t0))
+        else:
+            self.cell_q = None
+            self.cell_k = None
+            self.log_temp_cell = None
+        if self.use_cart_dist_bias:
+            self.log_cart_dist_bias = nn.Parameter(torch.tensor(math.log(max(float(mc.cart_dist_bias_init), 1e-4))))
+        else:
+            self.log_cart_dist_bias = None
 
         self.value_proj = MPLinear(self.d, 2, unit_norm_eps=eps)
         self.value_gain = nn.Parameter(torch.tensor(float(mc.value_gain_init)))
         self.value_bias = nn.Parameter(torch.zeros(2))
-        self.value_priv_proj = MPLinear(3, 2, unit_norm_eps=eps)
-        self.value_priv_gain = nn.Parameter(torch.tensor(float(mc.value_priv_gain_init)))
-        self.skill_id_proj = MPLinear(self.d, 1, unit_norm_eps=eps)
-        self.skill_id_gain = nn.Parameter(torch.tensor(float(mc.skill_id_gain_init)))
-        self.skill_id_bias = nn.Parameter(torch.zeros(1))
+        if self.use_aux_skill_head:
+            self.value_priv_proj = MPLinear(3, 2, unit_norm_eps=eps)
+            self.value_priv_gain = nn.Parameter(torch.tensor(float(mc.value_priv_gain_init)))
+            self.skill_id_proj = MPLinear(self.d, 1, unit_norm_eps=eps)
+            self.skill_id_gain = nn.Parameter(torch.tensor(float(mc.skill_id_gain_init)))
+            self.skill_id_bias = nn.Parameter(torch.zeros(1))
+        else:
+            self.value_priv_proj = None
+            self.value_priv_gain = None
+            self.skill_id_proj = None
+            self.skill_id_gain = None
+            self.skill_id_bias = None
         self.dyn_drift_proj = MPLinear(self.d, 1, unit_norm_eps=eps)
         self.dyn_drift_gain = nn.Parameter(torch.tensor(float(mc.dyn_drift_gain_init)))
         self.dyn_action_proj = MPLinear(self.d, PLAN_CONT_DIM, unit_norm_eps=eps)
@@ -580,7 +614,11 @@ class PlanWally(nn.Module):
         mc = self.model_cfg
         nc = self.norm_cfg
         n, j, k = obs.shape[0], carts.shape[0], teams.shape[0]
-        device, dtype = obs.device, obs.dtype
+        device = obs.device
+        dtype = self.enc_obs.weight.dtype
+        obs = obs.to(dtype)
+        carts = carts.to(dtype)
+        teams = teams.to(dtype)
         cart_valid = torch.ones(j, device=device, dtype=torch.bool)
         team_valid = torch.ones(k, device=device, dtype=torch.bool)
         cart_extra, team_extra = cgt_tensor_features(carts, teams, cart_valid, team_valid)
@@ -588,12 +626,17 @@ class PlanWally(nn.Module):
         tb = torch.sigmoid(self.type_blend)
         te = mp_norm(self.type_embed, eps=nc.mp_norm_eps)
 
-        obs_pre = prenormalize_obs(obs, geo, norm_cfg=nc)
-        bot_geo = mp_norm(torch.asinh(geo["bot_geo"]), eps=nc.mp_norm_eps) if (geo is not None and "bot_geo" in geo) else torch.zeros((n, BOT_GEO_DIM), device=device, dtype=dtype)
-        obs_h = mp_lerp(mp_norm(self.enc_obs(torch.cat((obs_pre, bot_geo), dim=-1)), eps=nc.mp_norm_eps), te[0].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
+        obs_pre = prenormalize_obs(obs, geo, norm_cfg=nc, mask_bot_config_inputs=self.mask_bot_config_inputs)
+        if self.use_manifold_encoders:
+            bot_geo = mp_norm(torch.asinh(geo["bot_geo"].to(device, dtype)), eps=nc.mp_norm_eps) if (geo is not None and "bot_geo" in geo) else torch.zeros((n, BOT_GEO_DIM), device=device, dtype=dtype)
+            obs_in_enc = torch.cat((obs_pre, bot_geo), dim=-1)
+        else:
+            obs_in_enc = obs_pre
+        obs_h = mp_lerp(mp_norm(self.enc_obs(obs_in_enc), eps=nc.mp_norm_eps), te[0].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
 
-        if events is not None and events.shape[0] > 0:
-            evt_h = mp_norm(self.enc_evt(mp_norm(torch.asinh(events), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps)
+        if self.enc_evt is not None and events is not None and events.shape[0] > 0:
+            evt_t = events.to(device, dtype)
+            evt_h = mp_norm(self.enc_evt(mp_norm(torch.asinh(evt_t), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps)
             evt_team = events[:, EVT["TEAM"]].to(torch.float32)
             obs_team = obs[:, OBS["TEAM"]].to(torch.float32)
             em = (obs_team[:, None] == evt_team[None, :]).to(dtype)
@@ -603,7 +646,7 @@ class PlanWally(nn.Module):
                 eps=nc.mp_norm_eps,
             )
 
-        cart_pre = prenormalize_carts(carts, cart_extra, geo, norm_cfg=nc)
+        cart_pre = prenormalize_carts(carts, cart_extra, geo, norm_cfg=nc, include_cart_geo=self.use_manifold_encoders)
         cart_h = mp_lerp(mp_norm(self.enc_cart(cart_pre), eps=nc.mp_norm_eps), te[1].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
 
         team_pre = prenormalize_teams(teams, team_extra, norm_cfg=nc)
@@ -612,29 +655,29 @@ class PlanWally(nn.Module):
         extra_tokens = []
         extra_teams = []
 
-        if geo is not None and "track_tokens" in geo and geo["track_tokens"].shape[0] > 0:
-            tr_h = mp_lerp(mp_norm(self.enc_track(mp_norm(torch.asinh(geo["track_tokens"]), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[3].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
+        if self.enc_track is not None and geo is not None and "track_tokens" in geo and geo["track_tokens"].shape[0] > 0:
+            tr_h = mp_lerp(mp_norm(self.enc_track(mp_norm(torch.asinh(geo["track_tokens"].to(device, dtype)), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[3].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
             extra_tokens.append(tr_h)
             extra_teams.append(geo["track_teams"].to(torch.float32))
 
         cell_h = None
-        if geo is not None and "cell_tokens" in geo and geo["cell_tokens"].shape[0] > 0:
-            cell_h = mp_lerp(mp_norm(self.enc_cell(mp_norm(torch.asinh(geo["cell_tokens"]), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[4].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
+        if self.enc_cell is not None and geo is not None and "cell_tokens" in geo and geo["cell_tokens"].shape[0] > 0:
+            cell_h = mp_lerp(mp_norm(self.enc_cell(mp_norm(torch.asinh(geo["cell_tokens"].to(device, dtype)), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[4].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
             if "fovea_weights" in geo:
                 obs_h = mp_norm(
-                    mp_lerp(obs_h, mp_norm(geo["fovea_weights"] @ cell_h, eps=nc.mp_norm_eps), torch.tensor(mc.fovea_blend, device=device, dtype=dtype), eps=nc.mp_lerp_eps),
+                    mp_lerp(obs_h, mp_norm(geo["fovea_weights"].to(device, dtype) @ cell_h, eps=nc.mp_norm_eps), torch.tensor(mc.fovea_blend, device=device, dtype=dtype), eps=nc.mp_lerp_eps),
                     eps=nc.mp_norm_eps,
                 )
             extra_tokens.append(cell_h)
             extra_teams.append(torch.zeros((cell_h.shape[0],), device=device, dtype=torch.float32))
 
-        if geo is not None and "item_tokens" in geo and geo["item_tokens"].shape[0] > 0:
-            it_h = mp_lerp(mp_norm(self.enc_item(mp_norm(torch.asinh(geo["item_tokens"]), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[5].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
+        if self.enc_item is not None and geo is not None and "item_tokens" in geo and geo["item_tokens"].shape[0] > 0:
+            it_h = mp_lerp(mp_norm(self.enc_item(mp_norm(torch.asinh(geo["item_tokens"].to(device, dtype)), eps=nc.mp_norm_eps)), eps=nc.mp_norm_eps), te[5].unsqueeze(0), tb, eps=nc.mp_lerp_eps)
             extra_tokens.append(it_h)
             extra_teams.append(torch.zeros((it_h.shape[0],), device=device, dtype=torch.float32))
 
         if self.mealy_gate is not None:
-            h_in = obs_h.detach() if (h_prev is None or h_prev.shape != (n, self.d)) else mp_norm(h_prev, eps=nc.mp_norm_eps)
+            h_in = obs_h.detach() if (h_prev is None or h_prev.shape != (n, self.d)) else mp_norm(h_prev.to(dtype), eps=nc.mp_norm_eps)
             cat_m = torch.cat((obs_h, h_in), dim=-1)
             z_gate = torch.sigmoid(self.mealy_gate(cat_m))
             cand = mp_norm(mp_silu(self.mealy_cand(cat_m), scale=nc.mp_silu_scale), eps=nc.mp_norm_eps)
@@ -669,7 +712,7 @@ class PlanWally(nn.Module):
         t_h = xn[n + j : n + j + k]
 
         offset = n + j + k
-        if geo is not None and "track_tokens" in geo:
+        if self.enc_track is not None and geo is not None and "track_tokens" in geo:
             offset += geo["track_tokens"].shape[0]
         vcell_h = xn[offset : offset + cell_h.shape[0]] if cell_h is not None else c_h
 
@@ -684,23 +727,28 @@ class PlanWally(nn.Module):
         t_lo, t_hi = mc.temp_bounds
         temp_c = torch.clamp(torch.exp(self.log_temp_cart), t_lo, t_hi)
         temp_r = torch.clamp(torch.exp(self.log_temp_rival), t_lo, t_hi)
-        temp_v = torch.clamp(torch.exp(self.log_temp_cell), t_lo, t_hi)
 
-        p_pos = obs[:, OBS["POS_X"] : OBS["POS_Z"] + 1]
-        c_pos = carts[:, CS["POS_X"] : CS["POS_Z"] + 1]
-        d_pc = (p_pos[:, None, :] - c_pos[None, :, :]).square().sum(dim=-1).clamp_min(nc.mp_unit_vec_eps).sqrt()
-        db_lo, db_hi = mc.cart_dist_bias_bounds
-        dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), db_lo, db_hi) * torch.log1p(d_pc / mc.cart_dist_scale)
-        cart_logits = temp_c * (mp_unit_vec(self.cart_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.cart_k(c_h), eps=nc.mp_unit_vec_eps).T) - dist_bias
+        cart_logits = temp_c * (mp_unit_vec(self.cart_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.cart_k(c_h), eps=nc.mp_unit_vec_eps).T)
+        if self.log_cart_dist_bias is not None:
+            p_pos = obs[:, OBS["POS_X"] : OBS["POS_Z"] + 1]
+            c_pos = carts[:, CS["POS_X"] : CS["POS_Z"] + 1]
+            d_pc = (p_pos[:, None, :] - c_pos[None, :, :]).square().sum(dim=-1).clamp_min(nc.mp_unit_vec_eps).sqrt()
+            db_lo, db_hi = mc.cart_dist_bias_bounds
+            dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), db_lo, db_hi) * torch.log1p(d_pc / mc.cart_dist_scale)
+            cart_logits = cart_logits - dist_bias
         rival_logits = temp_r * (mp_unit_vec(self.rival_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.rival_k(t_h), eps=nc.mp_unit_vec_eps).T)
         if k >= 2:
             own_mask = obs[:, OBS["TEAM"]].to(torch.float32)[:, None] == team_ids[None, :]
             rival_logits = rival_logits.masked_fill(own_mask, mc.rival_own_mask_fill)
-        cell_logits = temp_v * (mp_unit_vec(self.cell_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.cell_k(vcell_h), eps=nc.mp_unit_vec_eps).T)
+        if self.cell_q is not None and self.cell_k is not None and self.log_temp_cell is not None:
+            temp_v = torch.clamp(torch.exp(self.log_temp_cell), t_lo, t_hi)
+            cell_logits = temp_v * (mp_unit_vec(self.cell_q(p_h), eps=nc.mp_unit_vec_eps) @ mp_unit_vec(self.cell_k(vcell_h), eps=nc.mp_unit_vec_eps).T)
+        else:
+            cell_logits = None
 
         vg_lo, vg_hi = mc.value_gain_bounds
         vals = torch.clamp(self.value_gain, vg_lo, vg_hi) * self.value_proj(p_h) + self.value_bias
-        if priv_skill is not None and priv_skill.shape[0] == n:
+        if self.value_priv_proj is not None and priv_skill is not None and priv_skill.shape[0] == n:
             ps = priv_skill.to(device=device, dtype=dtype)
             obs_t = obs[:, OBS["TEAM"]].to(torch.float32)
             t_mem = (obs_t[:, None] == team_ids[None, :]).to(dtype)
@@ -717,9 +765,12 @@ class PlanWally(nn.Module):
             vp_lo, vp_hi = mc.value_priv_gain_bounds
             vals = vals + torch.clamp(self.value_priv_gain, vp_lo, vp_hi) * self.value_priv_proj(priv_feat)
 
-        sg_lo, sg_hi = mc.skill_id_gain_bounds
         dg_lo, dg_hi = mc.dyn_gain_bounds
-        pred_skill = (torch.clamp(self.skill_id_gain, sg_lo, sg_hi) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
+        if self.skill_id_proj is not None:
+            sg_lo, sg_hi = mc.skill_id_gain_bounds
+            pred_skill = (torch.clamp(self.skill_id_gain, sg_lo, sg_hi) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
+        else:
+            pred_skill = None
         dyn_drift = (torch.clamp(self.dyn_drift_gain, dg_lo, dg_hi) * self.dyn_drift_proj(p_h)).squeeze(-1)
         dyn_action = torch.clamp(self.dyn_action_gain, dg_lo, dg_hi) * self.dyn_action_proj(p_h)
         return PlanOutput(
@@ -735,20 +786,23 @@ class PlanWally(nn.Module):
         geo: dict[str, torch.Tensor] | None = None,
         h_prev: torch.Tensor | None = None,
     ) -> PlanOutput:
-        """Zero-copy GPU batched forward over E simultaneous matches: obs[E,N,84], carts[E,J,18], teams[E,K,7]."""
+        """Zero-copy GPU batched forward over E simultaneous matches in native model dtype (BF16)."""
         mc = self.model_cfg
         nc = self.norm_cfg
         e, n, _ = obs.shape
         j = carts.shape[1]
         k = teams.shape[1]
-        device, dtype = obs.device, obs.dtype
-        cart_extra, team_extra = cgt_tensor_features_batched(carts, teams)
+        device = obs.device
+        dtype = self.enc_obs.weight.dtype
+        obs_d = obs.to(dtype)
+        carts_d = carts.to(dtype)
+        teams_d = teams.to(dtype)
+        cart_extra, team_extra = cgt_tensor_features_batched(carts_d, teams_d)
 
         tb = torch.sigmoid(self.type_blend)
         te = mp_norm(self.type_embed, eps=nc.mp_norm_eps)
 
-        # Batched prenormalize_obs
-        xo = obs.clone()
+        xo = obs_d.clone()
         if geo is not None and "map_center" in geo and "map_radius" in geo:
             center = geo["map_center"].to(device, dtype)
             radius = torch.clamp(geo["map_radius"].to(device, dtype), min=nc.map_radius_min)
@@ -759,22 +813,28 @@ class PlanWally(nn.Module):
         xo[:, :, OBS["HEALTH"]] = (xo[:, :, OBS["HEALTH"]] - nc.health_offset) / nc.health_scale
         xo[:, :, OBS["ARMOR"]] = (xo[:, :, OBS["ARMOR"]] - nc.armor_offset) / nc.armor_scale
         xo[:, :, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] = xo[:, :, OBS["AMMO_SHELLS"] : OBS["AMMO_FUEL"] + 1] / nc.ammo_scale
-        for col in (
+        zero_cols = [
             "ENGINE_TIME", "SPAWN_TIME", "STRENGTH_FINISHED", "RESPONSE_SEQ", "RESPONSE_TIME",
             "APPLIED_SEQUENCE", "OUTCOME_A_SEQ", "OUTCOME_B_SEQ", "CELL_X", "CELL_Y",
-            "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME", *BOT_CONFIGURATION_COLUMNS,
-        ):
+            "SWIZZLE_SCHEDULED_TIME", "SWIZZLE_ACTUAL_TIME",
+        ]
+        if self.mask_bot_config_inputs:
+            zero_cols.extend(BOT_CONFIGURATION_COLUMNS)
+        for col in zero_cols:
             if col == "STRENGTH_FINISHED":
-                rem = torch.clamp(obs[:, :, OBS["STRENGTH_FINISHED"]] - obs[:, :, OBS["ENGINE_TIME"]], min=0.0, max=nc.strength_max_s) / nc.strength_max_s
+                rem = torch.clamp(obs_d[:, :, OBS["STRENGTH_FINISHED"]] - obs_d[:, :, OBS["ENGINE_TIME"]], min=0.0, max=nc.strength_max_s) / nc.strength_max_s
                 xo[:, :, OBS[col]] = rem
             else:
                 xo[:, :, OBS[col]] = 0.0
         obs_pre = mp_norm(torch.asinh(xo), eps=nc.mp_norm_eps)
-        bot_geo = torch.zeros((e, n, BOT_GEO_DIM), device=device, dtype=dtype)
-        obs_h = mp_lerp(mp_norm(self.enc_obs(torch.cat((obs_pre, bot_geo), dim=-1)), eps=nc.mp_norm_eps), te[0].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
+        if self.use_manifold_encoders:
+            bot_geo = torch.zeros((e, n, BOT_GEO_DIM), device=device, dtype=dtype)
+            obs_in_enc = torch.cat((obs_pre, bot_geo), dim=-1)
+        else:
+            obs_in_enc = obs_pre
+        obs_h = mp_lerp(mp_norm(self.enc_obs(obs_in_enc), eps=nc.mp_norm_eps), te[0].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
 
-        # Batched prenormalize_carts
-        xc = carts.clone()
+        xc = carts_d.clone()
         plen = torch.clamp(xc[:, :, CS["PATH_LENGTH"]], min=1.0)
         xc[:, :, CS["PATH_POSITION"]] = xc[:, :, CS["PATH_POSITION"]] / plen
         xc[:, :, CS["PATH_LENGTH"]] = torch.log1p(plen / nc.cart_len_scale)
@@ -785,12 +845,14 @@ class PlanWally(nn.Module):
             xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] = (xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] - center[None, None, :]) / radius
         else:
             xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] = xc[:, :, CS["POS_X"] : CS["POS_Z"] + 1] / nc.pos_fallback_scale
-        c_geo = torch.zeros((e, j, CART_GEO_DIM), device=device, dtype=dtype)
-        cart_pre = mp_norm(torch.asinh(torch.cat((xc, cart_extra, c_geo), dim=-1)), eps=nc.mp_norm_eps)
+        if self.use_manifold_encoders:
+            c_geo = torch.zeros((e, j, CART_GEO_DIM), device=device, dtype=dtype)
+            cart_pre = mp_norm(torch.asinh(torch.cat((xc, cart_extra, c_geo), dim=-1)), eps=nc.mp_norm_eps)
+        else:
+            cart_pre = mp_norm(torch.asinh(torch.cat((xc, cart_extra), dim=-1)), eps=nc.mp_norm_eps)
         cart_h = mp_lerp(mp_norm(self.enc_cart(cart_pre), eps=nc.mp_norm_eps), te[1].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
 
-        # Batched prenormalize_teams
-        xt = teams.clone()
+        xt = teams_d.clone()
         lim = torch.clamp(xt[:, :, TS["SCORE_LIMIT"]], min=1.0)
         xt[:, :, TS["SCORE"]] = xt[:, :, TS["SCORE"]] / lim
         xt[:, :, TS["SCORE_LIMIT"]] = 1.0
@@ -799,7 +861,7 @@ class PlanWally(nn.Module):
         team_h = mp_lerp(mp_norm(self.enc_team(team_pre), eps=nc.mp_norm_eps), te[2].view(1, 1, -1), tb, eps=nc.mp_lerp_eps)
 
         if self.mealy_gate is not None:
-            h_in = obs_h.detach() if (h_prev is None or h_prev.shape != (e, n, self.d)) else mp_norm(h_prev, eps=nc.mp_norm_eps)
+            h_in = obs_h.detach() if (h_prev is None or h_prev.shape != (e, n, self.d)) else mp_norm(h_prev.to(dtype), eps=nc.mp_norm_eps)
             cat_m = torch.cat((obs_h, h_in), dim=-1)
             z_gate = torch.sigmoid(self.mealy_gate(cat_m))
             cand = mp_norm(mp_silu(self.mealy_cand(cat_m), scale=nc.mp_silu_scale), eps=nc.mp_norm_eps)
@@ -808,7 +870,7 @@ class PlanWally(nn.Module):
         else:
             h_next = obs_h.detach()
 
-        x = mp_norm(torch.cat((obs_h, cart_h, team_h), dim=1), eps=nc.mp_norm_eps)  # [E, N+J+K, d]
+        x = mp_norm(torch.cat((obs_h, cart_h, team_h), dim=1), eps=nc.mp_norm_eps)
         entity_teams = torch.cat(
             (
                 obs[:, :, OBS["TEAM"]].to(torch.float32),
@@ -845,16 +907,17 @@ class PlanWally(nn.Module):
         t_lo, t_hi = mc.temp_bounds
         temp_c = torch.clamp(torch.exp(self.log_temp_cart), t_lo, t_hi)
         temp_r = torch.clamp(torch.exp(self.log_temp_rival), t_lo, t_hi)
-        temp_v = torch.clamp(torch.exp(self.log_temp_cell), t_lo, t_hi)
 
-        p_pos = obs[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1]
-        c_pos = carts[:, :, CS["POS_X"] : CS["POS_Z"] + 1]
-        d_pc = (p_pos[:, :, None, :] - c_pos[:, None, :, :]).square().sum(dim=-1).clamp_min(nc.mp_unit_vec_eps).sqrt()
-        db_lo, db_hi = mc.cart_dist_bias_bounds
-        dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), db_lo, db_hi) * torch.log1p(d_pc / mc.cart_dist_scale)
         q_c = mp_unit_vec(self.cart_q(p_h), eps=nc.mp_unit_vec_eps)
         k_c = mp_unit_vec(self.cart_k(c_h), eps=nc.mp_unit_vec_eps)
-        cart_logits = temp_c * torch.einsum("end,ejd->enj", q_c, k_c) - dist_bias
+        cart_logits = temp_c * torch.einsum("end,ejd->enj", q_c, k_c)
+        if self.log_cart_dist_bias is not None:
+            p_pos = obs_d[:, :, OBS["POS_X"] : OBS["POS_Z"] + 1]
+            c_pos = carts_d[:, :, CS["POS_X"] : CS["POS_Z"] + 1]
+            d_pc = (p_pos[:, :, None, :] - c_pos[:, None, :, :]).square().sum(dim=-1).clamp_min(nc.mp_unit_vec_eps).sqrt()
+            db_lo, db_hi = mc.cart_dist_bias_bounds
+            dist_bias = torch.clamp(torch.exp(self.log_cart_dist_bias), db_lo, db_hi) * torch.log1p(d_pc / mc.cart_dist_scale)
+            cart_logits = cart_logits - dist_bias
 
         q_r = mp_unit_vec(self.rival_q(p_h), eps=nc.mp_unit_vec_eps)
         k_r = mp_unit_vec(self.rival_k(t_h), eps=nc.mp_unit_vec_eps)
@@ -863,15 +926,22 @@ class PlanWally(nn.Module):
             own_mask = obs[:, :, OBS["TEAM"]].to(torch.float32)[:, :, None] == team_ids[:, None, :]
             rival_logits = rival_logits.masked_fill(own_mask, mc.rival_own_mask_fill)
 
-        q_v = mp_unit_vec(self.cell_q(p_h), eps=nc.mp_unit_vec_eps)
-        k_v = mp_unit_vec(self.cell_k(c_h), eps=nc.mp_unit_vec_eps)
-        cell_logits = temp_v * torch.einsum("end,ejd->enj", q_v, k_v)
+        if self.cell_q is not None and self.cell_k is not None and self.log_temp_cell is not None:
+            temp_v = torch.clamp(torch.exp(self.log_temp_cell), t_lo, t_hi)
+            q_v = mp_unit_vec(self.cell_q(p_h), eps=nc.mp_unit_vec_eps)
+            k_v = mp_unit_vec(self.cell_k(c_h), eps=nc.mp_unit_vec_eps)
+            cell_logits = temp_v * torch.einsum("end,ejd->enj", q_v, k_v)
+        else:
+            cell_logits = None
 
         vg_lo, vg_hi = mc.value_gain_bounds
         vals = torch.clamp(self.value_gain, vg_lo, vg_hi) * self.value_proj(p_h) + self.value_bias
-        sg_lo, sg_hi = mc.skill_id_gain_bounds
         dg_lo, dg_hi = mc.dyn_gain_bounds
-        pred_skill = (torch.clamp(self.skill_id_gain, sg_lo, sg_hi) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
+        if self.skill_id_proj is not None:
+            sg_lo, sg_hi = mc.skill_id_gain_bounds
+            pred_skill = (torch.clamp(self.skill_id_gain, sg_lo, sg_hi) * self.skill_id_proj(p_h) + self.skill_id_bias).squeeze(-1)
+        else:
+            pred_skill = None
         dyn_drift = (torch.clamp(self.dyn_drift_gain, dg_lo, dg_hi) * self.dyn_drift_proj(p_h)).squeeze(-1)
         dyn_action = torch.clamp(self.dyn_action_gain, dg_lo, dg_hi) * self.dyn_action_proj(p_h)
         return PlanOutput(
@@ -900,13 +970,13 @@ def sample_plan(out: PlanOutput, deterministic: bool = False) -> PlanSample:
         cont = out.cont_mean
         cart_pick = out.cart_logits.argmax(dim=-1)
         rival_pick = out.rival_logits.argmax(dim=-1)
-        cell_pick = out.cell_logits.argmax(dim=-1)
+        cell_pick = out.cell_logits.argmax(dim=-1) if out.cell_logits is not None else None
     else:
-        std = torch.exp(out.cont_logstd)
-        cont = out.cont_mean + std * torch.randn_like(out.cont_mean)
-        cart_pick = torch.distributions.Categorical(logits=out.cart_logits).sample()
-        rival_pick = torch.distributions.Categorical(logits=out.rival_logits).sample()
-        cell_pick = torch.distributions.Categorical(logits=out.cell_logits).sample()
+        std = torch.exp(out.cont_logstd.to(torch.float32))
+        cont = (out.cont_mean.to(torch.float32) + std * torch.randn_like(std)).to(out.cont_mean.dtype)
+        cart_pick = torch.distributions.Categorical(logits=out.cart_logits.to(torch.float32)).sample()
+        rival_pick = torch.distributions.Categorical(logits=out.rival_logits.to(torch.float32)).sample()
+        cell_pick = torch.distributions.Categorical(logits=out.cell_logits.to(torch.float32)).sample() if out.cell_logits is not None else None
     logp = plan_logp(out, cont, cart_pick, rival_pick, cell_pick)
     return PlanSample(cont, cart_pick, rival_pick, cell_pick, logp)
 
@@ -923,10 +993,10 @@ def pack_plan_rows(
     pack_cfg: ActionPackConfig = DEFAULT_ACTION_PACK_CONFIG,
 ) -> np.ndarray:
     out = np.zeros((maxclients, PLAN_WIDTH), dtype=np.float32)
-    cont_np = sample.cont.detach().cpu().numpy()
+    cont_np = sample.cont.detach().to(torch.float32).cpu().numpy()
     cart_np = sample.cart_pick.detach().cpu().numpy()
     rival_np = sample.rival_pick.detach().cpu().numpy()
-    cell_np = sample.cell_pick.detach().cpu().numpy()
+    cell_np = sample.cell_pick.detach().cpu().numpy() if sample.cell_pick is not None else None
     team_ids = team_rows[:, TS["ID"]].astype(np.float32)
     nw_lo, nw_hi = pack_cfg.nav_w_clip
     for i in range(len(obs_rows)):
@@ -936,7 +1006,7 @@ def pack_plan_rows(
         if 1 <= eid <= maxclients:
             r_idx = int(rival_np[i])
             focus_team = float(team_ids[r_idx]) if 0 <= r_idx < len(team_ids) else 0.0
-            c_idx = int(cell_np[i])
+            c_idx = int(cell_np[i]) if cell_np is not None else -1
             if cell_centroids is not None and 0 <= c_idx < len(cell_centroids):
                 nav_x, nav_y = float(cell_centroids[c_idx, 0]), float(cell_centroids[c_idx, 1])
                 nav_w = float(np.log1p(np.exp(np.clip(cont_np[i, 8] - pack_cfg.nav_w_shift, nw_lo, nw_hi))))
@@ -982,19 +1052,19 @@ def pack_plan_tensor(
     team_ids = teams[:, :, TS["ID"]].to(torch.float32)  # [E, K]
     r_idx = sample.rival_pick.long().clamp(0, max(0, team_ids.shape[1] - 1))
     focus_team = team_ids.gather(1, r_idx)
-    u_ds = sample.cont[:, :, 7]
+    u_ds = sample.cont[:, :, 7].to(torch.float32)
     cart_ds = (torch.sign(u_ds) * float(pack_cfg.cart_ds_scale) * (u_ds.abs().clamp_min(1e-8) ** float(pack_cfg.cart_ds_power))).clamp(
         -float(pack_cfg.cart_ds_clip), float(pack_cfg.cart_ds_clip)
     )
-    posture = torch.tanh(sample.cont[:, :, 10])
+    posture = torch.tanh(sample.cont[:, :, 10].to(torch.float32))
     out[:, :, 0] = obs[:, :, OBS["ID"]]
     out[:, :, 1] = sample.cart_pick.to(torch.float32)
-    out[:, :, 2:7] = sample.cont[:, :, 0:5]
+    out[:, :, 2:7] = sample.cont[:, :, 0:5].to(torch.float32)
     out[:, :, 7] = focus_team
-    out[:, :, 8] = sample.cont[:, :, 5]
-    out[:, :, 9] = sample.cont[:, :, 6]
+    out[:, :, 8] = sample.cont[:, :, 5].to(torch.float32)
+    out[:, :, 9] = sample.cont[:, :, 6].to(torch.float32)
     out[:, :, 10] = cart_ds
-    out[:, :, 14] = sample.cont[:, :, 9]
+    out[:, :, 14] = sample.cont[:, :, 9].to(torch.float32)
     out[:, :, 15] = posture
     if active_mask is not None:
         m = active_mask.to(device=device, dtype=torch.bool).unsqueeze(-1)

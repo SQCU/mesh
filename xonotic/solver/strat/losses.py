@@ -18,7 +18,7 @@ class PlanOutput(NamedTuple):
     cont_logstd: torch.Tensor
     cart_logits: torch.Tensor
     rival_logits: torch.Tensor
-    cell_logits: torch.Tensor
+    cell_logits: torch.Tensor | None
     value_winnie: torch.Tensor
     value_lou: torch.Tensor
     dyn_drift: torch.Tensor
@@ -32,7 +32,7 @@ class PlanSample(NamedTuple):
     cont: torch.Tensor
     cart_pick: torch.Tensor
     rival_pick: torch.Tensor
-    cell_pick: torch.Tensor
+    cell_pick: torch.Tensor | None
     logp: torch.Tensor
 
 
@@ -171,29 +171,35 @@ def plan_logp(
     cont: torch.Tensor,
     cart_pick: torch.Tensor,
     rival_pick: torch.Tensor,
-    cell_pick: torch.Tensor,
+    cell_pick: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    inv_std = torch.exp(-out.cont_logstd)
-    err = (cont - out.cont_mean) * inv_std
-    lp_cont = -0.5 * (err.square() + 2.0 * out.cont_logstd + math.log(2.0 * math.pi)).sum(dim=-1)
-    lp_cart = F.log_softmax(out.cart_logits, dim=-1).gather(-1, cart_pick.long().unsqueeze(-1)).squeeze(-1)
-    lp_rival = F.log_softmax(out.rival_logits, dim=-1).gather(-1, rival_pick.long().unsqueeze(-1)).squeeze(-1)
-    lp_cell = F.log_softmax(out.cell_logits, dim=-1).gather(-1, cell_pick.long().unsqueeze(-1)).squeeze(-1)
-    return lp_cont + lp_cart + lp_rival + lp_cell
+    c_mean = out.cont_mean.to(torch.float32)
+    c_lstd = out.cont_logstd.to(torch.float32)
+    inv_std = torch.exp(-c_lstd)
+    err = (cont.to(torch.float32) - c_mean) * inv_std
+    lp_cont = -0.5 * (err.square() + 2.0 * c_lstd + math.log(2.0 * math.pi)).sum(dim=-1)
+    lp_cart = F.log_softmax(out.cart_logits.to(torch.float32), dim=-1).gather(-1, cart_pick.long().unsqueeze(-1)).squeeze(-1)
+    lp_rival = F.log_softmax(out.rival_logits.to(torch.float32), dim=-1).gather(-1, rival_pick.long().unsqueeze(-1)).squeeze(-1)
+    lp = lp_cont + lp_cart + lp_rival
+    if out.cell_logits is not None and cell_pick is not None:
+        lp = lp + F.log_softmax(out.cell_logits.to(torch.float32), dim=-1).gather(-1, cell_pick.long().unsqueeze(-1)).squeeze(-1)
+    return lp
 
 
 def plan_discrete_entropy(out: PlanOutput) -> torch.Tensor:
-    p_cart = F.softmax(out.cart_logits, dim=-1)
-    h_cart = -(p_cart * F.log_softmax(out.cart_logits, dim=-1)).sum(dim=-1)
-    p_riv = F.softmax(out.rival_logits, dim=-1)
-    h_riv = -(p_riv * F.log_softmax(out.rival_logits, dim=-1)).sum(dim=-1)
-    p_cell = F.softmax(out.cell_logits, dim=-1)
-    h_cell = -(p_cell * F.log_softmax(out.cell_logits, dim=-1)).sum(dim=-1)
-    return h_cart + h_riv + h_cell
+    cl = out.cart_logits.to(torch.float32)
+    h_cart = -(F.softmax(cl, dim=-1) * F.log_softmax(cl, dim=-1)).sum(dim=-1)
+    rl = out.rival_logits.to(torch.float32)
+    h_riv = -(F.softmax(rl, dim=-1) * F.log_softmax(rl, dim=-1)).sum(dim=-1)
+    h = h_cart + h_riv
+    if out.cell_logits is not None:
+        vl = out.cell_logits.to(torch.float32)
+        h = h - (F.softmax(vl, dim=-1) * F.log_softmax(vl, dim=-1)).sum(dim=-1)
+    return h
 
 
 def plan_entropy(out: PlanOutput) -> torch.Tensor:
-    h_cont = (out.cont_logstd + 0.5 * math.log(2.0 * math.pi * math.e)).sum(dim=-1)
+    h_cont = (out.cont_logstd.to(torch.float32) + 0.5 * math.log(2.0 * math.pi * math.e)).sum(dim=-1)
     return h_cont + plan_discrete_entropy(out)
 
 

@@ -79,9 +79,15 @@ class ModelConfig:
     r_gram: int = 128
     r_dpp: int = 64
     recurrent: bool = True
-    use_fsq: bool = True
+    use_fsq: bool = False
     fsq_levels: tuple[int, ...] = (5, 5, 5, 5)
-    use_mealy: bool = True
+    use_mealy: bool = False
+    use_cart_dist_bias: bool = False
+    use_cell_head: bool = False
+    use_manifold_encoders: bool = False
+    use_aux_skill_head: bool = False
+    mask_bot_config_inputs: bool = False
+    dtype: str = "bfloat16"
     type_blend_init_logit: float = -1.8
     evt_blend: float = 0.2
     fovea_blend: float = 0.25
@@ -436,6 +442,7 @@ class WorldDistributionConfig:
 class SimDtConfig:
     dt: float = 0.4
     mode: str = "analytic"
+    dtype: str = "bfloat16"
     base_envs: int = 32
     group_size: int = 8
     warmup_steps_min: int = 15
@@ -443,11 +450,12 @@ class SimDtConfig:
     rollout_horizon: int = 40
     iterations: int = 24
     mid_snapshot_iter: int = 12
-    ppo_epochs: int = 3
-    minibatch_envs: int = 64
-    grpo_weight: float = 0.7
-    gae_weight: float = 0.3
-    terminal_win_bonus: float = 1.5
+    ppo_epochs: int = 2
+    target_microbatch_rows: int = 4096
+    target_opt_steps_per_epoch: int = 12
+    grpo_weight: float = 0.6
+    gae_weight: float = 0.4
+    terminal_win_bonus: float = 0.0
     point_limit_base: float = 160.0
     common_random_numbers: bool = True
     eval_interval: int = 6
