@@ -944,10 +944,10 @@ def eval_darkplaces_transfer(
         vfs.close()
         return {"error": f"darkplaces binary not found at {harness.dp_bin}"}
 
-    # Compact held-out parametric gas_world_bsp specs streamed zero-copy over POSIX shm
+    # Held-out parametric gas_world_bsp worlds (tiles >= 3) streamed zero-copy over POSIX shm
     dp_specs = [
-        {"seed": 9101, "family": "gas_world_bsp", "teams": 3, "carts": 9, "players": 24, "tiles": 2},
         {"seed": 9102, "family": "gas_world_bsp", "teams": 4, "carts": 12, "players": 32, "tiles": 3},
+        {"seed": 9104, "family": "gas_world_bsp", "teams": 6, "carts": 18, "players": 36, "tiles": 4},
     ]
     n_ep = max(1, int(sc.darkplaces_eval_episodes))
     dp_specs = dp_specs[:n_ep]
@@ -976,124 +976,125 @@ def eval_darkplaces_transfer(
             maxc = min(255, N + 16)
 
             for ti, trip in enumerate(triplets):
-                seat_arms = [trip[k_i % len(trip)] for k_i in range(K)]
-                ep_dir = work_dir / f"dp_s{si}_t{ti}"
-                ep_dir.mkdir(parents=True, exist_ok=True)
-                engine = Engine("udp://127.0.0.1:0", harness.framebytes)
-                inbox = RuntimeFrames(harness.framebytes, plan_only=True)
-                procs, logs = harness._spawn_servers(
-                    ep_dir, engine.path, [sp["seed"] + ti * 13], base_port + si * 20 + ti * 2,
-                    map_names=[mapname],
-                    skill=cfg.harness.default_skill,
-                    teams_per_server=[K],
-                    bots_per_server=[N],
-                    maxclients_per_server=[maxc],
-                    meta_per_server=[spec_out],
-                    point_limit=float(sc.darkplaces_point_limit),
-                )
-                routes: dict[int, tuple[int, object]] = {}
-                mealy_states: dict[str, dict[int, np.ndarray]] = defaultdict(dict)
-                last_scores: dict[int, float] = {}
-                last_sim_t = 0.0
-                finished = False
-                ep_t0 = time.monotonic()
-                max_wall = 90.0
+                for rot in range(len(trip)):
+                    seat_arms = [trip[(k_i + rot) % len(trip)] for k_i in range(K)]
+                    ep_dir = work_dir / f"dp_s{si}_t{ti}_r{rot}"
+                    ep_dir.mkdir(parents=True, exist_ok=True)
+                    engine = Engine("udp://127.0.0.1:0", harness.framebytes)
+                    inbox = RuntimeFrames(harness.framebytes, plan_only=True)
+                    procs, logs = harness._spawn_servers(
+                        ep_dir, engine.path, [sp["seed"] + ti * 31 + rot * 7], base_port + si * 40 + ti * 6 + rot,
+                        map_names=[mapname],
+                        skill=cfg.harness.default_skill,
+                        teams_per_server=[K],
+                        bots_per_server=[N],
+                        maxclients_per_server=[maxc],
+                        meta_per_server=[spec_out],
+                        point_limit=float(sc.darkplaces_point_limit),
+                    )
+                    routes: dict[int, tuple[int, object]] = {}
+                    mealy_states: dict[str, dict[int, np.ndarray]] = defaultdict(dict)
+                    last_scores: dict[int, float] = {}
+                    last_sim_t = 0.0
+                    finished = False
+                    ep_t0 = time.monotonic()
+                    max_wall = 90.0
 
-                try:
-                    while not finished and (time.monotonic() - ep_t0) < max_wall:
-                        if all(p.poll() is not None for p in procs):
-                            break
-                        readable, _, _ = select.select([engine], [], [], 0.05)
-                        if not readable:
-                            continue
-                        for node, address, buf in engine.receive():
-                            s = inbox.feed(buf)
-                            if s is not None:
-                                routes[s] = (node, address)
-                        while (ready := inbox.take()) is not None:
-                            (session, tick_id), records, _ = ready
-                            obs_raw = records[OBSERVATION_KIND][1]
-                            cart_rows = records[CART_KIND][1]
-                            team_rows = records[TEAM_KIND][1]
-                            obs_rows = obs_raw[obs_raw[:, OBS["PRESENT"]] > 0.5]
-                            if len(obs_rows) == 0 or len(cart_rows) == 0 or len(team_rows) == 0:
+                    try:
+                        while not finished and (time.monotonic() - ep_t0) < max_wall:
+                            if all(p.poll() is not None for p in procs):
+                                break
+                            readable, _, _ = select.select([engine], [], [], 0.05)
+                            if not readable:
                                 continue
-                            last_sim_t = max(last_sim_t, float(obs_rows[:, OBS["ENGINE_TIME"]].max()))
-                            for r in team_rows:
-                                last_scores[int(round(float(r[TS["ID"]])))] = float(r[TS["SCORE"]])
-                            if bool(np.any(team_rows[:, TS["FINISHED"]] > 0.5)):
-                                finished = True
-
-                            sv_maxc_obs = max(maxc, len(obs_raw))
-                            bot_teams = obs_rows[:, OBS["TEAM"]].astype(np.int64)
-                            bot_arms = np.asarray([seat_arms[(int(t) - 1) % len(seat_arms)] for t in bot_teams], dtype=object)
-                            plan_mat = np.zeros((sv_maxc_obs, PLAN_WIDTH), dtype=np.float32)
-
-                            obs_t = torch.as_tensor(obs_rows, dtype=torch.float32, device=device)
-                            carts_t = torch.as_tensor(cart_rows, dtype=torch.float32, device=device)
-                            teams_t = torch.as_tensor(team_rows, dtype=torch.float32, device=device)
-                            # Compute map center/radius from carts+bots for exact PlanWally parity
-                            all_xy = torch.cat((obs_t[:, OBS["POS_X"] : OBS["POS_Z"] + 1], carts_t[:, CS["POS_X"] : CS["POS_Z"] + 1]), dim=0)
-                            lo_p = all_xy.amin(dim=0)
-                            hi_p = all_xy.amax(dim=0)
-                            geo = {
-                                "map_center": 0.5 * (lo_p + hi_p),
-                                "map_radius": ((hi_p - lo_p).norm() * 0.5).clamp_min(128.0),
-                            }
-
-                            for arm in set(seat_arms):
-                                if arm == "default":
+                            for node, address, buf in engine.receive():
+                                s = inbox.feed(buf)
+                                if s is not None:
+                                    routes[s] = (node, address)
+                            while (ready := inbox.take()) is not None:
+                                (session, tick_id), records, _ = ready
+                                obs_raw = records[OBSERVATION_KIND][1]
+                                cart_rows = records[CART_KIND][1]
+                                team_rows = records[TEAM_KIND][1]
+                                obs_rows = obs_raw[obs_raw[:, OBS["PRESENT"]] > 0.5]
+                                if len(obs_rows) == 0 or len(cart_rows) == 0 or len(team_rows) == 0:
                                     continue
-                                if arm in SCRIPTED_ANCHORS:
-                                    sp_mat = scripted_plan_rows(arm, obs_rows, cart_rows, team_rows, bot_arms, maxclients=sv_maxc_obs)
-                                    m_nz = sp_mat[:, 0] > 0.5
-                                    plan_mat[m_nz] = sp_mat[m_nz]
-                                    continue
-                                mdl = arm_models.get(arm)
-                                if mdl is None:
-                                    continue
-                                h_prev = None
-                                if mdl.use_mealy and mealy_states[arm]:
-                                    h_arr = np.zeros((len(obs_rows), mdl.d), dtype=np.float32)
-                                    for bi in range(len(obs_rows)):
-                                        eid = int(round(float(obs_rows[bi, OBS["ID"]])))
-                                        if eid in mealy_states[arm]:
-                                            h_arr[bi] = mealy_states[arm][eid]
-                                    h_prev = torch.as_tensor(h_arr, dtype=torch.float32, device=device)
-                                with torch.no_grad():
-                                    out = mdl(obs_t, carts_t, teams_t, None, geo=geo, h_prev=h_prev)
-                                    smp = sample_plan(out, deterministic=True)
-                                if mdl.use_mealy:
-                                    hn = out.h_next.detach().cpu().numpy()
-                                    for bi in range(len(obs_rows)):
-                                        mealy_states[arm][int(round(float(obs_rows[bi, OBS["ID"]])))] = hn[bi]
-                                packed = pack_plan_rows(obs_rows, team_rows, smp, bot_arms, {arm}, maxclients=sv_maxc_obs, pack_cfg=cfg.action_pack)
-                                m_nz = packed[:, 0] > 0.5
-                                plan_mat[m_nz] = packed[m_nz]
+                                last_sim_t = max(last_sim_t, float(obs_rows[:, OBS["ENGINE_TIME"]].max()))
+                                for r in team_rows:
+                                    last_scores[int(round(float(r[TS["ID"]])))] = float(r[TS["SCORE"]])
+                                if bool(np.any(team_rows[:, TS["FINISHED"]] > 0.5)):
+                                    finished = True
 
-                            if session in routes:
-                                node, addr = routes[session]
-                                req_id = records[OBSERVATION_KIND][0]["req_id"]
-                                engine.send(addr, node, frames(PLAN_KIND, req_id, tick_id, plan_mat, harness.framebytes, session))
-                finally:
-                    harness._stop_servers(procs, logs)
-                    engine.close()
+                                sv_maxc_obs = max(maxc, len(obs_raw))
+                                bot_teams = obs_rows[:, OBS["TEAM"]].astype(np.int64)
+                                bot_arms = np.asarray([seat_arms[(int(t) - 1) % len(seat_arms)] for t in bot_teams], dtype=object)
+                                plan_mat = np.zeros((sv_maxc_obs, PLAN_WIDTH), dtype=np.float32)
 
-                ep_wall = time.monotonic() - ep_t0
-                total_wall_s += ep_wall
-                total_sim_s += last_sim_t
-                by_arm: dict[str, list[float]] = defaultdict(list)
-                for k_i, arm in enumerate(seat_arms):
-                    by_arm[arm].append(float(last_scores.get(k_i + 1, 0.0)))
-                m_rec = {a: float(np.mean(vs)) for a, vs in by_arm.items()}
-                matches.append(m_rec)
-                per_episode.append({
-                    "map": mapname, "K": K, "N": N, "triplet": list(trip),
-                    "finished": finished, "sim_s": round(last_sim_t, 2),
-                    "wall_s": round(ep_wall, 2),
-                    "speedup_x": round(last_sim_t / max(ep_wall, 1e-3), 2),
-                    "scores": {a: round(v, 2) for a, v in m_rec.items()},
-                })
+                                obs_t = torch.as_tensor(obs_rows, dtype=torch.float32, device=device)
+                                carts_t = torch.as_tensor(cart_rows, dtype=torch.float32, device=device)
+                                teams_t = torch.as_tensor(team_rows, dtype=torch.float32, device=device)
+                                all_xy = torch.cat((obs_t[:, OBS["POS_X"] : OBS["POS_Z"] + 1], carts_t[:, CS["POS_X"] : CS["POS_Z"] + 1]), dim=0)
+                                lo_p = all_xy.amin(dim=0)
+                                hi_p = all_xy.amax(dim=0)
+                                geo = {
+                                    "map_center": 0.5 * (lo_p + hi_p),
+                                    "map_radius": ((hi_p - lo_p).norm() * 0.5).clamp_min(128.0),
+                                }
+
+                                for arm in set(seat_arms):
+                                    if arm == "default":
+                                        continue
+                                    if arm in SCRIPTED_ANCHORS:
+                                        sp_mat = scripted_plan_rows(arm, obs_rows, cart_rows, team_rows, bot_arms, maxclients=sv_maxc_obs)
+                                        m_nz = sp_mat[:, 0] > 0.5
+                                        plan_mat[m_nz] = sp_mat[m_nz]
+                                        continue
+                                    mdl = arm_models.get(arm)
+                                    if mdl is None:
+                                        continue
+                                    h_prev = None
+                                    if mdl.use_mealy and mealy_states[arm]:
+                                        h_arr = np.zeros((len(obs_rows), mdl.d), dtype=np.float32)
+                                        for bi in range(len(obs_rows)):
+                                            eid = int(round(float(obs_rows[bi, OBS["ID"]])))
+                                            if eid in mealy_states[arm]:
+                                                h_arr[bi] = mealy_states[arm][eid]
+                                        h_prev = torch.as_tensor(h_arr, dtype=torch.float32, device=device)
+                                    with torch.no_grad():
+                                        out = mdl(obs_t, carts_t, teams_t, None, geo=geo, h_prev=h_prev)
+                                        smp = sample_plan(out, deterministic=True)
+                                    if mdl.use_mealy:
+                                        hn = out.h_next.detach().cpu().numpy()
+                                        for bi in range(len(obs_rows)):
+                                            mealy_states[arm][int(round(float(obs_rows[bi, OBS["ID"]])))] = hn[bi]
+                                    packed = pack_plan_rows(obs_rows, team_rows, smp, bot_arms, {arm}, maxclients=sv_maxc_obs, pack_cfg=cfg.action_pack)
+                                    m_nz = packed[:, 0] > 0.5
+                                    plan_mat[m_nz] = packed[m_nz]
+
+                                if session in routes:
+                                    node, addr = routes[session]
+                                    req_id = records[OBSERVATION_KIND][0]["req_id"]
+                                    engine.send(addr, node, frames(PLAN_KIND, req_id, tick_id, plan_mat, harness.framebytes, session))
+                    finally:
+                        harness._stop_servers(procs, logs)
+                        engine.close()
+
+                    ep_wall = time.monotonic() - ep_t0
+                    total_wall_s += ep_wall
+                    total_sim_s += last_sim_t
+                    by_arm: dict[str, list[float]] = defaultdict(list)
+                    for k_i, arm in enumerate(seat_arms):
+                        by_arm[arm].append(float(last_scores.get(k_i + 1, 0.0)))
+                    m_rec = {a: float(np.mean(vs)) for a, vs in by_arm.items()}
+                    if last_sim_t > 1.0:
+                        matches.append(m_rec)
+                    per_episode.append({
+                        "map": mapname, "K": K, "N": N, "triplet": list(trip), "rot": rot,
+                        "finished": finished, "sim_s": round(last_sim_t, 2),
+                        "wall_s": round(ep_wall, 2),
+                        "speedup_x": round(last_sim_t / max(ep_wall, 1e-3), 2),
+                        "scores": {a: round(v, 2) for a, v in m_rec.items()},
+                    })
     finally:
         vfs.close()
 
