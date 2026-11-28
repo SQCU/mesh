@@ -1782,6 +1782,7 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
 
   threadgroup float sh_B[72 * 32];
   threadgroup float sh_dB[72 * 32];
+  threadgroup float sh_G[32 * 32];
   threadgroup float sh_db2[32];
   threadgroup float sh_ddaw[32];
   threadgroup float sh_v[32], sh_vt[32], sh_ul[32], sh_ep[32];
@@ -1892,9 +1893,6 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
         }
         ev_sq = err_v * err_v;
         dv_a = (2.0f * inv_A * w_flow * gsc) * err_v;
-        for (uint d = 0; d < 32u; d++) {
-          sh_dB[tid * 32u + d] += dv_a * (sh_v[d] - (sh_ul[d] - sh_ep[d]));
-        }
       }
       const float lv_t = gf_tg_sum(ev_sq, lane, sg, 4u, tg_red) * inv_A;
       if (tid == 0u) loc_l_vel += lv_t * w_flow;
@@ -1916,6 +1914,31 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     const float un_a = (valid_env > 0.5f && tid < A_dim && tid != W_nav + t0) ? (ut[tid] * ut[tid]) : 0.0f;
     const float un_s = gf_tg_sum(un_a, lane, sg, 4u, tg_red) * inv_A;
     if (tid == 0u && valid_env > 0.5f) loc_unorm += sqrt(un_s) * inv_en;
+  }
+
+  // Tight-frame isotropy regularizer on B_H: (0.25 / (B_cur * 32^2)) * ||B_H^T B_H - (A_dim/32) I||_F^2
+  // Prevents basis rank collapse while keeping B_H permutation-equivariant and full-rank!
+  if (valid_env > 0.5f) {
+    const float diag_t = float(A_dim) / 32.0f;
+    float iso_sq = 0.0f;
+    for (uint pq = tid; pq < 1024u; pq += 128u) {
+      const uint p = pq / 32u, q = pq % 32u;
+      float s = (p == q) ? -diag_t : 0.0f;
+      for (uint a = 0; a < A_dim; a++) s += sh_B[a * 32u + p] * sh_B[a * 32u + q];
+      sh_G[pq] = s;
+      iso_sq += s * s;
+    }
+    const float iso_loss = gf_tg_sum(iso_sq, lane, sg, 4u, tg_red) * (0.25f / (1024.0f * float(B_cur)));
+    if (tid == 0u) loc_l_vel += iso_loss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float iso_coef = (4.0f * 0.25f / (1024.0f * float(B_cur))) * gsc;
+    for (uint idx = tid; idx < A_dim * 32u; idx += 128u) {
+      const uint a = idx / 32u, q = idx % 32u;
+      float g_iso = 0.0f;
+      for (uint p = 0; p < 32u; p++) g_iso += sh_B[a * 32u + p] * sh_G[p * 32u + q];
+      sh_dB[idx] += iso_coef * g_iso;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
   // Backprop sh_dB [A_dim, 32] through unit_vec(B_raw) -> d_B_nav [EW_pad, 64], d_B_tm [EK_pad, 64], atomic d_W_b_self!

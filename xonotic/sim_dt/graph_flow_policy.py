@@ -70,6 +70,7 @@ class GraphFlowConfig:
     v_max: float = 3.0
     ridge_lambda: float = 0.02
     basis_rec_weight: float = 0.20
+    basis_iso_weight: float = 0.25
     u_clip: float = 6.0
 
 
@@ -966,12 +967,16 @@ class GraphFlowPolicy(nn.Module):
 
         v_pred = self.flow_vel_eval(z_t, tau_grid, c_exp)  # [T, E, N, d_e]
 
-        # Consistent action-metric CFM loss on v* = u_lat_targ - eps + separate basis reconstruction loss!
-        v_diff_act = self.lift_to_action(v_pred - (u_lat_targ.unsqueeze(0) - eps), B_H, bot_t0, W_nav, K)
+        # Consistent action-metric CFM loss on v* = u_lat_targ - eps (detach B_H here so CFM cannot cheat by
+        # collapsing B_H rank!) + basis reconstruction + tight-frame isotropy ||B_H^T B_H - (A_dim/d_e) I||_F^2!
+        v_diff_act = self.lift_to_action(v_pred - (u_lat_targ.unsqueeze(0) - eps), B_H.detach(), bot_t0, W_nav, K)
         vel_err = v_diff_act.square().mean(dim=-1)  # [T, E, N]
         u_rec_act = self.lift_to_action(u_lat_targ, B_H, bot_t0, W_nav, K)
         rec_err = (u_rec_act - u_t).square().mean(dim=-1)  # [E, N]
-        loss_vel = ((vel_err.mean(dim=0) + float(cfg.basis_rec_weight) * rec_err) * w_norm).sum() / am_sum
+        A_dim = W_nav + K + 4
+        G_iso = torch.einsum("ead,eaf->edf", B_H, B_H) - (float(A_dim) / float(self.d_e)) * torch.eye(self.d_e, device=dev).unsqueeze(0)
+        loss_iso = float(cfg.basis_iso_weight) * G_iso.square().mean()
+        loss_vel = ((vel_err.mean(dim=0) + float(cfg.basis_rec_weight) * rec_err) * w_norm).sum() / am_sum + loss_iso
 
         # Winnie / Lou Huber critic loss
         ret_f = gae_ret.to(device=dev, dtype=torch.float32)

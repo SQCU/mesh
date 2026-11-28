@@ -353,6 +353,23 @@ def evaluate_multimodal_branch_diversity(
     skew1 = float(np.mean(pc1_z ** 3))
     kurt1 = float(np.mean(pc1_z ** 4))
     bimod1 = (skew1 ** 2 + 1.0) / max(kurt1, 1e-6)
+    # Also measure single-bot p(u_0 | s_0) and B_H basis effective rank (guards against rank-1 basis collapse!)
+    U128_b0 = res_128["u_vel"][:, main_idx[0], :].numpy()  # [128, A_dim]
+    b0_mu = U128_b0.mean(axis=0)
+    b0_c = U128_b0 - b0_mu
+    b0_spr = float(np.sqrt(np.mean(np.sum(b0_c ** 2, axis=1))))
+    b0_cov = (b0_c.T @ b0_c) / 127.0
+    b0_ev, b0_evec = np.linalg.eigh(b0_cov)
+    b0_ev = np.maximum(b0_ev[::-1], 0.0)
+    b0_p = b0_ev / max(float(b0_ev.sum()), 1e-12)
+    b0_eff_r = float(np.exp(-np.sum(np.where(b0_p > 1e-12, b0_p * np.log(np.maximum(b0_p, 1e-12)), 0.0))))
+    b0_pc1 = b0_c @ b0_evec[:, -1]
+    b0_z = (b0_pc1 - b0_pc1.mean()) / max(float(b0_pc1.std()), 1e-6)
+    b0_bimod = (float(np.mean(b0_z ** 3)) ** 2 + 1.0) / max(float(np.mean(b0_z ** 4)), 1e-6)
+    enc0 = model.encode_backbone(obs0[:1], nav0[:1], carts0[:1], teams0[:1], acc0[:1], world.nav_kern, geo=geo)
+    sv_bh = np.linalg.svd(enc0["B_H"][0].float().numpy(), compute_uv=False)
+    p_bh = (sv_bh ** 2) / max(float((sv_bh ** 2).sum()), 1e-12)
+    bh_eff_r = float(np.exp(-np.sum(np.where(p_bh > 1e-12, p_bh * np.log(np.maximum(p_bh, 1e-12)), 0.0))))
     c_128.close()
 
     c_pol.close()
@@ -371,6 +388,10 @@ def evaluate_multimodal_branch_diversity(
         "s0_128_eff_rank": round(eff_r128, 2),
         "s0_128_pc1_var": round(float(p128[0]), 4),
         "s0_128_pc1_bimod": round(bimod1, 4),
+        "s0_bot0_eff_rank": round(b0_eff_r, 2),
+        "s0_bot0_spr_over_mu": round(b0_spr / max(float(np.linalg.norm(b0_mu)), 1e-6), 4),
+        "s0_bot0_bimod": round(b0_bimod, 4),
+        "bh_eff_rank": round(bh_eff_r, 2),
     }
 
 
@@ -469,7 +490,7 @@ def main() -> None:
             print(
                 f"  {an:10s}: zero_err={dv['zero_collapse_max_u']:.1e} | "
                 f"G8(u_L2={dv['s0_branch_u_l2']:.3f} u_cos={dv['s0_branch_u_cos']:+.3f} pos_div={dv['end_pos_divergence_u']:.1f}u gk_dis={dv['end_goal_kind_disagree']:.3f} sc_std={dv['end_score_std_across_G']:.2f}) | "
-                f"p(u|s0,128)(uRms={dv['s0_128_u_rms']:.2f} sat={dv['s0_128_sat_frac']*100:.2f}% spr/mu={dv['s0_128_spread_over_mean']:.2f} cos={dv['s0_128_pair_cos']:+.3f} effR={dv['s0_128_eff_rank']:.1f} bimod={dv['s0_128_pc1_bimod']:.3f})"
+                f"p(u|s0,128)(uRms={dv['s0_128_u_rms']:.2f} sat={dv['s0_128_sat_frac']*100:.2f}% spr/mu={dv['s0_128_spread_over_mean']:.2f} cos={dv['s0_128_pair_cos']:+.3f} tmEffR={dv['s0_128_eff_rank']:.1f} bot0EffR={dv['s0_bot0_eff_rank']:.1f} BH_effR={dv['bh_eff_rank']:.1f} bimod={dv['s0_bot0_bimod']:.3f})"
             )
 
 
