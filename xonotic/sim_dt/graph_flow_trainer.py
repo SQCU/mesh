@@ -457,6 +457,9 @@ class GraphFlowRolloutPool:
         u_sq_cnt = 0
 
         obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
+        ou_rho = max(0.0, min(0.95, float(getattr(c_main.cfg, "ou_rho", 0.0))))
+        ou_scale = math.sqrt(max(0.0, 1.0 - ou_rho * ou_rho))
+        q_ou_main: torch.Tensor | None = None
         for t in range(H):
             if G == 1:
                 fin_pre = eng.t_finished
@@ -476,11 +479,17 @@ class GraphFlowRolloutPool:
             acc_c = acc_in.clone()
             p_team = torch.round(obs_c[:, :, OBS["TEAM"]].float()).to(torch.int64)
 
-            # Draw orthogonalized Strategy(team) + Tactic(bot) base noise across the G branches!
-            eps_main = sample_orthogonal_team_bot_noise(
+            # Draw orthogonalized Strategy(team) + Tactic(bot) base noise (with optional OU temporal persistence!)
+            eps_raw = sample_orthogonal_team_bot_noise(
                 B, G, N, d_e, p_team, K,
                 team_corr=self.team_corr, sigma=sigma_b, generator=slot.noise_gen,
             )
+            if ou_rho > 0.0 and q_ou_main is not None:
+                q_ou_main = ou_rho * q_ou_main + ou_scale * eps_raw
+                eps_main = q_ou_main
+            else:
+                q_ou_main = eps_raw
+                eps_main = eps_raw
 
             u_vel = torch.zeros((E, N, A_dim), dtype=torch.float32)
             has_vel = torch.zeros((E, N), dtype=torch.bool)
@@ -757,6 +766,7 @@ class GraphFlowRolloutPool:
         u_sq_cnt = {a: 0 for a in present_active}
 
         obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
+        q_ou_arms: dict[str, torch.Tensor | None] = {a: None for a in present_active}
         for t in range(H):
             if G == 1:
                 fin_pre = eng.t_finished
@@ -791,10 +801,17 @@ class GraphFlowRolloutPool:
                     continue
                 eps_cur = None
                 if arm in buf_amask:
-                    eps_cur = sample_orthogonal_team_bot_noise(
+                    eps_raw = sample_orthogonal_team_bot_noise(
                         B, G, N, cpol.d_e, p_team, K,
                         team_corr=self.team_corr, sigma=float(cpol.cfg.sigma_base), generator=slot.noise_gen,
                     )
+                    rho_a = max(0.0, min(0.95, float(getattr(cpol.cfg, "ou_rho", 0.0))))
+                    if rho_a > 0.0 and q_ou_arms[arm] is not None:
+                        q_ou_arms[arm] = rho_a * q_ou_arms[arm] + math.sqrt(max(0.0, 1.0 - rho_a * rho_a)) * eps_raw
+                        eps_cur = q_ou_arms[arm]
+                    else:
+                        q_ou_arms[arm] = eps_raw
+                        eps_cur = eps_raw
                 res = cpol.sample_velocity(obs_c, nav_c, carts_c, teams_c, acc_c, geo=slot.geo, eps=eps_cur)
                 u_vel = torch.where(mask.unsqueeze(-1), res["u_vel"], u_vel)
                 has_vel = has_vel | mask

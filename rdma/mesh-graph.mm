@@ -4127,7 +4127,7 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
           [enc setBuffer:bbnd.mtl offset:bbnd.off atIndex:10];
           [enc setBuffer:bdiag.mtl offset:bdiag.off atIndex:11];
           [enc setBytes:op.u length:sizeof(op.u) atIndex:12];
-          [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+          [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         } else if (op.u[7] == 4u) {
           // mg_opt_snr_accum: in[0]=g_proj, out[0]=g_sum, out[1]=q_sum, u={n_elems, grp_idx, ..., 4}
           const BufSlot &bgp = g->bufs[op.in[0]], &bgs = g->bufs[op.out[0]], &bqs = g->bufs[op.out[1]];
@@ -4481,6 +4481,53 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         [enc setBytes:op.u length:sizeof(op.u) atIndex:6];
         [enc setBytes:op.f length:sizeof(op.f) atIndex:7];
         [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MHC_MIX: {
+        const BufSlot &b0 = g->bufs[op.in[0]];
+        const BufSlot &b1 = (op.in[1] >= 0 ? g->bufs[op.in[1]] : b0);
+        const BufSlot &b2 = (op.in[2] >= 0 ? g->bufs[op.in[2]] : b0);
+        const BufSlot &bs = (op.in[3] >= 0 ? g->bufs[op.in[3]] : b0);
+        const BufSlot &bo = g->bufs[op.out[0]];
+        const uint32_t EM_pad = op.u[1];
+        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_mhc_mix")];
+        [enc setBuffer:b0.mtl offset:b0.off atIndex:0];
+        [enc setBuffer:b1.mtl offset:b1.off atIndex:1];
+        [enc setBuffer:b2.mtl offset:b2.off atIndex:2];
+        [enc setBuffer:bs.mtl offset:bs.off atIndex:3];
+        [enc setBuffer:bo.mtl offset:bo.off atIndex:4];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:5];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake((EM_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_MHC_MIX_BWD: {
+        const BufSlot &b0 = g->bufs[op.in[0]];
+        const BufSlot &b1 = (op.in[1] >= 0 ? g->bufs[op.in[1]] : b0);
+        const BufSlot &b2 = (op.in[2] >= 0 ? g->bufs[op.in[2]] : b0);
+        const BufSlot &b3 = (op.in[3] >= 0 ? g->bufs[op.in[3]] : b0);
+        const BufSlot &bs = (op.in[4] >= 0 ? g->bufs[op.in[4]] : b0);
+        const BufSlot &bgr = (op.in[5] >= 0 ? g->bufs[op.in[5]] : b0);
+        const BufSlot &bo0 = (op.out[0] >= 0 ? g->bufs[op.out[0]] : b0);
+        const BufSlot &bo1 = (op.out[1] >= 0 ? g->bufs[op.out[1]] : bo0);
+        const BufSlot &bo2 = (op.out[2] >= 0 ? g->bufs[op.out[2]] : bo0);
+        const uint32_t mode = op.u[4];
+        const uint32_t tgs = (mode == 4u) ? 1u : ((op.u[1] + 3u) / 4u);
+        const uint32_t ths = (mode == 4u) ? 32u : 128u;
+        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_mhc_mix_bwd")];
+        [enc setBuffer:b0.mtl offset:b0.off atIndex:0];
+        [enc setBuffer:b1.mtl offset:b1.off atIndex:1];
+        [enc setBuffer:b2.mtl offset:b2.off atIndex:2];
+        [enc setBuffer:b3.mtl offset:b3.off atIndex:3];
+        [enc setBuffer:bs.mtl offset:bs.off atIndex:4];
+        [enc setBuffer:bo0.mtl offset:bo0.off atIndex:5];
+        [enc setBuffer:bo1.mtl offset:bo1.off atIndex:6];
+        [enc setBuffer:bo2.mtl offset:bo2.off atIndex:7];
+        [enc setBuffer:bgr.mtl offset:bgr.off atIndex:8];
+        [enc setBuffer:(mode == 4u ? bo0.mtl : bgr.mtl) offset:(mode == 4u ? bo0.off : bgr.off) atIndex:9];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:10];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:11];
+        [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(ths, 1, 1)];
         break;
       }
       default:

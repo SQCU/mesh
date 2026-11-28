@@ -941,6 +941,15 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
     if out_dir is not None and args.tp_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
         torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+        (out_dir / "arch_meta.json").write_text(json.dumps({
+            "arch": str(getattr(args, "arch", "tied4")),
+            "mhc_streams": int(gf_cfg.mhc_streams),
+            "ou_rho": float(gf_cfg.ou_rho),
+            "block_schedule": list(gf_cfg.resolved_schedule()),
+            "n_uniq_blocks": int(gf_cfg.n_uniq_blocks()),
+            "eff_depth": int(gf_cfg.eff_depth()),
+            "n_params": int(sum(p.numel() for p in model.parameters())),
+        }, indent=2))
 
     t_start = time.perf_counter()
     tot_sim_s = 0.0
@@ -1099,6 +1108,15 @@ def run_rdma_dp_league(args: argparse.Namespace) -> None:
     if out_dir is not None and args.tp_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
         torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+        (out_dir / "arch_meta.json").write_text(json.dumps({
+            "arch": str(getattr(args, "arch", "tied4")),
+            "mhc_streams": int(gf_cfg.mhc_streams),
+            "ou_rho": float(gf_cfg.ou_rho),
+            "block_schedule": list(gf_cfg.resolved_schedule()),
+            "n_uniq_blocks": int(gf_cfg.n_uniq_blocks()),
+            "eff_depth": int(gf_cfg.eff_depth()),
+            "n_params": int(sum(p.numel() for p in main_model.parameters())),
+        }, indent=2))
 
     pfsp_pool = ["default", "main_init", "ema_fast", "ema_slow", "main"]
     pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
@@ -1448,45 +1466,60 @@ def _fast_shadow_eval(
                     rng.shuffle(full)
                     seatings.append([arms[int(x)] for x in full])
 
+        # Paired CRN seat-rotated matchups (cancels map/spawn asymmetry!)
         eng = MetalDeltaTimePayloadEngine(world, num_envs=E_match, num_players=N, rules=rules, base_seed=seed + wi * 1009)
         try:
-            for si, seats in enumerate(seatings):
+            for si, base_seats in enumerate(seatings):
                 rm = "balanced_fixed" if (si % 2 == 0) else "mixed_dr"
-                eng.reset(torch.ones((E_match,), dtype=torch.bool))
-                eng.set_skills(sample_roster_skills(rng, E_match, N, K, rm))
-                arm_to_tmask: dict[str, torch.Tensor] = {}
-                for ti, a in enumerate(seats):
-                    if a == "default":
-                        continue
-                    arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
-                obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
-                for _ in range(H):
-                    u_vel = torch.zeros((E_match, N, A_dim), dtype=torch.float32)
-                    has_vel = torch.zeros((E_match, N), dtype=torch.bool)
-                    for a, tmask in arm_to_tmask.items():
-                        cp = compiled[a]
-                        if cp is None:
+                skills = sample_roster_skills(rng, E_match, N, K, rm)
+                # Run both base seating and cyclic seat rotation on the EXACT same world seed & skills!
+                rot_seats = [base_seats, base_seats[1:] + base_seats[:1]]
+                for ri, seats in enumerate(rot_seats):
+                    eng.reset(torch.ones((E_match,), dtype=torch.bool), base_seed=seed + wi * 1009 + si * 37)
+                    eng.set_skills(skills)
+                    arm_to_tmask: dict[str, torch.Tensor] = {}
+                    for ti, a in enumerate(seats):
+                        if a == "default":
                             continue
-                        res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
-                        u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
-                        has_vel = has_vel | tmask
-                    eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
-                    eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=True, n_steps=2, tau_rel=2.5)
+                        arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
+                    q_ou_arm: dict[str, torch.Tensor] = {}
                     obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
-                sc = eng.t_score.numpy()
-                for ti in range(K):
-                    ai = arm_idx[seats[ti]]
-                    for tj in range(ti + 1, K):
-                        aj = arm_idx[seats[tj]]
-                        if ai == aj:
-                            continue
-                        w_ij = np.where(sc[:, ti] > sc[:, tj] + 1e-6, 1.0, np.where(sc[:, tj] > sc[:, ti] + 1e-6, 0.0, 0.5))
-                        s_ij = float(w_ij.sum())
-                        n_ij = float(E_match)
-                        wins[ai, aj] += s_ij
-                        wins[aj, ai] += n_ij - s_ij
-                        games[ai, aj] += n_ij
-                        games[aj, ai] += n_ij
+                    for _ in range(H):
+                        u_vel = torch.zeros((E_match, N, A_dim), dtype=torch.float32)
+                        has_vel = torch.zeros((E_match, N), dtype=torch.bool)
+                        for a, tmask in arm_to_tmask.items():
+                            cp = compiled[a]
+                            if cp is None:
+                                continue
+                            rho_a = max(0.0, min(0.95, float(getattr(cp.cfg, "ou_rho", 0.0))))
+                            eps_in = None
+                            if rho_a > 0.0:
+                                raw_e = torch.randn((E_match, N, int(cp.cfg.d_e)), dtype=torch.float32) * float(cp.cfg.sigma_base)
+                                if a not in q_ou_arm:
+                                    q_ou_arm[a] = raw_e
+                                else:
+                                    q_ou_arm[a] = rho_a * q_ou_arm[a] + math.sqrt(max(0.0, 1.0 - rho_a * rho_a)) * raw_e
+                                eps_in = q_ou_arm[a]
+                            res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo, eps=eps_in)
+                            u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
+                            has_vel = has_vel | tmask
+                        eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
+                        eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=True, n_steps=2, tau_rel=2.5)
+                        obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+                    sc = eng.t_score.numpy()
+                    for ti in range(K):
+                        ai = arm_idx[seats[ti]]
+                        for tj in range(ti + 1, K):
+                            aj = arm_idx[seats[tj]]
+                            if ai == aj:
+                                continue
+                            w_ij = np.where(sc[:, ti] > sc[:, tj] + 1e-6, 1.0, np.where(sc[:, tj] > sc[:, ti] + 1e-6, 0.0, 0.5))
+                            s_ij = float(w_ij.sum())
+                            n_ij = float(E_match)
+                            wins[ai, aj] += s_ij
+                            wins[aj, ai] += n_ij - s_ij
+                            games[ai, aj] += n_ij
+                            games[aj, ai] += n_ij
         finally:
             eng.close()
             for cp in compiled.values():
@@ -1538,7 +1571,7 @@ def run_rdma_dp_concurrent(args: argparse.Namespace) -> None:
       * Soft-tether `main` 25% toward `ema_slow` if `Wilson_LCB95(WR(ema_slow vs main)) > 0.55`.
       * Logs live `best_elo` and `ΔElo / wall-second` at every eval window!
     """
-    from sim_dt.graph_flow_policy import GraphFlowConfig, GraphFlowPolicy, clone_graph_flow_model
+    from sim_dt.graph_flow_policy import GraphFlowConfig, GraphFlowPolicy, clone_graph_flow_model, make_graph_flow_config
     from sim_dt.graph_flow_trainer import GraphFlowRolloutPool, GraphFlowTrainer
 
     overrides: dict[str, Any] = {}
@@ -1553,13 +1586,19 @@ def run_rdma_dp_concurrent(args: argparse.Namespace) -> None:
         sd["rollout_horizon"] = args.horizon
     if args.ppo_epochs > 0:
         sd["ppo_epochs"] = args.ppo_epochs
+    if int(getattr(args, "target_opt_steps", 0)) > 0:
+        sd["target_opt_steps_per_epoch"] = int(args.target_opt_steps)
     if sd:
         overrides["sim_dt"] = sd
     cfg = load_training_config(args.config, overrides=overrides or None)
 
     torch.manual_seed(cfg.seeds.model_init)
     np.random.seed(cfg.seeds.model_init)
-    gf_cfg = GraphFlowConfig()
+    gf_cfg = make_graph_flow_config(
+        str(getattr(args, "arch", "tied4")),
+        mhc_streams=int(getattr(args, "mhc_streams", 1)),
+        ou_rho=float(getattr(args, "ou_rho", 0.0)),
+    )
     main_model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
     ema_fast = clone_graph_flow_model(main_model)
     ema_slow = clone_graph_flow_model(main_model)
@@ -1625,6 +1664,15 @@ def run_rdma_dp_concurrent(args: argparse.Namespace) -> None:
     if out_dir is not None and args.tp_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
         torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+        (out_dir / "arch_meta.json").write_text(json.dumps({
+            "arch": str(getattr(args, "arch", "tied4")),
+            "mhc_streams": int(gf_cfg.mhc_streams),
+            "ou_rho": float(gf_cfg.ou_rho),
+            "block_schedule": list(gf_cfg.resolved_schedule()),
+            "n_uniq_blocks": int(gf_cfg.n_uniq_blocks()),
+            "eff_depth": int(gf_cfg.eff_depth()),
+            "n_params": int(n_one),
+        }, indent=2))
 
     pfsp_pool = ["default", "main_init", "main_snap", "ema_fast", "ema_slow", "main", "exp_0", "exp_1"]
     pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
@@ -2020,6 +2068,10 @@ def main() -> None:
     ap.add_argument("--tp-comm-id", type=str, default="10.0.0.124:29820")
     ap.add_argument("--tp-envs", type=int, default=256)
     ap.add_argument("--wire-mode", choices=("had8_gather", "gather", "f32"), default="had8_gather")
+    ap.add_argument("--arch", choices=("tied4", "untied2", "untied3", "untied4", "untied6", "plc141", "plc1221"), default="tied4")
+    ap.add_argument("--mhc-streams", type=int, default=1)
+    ap.add_argument("--ou-rho", type=float, default=0.0)
+    ap.add_argument("--target-opt-steps", type=int, default=0)
     args = ap.parse_args()
 
     if args.role == "rdma-dp":

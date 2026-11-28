@@ -40,6 +40,7 @@ from sim_dt.dataset_sampler import make_rules_for_profile, sample_roster_skills
 from sim_dt.graph_flow_policy import (
     GraphFlowConfig,
     GraphFlowPolicy,
+    make_graph_flow_config,
     sample_orthogonal_team_bot_noise,
 )
 from sim_dt.metal_graphflow import CompiledGraphFlowPolicy
@@ -186,6 +187,7 @@ def evaluate_league_tournament(
                         continue
                     arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
 
+                q_ou_arm: dict[str, torch.Tensor] = {}
                 obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
                 for _ in range(H):
                     u_vel = torch.zeros((E_match, N, A_dim), dtype=torch.float32)
@@ -194,7 +196,13 @@ def evaluate_league_tournament(
                         cp = compiled[a]
                         if cp is None:
                             continue
-                        res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
+                        rho_a = max(0.0, min(0.95, float(getattr(cp.cfg, "ou_rho", 0.0))))
+                        eps_in = None
+                        if rho_a > 0.0:
+                            raw_e = torch.randn((E_match, N, int(cp.cfg.d_e)), dtype=torch.float32) * float(cp.cfg.sigma_base)
+                            q_ou_arm[a] = raw_e if a not in q_ou_arm else (rho_a * q_ou_arm[a] + math.sqrt(max(0.0, 1.0 - rho_a * rho_a)) * raw_e)
+                            eps_in = q_ou_arm[a]
+                        res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo, eps=eps_in)
                         u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
                         has_vel = has_vel | tmask
                     eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
@@ -372,10 +380,17 @@ def evaluate_arm_on_regime(
     gk_step_l = []
 
     try:
+        q_ou_main: torch.Tensor | None = None
         for step in range(H):
             obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
             if c_main is not None:
-                res = c_main.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
+                rho_m = max(0.0, min(0.95, float(getattr(c_main.cfg, "ou_rho", 0.0))))
+                eps_in = None
+                if rho_m > 0.0:
+                    raw_e = torch.randn((E, N, int(c_main.cfg.d_e)), dtype=torch.float32) * float(c_main.cfg.sigma_base)
+                    q_ou_main = raw_e if q_ou_main is None else (rho_m * q_ou_main + math.sqrt(max(0.0, 1.0 - rho_m * rho_m)) * raw_e)
+                    eps_in = q_ou_main
+                res = c_main.sample_velocity(obs, nav, carts, teams, acc, geo=geo, eps=eps_in)
                 u_vel = res["u_vel"]
                 eng.apply_vel(u_vel, main_mask_t, tau_rel=tau_rel)
             eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=True, n_steps=1, tau_rel=tau_rel)
@@ -868,6 +883,7 @@ def evaluate_playerwise_pvp_elo(
                 continue
             arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
         kills, deaths, dmg_out, dmg_in, push = 0.0, 0.0, 0.0, 0.0, 0.0
+        q_ou_arm: dict[str, torch.Tensor] = {}
         obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
         for _ in range(H):
             u_vel = torch.zeros((E_block, N, A_dim), dtype=torch.float32)
@@ -876,7 +892,13 @@ def evaluate_playerwise_pvp_elo(
                 cp = compiled[a]
                 if cp is None:
                     continue
-                res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
+                rho_a = max(0.0, min(0.95, float(getattr(cp.cfg, "ou_rho", 0.0))))
+                eps_in = None
+                if rho_a > 0.0:
+                    raw_e = torch.randn((E_block, N, int(cp.cfg.d_e)), dtype=torch.float32) * float(cp.cfg.sigma_base)
+                    q_ou_arm[a] = raw_e if a not in q_ou_arm else (rho_a * q_ou_arm[a] + math.sqrt(max(0.0, 1.0 - rho_a * rho_a)) * raw_e)
+                    eps_in = q_ou_arm[a]
+                res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo, eps=eps_in)
                 u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
                 has_vel = has_vel | tmask
             eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
@@ -998,6 +1020,9 @@ def main() -> None:
     ap.add_argument("--pvp-elo-eval", action="store_true")
     ap.add_argument("--diversity-eval", action="store_true")
     ap.add_argument("--full-eval", action="store_true")
+    ap.add_argument("--arch", type=str, default="")
+    ap.add_argument("--mhc-streams", type=int, default=0)
+    ap.add_argument("--ou-rho", type=float, default=-1.0)
     args = ap.parse_args()
 
     cfg = load_training_config(args.config)
@@ -1008,7 +1033,22 @@ def main() -> None:
         seed=8101, device=torch.device("cpu"),
     )
 
-    gf_cfg = GraphFlowConfig()
+    arch_meta_p = ckpt_dir / "arch_meta.json"
+    if arch_meta_p.exists():
+        am = json.loads(arch_meta_p.read_text())
+        gf_cfg = make_graph_flow_config(
+            args.arch or str(am.get("arch", "tied4")),
+            mhc_streams=args.mhc_streams if args.mhc_streams > 0 else int(am.get("mhc_streams", 1)),
+            ou_rho=args.ou_rho if args.ou_rho >= 0.0 else float(am.get("ou_rho", 0.0)),
+        )
+    elif args.arch or args.mhc_streams > 1 or args.ou_rho >= 0.0:
+        gf_cfg = make_graph_flow_config(
+            args.arch or "tied4",
+            mhc_streams=max(1, int(args.mhc_streams)),
+            ou_rho=max(0.0, float(args.ou_rho)),
+        )
+    else:
+        gf_cfg = GraphFlowConfig()
     models: dict[str, GraphFlowPolicy | None] = {"default": None}
     cand_names = [
         "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2",

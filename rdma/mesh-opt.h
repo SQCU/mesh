@@ -597,9 +597,12 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     device float* lcfg_gains [[buffer(9)]],    // [5] trainer gains: [vg, vb0, vb1, ddg, dag]
     const device float* bounds [[buffer(10)]], // [vg_lo, vg_hi, dg_lo, dg_hi]
     device float* diag_opt [[buffer(11)]],     // [2]: grad_norm
-    constant uint* u [[buffer(12)]],           // [S_tot, n_uniq_blk, depth, recurrent]
+    constant uint* u [[buffer(12)]],           // [S_tot, n_uniq_blk, depth, recurrent|(mhc_S<<8)|(sg_mhc_off<<16)]
     uint tid [[thread_index_in_threadgroup]]) {
-  const uint S_tot = u[0], n_uniq_blk = u[1], depth = u[2], recurrent = u[3];
+  const uint S_tot = u[0], n_uniq_blk = u[1], depth = u[2];
+  const uint recurrent = u[3] & 1u;
+  const uint mhc_S = (u[3] >> 8) & 0xFFu;
+  const uint sg_mhc_off = u[3] >> 16;
   const float slr = opt_cfg[1];
   const float b1 = 0.9f;
   const float grad_clip = opt_cfg[4];
@@ -616,22 +619,21 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
   const float vg_lo = bounds[0], vg_hi = bounds[1];
   const float dg_lo = bounds[2], dg_hi = bounds[3];
 
-  if (tid < S_tot) {
-    float cur = sc_master[tid];
-    float g_raw = sc_grads[tid];
-    // Respect exact clamped gain boundary gradient zeroing
-    if (tid == 0u && !(cur > vg_lo && cur < vg_hi)) g_raw = 0.0f;
-    if ((tid == 3u || tid == 4u) && !(cur > dg_lo && cur < dg_hi)) g_raw = 0.0f;
+  for (uint idx = tid; idx < S_tot; idx += 256u) {
+    float cur = sc_master[idx];
+    float g_raw = sc_grads[idx];
+    if (idx == 0u && !(cur > vg_lo && cur < vg_hi)) g_raw = 0.0f;
+    if ((idx == 3u || idx == 4u) && !(cur > dg_lo && cur < dg_hi)) g_raw = 0.0f;
     float g = g_raw * clip_sc;
-    float m = b1 * mom[tid] + (1.0f - b1) * g;
-    float v = b2 * v_buf[tid] + (1.0f - b2) * g * g;
-    mom[tid] = m;
-    v_buf[tid] = v;
+    float m = b1 * mom[idx] + (1.0f - b1) * g;
+    float v = b2 * v_buf[idx] + (1.0f - b2) * g * g;
+    mom[idx] = m;
+    v_buf[idx] = v;
     float wn = cur - slr * (m * bc1) / (sqrt(v * bc2) + seps);
-    if (tid == 0u) wn = clamp(wn, vg_lo, vg_hi);
-    if (tid == 3u || tid == 4u) wn = clamp(wn, dg_lo, dg_hi);
-    sc_master[tid] = wn;
-    sc_grads[tid] = 0.0f;
+    if (idx == 0u) wn = clamp(wn, vg_lo, vg_hi);
+    if (idx == 3u || idx == 4u) wn = clamp(wn, dg_lo, dg_hi);
+    sc_master[idx] = wn;
+    sc_grads[idx] = 0.0f;
   }
   threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
@@ -647,6 +649,42 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     const uint n_sig = 2u + 6u * n_uniq_blk + (recurrent ? depth : 0u);
     for (uint i = 0u; i < n_sig; i++) {
       scalars_live[i] = 1.0f / (1.0f + exp(-clamp(sc_master[5u + i], -40.0f, 40.0f)));
+    }
+    if (mhc_S > 1u) {
+      const uint live_mhc = n_sig;
+      const uint raw_mhc = n_sig + depth * 24u;
+      for (uint st = 0u; st < depth; st++) {
+        const uint sb = sg_mhc_off + st * 24u;
+        const uint lb = live_mhc + st * 24u;
+        const uint rb = raw_mhc + st * 24u;
+        for (uint q = 0u; q < 24u; q++) scalars_live[rb + q] = sc_master[sb + q];
+        float M[16];
+        for (uint q = 0u; q < 16u; q++) M[q] = 0.0f;
+        for (uint r = 0u; r < mhc_S; r++) {
+          for (uint c = 0u; c < mhc_S; c++) M[r * 4u + c] = exp(clamp(sc_master[sb + r * 4u + c], -6.0f, 6.0f));
+        }
+        for (uint it = 0u; it < 5u; it++) {
+          for (uint r = 0u; r < mhc_S; r++) {
+            float s = 0.0f; for (uint c = 0u; c < mhc_S; c++) s += M[r * 4u + c];
+            const float inv = 1.0f / max(s, 1e-12f);
+            for (uint c = 0u; c < mhc_S; c++) M[r * 4u + c] *= inv;
+          }
+          for (uint c = 0u; c < mhc_S; c++) {
+            float s = 0.0f; for (uint r = 0u; r < mhc_S; r++) s += M[r * 4u + c];
+            const float inv = 1.0f / max(s, 1e-12f);
+            for (uint r = 0u; r < mhc_S; r++) M[r * 4u + c] *= inv;
+          }
+        }
+        for (uint q = 0u; q < 16u; q++) scalars_live[lb + q] = M[q];
+        float pmax = -1e30f;
+        for (uint s = 0u; s < mhc_S; s++) pmax = max(pmax, sc_master[sb + 16u + s]);
+        float psum = 0.0f;
+        for (uint s = 0u; s < mhc_S; s++) { float e = exp(sc_master[sb + 16u + s] - pmax); scalars_live[lb + 16u + s] = e; psum += e; }
+        for (uint s = 0u; s < mhc_S; s++) scalars_live[lb + 16u + s] /= max(psum, 1e-12f);
+        for (uint s = 0u; s < mhc_S; s++) {
+          scalars_live[lb + 20u + s] = 1.0f / (1.0f + exp(-clamp(sc_master[sb + 20u + s], -20.0f, 20.0f)));
+        }
+      }
     }
     diag_opt[0] = g_norm;
     norm_sq[0] = 0.0f;

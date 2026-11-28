@@ -21,6 +21,7 @@ from .graph_flow_policy import (
     GraphFlowPolicy,
     compute_ess_boltzmann_weights,
     project_graph_flow_unit_norm_,
+    project_mhc_params,
 )
 from .metal_runtime import (
     MG_BUF_STATE,
@@ -74,6 +75,8 @@ MG_OP_FLOW_JET_SAMPLE = 61
 MG_OP_FLOW_JET_PREP = 62
 MG_OP_FLOW_JET_LOSS_BWD = 63
 MG_OP_FLOW_COND_BWD = 64
+MG_OP_MHC_MIX = 65
+MG_OP_MHC_MIX_BWD = 66
 
 
 def _pad_rows_bf16(w: torch.Tensor, rows_pad: int) -> torch.Tensor:
@@ -130,7 +133,10 @@ class GraphFlowWeightBank:
         self.r_dpp = int(self.cfg.r_dpp)
         self.d_e = int(self.cfg.d_e)
         self.depth = int(model.depth)
+        self.block_schedule = tuple(model.block_schedule)
+        self.n_uniq_blk = int(model.n_uniq_blk)
         self.recurrent = bool(model.recurrent)
+        self.mhc_streams = int(model.mhc_streams)
         self.with_grads = bool(with_grads)
 
         self.g = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
@@ -147,18 +153,20 @@ class GraphFlowWeightBank:
         self._g_zero: int | None = None
 
         D, H, Rg, Rt = self.d, self.h, self.r_gram, self.r_team
-        n_uniq_blk = 1 if self.recurrent else self.depth
-        self.n_uniq_blk = n_uniq_blk
+        n_uniq_blk = self.n_uniq_blk
         self.sc_blk_base = 2
         self.sc_step_base = 2 + 6 * n_uniq_blk
-        self.n_scalars = self.sc_step_base + (self.depth if self.recurrent else 0)
+        self.sc_mhc_live = self.sc_step_base + (self.depth if self.recurrent else 0)
+        self.sc_mhc_raw = self.sc_mhc_live + (24 * self.depth if self.mhc_streams > 1 else 0)
+        self.n_scalars = self.sc_mhc_raw + (24 * self.depth if self.mhc_streams > 1 else 0)
         self.buf_scalars = self._add_buf(max(16, self.n_scalars) * 4)
         self.buf_hp = self._add_buf(16 * 4)
         self.buf_lcfg_gains = self._add_buf(8 * 4)
 
         self.sg_blk_base = 7
         self.sg_step_base = 7 + 6 * n_uniq_blk
-        self.n_sc_grads = max(64, self.sg_step_base + self.depth)
+        self.sg_mhc_base = self.sg_step_base + (self.depth if self.recurrent else 0)
+        self.n_sc_grads = max(64, self.sg_mhc_base + (24 * self.depth if self.mhc_streams > 1 else 0))
         self.buf_sc_grads = self._add_buf(self.n_sc_grads * 4) if with_grads else -1
 
         def add_w(key: str, rows: int, cols: int, *, i8: bool = False) -> None:
@@ -340,6 +348,26 @@ class GraphFlowWeightBank:
             ])
         if self.recurrent:
             scalars.extend(float(v) for v in torch.sigmoid(model.step_blends.detach().float()).cpu().tolist()[: self.depth])
+        if self.mhc_streams > 1:
+            assert model.mhc_logits is not None
+            S = self.mhc_streams
+            ml = model.mhc_logits.detach().float().cpu()
+            # Projected mHC params [depth * 24] followed by raw logits [depth * 24]
+            for st in range(self.depth):
+                H_res, h_pre, h_post = project_mhc_params(ml[st], S)
+                mat = np.zeros((16,), dtype=np.float32)
+                for r_i in range(S):
+                    for c_i in range(S):
+                        mat[r_i * 4 + c_i] = float(H_res[r_i, c_i].item())
+                p_arr = np.zeros((4,), dtype=np.float32)
+                q_arr = np.zeros((4,), dtype=np.float32)
+                p_arr[:S] = h_pre.numpy()
+                q_arr[:S] = h_post.numpy()
+                scalars.extend(mat.tolist())
+                scalars.extend(p_arr.tolist())
+                scalars.extend(q_arr.tolist())
+            for st in range(self.depth):
+                scalars.extend(float(v) for v in ml[st].tolist())
         _copy_f32_to_ptr(np.asarray(scalars, dtype=np.float32), self.lib.mesh_graph_buffer_ptr(self.g, self.buf_scalars))
 
         put_bf("flow_cond_bot", _unit_pad_bf16(model.flow_cond_bot.weight, eps))
@@ -548,11 +576,28 @@ class CompiledGraphFlowPolicy:
         ))
 
         # 4. Depth GraphDPPBlock passes (ALL 10 wide linears on M5 INT8@INT8 NAX!)
+        self.block_schedule = self.bank.block_schedule
+        self.mhc_streams = self.bank.mhc_streams
+        self._sc_mhc_live = self.bank.sc_mhc_live
         J_eff = Wn + J
+        if self.mhc_streams > 1:
+            S_mhc = self.mhc_streams
+            b_X_a = self._add_buf(S_mhc * EM_pad * D * 2)
+            b_X_b = self._add_buf(S_mhc * EM_pad * D * 2)
+            b_x_out = self._add_buf(EM_pad * D * 2)
+            self._add_op(_make_op(MG_OP_MHC_MIX, in_bufs=(b_x,), out_bufs=(b_X_a,), u=(M_tot, EM_pad, D, S_mhc, 0, 0), f=(eps_n,)))
         for step in range(self.depth):
-            bi = 0 if self.recurrent else step
+            bi = self.block_schedule[step]
             p = f"b{bi}."
             sc0 = self._sc_blk_base + 6 * bi
+            if self.mhc_streams > 1:
+                self._add_op(_make_op(
+                    MG_OP_MHC_MIX,
+                    in_bufs=(b_X_a, -1, -1, self.buf_scalars),
+                    out_bufs=(b_x,),
+                    u=(M_tot, EM_pad, D, S_mhc, 1, self._sc_mhc_live + step * 24),
+                    f=(eps_n,),
+                ))
 
             self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(b_x,), out_bufs=(b_xn,), u=(M_tot, D), f=(eps_n,)))
 
@@ -611,11 +656,24 @@ class CompiledGraphFlowPolicy:
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_gate_up"]), out_bufs=(b_tmp1,), u=(EM_pad, 2 * H, D, 0)))
             self._add_op(_make_op(MG_OP_MP_SWIGLU, in_bufs=(b_tmp1,), out_bufs=(b_tmp2, b_q, b_s), u=(M_tot, H, EM_pad, 0), f=(inv_silu,)))
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_down"]), out_bufs=(b_tmp3,), u=(EM_pad, D, H, 0)))
-            if self.recurrent:
+            if self.mhc_streams > 1:
+                self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(b_xm2, b_tmp3, self.buf_scalars), out_bufs=(b_x_out,), u=(M_tot, D, sc0 + 5, 1), f=(eps_n, eps_l)))
+                self._add_op(_make_op(
+                    MG_OP_MHC_MIX,
+                    in_bufs=(b_X_a, b_x, b_x_out, self.buf_scalars),
+                    out_bufs=(b_X_b,),
+                    u=(M_tot, EM_pad, D, S_mhc, 2, self._sc_mhc_live + step * 24),
+                    f=(eps_n,),
+                ))
+                b_X_a, b_X_b = b_X_b, b_X_a
+            elif self.recurrent:
                 self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(b_xm2, b_tmp3, self.buf_scalars), out_bufs=(b_tmp1,), u=(M_tot, D, sc0 + 5, 1), f=(eps_n, eps_l)))
                 self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(b_x, b_tmp1, self.buf_scalars), out_bufs=(b_x,), u=(M_tot, D, self._sc_step_base + step, 0), f=(eps_n, eps_l)))
             else:
                 self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(b_xm2, b_tmp3, self.buf_scalars), out_bufs=(b_x,), u=(M_tot, D, sc0 + 5, 1), f=(eps_n, eps_l)))
+
+        if self.mhc_streams > 1:
+            self._add_op(_make_op(MG_OP_MHC_MIX, in_bufs=(b_X_a,), out_bufs=(b_x,), u=(M_tot, EM_pad, D, S_mhc, 3, 0), f=(eps_n,)))
 
         # 5. Slice H_bot, H_nav, H_team + NAX head projections + parallel simdgroup-per-bot Mealy-Jet sample!
         b_hb, b_hn, b_ht = b_obs_enc, b_nav_enc, b_team_enc
@@ -827,9 +885,14 @@ class CompiledGraphFlowTrainer:
         # Import weights, INT8/INT8^T weights, FP32 grads, scalars & sc_grads zero-copy from bank!
         self._sc_blk_base = self.bank.sc_blk_base
         self._sc_step_base = self.bank.sc_step_base
+        self._sc_mhc_live = self.bank.sc_mhc_live
+        self._sc_mhc_raw = self.bank.sc_mhc_raw
         self._sg_blk_base = self.bank.sg_blk_base
         self._sg_step_base = self.bank.sg_step_base
+        self._sg_mhc_base = self.bank.sg_mhc_base
         self._n_sc_grads = self.bank.n_sc_grads
+        self.block_schedule = self.bank.block_schedule
+        self.mhc_streams = self.bank.mhc_streams
         self.buf_scalars = self._imp(self.bank.buf_scalars)
         self.buf_sc_grads = self._imp(self.bank.buf_sc_grads)
 
@@ -900,12 +963,19 @@ class CompiledGraphFlowTrainer:
         ))
 
         J_eff = Wn + J
+        S_mhc = self.mhc_streams
+        X_states: list[int] = []
+        if S_mhc > 1:
+            X_states = [self._add_buf(S_mhc * EM_pad * D * 2) for _ in range(self.depth + 1)]
+            self._add_op(_make_op(MG_OP_MHC_MIX, in_bufs=(x_states[0],), out_bufs=(X_states[0],), u=(M_tot, EM_pad, D, S_mhc, 0, 0), f=(eps_n,)))
+
         st_acts: list[dict[str, int]] = []
         for s in range(self.depth):
-            bi = 0 if self.recurrent else s
+            bi = self.block_schedule[s]
             p = f"b{bi}."
             sc0 = self._sc_blk_base + 6 * bi
             a = {
+                "x_in": self._add_buf(EM_pad * D * 2) if S_mhc > 1 else x_states[s],
                 "xn": self._add_buf(EM_pad * D * 2),
                 "x_nav": self._add_buf(EW_pad * D * 2),
                 "v_nav_raw": self._add_buf(EW_pad * D * 2),
@@ -943,7 +1013,15 @@ class CompiledGraphFlowTrainer:
             }
             st_acts.append(a)
 
-            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(x_states[s],), out_bufs=(a["xn"],), u=(M_tot, D), f=(eps_n,)))
+            if S_mhc > 1:
+                self._add_op(_make_op(
+                    MG_OP_MHC_MIX,
+                    in_bufs=(X_states[s], -1, -1, self.buf_scalars),
+                    out_bufs=(a["x_in"],),
+                    u=(M_tot, EM_pad, D, S_mhc, 1, self._sc_mhc_live + s * 24),
+                    f=(eps_n,),
+                ))
+            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(a["x_in"],), out_bufs=(a["xn"],), u=(M_tot, D), f=(eps_n,)))
             # Nav-graph mix (INT8@INT8 NAX matching CompiledGraphFlowPolicy bit-for-bit!)
             self._add_op(_make_op(MG_OP_NAV_GRAPH_MIX, in_bufs=(a["xn"],), out_bufs=(a["x_nav"],), u=(E, N, Wn, M_ent, D, 0, 0, EW_pad)))
             self._add_op(_make_op(MG_OP_FWHT_PACK_I8, in_bufs=(a["x_nav"],), out_bufs=(b_q, b_s), u=(EW_pad, D, 0)))
@@ -989,11 +1067,23 @@ class CompiledGraphFlowTrainer:
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_gate_up"]), out_bufs=(a["gate_up"],), u=(EM_pad, 2 * H, D, 0)))
             self._add_op(_make_op(MG_OP_MP_SWIGLU, in_bufs=(a["gate_up"],), out_bufs=(a["hid"], b_q, b_s), u=(M_tot, H, EM_pad, 1), f=(inv_silu,)))
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_down"]), out_bufs=(a["ffn_raw"],), u=(EM_pad, D, H, 0)))
-            if self.recurrent:
+            if S_mhc > 1:
+                self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(a["x_mid2"], a["ffn_raw"], self.buf_scalars), out_bufs=(a["x_new"],), u=(M_tot, D, sc0 + 5, 1), f=(eps_n, eps_l)))
+                self._add_op(_make_op(
+                    MG_OP_MHC_MIX,
+                    in_bufs=(X_states[s], a["x_in"], a["x_new"], self.buf_scalars),
+                    out_bufs=(X_states[s + 1],),
+                    u=(M_tot, EM_pad, D, S_mhc, 2, self._sc_mhc_live + s * 24),
+                    f=(eps_n,),
+                ))
+            elif self.recurrent:
                 self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(a["x_mid2"], a["ffn_raw"], self.buf_scalars), out_bufs=(a["x_new"],), u=(M_tot, D, sc0 + 5, 1), f=(eps_n, eps_l)))
                 self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(x_states[s], a["x_new"], self.buf_scalars), out_bufs=(x_states[s + 1],), u=(M_tot, D, self._sc_step_base + s, 0), f=(eps_n, eps_l)))
             else:
                 self._add_op(_make_op(MG_OP_MP_LERP, in_bufs=(a["x_mid2"], a["ffn_raw"], self.buf_scalars), out_bufs=(x_states[s + 1],), u=(M_tot, D, sc0 + 5, 1), f=(eps_n, eps_l)))
+
+        if S_mhc > 1:
+            self._add_op(_make_op(MG_OP_MHC_MIX, in_bufs=(X_states[self.depth],), out_bufs=(x_states[self.depth],), u=(M_tot, EM_pad, D, S_mhc, 3, 0), f=(eps_n,)))
 
         # Final slice + head projections + Mealy-Jet NAX MLP!
         b_hb = self._add_buf(EN_pad * D * 2)
@@ -1122,14 +1212,37 @@ class CompiledGraphFlowTrainer:
 
         # 3. Reverse loop through depth blocks (ALL 10 wide linears dX + dW on M5 INT8@INT8 NAX!)
         cur_dx, nxt_dx = bd_x, bd_x_prev
+        if S_mhc > 1:
+            b_mhc_graw = self._add_buf(self.depth * 24 * 4)
+            bd_X_cur = self._add_buf(S_mhc * EM_pad * D * 2)
+            bd_X_nxt = self._add_buf(S_mhc * EM_pad * D * 2)
+            bd_X_post = self._add_buf(S_mhc * EM_pad * D * 2)
+            bd_xin_post = self._add_buf(EM_pad * D * 2)
+            self._add_op(_make_op(MG_OP_ZERO_F32, out_bufs=(b_mhc_graw,), u=(self.depth * 24,)))
+            self._add_op(_make_op(
+                MG_OP_MHC_MIX_BWD,
+                in_bufs=(X_states[self.depth], bd_x),
+                out_bufs=(bd_X_cur,),
+                u=(M_tot, EM_pad, D, S_mhc, 3, 0, 0, 0),
+                f=(eps_n,),
+            ))
         for s in range(self.depth - 1, -1, -1):
-            bi = 0 if self.recurrent else s
+            bi = self.block_schedule[s]
             p = f"b{bi}."
             sc0 = self._sc_blk_base + 6 * bi
             sg0 = self._sg_blk_base + 6 * bi
             a = st_acts[s]
 
-            if self.recurrent:
+            if S_mhc > 1:
+                self._add_op(_make_op(
+                    MG_OP_MHC_MIX_BWD,
+                    in_bufs=(X_states[s], a["x_in"], a["x_new"], bd_X_cur, self.buf_scalars, b_mhc_graw),
+                    out_bufs=(bd_X_post, bd_x_new, bd_xin_post),
+                    u=(M_tot, EM_pad, D, S_mhc, 2, self._sc_mhc_live + s * 24, s, 0),
+                    f=(eps_n,),
+                ))
+                dx_blk_out = bd_x_new
+            elif self.recurrent:
                 self._add_op(_make_op(MG_OP_MP_LERP_BWD, in_bufs=(x_states[s], a["x_new"], cur_dx, self.buf_scalars), out_bufs=(nxt_dx, bd_x_new, self.buf_sc_grads), u=(M_tot, D, self._sc_step_base + s, 0, self._sg_step_base + s, 0, EM_pad), f=(eps_n, eps_l)))
                 dx_blk_out = bd_x_new
             else:
@@ -1196,8 +1309,35 @@ class CompiledGraphFlowTrainer:
             emit_i8_dx(bd_v_nav_raw, p + "nav_val_proj", bd_x_nav, EW_pad, D, D, 0)
             self._add_op(_make_op(MG_OP_NAV_GRAPH_MIX_BWD, in_bufs=(bd_x_nav,), out_bufs=(bd_xn,), u=(E, N, Wn, M_ent, D, 0, 0, E * Wn)))
 
-            self._add_op(_make_op(MG_OP_MP_NORM_BWD, in_bufs=(x_states[s], bd_xn), out_bufs=(nxt_dx,), u=(M_tot, D, 1 if self.recurrent else 0, EM_pad), f=(eps_n,)))
-            cur_dx, nxt_dx = nxt_dx, cur_dx
+            if S_mhc > 1:
+                self._add_op(_make_op(MG_OP_MP_NORM_BWD, in_bufs=(a["x_in"], bd_xn), out_bufs=(nxt_dx,), u=(M_tot, D, 0, EM_pad), f=(eps_n,)))
+                self._add_op(_make_op(
+                    MG_OP_MHC_MIX_BWD,
+                    in_bufs=(X_states[s], nxt_dx, bd_X_post, bd_xin_post, self.buf_scalars, b_mhc_graw),
+                    out_bufs=(bd_X_nxt,),
+                    u=(M_tot, EM_pad, D, S_mhc, 1, self._sc_mhc_live + s * 24, s, 0),
+                    f=(eps_n,),
+                ))
+                bd_X_cur, bd_X_nxt = bd_X_nxt, bd_X_cur
+            else:
+                self._add_op(_make_op(MG_OP_MP_NORM_BWD, in_bufs=(x_states[s], bd_xn), out_bufs=(nxt_dx,), u=(M_tot, D, 1 if self.recurrent else 0, EM_pad), f=(eps_n,)))
+                cur_dx, nxt_dx = nxt_dx, cur_dx
+
+        if S_mhc > 1:
+            self._add_op(_make_op(
+                MG_OP_MHC_MIX_BWD,
+                in_bufs=(bd_X_cur,),
+                out_bufs=(cur_dx,),
+                u=(M_tot, EM_pad, D, S_mhc, 0, 0, 0, 0),
+                f=(eps_n,),
+            ))
+            self._add_op(_make_op(
+                MG_OP_MHC_MIX_BWD,
+                in_bufs=(self.buf_scalars, -1, -1, -1, self.buf_scalars, b_mhc_graw),
+                out_bufs=(self.buf_sc_grads,),
+                u=(self.depth, 0, 0, S_mhc, 4, 0, 0, self._sc_mhc_raw | (self._sg_mhc_base << 16)),
+                f=(eps_n,),
+            ))
 
         # 4. Encoder backward
         bd_obs_enc = self._add_buf(EN_pad * D * 2)
@@ -1442,7 +1582,7 @@ class CompiledGraphFlowTrainer:
         model.type_blend.grad = sg[5].clone().to(model.type_blend.dtype)
         model.aff_blend.grad = sg[6].clone().to(model.aff_blend.dtype)
 
-        n_uniq_blk = 1 if self.recurrent else self.depth
+        n_uniq_blk = self.bank.n_uniq_blk
         for bi in range(n_uniq_blk):
             blk = model.blocks[bi]
             p = f"b{bi}."
@@ -1473,6 +1613,8 @@ class CompiledGraphFlowTrainer:
 
         if self.recurrent:
             model.step_blends.grad = sg[self._sg_step_base : self._sg_step_base + self.depth].clone().to(model.step_blends.dtype)
+        if self.mhc_streams > 1 and model.mhc_logits is not None:
+            model.mhc_logits.grad = sg[self._sg_mhc_base : self._sg_mhc_base + self.depth * 24].clone().view(self.depth, 24).to(model.mhc_logits.dtype)
 
         set_unit_g(model.flow_cond_bot.weight, gv["flow_cond_bot"])
         set_unit_g(model.flow_cond_team.weight, gv["flow_cond_team"])
@@ -1537,7 +1679,9 @@ class CompiledGraphFlowOptimizer:
 
         D, H = bank.d, bank.h
         n_uniq_blk = bank.n_uniq_blk
-        S_tot = 7 + 6 * n_uniq_blk + (bank.depth if bank.recurrent else 0)
+        mhc_S = bank.mhc_streams if bank.mhc_streams > 1 else 0
+        sg_mhc_off = bank.sg_mhc_base
+        S_tot = 7 + 6 * n_uniq_blk + (bank.depth if bank.recurrent else 0) + (24 * bank.depth if mhc_S > 1 else 0)
         self._n_uniq_blk = n_uniq_blk
         self._S_tot = S_tot
 
@@ -1751,11 +1895,12 @@ class CompiledGraphFlowOptimizer:
             ))
 
         # --- Pass 4: GraphFlow scalar bank Adam + live scalars/hp/lcfg_gains pack + step++ + zero sc_grads/norm_sq ---
+        u3_sc = (1 if bank.recurrent else 0) | (mhc_S << 8) | (sg_mhc_off << 16)
         add_op(_make_op(
             MG_OP_OPT_APPLY_1D,
             in_bufs=(i_sc_grads, self.b_norm_sq, self.b_cfg, self.b_step, self.b_sc_mom, self.b_sc_v),
             out_bufs=(self.b_sc_m, i_sc_live, i_hp_live),
-            u=(S_tot, n_uniq_blk, bank.depth, 1 if bank.recurrent else 0, i_lcfg_gains, self.b_bounds, self.b_diag, 3),
+            u=(S_tot, n_uniq_blk, bank.depth, u3_sc, i_lcfg_gains, self.b_bounds, self.b_diag, 3),
         ))
 
         # --- Pass 5: In-CB INT8 + INT8^T weight repack directly inside the SAME command buffer! ---
@@ -1820,6 +1965,9 @@ class CompiledGraphFlowOptimizer:
         if bank.recurrent:
             self._sc_param_slices.append(("step_blends", off, off + bank.depth))
             off += bank.depth
+        if mhc_S > 1:
+            self._sc_param_slices.append(("mhc_logits", off, off + 24 * bank.depth))
+            off += 24 * bank.depth
         for sname, s0, s1 in self._sc_param_slices:
             self._master_views[sname] = self._sc_m_view[s0:s1].view(p_map[sname].shape)
         self.master = self._master_views  # drop-in compatibility with _update_synced_emas_!
@@ -1943,7 +2091,7 @@ class CompiledGraphFlowOptimizer:
                 wm.clamp_(*self.model.cfg.value_gain_bounds)
             elif n in ("dyn_drift_gain", "dyn_action_gain"):
                 wm.clamp_(*self.model.cfg.dyn_gain_bounds)
-            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2")):
+            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2", "mhc_logits")):
                 wm.copy_(F.normalize(wm, p=2, dim=-1, eps=eps))
             p.copy_(wm.to(p.dtype))
             off += cnt
@@ -1964,7 +2112,7 @@ class CompiledGraphFlowOptimizer:
                 wm.clamp_(*self.model.cfg.value_gain_bounds)
             elif n in ("dyn_drift_gain", "dyn_action_gain"):
                 wm.clamp_(*self.model.cfg.dyn_gain_bounds)
-            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2")):
+            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2", "mhc_logits")):
                 wm.copy_(F.normalize(wm, p=2, dim=-1, eps=eps))
             p.copy_(wm.to(p.dtype))
             off += cnt
@@ -2109,7 +2257,7 @@ class GraphFlowOptimizer:
                 wm.clamp_(*self.model.cfg.value_gain_bounds)
             elif n in ("dyn_drift_gain", "dyn_action_gain"):
                 wm.clamp_(*self.model.cfg.dyn_gain_bounds)
-            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2")):
+            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2", "mhc_logits")):
                 wm.copy_(F.normalize(wm, p=2, dim=-1, eps=eps))
             p.copy_(wm.to(p.dtype))
             off += cnt
@@ -2128,7 +2276,7 @@ class GraphFlowOptimizer:
                 wm.clamp_(*self.model.cfg.value_gain_bounds)
             elif n in ("dyn_drift_gain", "dyn_action_gain"):
                 wm.clamp_(*self.model.cfg.dyn_gain_bounds)
-            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2")):
+            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2", "mhc_logits")):
                 wm.copy_(F.normalize(wm, p=2, dim=-1, eps=eps))
             p.copy_(wm.to(p.dtype))
             off += cnt

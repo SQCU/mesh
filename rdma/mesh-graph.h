@@ -100,7 +100,9 @@ enum mesh_graph_op_kind {
   MG_OP_FLOW_JET_SAMPLE   = 61, /* 1-NFE Mealy-Jet SRAM integration -> u_vel, u_lat, V_W, V_L */
   MG_OP_FLOW_JET_PREP     = 62, /* B_H unit-norm + 32x32 Cholesky ridge u_lat_targ + pack inp_fj */
   MG_OP_FLOW_JET_LOSS_BWD = 63, /* Advantage-Weighted Boltzmann Flow + Jet + Winnie/Lou + Dyn loss & bwd */
-  MG_OP_FLOW_COND_BWD     = 64  /* reduce d_inp_fj[:,40:104] -> d_c_bot, d_c_team */
+  MG_OP_FLOW_COND_BWD     = 64, /* reduce d_inp_fj[:,40:104] -> d_c_bot, d_c_team */
+  MG_OP_MHC_MIX           = 65, /* S-stream Manifold Hyper-Connection (mHC) init/pre/post/collapse */
+  MG_OP_MHC_MIX_BWD       = 66  /* exact analytical backward of MG_OP_MHC_MIX + 5-step Sinkhorn-Knopp */
 };
 
 enum mesh_graph_ew_subop {

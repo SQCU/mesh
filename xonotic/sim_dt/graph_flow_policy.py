@@ -72,6 +72,70 @@ class GraphFlowConfig:
     basis_rec_weight: float = 0.20
     basis_iso_weight: float = 0.25
     u_clip: float = 6.0
+    block_schedule: tuple[int, ...] | None = None
+    mhc_streams: int = 1
+    ou_rho: float = 0.0
+
+    def resolved_schedule(self) -> tuple[int, ...]:
+        if self.block_schedule is not None:
+            return tuple(int(i) for i in self.block_schedule)
+        if self.recurrent:
+            return (0,) * int(self.depth)
+        return tuple(range(int(self.depth)))
+
+    def n_uniq_blocks(self) -> int:
+        sched = self.resolved_schedule()
+        return max(sched) + 1 if sched else 1
+
+    def eff_depth(self) -> int:
+        return len(self.resolved_schedule())
+
+    def use_step_blends(self) -> bool:
+        if int(self.mhc_streams) > 1:
+            return False
+        sched = self.resolved_schedule()
+        return bool(self.recurrent or (len(sched) > self.n_uniq_blocks()))
+
+
+def make_graph_flow_config(
+    arch: str = "tied4",
+    *,
+    mhc_streams: int = 1,
+    ou_rho: float = 0.0,
+) -> GraphFlowConfig:
+    """Factory for controlled depth/tying/mHC/OU ablations (strictly keeping CGT Gram + Exact DPP + Nav Diffusion!)."""
+    presets: dict[str, tuple[int, bool, tuple[int, ...] | None]] = {
+        "tied4":   (4, True,  None),
+        "untied2": (2, False, (0, 1)),
+        "untied3": (3, False, (0, 1, 2)),
+        "untied4": (4, False, (0, 1, 2, 3)),
+        "untied6": (6, False, (0, 1, 2, 3, 4, 5)),
+        "plc141":  (6, False, (0, 1, 1, 1, 1, 2)),
+        "plc1221": (6, False, (0, 1, 2, 1, 2, 3)),
+    }
+    if arch not in presets:
+        raise ValueError(f"Unknown arch preset {arch!r}; choose from {sorted(presets)}")
+    depth, rec, sched = presets[arch]
+    return GraphFlowConfig(
+        depth=depth,
+        recurrent=rec,
+        block_schedule=sched,
+        mhc_streams=int(mhc_streams),
+        ou_rho=float(ou_rho),
+    )
+
+
+def project_mhc_params(logits: torch.Tensor, S: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Exact 5-step Sinkhorn-Knopp doubly-stochastic H_res [S,S] + softmax h_pre [S] + sigmoid h_post [S]."""
+    lf = logits.float()
+    res_l = lf[:16].view(4, 4)[:S, :S]
+    M = torch.exp(res_l.clamp(-6.0, 6.0))
+    for _ in range(5):
+        M = M / M.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        M = M / M.sum(dim=0, keepdim=True).clamp_min(1e-12)
+    h_pre = torch.softmax(lf[16 : 16 + S], dim=0)
+    h_post = torch.sigmoid(lf[20 : 20 + S].clamp(-20.0, 20.0))
+    return M, h_pre, h_post
 
 
 def compute_ess_boltzmann_weights(
@@ -617,8 +681,11 @@ class GraphFlowPolicy(nn.Module):
         self.norm_cfg = norm_cfg
         self.d = cfg.d
         self.h = cfg.h
-        self.depth = cfg.depth
-        self.recurrent = cfg.recurrent
+        self.block_schedule = cfg.resolved_schedule()
+        self.n_uniq_blk = cfg.n_uniq_blocks()
+        self.depth = cfg.eff_depth()
+        self.recurrent = cfg.use_step_blends()
+        self.mhc_streams = int(cfg.mhc_streams)
         self.d_e = cfg.d_e
         self.c_dim = cfg.c_flow_dim
 
@@ -632,13 +699,26 @@ class GraphFlowPolicy(nn.Module):
         self.aff_blend = nn.Parameter(torch.tensor(float(cfg.aff_blend_init_logit)))
 
         # Backbone mixing blocks
-        n_blk = 1 if cfg.recurrent else cfg.depth
-        self.blocks = nn.ModuleList([GraphDPPBlock(cfg, norm_cfg) for _ in range(n_blk)])
-        if cfg.recurrent:
+        self.blocks = nn.ModuleList([GraphDPPBlock(cfg, norm_cfg) for _ in range(self.n_uniq_blk)])
+        if self.recurrent:
             init_logit = math.log(cfg.step_blend_init / max(1.0 - cfg.step_blend_init, 1e-4))
-            self.step_blends = nn.Parameter(torch.full((cfg.depth,), init_logit))
+            self.step_blends = nn.Parameter(torch.full((self.depth,), init_logit))
         else:
             self.register_parameter("step_blends", None)
+
+        # Optional S-stream Manifold Hyper-Connections (mHC, exact 5-step Sinkhorn-Knopp doubly-stochastic H_res!)
+        if self.mhc_streams > 1:
+            mhc_init = torch.zeros((self.depth, 24), dtype=torch.float32)
+            # Break stream symmetry cleanly: near-identity Sinkhorn + multi-timescale post gains!
+            for s_i in range(self.mhc_streams):
+                mhc_init[:, s_i * 4 + s_i] = 2.5
+            mhc_init[:, :16].add_(0.15 * torch.randn((self.depth, 16)))
+            mhc_init[:, 16 : 16 + self.mhc_streams] = 0.25 * torch.randn((self.depth, self.mhc_streams))
+            post_spread = torch.linspace(-0.6, 0.6, self.mhc_streams)
+            mhc_init[:, 20 : 20 + self.mhc_streams] = post_spread.unsqueeze(0) + 0.10 * torch.randn((self.depth, self.mhc_streams))
+            self.mhc_logits = nn.Parameter(mhc_init)
+        else:
+            self.register_parameter("mhc_logits", None)
 
         # Shared-IR linear Winnie/Lou critic + dynamics probes
         self.value_proj = nn.Linear(cfg.d, 2, bias=False)
@@ -719,23 +799,47 @@ class GraphFlowPolicy(nn.Module):
         h_obs = _mp_lerp(h_obs, aff_msg, torch.sigmoid(self.aff_blend), eps_l)
 
         x = torch.cat((h_obs, h_nav, h_cart, h_team), dim=1)
-        for s in range(self.depth):
-            blk = self.blocks[0] if self.recurrent else self.blocks[s]
-            x_new = blk(
-                x,
-                N=N,
-                W_nav=W_nav,
-                J=J,
-                K=K,
-                entity_teams=entity_teams,
-                team_ids=team_ids,
-                bot_nav_id=bot_nav_id,
-                nav_kern=nav_kern,
-            )
-            if self.recurrent:
-                x = _mp_norm(_mp_lerp(x, x_new, torch.sigmoid(self.step_blends[s]), eps_l), eps_n)
-            else:
-                x = x_new
+        if self.mhc_streams > 1:
+            S = self.mhc_streams
+            assert self.mhc_logits is not None
+            X_s = x.unsqueeze(0).expand(S, -1, -1, -1).contiguous()  # [S, E, M_ent, D]
+            for s in range(self.depth):
+                blk = self.blocks[self.block_schedule[s]]
+                H_res, h_pre, h_post = project_mhc_params(self.mhc_logits[s], S)
+                x_in = torch.einsum("s,semd->emd", h_pre, X_s.float()).to(dt)
+                x_out = blk(
+                    x_in,
+                    N=N,
+                    W_nav=W_nav,
+                    J=J,
+                    K=K,
+                    entity_teams=entity_teams,
+                    team_ids=team_ids,
+                    bot_nav_id=bot_nav_id,
+                    nav_kern=nav_kern,
+                )
+                delta_n = _mp_norm((x_out.float() - x_in.float()), eps_n)  # [E, M_ent, D]
+                Y_s = torch.einsum("sr,remd->semd", H_res, X_s.float()) + h_post.view(S, 1, 1, 1) * delta_n.unsqueeze(0)
+                X_s = _mp_norm(Y_s, eps_n).to(dt)
+            x = _mp_norm(X_s.float().mean(dim=0), eps_n).to(dt)
+        else:
+            for s in range(self.depth):
+                blk = self.blocks[self.block_schedule[s]]
+                x_new = blk(
+                    x,
+                    N=N,
+                    W_nav=W_nav,
+                    J=J,
+                    K=K,
+                    entity_teams=entity_teams,
+                    team_ids=team_ids,
+                    bot_nav_id=bot_nav_id,
+                    nav_kern=nav_kern,
+                )
+                if self.recurrent:
+                    x = _mp_norm(_mp_lerp(x, x_new, torch.sigmoid(self.step_blends[s]), eps_l), eps_n)
+                else:
+                    x = x_new
 
         H = _mp_norm(x, eps_n)
         H_bot = H[:, :N, :]
@@ -1024,7 +1128,7 @@ class GraphFlowPolicy(nn.Module):
 @torch.no_grad()
 def project_graph_flow_unit_norm_(model: GraphFlowPolicy, eps: float = 1e-6) -> None:
     """Project all row-normalized backbone weights onto the unit sphere (preserving Mealy-Jet MLP scale)."""
-    skip_prefixes = ("fj_w1", "fj_w2")
+    skip_prefixes = ("fj_w1", "fj_w2", "mhc_logits")
     for name, p in model.named_parameters():
         if p.ndim == 2 and not name.startswith(skip_prefixes):
             w = F.normalize(p.data.float(), p=2, dim=-1, eps=max(float(eps), 1e-4))

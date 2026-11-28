@@ -2268,6 +2268,439 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     d_c_team[(ulong(e) * K + k) * 64ul + c] = bfloat(sh_dct[idx]);
   }
 }
+
+// ============================================================================
+// 11. MG_OP_MHC_MIX & BWD (S<=4 Manifold Hyper-Connections with 5-step Sinkhorn-Knopp!)
+//   Stream tensor X has shape [S, EM_pad, D] (stream-major, 100% coalesced per stream!).
+//   Projected mHC params at scalars[off + 0..23]: H_res[4x4], h_pre[4], h_post[4].
+//   Raw mHC logits at scalars[raw_off + 0..23]: res_logits[4x4], pre_logits[4], post_logits[4].
+//   Forward modes:  0=init broadcast, 1=pre mix, 2=post mix (doubly-stochastic H_res + mp_norm), 3=final collapse
+//   Backward modes: 0=init bwd, 1=pre bwd, 2=post bwd, 3=collapse bwd, 4=Sinkhorn+softmax+sigmoid Jacobian bwd!
+// ============================================================================
+[[kernel]] void mg_mhc_mix(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device bfloat* in2 [[buffer(2)]],
+    const device float* scalars [[buffer(3)]],
+    device bfloat* out0 [[buffer(4)]],
+    constant uint* u [[buffer(5)]],
+    constant float* f [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint M_tot = u[0], EM_pad = u[1], D = u[2], S = u[3], mode = u[4], off = u[5];
+  const float eps_n = max(f[0], 1e-4f);
+  const uint row = tgp * 4u + sg;
+  const uint n_el = min(8u, (D + 31u) / 32u);
+  const ulong s_stride = ulong(EM_pad) * ulong(D);
+
+  if (mode == 0u) {
+    if (row >= EM_pad) return;
+    const device bfloat* src = in0 + ulong(row) * D;
+    for (uint s = 0u; s < S; s++) {
+      device bfloat* dst = out0 + ulong(s) * s_stride + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        if (c < D) dst[c] = (row < M_tot) ? src[c] : bfloat(0.0f);
+      }
+    }
+    return;
+  }
+
+  if (mode == 1u) {
+    if (row >= EM_pad) return;
+    device bfloat* dst = out0 + ulong(row) * D;
+    if (row >= M_tot) {
+      for (uint i = 0u; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = bfloat(0.0f); }
+      return;
+    }
+    float hp[4];
+    for (uint s = 0u; s < S; s++) hp[s] = scalars[off + 16u + s];
+    for (uint i = 0u; i < n_el; i++) {
+      uint c = lane + i * 32u;
+      if (c < D) {
+        float acc = 0.0f;
+        for (uint s = 0u; s < S; s++) acc += hp[s] * float(in0[ulong(s) * s_stride + ulong(row) * D + c]);
+        dst[c] = bfloat(acc);
+      }
+    }
+    return;
+  }
+
+  if (mode == 2u) {
+    if (row >= EM_pad) return;
+    if (row >= M_tot) {
+      for (uint s = 0u; s < S; s++) {
+        device bfloat* dst = out0 + ulong(s) * s_stride + ulong(row) * D;
+        for (uint i = 0u; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = bfloat(0.0f); }
+      }
+      return;
+    }
+    const device bfloat* xi = in1 + ulong(row) * D;
+    const device bfloat* xo = in2 + ulong(row) * D;
+    float dn[8];
+    float ss_d = 0.0f;
+    for (uint i = 0u; i < n_el; i++) {
+      uint c = lane + i * 32u;
+      float dv = (c < D) ? (float(xo[c]) - float(xi[c])) : 0.0f;
+      dn[i] = dv; ss_d += dv * dv;
+    }
+    const float inv_d = rsqrt(simd_sum(ss_d) / float(D) + eps_n);
+    for (uint i = 0u; i < n_el; i++) dn[i] *= inv_d;
+
+    float xv[4][8];
+    for (uint r = 0u; r < S; r++) {
+      const device bfloat* xr = in0 + ulong(r) * s_stride + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        xv[r][i] = (c < D) ? float(xr[c]) : 0.0f;
+      }
+    }
+    for (uint s = 0u; s < S; s++) {
+      const float hpo = scalars[off + 20u + s];
+      float ys[8];
+      float ss_y = 0.0f;
+      for (uint i = 0u; i < n_el; i++) {
+        float y = hpo * dn[i];
+        for (uint r = 0u; r < S; r++) y += scalars[off + s * 4u + r] * xv[r][i];
+        ys[i] = y; ss_y += y * y;
+      }
+      const float inv_y = rsqrt(simd_sum(ss_y) / float(D) + eps_n);
+      device bfloat* dst = out0 + ulong(s) * s_stride + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        if (c < D) dst[c] = bfloat(ys[i] * inv_y);
+      }
+    }
+    return;
+  }
+
+  if (row >= EM_pad) return;
+  device bfloat* dst = out0 + ulong(row) * D;
+  if (row >= M_tot) {
+    for (uint i = 0u; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = bfloat(0.0f); }
+    return;
+  }
+  const float inv_s = 1.0f / float(max(1u, S));
+  float av[8];
+  float ss = 0.0f;
+  for (uint i = 0u; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    float a = 0.0f;
+    if (c < D) {
+      for (uint s = 0u; s < S; s++) a += float(in0[ulong(s) * s_stride + ulong(row) * D + c]);
+      a *= inv_s;
+    }
+    av[i] = a; ss += a * a;
+  }
+  const float inv_a = rsqrt(simd_sum(ss) / float(D) + eps_n);
+  for (uint i = 0u; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    if (c < D) dst[c] = bfloat(av[i] * inv_a);
+  }
+}
+
+[[kernel]] void mg_mhc_mix_bwd(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device bfloat* in2 [[buffer(2)]],
+    const device bfloat* in3 [[buffer(3)]],
+    const device float* scalars [[buffer(4)]],
+    device bfloat* out0 [[buffer(5)]],
+    device bfloat* out1 [[buffer(6)]],
+    device bfloat* out2 [[buffer(7)]],
+    device float* g_raw [[buffer(8)]],
+    device float* sc_grads [[buffer(9)]],
+    constant uint* u [[buffer(10)]],
+    constant float* f [[buffer(11)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint M_tot = u[0], EM_pad = u[1], D = u[2], S = u[3], mode = u[4], off = u[5], step = u[6];
+  const float eps_n = max(f[0], 1e-4f);
+
+  if (mode == 4u) {
+    const uint depth = u[0];
+    if (tid >= depth) return;
+    const uint raw_off = u[7] & 0xFFFFu;
+    const uint sg_base = u[7] >> 16;
+    const uint lbase = raw_off + tid * 24u;
+    const uint gbase = tid * 24u;
+    const uint sbase = sg_base + tid * 24u;
+
+    float pl[4], hp[4], gp[4];
+    float pmax = -1e30f;
+    for (uint s = 0u; s < S; s++) { pl[s] = scalars[lbase + 16u + s]; pmax = max(pmax, pl[s]); }
+    float psum = 0.0f;
+    for (uint s = 0u; s < S; s++) { hp[s] = exp(pl[s] - pmax); psum += hp[s]; }
+    float pdot = 0.0f;
+    for (uint s = 0u; s < S; s++) { hp[s] /= max(psum, 1e-12f); gp[s] = g_raw[gbase + 16u + s]; pdot += gp[s] * hp[s]; }
+    for (uint s = 0u; s < S; s++) gf_atomic_add_f32(&sc_grads[sbase + 16u + s], hp[s] * (gp[s] - pdot));
+
+    for (uint s = 0u; s < S; s++) {
+      const float lv = scalars[lbase + 20u + s];
+      const float sig = 1.0f / (1.0f + exp(-clamp(lv, -20.0f, 20.0f)));
+      gf_atomic_add_f32(&sc_grads[sbase + 20u + s], g_raw[gbase + 20u + s] * sig * (1.0f - sig));
+    }
+
+    float L0[16];
+    float A_r[5][16], A_c[5][16];
+    float rs[5][4], cs[5][4];
+    float cur[16];
+    for (uint i = 0u; i < 16u; i++) cur[i] = 0.0f;
+    for (uint r = 0u; r < S; r++) {
+      for (uint c = 0u; c < S; c++) {
+        const float lv = scalars[lbase + r * 4u + c];
+        L0[r * 4u + c] = lv;
+        cur[r * 4u + c] = exp(clamp(lv, -6.0f, 6.0f));
+      }
+    }
+    for (uint it = 0u; it < 5u; it++) {
+      for (uint r = 0u; r < S; r++) {
+        float s = 0.0f;
+        for (uint c = 0u; c < S; c++) s += cur[r * 4u + c];
+        rs[it][r] = max(s, 1e-12f);
+        for (uint c = 0u; c < S; c++) { cur[r * 4u + c] /= rs[it][r]; A_r[it][r * 4u + c] = cur[r * 4u + c]; }
+      }
+      for (uint c = 0u; c < S; c++) {
+        float s = 0.0f;
+        for (uint r = 0u; r < S; r++) s += cur[r * 4u + c];
+        cs[it][c] = max(s, 1e-12f);
+        for (uint r = 0u; r < S; r++) { cur[r * 4u + c] /= cs[it][c]; A_c[it][r * 4u + c] = cur[r * 4u + c]; }
+      }
+    }
+    float gM[16];
+    for (uint i = 0u; i < 16u; i++) gM[i] = g_raw[gbase + i];
+    for (int it = 4; it >= 0; it--) {
+      for (uint c = 0u; c < S; c++) {
+        float dot_c = 0.0f;
+        for (uint r = 0u; r < S; r++) dot_c += gM[r * 4u + c] * A_c[it][r * 4u + c];
+        const float inv_c = 1.0f / cs[it][c];
+        for (uint r = 0u; r < S; r++) gM[r * 4u + c] = (gM[r * 4u + c] - dot_c) * inv_c;
+      }
+      for (uint r = 0u; r < S; r++) {
+        float dot_r = 0.0f;
+        for (uint c = 0u; c < S; c++) dot_r += gM[r * 4u + c] * A_r[it][r * 4u + c];
+        const float inv_r = 1.0f / rs[it][r];
+        for (uint c = 0u; c < S; c++) gM[r * 4u + c] = (gM[r * 4u + c] - dot_r) * inv_r;
+      }
+    }
+    for (uint r = 0u; r < S; r++) {
+      for (uint c = 0u; c < S; c++) {
+        const float lv = L0[r * 4u + c];
+        const float gl = (lv > -6.0f && lv < 6.0f) ? (gM[r * 4u + c] * exp(lv)) : 0.0f;
+        gf_atomic_add_f32(&sc_grads[sbase + r * 4u + c], gl);
+      }
+    }
+    return;
+  }
+
+  const uint row = tgp * 4u + sg;
+  const uint n_el = min(8u, (D + 31u) / 32u);
+  const ulong s_stride = ulong(EM_pad) * ulong(D);
+
+  if (mode == 0u) {
+    if (row >= EM_pad) return;
+    device bfloat* dst = out0 + ulong(row) * D;
+    for (uint i = 0u; i < n_el; i++) {
+      uint c = lane + i * 32u;
+      if (c < D) {
+        float acc = 0.0f;
+        if (row < M_tot) {
+          for (uint s = 0u; s < S; s++) acc += float(in0[ulong(s) * s_stride + ulong(row) * D + c]);
+        }
+        dst[c] = bfloat(acc);
+      }
+    }
+    return;
+  }
+
+  if (mode == 3u) {
+    if (row >= EM_pad) return;
+    if (row >= M_tot) {
+      for (uint s = 0u; s < S; s++) {
+        device bfloat* dst = out0 + ulong(s) * s_stride + ulong(row) * D;
+        for (uint i = 0u; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = bfloat(0.0f); }
+      }
+      return;
+    }
+    const float inv_s = 1.0f / float(max(1u, S));
+    const device bfloat* dy = in1 + ulong(row) * D;
+    float av[8], gv[8];
+    float ss = 0.0f;
+    for (uint i = 0u; i < n_el; i++) {
+      uint c = lane + i * 32u;
+      float a = 0.0f;
+      if (c < D) {
+        for (uint s = 0u; s < S; s++) a += float(in0[ulong(s) * s_stride + ulong(row) * D + c]);
+        a *= inv_s;
+      }
+      av[i] = a; gv[i] = (c < D) ? float(dy[c]) : 0.0f;
+      ss += a * a;
+    }
+    const float inv_a = rsqrt(simd_sum(ss) / float(D) + eps_n);
+    float dot = 0.0f;
+    for (uint i = 0u; i < n_el; i++) dot += gv[i] * (av[i] * inv_a);
+    const float md = simd_sum(dot) / float(D);
+    for (uint s = 0u; s < S; s++) {
+      device bfloat* dst = out0 + ulong(s) * s_stride + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        if (c < D) dst[c] = bfloat(((gv[i] - (av[i] * inv_a) * md) * inv_a) * inv_s);
+      }
+    }
+    return;
+  }
+
+  if (mode == 1u) {
+    threadgroup float tg_hp[4][4];
+    float loc_hp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (row < EM_pad) {
+      float hp[4];
+      for (uint s = 0u; s < S; s++) hp[s] = scalars[off + 16u + s];
+      const device bfloat* gxin0 = in1 + ulong(row) * D;
+      const device bfloat* gxin1 = in3 + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        if (c < D) {
+          const float gx = (row < M_tot) ? (float(gxin0[c]) + float(gxin1[c])) : 0.0f;
+          for (uint s = 0u; s < S; s++) {
+            const ulong xo = ulong(s) * s_stride + ulong(row) * D + c;
+            if (row < M_tot) {
+              loc_hp[s] += gx * float(in0[xo]);
+              out0[xo] = bfloat(float(in2[xo]) + hp[s] * gx);
+            } else {
+              out0[xo] = bfloat(0.0f);
+            }
+          }
+        }
+      }
+    }
+    for (uint s = 0u; s < S; s++) {
+      const float sm = simd_sum(loc_hp[s]);
+      if (lane == 0u) tg_hp[sg][s] = sm;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < S) {
+      const float tot = tg_hp[0][tid] + tg_hp[1][tid] + tg_hp[2][tid] + tg_hp[3][tid];
+      if (tot != 0.0f) gf_atomic_add_f32(&g_raw[step * 24u + 16u + tid], tot);
+    }
+    return;
+  }
+
+  threadgroup float tg_g[4][20];
+  float loc_H[16];
+  float loc_po[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint i = 0u; i < 16u; i++) loc_H[i] = 0.0f;
+
+  if (row < EM_pad) {
+    if (row >= M_tot) {
+      for (uint s = 0u; s < S; s++) {
+        device bfloat* dxp = out0 + ulong(s) * s_stride + ulong(row) * D;
+        for (uint i = 0u; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dxp[c] = bfloat(0.0f); }
+      }
+      device bfloat* dxo = out1 + ulong(row) * D;
+      device bfloat* dxi = out2 + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) { dxo[c] = bfloat(0.0f); dxi[c] = bfloat(0.0f); } }
+    } else {
+      const device bfloat* xi = in1 + ulong(row) * D;
+      const device bfloat* xo = in2 + ulong(row) * D;
+      float dv[8], dn[8];
+      float ss_d = 0.0f;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        float d = (c < D) ? (float(xo[c]) - float(xi[c])) : 0.0f;
+        dv[i] = d; ss_d += d * d;
+      }
+      const float inv_d = rsqrt(simd_sum(ss_d) / float(D) + eps_n);
+      for (uint i = 0u; i < n_el; i++) dn[i] = dv[i] * inv_d;
+
+      float xv[4][8], dxr[4][8];
+      for (uint r = 0u; r < S; r++) {
+        const device bfloat* xr = in0 + ulong(r) * s_stride + ulong(row) * D;
+        for (uint i = 0u; i < n_el; i++) {
+          uint c = lane + i * 32u;
+          xv[r][i] = (c < D) ? float(xr[c]) : 0.0f;
+          dxr[r][i] = 0.0f;
+        }
+      }
+      float d_dn[8];
+      for (uint i = 0u; i < n_el; i++) d_dn[i] = 0.0f;
+
+      for (uint s = 0u; s < S; s++) {
+        const float hpo = scalars[off + 20u + s];
+        const device bfloat* gxn = in3 + ulong(s) * s_stride + ulong(row) * D;
+        float ys[8], gs[8];
+        float ss_y = 0.0f;
+        for (uint i = 0u; i < n_el; i++) {
+          uint c = lane + i * 32u;
+          float y = hpo * dn[i];
+          for (uint r = 0u; r < S; r++) y += scalars[off + s * 4u + r] * xv[r][i];
+          ys[i] = y; ss_y += y * y;
+          gs[i] = (c < D) ? float(gxn[c]) : 0.0f;
+        }
+        const float inv_y = rsqrt(simd_sum(ss_y) / float(D) + eps_n);
+        float dot_y = 0.0f;
+        for (uint i = 0u; i < n_el; i++) dot_y += gs[i] * (ys[i] * inv_y);
+        const float my = simd_sum(dot_y) / float(D);
+
+        for (uint i = 0u; i < n_el; i++) {
+          const float dy = (gs[i] - (ys[i] * inv_y) * my) * inv_y;
+          d_dn[i] += hpo * dy;
+          loc_po[s] += dy * dn[i];
+          for (uint r = 0u; r < S; r++) {
+            const float hsr = scalars[off + s * 4u + r];
+            dxr[r][i] += hsr * dy;
+            loc_H[s * 4u + r] += dy * xv[r][i];
+          }
+        }
+      }
+
+      for (uint r = 0u; r < S; r++) {
+        device bfloat* dxp = out0 + ulong(r) * s_stride + ulong(row) * D;
+        for (uint i = 0u; i < n_el; i++) {
+          uint c = lane + i * 32u;
+          if (c < D) dxp[c] = bfloat(dxr[r][i]);
+        }
+      }
+      float dot_d = 0.0f;
+      for (uint i = 0u; i < n_el; i++) dot_d += d_dn[i] * dn[i];
+      const float md = simd_sum(dot_d) / float(D);
+      device bfloat* dxo = out1 + ulong(row) * D;
+      device bfloat* dxi = out2 + ulong(row) * D;
+      for (uint i = 0u; i < n_el; i++) {
+        uint c = lane + i * 32u;
+        if (c < D) {
+          const float dd = (d_dn[i] - dn[i] * md) * inv_d;
+          dxo[c] = bfloat(dd);
+          dxi[c] = bfloat(-dd);
+        }
+      }
+    }
+  }
+
+  for (uint s = 0u; s < S; s++) {
+    for (uint r = 0u; r < S; r++) {
+      const float sm = simd_sum(loc_H[s * 4u + r]);
+      if (lane == 0u) tg_g[sg][s * 4u + r] = sm;
+    }
+    const float sp = simd_sum(loc_po[s]);
+    if (lane == 0u) tg_g[sg][16u + s] = sp;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid < 20u) {
+    const uint s_i = (tid < 16u) ? (tid / 4u) : (tid - 16u);
+    const uint r_i = (tid < 16u) ? (tid % 4u) : 0u;
+    if (s_i < S && r_i < S) {
+      const float tot = tg_g[0][tid] + tg_g[1][tid] + tg_g[2][tid] + tg_g[3][tid];
+      if (tot != 0.0f) {
+        const uint goff = (tid < 16u) ? tid : (20u + (tid - 16u));
+        gf_atomic_add_f32(&g_raw[step * 24u + goff], tot);
+      }
+    }
+  }
+}
 )MSL");
 }
 
