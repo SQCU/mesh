@@ -78,7 +78,16 @@ enum mesh_graph_op_kind {
   MG_OP_CGT_STAGE1_BWD    = 39, /* exact backward of team_pool + global_gram + norm(v,r) -> d_v_raw, d_r_raw, d_xn, d_w_pool */
   MG_OP_PLAN_EMBED_BWD    = 40, /* exact backward of plan_embed_cat -> d_obs/cart/team_enc, d_type_embed, d_type_blend */
   MG_OP_UNIT_W_BWD        = 41, /* tangent projection of FP32 grad_Wu through F.normalize(W) -> grad_W */
-  MG_OP_ZERO_F32          = 42  /* fast GPU zero of FP32 buffer */
+  MG_OP_ZERO_F32          = 42, /* fast GPU zero of FP32 buffer */
+  MG_OP_FWHT_PACK_I8      = 43, /* Rademacher-FWHT-64 + per-row dynamic int8_t + f32 scale (u[2]=transpose) */
+  MG_OP_LINEAR_I8         = 44, /* native Metal 4 MPP int8@int8->int32 NAX GEMM (optional accum=1) */
+  MG_OP_SIMDT_REWARD      = 45, /* fused in-GPU CGT step reward + Winnie/Lou role masks */
+  MG_OP_OPT_TANGENT_NORM  = 46, /* unit-norm/mp-norm/scalar tangent proj + atomic L2 norm^2 */
+  MG_OP_OPT_MOM_PREP      = 47, /* clip + Nesterov mom + optional Aurora D init + BF16 X0 pack */
+  MG_OP_OPT_NS_AXPBY      = 48, /* BF16 y = f0*a + f1*b for Newton-Schulz polynomial */
+  MG_OP_OPT_AURORA_DREF   = 49, /* Aurora tall-matrix row-leverage D refinement + X0 repack */
+  MG_OP_OPT_APPLY_2D      = 50, /* polar step + EDM2 unit-norm + EMA + live BF16 pack + zero gw */
+  MG_OP_OPT_APPLY_1D      = 51  /* Adam step for 1D UnitLinear (u[7]=0) or scalar bank (u[7]=1) */
 };
 
 enum mesh_graph_ew_subop {

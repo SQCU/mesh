@@ -334,6 +334,26 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
 }
 
 // ---- 3. MG_OP_MP_NORM (1 simdgroup = 32 threads per row, 4 rows per TG, ZERO TG barriers!) ----
+inline float simdt_rad_sign64(uint idx) {
+  constexpr ulong MASK = 0x965a3c69a5c3695aul;
+  return ((MASK >> (idx & 63u)) & 1ul) ? 1.0f : -1.0f;
+}
+
+inline void simdt_fwht64_pair(thread float& a, thread float& b, uint lane) {
+  float s = a + b, d = a - b;
+  a = s; b = d;
+  #pragma unroll
+  for (uint mask = 1u; mask <= 16u; mask <<= 1u) {
+    float oa = simd_shuffle_xor(a, ushort(mask));
+    float ob = simd_shuffle_xor(b, ushort(mask));
+    bool hi = (lane & mask) != 0u;
+    a = hi ? (oa - a) : (a + oa);
+    b = hi ? (ob - b) : (b + ob);
+  }
+  a *= 0.125f;
+  b *= 0.125f;
+}
+
 [[kernel]] void mg_mp_norm(
     const device bfloat* x [[buffer(0)]],
     device bfloat* out [[buffer(1)]],
@@ -361,6 +381,63 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
   for (uint i = 0; i < n_el; i++) {
     const uint c = lane + i * 32u;
     if (c < D) yr[c] = bfloat(reg[i] * inv);
+  }
+}
+
+// Fused mp_norm + Rademacher-FWHT-64 + per-row dynamic int8_t pack (D <= 512, D%64==0, ZERO extra DRAM reads!)
+[[kernel]] void mg_mp_norm_i8(
+    const device bfloat* x [[buffer(0)]],
+    device bfloat* out_bf [[buffer(1)]],
+    device int8_t* out_q [[buffer(2)]],
+    device float* out_s [[buffer(3)]],
+    constant uint* u [[buffer(4)]],  // [rows, D, rows_pad]
+    constant float* f [[buffer(5)]], // [eps]
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint rows = u[0], D = u[1], rows_pad = max(u[0], u[2]);
+  const uint row = tgp * 4u + sg;
+  if (row >= rows_pad) return;
+  const uint n_blk = D >> 6u;
+  device char2* q2 = reinterpret_cast<device char2*>(out_q + ulong(row) * ulong(D));
+  if (row >= rows) {
+    if (lane == 0u) out_s[row] = 0.0f;
+    for (uint blk = 0u; blk < n_blk; blk++) q2[blk * 32u + lane] = char2(0, 0);
+    return;
+  }
+  const float eps = max(f[0], 1e-4f);
+  const device bfloat* xr = x + ulong(row) * D;
+  device bfloat* yr = out_bf + ulong(row) * D;
+  float ra[8], rb[8];
+  float ss = 0.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    float a = float(xr[c0]);
+    float b = float(xr[c0 + 1u]);
+    ra[blk] = a; rb[blk] = b;
+    ss += a * a + b * b;
+  }
+  const float inv = rsqrt(simd_sum(ss) / float(D) + eps);
+  float lmax = 0.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    float a = float(bfloat(ra[blk] * inv));
+    float b = float(bfloat(rb[blk] * inv));
+    yr[c0] = bfloat(a);
+    yr[c0 + 1u] = bfloat(b);
+    a *= simdt_rad_sign64(lane * 2u);
+    b *= simdt_rad_sign64(lane * 2u + 1u);
+    simdt_fwht64_pair(a, b, lane);
+    ra[blk] = a; rb[blk] = b;
+    lmax = max(lmax, max(fabs(a), fabs(b)));
+  }
+  const float amax = max(simd_max(lmax), 1e-8f);
+  const float inv_s = 127.0f / amax;
+  if (lane == 0u) out_s[row] = amax / 127.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    q2[blk * 32u + lane] = char2(
+        char(clamp(int(rint(ra[blk] * inv_s)), -127, 127)),
+        char(clamp(int(rint(rb[blk] * inv_s)), -127, 127)));
   }
 }
 
@@ -416,6 +493,83 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
   }
 }
 
+// Fused mp_lerp + Rademacher-FWHT-64 + per-row dynamic int8_t pack (D <= 512, D%64==0, ZERO extra DRAM reads!)
+[[kernel]] void mg_mp_lerp_i8(
+    const device bfloat* a_in [[buffer(0)]],
+    const device bfloat* b_in [[buffer(1)]],
+    const device float* scalars [[buffer(2)]],
+    device bfloat* out_bf [[buffer(3)]],
+    device int8_t* out_q [[buffer(4)]],
+    device float* out_s [[buffer(5)]],
+    constant uint* u [[buffer(6)]],  // [rows, D, sc_idx, norm_b, rows_pad]
+    constant float* f [[buffer(7)]], // [mp_norm_eps, mp_lerp_eps]
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint rows = u[0], D = u[1], sc_idx = u[2], norm_b = u[3], rows_pad = max(u[0], u[4]);
+  const uint row = tgp * 4u + sg;
+  if (row >= rows_pad) return;
+  const uint n_blk = D >> 6u;
+  device char2* q2 = reinterpret_cast<device char2*>(out_q + ulong(row) * ulong(D));
+  if (row >= rows) {
+    if (lane == 0u) out_s[row] = 0.0f;
+    for (uint blk = 0u; blk < n_blk; blk++) q2[blk * 32u + lane] = char2(0, 0);
+    return;
+  }
+  const float eps_n = max(f[0], 1e-4f);
+  const float eps_l = max(f[1], 1e-4f);
+  const float t = clamp(scalars[sc_idx], 0.0f, 1.0f);
+  const float lerp_inv = rsqrt((1.0f - t) * (1.0f - t) + t * t + eps_l);
+
+  const device bfloat* ar = a_in + ulong(row) * D;
+  const device bfloat* br = b_in + ulong(row) * D;
+  device bfloat* yr = out_bf + ulong(row) * D;
+
+  float rba[8], rbb[8];
+  float ssb = 0.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    float va = float(br[c0]), vb = float(br[c0 + 1u]);
+    rba[blk] = va; rbb[blk] = vb;
+    ssb += va * va + vb * vb;
+  }
+  const float inv_b = norm_b ? rsqrt(simd_sum(ssb) / float(D) + eps_n) : 1.0f;
+
+  float sso = 0.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    float ba = norm_b ? float(bfloat(rba[blk] * inv_b)) : rba[blk];
+    float bb = norm_b ? float(bfloat(rbb[blk] * inv_b)) : rbb[blk];
+    float ha = float(bfloat(((1.0f - t) * float(ar[c0]) + t * ba) * lerp_inv));
+    float hb = float(bfloat(((1.0f - t) * float(ar[c0 + 1u]) + t * bb) * lerp_inv));
+    rba[blk] = ha; rbb[blk] = hb;
+    sso += ha * ha + hb * hb;
+  }
+  const float inv_o = rsqrt(simd_sum(sso) / float(D) + eps_n);
+
+  float lmax = 0.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    float ya = float(bfloat(rba[blk] * inv_o));
+    float yb = float(bfloat(rbb[blk] * inv_o));
+    yr[c0] = bfloat(ya);
+    yr[c0 + 1u] = bfloat(yb);
+    ya *= simdt_rad_sign64(lane * 2u);
+    yb *= simdt_rad_sign64(lane * 2u + 1u);
+    simdt_fwht64_pair(ya, yb, lane);
+    rba[blk] = ya; rbb[blk] = yb;
+    lmax = max(lmax, max(fabs(ya), fabs(yb)));
+  }
+  const float amax = max(simd_max(lmax), 1e-8f);
+  const float inv_s = 127.0f / amax;
+  if (lane == 0u) out_s[row] = amax / 127.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    q2[blk * 32u + lane] = char2(
+        char(clamp(int(rint(rba[blk] * inv_s)), -127, 127)),
+        char(clamp(int(rint(rbb[blk] * inv_s)), -127, 127)));
+  }
+}
+
 // ---- 5. MG_OP_MP_SWIGLU ----
 // Input: gate_up [rows, 2*H] BF16 (packed [gate(H), up(H)] per row); Output: hid [rows, H] BF16
 [[kernel]] void mg_mp_swiglu(
@@ -433,6 +587,64 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
   const float sg = g / (1.0f + exp(-g));
   const float ms = float(bfloat(sg * f[0]));
   hid[ulong(row) * H + col] = bfloat(ms * up);
+}
+
+// Fused mp_swiglu + Rademacher-FWHT-64 + per-row dynamic int8_t pack (1 TG = 128 th per row, H <= 1024, ZERO extra DRAM reads!)
+[[kernel]] void mg_mp_swiglu_i8(
+    const device bfloat* gu [[buffer(0)]],
+    device bfloat* hid_bf [[buffer(1)]],
+    device int8_t* hid_q [[buffer(2)]],
+    device float* hid_s [[buffer(3)]],
+    constant uint* u [[buffer(4)]],  // [rows, H, rows_pad, write_bf]
+    constant float* f [[buffer(5)]], // [inv_silu_scale]
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+  const uint rows = u[0], H = u[1], rows_pad = max(u[0], u[2]), write_bf = u[3];
+  if (row >= rows_pad) return;
+  const uint n_blk = H >> 6u;
+  device char2* q2 = reinterpret_cast<device char2*>(hid_q + ulong(row) * ulong(H));
+  if (row >= rows) {
+    if (tid == 0u) hid_s[row] = 0.0f;
+    for (uint blk = sg; blk < n_blk; blk += 4u) q2[blk * 32u + lane] = char2(0, 0);
+    return;
+  }
+  const float inv_sc = f[0];
+  const ulong gbase = ulong(row) * (2ul * H);
+  device bfloat* hrow = hid_bf + ulong(row) * ulong(H);
+  threadgroup float sg_max[4];
+  float ra[4], rb[4];
+  float lmax = 0.0f;
+  uint ri = 0u;
+  for (uint blk = sg; blk < n_blk; blk += 4u, ri++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    const float g0 = float(gu[gbase + c0]), up0 = float(gu[gbase + H + c0]);
+    const float g1 = float(gu[gbase + c0 + 1u]), up1 = float(gu[gbase + H + c0 + 1u]);
+    float h0 = float(bfloat(float(bfloat((g0 / (1.0f + exp(-g0))) * inv_sc)) * up0));
+    float h1 = float(bfloat(float(bfloat((g1 / (1.0f + exp(-g1))) * inv_sc)) * up1));
+    if (write_bf) {
+      hrow[c0] = bfloat(h0);
+      hrow[c0 + 1u] = bfloat(h1);
+    }
+    h0 *= simdt_rad_sign64(lane * 2u);
+    h1 *= simdt_rad_sign64(lane * 2u + 1u);
+    simdt_fwht64_pair(h0, h1, lane);
+    ra[ri] = h0; rb[ri] = h1;
+    lmax = max(lmax, max(fabs(h0), fabs(h1)));
+  }
+  lmax = simd_max(lmax);
+  if (lane == 0u) sg_max[sg] = lmax;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float amax = max(max(max(sg_max[0], sg_max[1]), max(sg_max[2], sg_max[3])), 1e-8f);
+  const float inv_s = 127.0f / amax;
+  if (tid == 0u) hid_s[row] = amax / 127.0f;
+  ri = 0u;
+  for (uint blk = sg; blk < n_blk; blk += 4u, ri++) {
+    q2[blk * 32u + lane] = char2(
+        char(clamp(int(rint(ra[ri] * inv_s)), -127, 127)),
+        char(clamp(int(rint(rb[ri] * inv_s)), -127, 127)));
+  }
 }
 
 // ---- 6. MG_OP_CGT_GRAM_STAGE1 ----
@@ -1860,6 +2072,214 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       }
       team_out[(ulong(e) * K + k) * 7ul + tid] = bfloat(v);
     }
+  }
+}
+
+// ---- 14. MG_OP_SIMDT_REWARD ----
+// Fused in-GPU CGT step reward + Winnie/Lou role masks matching compute_step_rewards_batched!
+// 1 TG per env e (128 threads), < 0.03 ms for E=256!
+// rcfg[16]: [partial_cp_w, winner_barrier_margin, winner_barrier_w, pot_shaping_w, pot_shaping_gamma,
+//            loser_pot_self_w, lane_prog_w, rival_lane_pen, norm_lane_scale, push_w, push_sc,
+//            contest_w, contest_sc, pickup_w, pickup_sc, term_win_bonus]
+// extra_i[E, 3]: [was_finished, now_finished, winner_team_1based]
+[[kernel]] void mg_simdt_cgt_reward(
+    const device bfloat* obs_in [[buffer(0)]],
+    const device bfloat* carts_in [[buffer(1)]],
+    const device bfloat* teams_in [[buffer(2)]],
+    const device bfloat* obs_out [[buffer(3)]],
+    const device bfloat* carts_out [[buffer(4)]],
+    const device bfloat* teams_out [[buffer(5)]],
+    const device int* extra_i [[buffer(6)]],
+    const device float* rcfg [[buffer(7)]],
+    device float* rew_out [[buffer(8)]],
+    device uchar* wm_in_out [[buffer(9)]],
+    device uchar* wm_out_out [[buffer(10)]],
+    constant uint* u [[buffer(11)]], // [E, N, J, K]
+    uint tid [[thread_index_in_threadgroup]],
+    uint e [[threadgroup_position_in_grid]]) {
+  const uint E = u[0], N = u[1], J = u[2], K = u[3];
+  if (e >= E) return;
+
+  const float partial_cp_w = rcfg[0];
+  const float wb_margin = rcfg[1], wb_weight = rcfg[2];
+  const float ps_weight = rcfg[3], ps_gamma = rcfg[4], loser_self_w = rcfg[5];
+  const float lane_w = rcfg[6], rival_pen = rcfg[7], norm_lane = rcfg[8];
+  const float push_w = rcfg[9], push_sc = max(rcfg[10], 1e-6f);
+  const float cont_w = rcfg[11], cont_sc = max(rcfg[12], 1e-6f);
+  const float pick_w = rcfg[13], pick_sc = max(rcfg[14], 1e-6f);
+  const float term_bonus = rcfg[15];
+
+  threadgroup float ttw_b[16], ttw_a[16], rho_b[16], rho_a[16], eff_b[16], eff_a[16];
+  threadgroup float marg_a[16], eff_mb[16], eff_ma[16], team_rew[16];
+  threadgroup int tid_b[16], tid_a[16], rank_b[16], rank_a[16];
+  threadgroup uchar is_pwb[16], is_pwa[16];
+  threadgroup float dfrac_sh[64];
+  threadgroup int ctrl_a_sh[64];
+
+  const device bfloat* ti_b = teams_in + ulong(e) * K * 7ul;
+  const device bfloat* ti_a = teams_out + ulong(e) * K * 7ul;
+  const device bfloat* ci_b = carts_in + ulong(e) * J * 18ul;
+  const device bfloat* ci_a = carts_out + ulong(e) * J * 18ul;
+
+  if (tid < J) {
+    const float pf = float(ci_b[tid * 18u + 1u]) / max(float(ci_b[tid * 18u + 2u]), 1.0f);
+    const float cf = float(ci_a[tid * 18u + 1u]) / max(float(ci_a[tid * 18u + 2u]), 1.0f);
+    dfrac_sh[tid] = cf - pf;
+    ctrl_a_sh[tid] = int(rint(float(ci_a[tid * 18u + 3u])));
+  }
+
+  if (tid < K) {
+    // Before state
+    {
+      const float idv = float(ti_b[tid * 7u + 0u]);
+      const float sc = float(ti_b[tid * 7u + 1u]);
+      const float held = float(ti_b[tid * 7u + 2u]);
+      const float rate = float(ti_b[tid * 7u + 3u]);
+      const float lim = max(float(ti_b[tid * 7u + 4u]), 1e-6f);
+      const float rem = max(lim - sc, 0.0f);
+      tid_b[tid] = int(rint(idv));
+      rho_b[tid] = (held > 0.0f) ? ((rate * held) / max(rem, 1e-6f)) : 0.0f;
+      ttw_b[tid] = (held > 0.0f) ? (rem / max(held * rate, 1e-6f)) : ((sc >= lim) ? 0.0f : 1e12f);
+      float psum = 0.0f;
+      for (uint j = 0; j < J; j++) {
+        if (int(rint(float(ci_b[j * 18u + 3u]))) == tid_b[tid]) {
+          float plen = max(float(ci_b[j * 18u + 2u]), 1e-6f);
+          float pfrac = clamp(float(ci_b[j * 18u + 1u]) / plen, 0.0f, 1.0f);
+          float cpc = max(float(ci_b[j * 18u + 17u]), 1.0f);
+          float x = pfrac * cpc;
+          psum += x - floor(x);
+        }
+      }
+      const float eh = held + partial_cp_w * psum;
+      eff_b[tid] = (eh > 0.0f) ? ((rate * eh) / max(rem, 1e-6f)) : 0.0f;
+    }
+    // After state
+    {
+      const float idv = float(ti_a[tid * 7u + 0u]);
+      const float sc = float(ti_a[tid * 7u + 1u]);
+      const float held = float(ti_a[tid * 7u + 2u]);
+      const float rate = float(ti_a[tid * 7u + 3u]);
+      const float lim = max(float(ti_a[tid * 7u + 4u]), 1e-6f);
+      const float rem = max(lim - sc, 0.0f);
+      tid_a[tid] = int(rint(idv));
+      rho_a[tid] = (held > 0.0f) ? ((rate * held) / max(rem, 1e-6f)) : 0.0f;
+      ttw_a[tid] = (held > 0.0f) ? (rem / max(held * rate, 1e-6f)) : ((sc >= lim) ? 0.0f : 1e12f);
+      float psum = 0.0f;
+      for (uint j = 0; j < J; j++) {
+        if (int(rint(float(ci_a[j * 18u + 3u]))) == tid_a[tid]) {
+          float plen = max(float(ci_a[j * 18u + 2u]), 1e-6f);
+          float pfrac = clamp(float(ci_a[j * 18u + 1u]) / plen, 0.0f, 1.0f);
+          float cpc = max(float(ci_a[j * 18u + 17u]), 1.0f);
+          float x = pfrac * cpc;
+          psum += x - floor(x);
+        }
+      }
+      const float eh = held + partial_cp_w * psum;
+      eff_a[tid] = (eh > 0.0f) ? ((rate * eh) / max(rem, 1e-6f)) : 0.0f;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (tid < K) {
+    // Winning margins & loser ranks
+    float bo_a = 0.0f, bo_eb = 0.0f, bo_ea = 0.0f;
+    int rb = 0, ra = 0;
+    for (uint j = 0; j < K; j++) {
+      if (j != tid) {
+        bo_a = max(bo_a, rho_a[j]);
+        bo_eb = max(bo_eb, eff_b[j]);
+        bo_ea = max(bo_ea, eff_a[j]);
+      }
+      if (ttw_b[tid] + 1e-6f < ttw_b[j]) rb++;
+      if (ttw_a[tid] + 1e-6f < ttw_a[j]) ra++;
+    }
+    rank_b[tid] = rb;
+    rank_a[tid] = ra;
+    marg_a[tid] = (K <= 1u) ? ((rho_a[tid] > 0.0f) ? 1.0f : 0.0f) : ((rho_a[tid] - bo_a) / (rho_a[tid] + bo_a + 1e-6f));
+    eff_mb[tid] = (K <= 1u) ? ((eff_b[tid] > 0.0f) ? 1.0f : 0.0f) : ((eff_b[tid] - bo_eb) / (eff_b[tid] + bo_eb + 1e-6f));
+    eff_ma[tid] = (K <= 1u) ? ((eff_a[tid] > 0.0f) ? 1.0f : 0.0f) : ((eff_a[tid] - bo_ea) / (eff_a[tid] + bo_ea + 1e-6f));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (tid == 0u) {
+    float min_b = 1e30f, min_a = 1e30f;
+    uint pw_b = 0u, pw_a = 0u;
+    for (uint k = 0; k < K; k++) {
+      if (ttw_b[k] < min_b) { min_b = ttw_b[k]; pw_b = k; }
+      if (ttw_a[k] < min_a) { min_a = ttw_a[k]; pw_a = k; }
+    }
+    uint nb = 0u, na = 0u;
+    for (uint k = 0; k < K; k++) {
+      if (ttw_b[k] <= min_b + 1e-6f && min_b < 1e11f) nb++;
+      if (ttw_a[k] <= min_a + 1e-6f && min_a < 1e11f) na++;
+    }
+    const bool has_b = (nb == 1u);
+    const bool has_a = (na == 1u);
+    const bool kept = has_b && has_a && (pw_a == pw_b);
+
+    float eb_max = -1e30f, ea_max = -1e30f;
+    uint eb_arg = 0u, ea_arg = 0u;
+    for (uint k = 0; k < K; k++) {
+      if (eff_mb[k] > eb_max) { eb_max = eff_mb[k]; eb_arg = k; }
+      if (eff_ma[k] > ea_max) { ea_max = eff_ma[k]; ea_arg = k; }
+    }
+    const bool has_lb = has_b || (eb_max > 0.0f);
+    const bool has_la = has_a || (ea_max > 0.0f);
+    const uint lb = has_b ? pw_b : eb_arg;
+    const uint la = has_a ? pw_a : ea_arg;
+    const float m_lb = has_lb ? eff_mb[lb] : 0.0f;
+    const float m_la = has_la ? eff_ma[la] : 0.0f;
+
+    const float deficit = max(wb_margin - marg_a[pw_b], 0.0f);
+    const float w_rew_val = kept ? (-wb_weight * deficit * deficit) : -1.0f;
+
+    for (uint k = 0; k < K; k++) {
+      is_pwb[k] = (has_b && k == pw_b) ? 1u : 0u;
+      is_pwa[k] = (has_a && k == pw_a) ? 1u : 0u;
+      float tr = is_pwb[k] ? w_rew_val : ((rank_a[k] > rank_b[k]) ? 1.0f : 0.0f);
+      float phi_b = (has_lb && k == lb) ? eff_mb[k] : (-m_lb + loser_self_w * eff_mb[k]);
+      float phi_a = (has_la && k == la) ? eff_ma[k] : (-m_la + loser_self_w * eff_ma[k]);
+      team_rew[k] = tr + ps_weight * (ps_gamma * phi_a - phi_b);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const int was_fin = extra_i[e * 3u + 0u];
+  const int now_fin = extra_i[e * 3u + 1u];
+  const int winner1 = extra_i[e * 3u + 2u];
+  const bool active_env = (was_fin == 0);
+  const bool just_fin = (was_fin == 0) && (now_fin != 0);
+
+  const float k_eff = float(max(2u, K));
+  const float j_eff = float(max(1u, J));
+  const float cpt = max(1.0f, j_eff / k_eff);
+  const float own_sc = (norm_lane > 0.5f) ? (1.0f / cpt) : 1.0f;
+  const float riv_sc = (norm_lane > 0.5f) ? (-rival_pen / (max(1.0f, k_eff - 1.0f) * cpt)) : (-0.5f * rival_pen);
+
+  for (uint n = tid; n < N; n += 128u) {
+    const ulong ob = (ulong(e) * N + n) * 84ul;
+    const int p_t1 = int(rint(float(obs_in[ob + 1u])));
+    const uint p_t0 = uint(clamp(p_t1 - 1, 0, int(K) - 1));
+    float r = team_rew[p_t0];
+    if (lane_w != 0.0f) {
+      float lp = 0.0f;
+      for (uint j = 0; j < J; j++) {
+        if (ctrl_a_sh[j] > 0) {
+          lp += ((ctrl_a_sh[j] == p_t1) ? own_sc : riv_sc) * dfrac_sh[j];
+        }
+      }
+      r += lane_w * lp;
+    }
+    if (push_w != 0.0f) r += push_w * tanh(max(float(obs_out[ob + 52u]), 0.0f) / push_sc);
+    if (cont_w != 0.0f) r += cont_w * tanh(max(float(obs_out[ob + 53u]), 0.0f) / cont_sc);
+    if (pick_w != 0.0f) r += pick_w * tanh(max(float(obs_out[ob + 51u]), 0.0f) / pick_sc);
+    if (term_bonus > 0.0f && just_fin && winner1 > 0) {
+      r += (p_t1 == winner1) ? term_bonus : (-term_bonus / max(1.0f, float(K - 1u)));
+    }
+    const ulong idx = ulong(e) * N + n;
+    rew_out[idx] = active_env ? r : 0.0f;
+    wm_in_out[idx] = is_pwb[p_t0];
+    wm_out_out[idx] = is_pwa[p_t0];
   }
 }
 )MSL");

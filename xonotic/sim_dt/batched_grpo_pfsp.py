@@ -45,8 +45,11 @@ from mapgen.bsp_stream import sample_world_spec, synthesize_world_bundle
 from payload.tools.strategy_io_schema import CS, OBS, TS
 from sim_dt.engine import SimRulesConfig
 from sim_dt.metal_runtime import (
+    CompiledAuroraOptimizer,
+    CompiledAuroraState,
     CompiledPlanTrainer,
     CompiledPlanWally,
+    MetalCGTRewardComputer,
     MetalDeltaTimePayloadEngine,
 )
 from sim_dt.world_graph import WorldGraphIR, build_gas_world_graph
@@ -434,23 +437,38 @@ def act_batched_league(
         cpol = compiled_arms.get(arm)
         if cpol is None:
             continue
-        out = cpol.forward(obs, carts, teams, geo=geo)
-        det = deterministic_eval and (arm != train_arm)
-        smp = sample_plan(out, deterministic=det)
-        packed = pack_plan_tensor(obs, teams, smp, active_mask=mask, pack_cfg=pack_cfg)
-        plan = torch.where(mask.unsqueeze(-1), packed, plan)
-        has_plan = has_plan | mask
+        if cpol.do_pack and cpol.write_sample:
+            res = cpol.forward_sample(obs, carts, teams, geo=geo)
+            plan = torch.where(mask.unsqueeze(-1), res["plan"], plan)
+            has_plan = has_plan | mask
+            if arm == train_arm:
+                train_data = {
+                    "cont": res["cont"],
+                    "cart_pick": res["cart_pick"],
+                    "rival_pick": res["rival_pick"],
+                    "logp": res["logp"],
+                    "value_winnie": res["value_winnie"],
+                    "value_lou": res["value_lou"],
+                    "actor_mask": mask,
+                }
+        else:
+            out = cpol.forward(obs, carts, teams, geo=geo)
+            det = deterministic_eval and (arm != train_arm)
+            smp = sample_plan(out, deterministic=det)
+            packed = pack_plan_tensor(obs, teams, smp, active_mask=mask, pack_cfg=pack_cfg)
+            plan = torch.where(mask.unsqueeze(-1), packed, plan)
+            has_plan = has_plan | mask
 
-        if arm == train_arm:
-            train_data = {
-                "cont": smp.cont.detach(),
-                "cart_pick": smp.cart_pick.detach(),
-                "rival_pick": smp.rival_pick.detach(),
-                "logp": smp.logp.detach(),
-                "value_winnie": out.value_winnie.detach().to(torch.float32),
-                "value_lou": out.value_lou.detach().to(torch.float32),
-                "actor_mask": mask,
-            }
+            if arm == train_arm:
+                train_data = {
+                    "cont": smp.cont.detach(),
+                    "cart_pick": smp.cart_pick.detach(),
+                    "rival_pick": smp.rival_pick.detach(),
+                    "logp": smp.logp.detach(),
+                    "value_winnie": out.value_winnie.detach().to(torch.float32),
+                    "value_lou": out.value_lou.detach().to(torch.float32),
+                    "actor_mask": mask,
+                }
 
     return plan, has_plan, train_data
 
@@ -512,11 +530,25 @@ def collect_grpo_rollout_group(
 
     t0 = time.perf_counter()
 
-    # Compile active neural arms once for Metal 4 NAX GIL-free execution
+    # Compile active neural arms once for Metal 4 NAX GIL-free forward + in-GPU Philox sampling & packing
     active_neural = sorted({a for a in seat_arms if arm_models.get(a) is not None})
-    warm_compiled = {a: CompiledPlanWally(arm_models[a], E=B, N=N, J=J, K=K, pack_cfg=cfg.action_pack) for a in active_neural}
-    grp_compiled = {a: CompiledPlanWally(arm_models[a], E=E, N=N, J=J, K=K, pack_cfg=cfg.action_pack) for a in active_neural}
+    warm_compiled = {
+        a: CompiledPlanWally(
+            arm_models[a], E=B, N=N, J=J, K=K, pack_cfg=cfg.action_pack,
+            do_pack=True, stochastic=True, write_sample=True, sample_seed=seed_base + 31 * idx + 1,
+        )
+        for idx, a in enumerate(active_neural)
+    }
+    grp_compiled = {
+        a: CompiledPlanWally(
+            arm_models[a], E=E, N=N, J=J, K=K, pack_cfg=cfg.action_pack,
+            do_pack=True, stochastic=True, write_sample=True, sample_seed=seed_base + 97 * idx + 5,
+        )
+        for idx, a in enumerate(active_neural)
+    }
     base_eng = MetalDeltaTimePayloadEngine(world, num_envs=B, num_players=N, rules=rules, base_seed=seed_base)
+    rew_gpu = MetalCGTRewardComputer(E=E, N=N, J=J, K=K)
+    rew_gpu.set_config(cfg.losses.reward, terminal_win_bonus=float(sc.terminal_win_bonus))
     grp_eng: MetalDeltaTimePayloadEngine | None = None
 
     try:
@@ -579,17 +611,13 @@ def collect_grpo_rollout_group(
             grp_eng.apply_plan(plan, hp)
             grp_eng.step(sc.dt, mode=sc.mode)
             obs_out, carts_out, teams_out, _ = grp_eng.observe_tensors()
-            just_finished = (~was_finished) & grp_eng.t_finished
-
-            rew, wm_in, wm_out = compute_step_rewards_batched(
+            now_finished = grp_eng.t_finished
+            rew, wm_in, wm_out = rew_gpu.compute(
                 obs_in_c, carts_in_c, teams_in_c,
                 obs_out, carts_out, teams_out,
-                just_finished, grp_eng.t_winner,
-                cfg.losses.reward,
-                terminal_win_bonus=float(sc.terminal_win_bonus),
+                was_finished, now_finished, grp_eng.t_winner,
             )
             active_env = ~was_finished
-            rew = torch.where(active_env[:, None], rew, torch.zeros_like(rew))
 
             buf_obs[t] = obs_in_c.to(act_dtype)
             buf_carts[t] = carts_in_c.to(act_dtype)
@@ -619,6 +647,7 @@ def collect_grpo_rollout_group(
             c.close()
         for c in grp_compiled.values():
             c.close()
+        rew_gpu.close()
         base_eng.close()
         if grp_eng is not None:
             grp_eng.close()
@@ -712,14 +741,14 @@ def collect_grpo_rollout_group(
 def update_batched_grpo_ppo(
     model: PlanWally,
     ema_model: PlanWally,
-    optimizer: Aurora,
+    optimizer: CompiledAuroraState,
     rollout: dict[str, Any],
     *,
     cfg: TrainingConfig,
     entropy_coef: float,
     device: torch.device,
 ) -> dict[str, Any]:
-    """Compiled Metal 4 NAX BF16 forward + loss + analytical backward + FP32 grad accum + Aurora."""
+    """Compiled Metal 4 NAX compressed had_int8 forward + analytical backward + fused in-GPU Aurora."""
     t0 = time.perf_counter()
     lcfg: LossConfig = cfg.losses
     sc = cfg.sim_dt
@@ -763,12 +792,11 @@ def update_batched_grpo_ppo(
 
     trainer = CompiledPlanTrainer(model, E_mb=mb_envs, N=N, J=J, K=K)
     trainer.set_geo(geo)
-    ls_lo, ls_hi = model.model_cfg.cont_logstd_bounds
+    opt_gpu = CompiledAuroraOptimizer(trainer, model, ema_model, cfg.optimizer, state=optimizer)
     try:
+        trainer.zero_grads_()
         for _ in range(max(1, int(sc.ppo_epochs))):
             perm = torch.randperm(M_tot)
-            optimizer.zero_grad(set_to_none=True)
-            trainer.zero_grads_()
             in_accum = 0
             for start in range(0, M_tot, mb_envs):
                 idx = perm[start : start + mb_envs]
@@ -787,29 +815,23 @@ def update_batched_grpo_ppo(
 
                 is_last = (start + mb_envs) >= M_tot
                 if in_accum >= accum or is_last:
-                    trainer.export_grads_to_model_(model)
-                    gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip).item())
-                    optimizer.step()
-                    project_unit_norm_(model, eps=cfg.norm.unit_norm_eps)
-                    ema_update(ema_model, model, decay=cfg.optimizer.ema_decay)
-                    optimizer.zero_grad(set_to_none=True)
-                    trainer.sync_weights_(model)
-                    trainer.zero_grads_()
+                    gn, cont_std = opt_gpu.step()
                     in_accum = 0
                     opt_steps += 1
-                    with torch.no_grad():
-                        diags.append({
-                            "loss_total": float(step_diag["loss_total"]),
-                            "loss_actor": float(step_diag["loss_actor"]),
-                            "loss_critic": float(step_diag["loss_w"] + step_diag["loss_l"]),
-                            "loss_dyn": float(step_diag["loss_dyn"]),
-                            "entropy": float(step_diag["entropy"]),
-                            "entropy_disc": float(step_diag["entropy_disc"]),
-                            "clip_frac": float(step_diag["clip_frac"]),
-                            "grad_norm": gn,
-                            "cont_std": float(torch.exp(model.cont_logstd.detach().to(torch.float32).clamp(ls_lo, ls_hi)).mean().item()),
-                        })
+                    diags.append({
+                        "loss_total": float(step_diag["loss_total"]),
+                        "loss_actor": float(step_diag["loss_actor"]),
+                        "loss_critic": float(step_diag["loss_w"] + step_diag["loss_l"]),
+                        "loss_dyn": float(step_diag["loss_dyn"]),
+                        "entropy": float(step_diag["entropy"]),
+                        "entropy_disc": float(step_diag["entropy_disc"]),
+                        "clip_frac": float(step_diag["clip_frac"]),
+                        "grad_norm": gn,
+                        "cont_std": cont_std,
+                    })
+        opt_gpu.export_to_models_(model, ema_model)
     finally:
+        opt_gpu.close()
         trainer.close()
 
     _sync_device(device)
@@ -884,7 +906,13 @@ def eval_sim_dt_league(
         J = int(world.carts)
         N = int(ws["players"])
         score_outs_w = 0
-        compiled_w = {a: CompiledPlanWally(arm_models[a], E=n_envs, N=N, J=J, K=K, pack_cfg=cfg.action_pack) for a in neural_arms}
+        compiled_w = {
+            a: CompiledPlanWally(
+                arm_models[a], E=n_envs, N=N, J=J, K=K, pack_cfg=cfg.action_pack,
+                do_pack=True, stochastic=False, write_sample=True, sample_seed=ws["seed"] + idx,
+            )
+            for idx, a in enumerate(neural_arms)
+        }
         eng = MetalDeltaTimePayloadEngine(world, num_envs=n_envs, num_players=N, rules=rules, base_seed=ws["seed"] * 100)
         try:
             for ti, trip in enumerate(triplets):
@@ -1201,11 +1229,11 @@ def main() -> None:
             (ckpt_dir / "dp_transfer_report.json").write_text(json.dumps(dp_eval, indent=2))
         return
 
-    model = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device=device, dtype=model_dtype)
-    ema_model = clone_plan_model(model).to(device=device, dtype=model_dtype)
-    main_init = clone_plan_model(model).to(device=device, dtype=model_dtype)
+    model = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=model_dtype)
+    ema_model = clone_plan_model(model).to(device=torch.device("cpu"), dtype=model_dtype)
+    main_init = clone_plan_model(model).to(device=torch.device("cpu"), dtype=model_dtype)
     main_mid: PlanWally | None = None
-    optimizer = _make_aurora(model, cfg.optimizer)
+    optimizer = CompiledAuroraState.empty()
 
     torch.save(main_init.state_dict(), out_dir / "main_init.pt")
 
@@ -1266,7 +1294,7 @@ def main() -> None:
             pfsp_wr[opp_arm] = alpha_ema * prev + (1.0 - alpha_ema) * float(wr_val)
 
         if it == sc.mid_snapshot_iter:
-            main_mid = clone_plan_model(model).to(device)
+            main_mid = clone_plan_model(model)
             arm_models["main_mid"] = main_mid
             pfsp_pool.append("main_mid")
             pfsp_wr["main_mid"] = 0.5
@@ -1298,11 +1326,11 @@ def main() -> None:
 
     train_wall_s = time.perf_counter() - t_train_start
     if main_mid is None:
-        main_mid = clone_plan_model(model).to(device)
+        main_mid = clone_plan_model(model)
         arm_models["main_mid"] = main_mid
         torch.save(main_mid.state_dict(), out_dir / "main_mid.pt")
 
-    main_final = clone_plan_model(model).to(device)
+    main_final = clone_plan_model(model)
     arm_models["main_final"] = main_final
     torch.save(main_final.state_dict(), out_dir / "main_final.pt")
 

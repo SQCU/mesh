@@ -63,6 +63,15 @@ MG_OP_CGT_STAGE1_BWD = 39
 MG_OP_PLAN_EMBED_BWD = 40
 MG_OP_UNIT_W_BWD = 41
 MG_OP_ZERO_F32 = 42
+MG_OP_FWHT_PACK_I8 = 43
+MG_OP_LINEAR_I8 = 44
+MG_OP_SIMDT_REWARD = 45
+MG_OP_OPT_TANGENT_NORM = 46
+MG_OP_OPT_MOM_PREP = 47
+MG_OP_OPT_NS_AXPBY = 48
+MG_OP_OPT_AURORA_DREF = 49
+MG_OP_OPT_APPLY_2D = 50
+MG_OP_OPT_APPLY_1D = 51
 
 
 class MeshGraphOp(ctypes.Structure):
@@ -274,6 +283,8 @@ class CompiledPlanWally:
             self.g = graph
 
         self._w_bufs: dict[str, int] = {}
+        self._wq_bufs: dict[str, tuple[int, int]] = {}
+        self._g_repack: int | None = None
         self._build_graph(
             model,
             ext_obs_buf=ext_obs_buf,
@@ -290,6 +301,9 @@ class CompiledPlanWally:
                 raise RuntimeError(f"mesh_graph_compile failed: {rc}")
 
     def close(self) -> None:
+        if getattr(self, "_g_repack", None):
+            self.lib.mesh_graph_destroy(self._g_repack)
+            self._g_repack = None
         if self._owns_graph and getattr(self, "g", None):
             self.lib.mesh_graph_destroy(self.g)
             self.g = None
@@ -352,17 +366,24 @@ class CompiledPlanWally:
         self.buf_sample = self._add_buf(E * N * 14 * 4, MG_BUF_STATE) if self.write_sample else -1
         self.buf_active_mask = ext_active_mask_buf if ext_active_mask_buf is not None else -1
 
-        # Static BF16 unit-normalized weights (all NAX-aligned: K%64==0, N%32==0!)
+        # Static BF16 + compressed had_int8 weights (repacked in-GPU via MG_OP_FWHT_PACK_I8)
         w = self._w_bufs
+        wq = self._wq_bufs
+        repack_specs: list[tuple[str, int, int]] = []
         w["enc_obs"] = self._add_buf(D * 128 * 2, MG_BUF_WEIGHT)
         w["enc_cart"] = self._add_buf(D * 64 * 2, MG_BUF_WEIGHT)
         w["enc_team"] = self._add_buf(D * 64 * 2, MG_BUF_WEIGHT)
         w["type_embed"] = self._add_buf(3 * D * 2, MG_BUF_WEIGHT)
 
+        def add_i8_w(key: str, rows: int, cols: int) -> None:
+            w[key] = self._add_buf(rows * cols * 2, MG_BUF_WEIGHT)
+            wq[key] = (self._add_buf(rows * cols, MG_BUF_STATE), self._add_buf(rows * 4, MG_BUF_STATE))
+            repack_specs.append((key, rows, cols))
+
         for bi in range(n_uniq_blk):
             p = f"b{bi}."
-            w[p + "val_proj"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
-            w[p + "global_metric"] = self._add_buf(Rg * D * 2, MG_BUF_WEIGHT)
+            add_i8_w(p + "val_proj", D, D)
+            add_i8_w(p + "global_metric", Rg, D)
             w[p + "pool_score"] = self._add_buf(D * 2, MG_BUF_WEIGHT)
             w[p + "team_metric"] = self._add_buf(Rt * D * 2, MG_BUF_WEIGHT)
             w[p + "rival_metric"] = self._add_buf(Rt * D * 2, MG_BUF_WEIGHT)
@@ -370,8 +391,8 @@ class CompiledPlanWally:
             w[p + "team_mutate_proj"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
             w[p + "team_bcast_proj"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
             w[p + "gram_out"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
-            w[p + "ffn_gate_up"] = self._add_buf(2 * H * D * 2, MG_BUF_WEIGHT)
-            w[p + "ffn_down"] = self._add_buf(D * H * 2, MG_BUF_WEIGHT)
+            add_i8_w(p + "ffn_gate_up", 2 * H, D)
+            add_i8_w(p + "ffn_down", D, H)
 
         w["cart_q"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
         w["cart_k"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
@@ -379,8 +400,17 @@ class CompiledPlanWally:
         w["rival_k"] = self._add_buf(D * D * 2, MG_BUF_WEIGHT)
         w["heads_packed"] = self._add_buf(64 * D * 2, MG_BUF_WEIGHT)
 
+        # Build zero-copy in-GPU weight repack graph (W_bf16 -> W_had_i8 + W_s_f32 in <0.03 ms!)
+        self._g_repack = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+        for key, rows, cols in repack_specs:
+            iw = self.lib.mesh_graph_import_buffer(self._g_repack, self.g, w[key])
+            iq = self.lib.mesh_graph_import_buffer(self._g_repack, self.g, wq[key][0])
+            is_ = self.lib.mesh_graph_import_buffer(self._g_repack, self.g, wq[key][1])
+            op_r = _make_op(MG_OP_FWHT_PACK_I8, in_bufs=(iw,), out_bufs=(iq, is_), u=(rows, cols, 0))
+            self.lib.mesh_graph_add_op(self._g_repack, ctypes.byref(op_r))
+        self.lib.mesh_graph_compile(self._g_repack)
+
         # Static shared activation arena (zero dynamic allocation per step!)
-        # Layout sized with generous non-aliasing slots for peak live tensors.
         off = 0
         def alloc_slot(nbytes: int) -> tuple[int, int]:
             nonlocal off
@@ -398,6 +428,8 @@ class CompiledPlanWally:
         s_f = alloc_slot(max(EK_pad * D, EK_pad * Rt, EN_pad * D) * 2)
         s_g = alloc_slot(max(EK_pad * D, EK_pad * Rt, EJ_pad * D) * 2)
         s_h = alloc_slot(max(EK_pad * D, EN_pad * 64) * 2)
+        s_q = alloc_slot(EM_pad * max(D, H))
+        s_s = alloc_slot(EM_pad * 4)
 
         self.buf_arena = self._add_buf(off, MG_BUF_ARENA)
         b_x = self._add_view(self.buf_arena, *s_x)
@@ -410,6 +442,8 @@ class CompiledPlanWally:
         b_f = self._add_view(self.buf_arena, *s_f)
         b_g = self._add_view(self.buf_arena, *s_g)
         b_h = self._add_view(self.buf_arena, *s_h)
+        b_q = self._add_view(self.buf_arena, *s_q)
+        b_s = self._add_view(self.buf_arena, *s_s)
 
         eps_n = float(self.nc.mp_norm_eps)
         eps_l = float(self.nc.mp_lerp_eps)
@@ -455,12 +489,10 @@ class CompiledPlanWally:
             p = f"b{bi}."
             sc0 = self._sc_blk_base + 4 * bi
 
-            # xn = mp_norm(x)
-            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(b_x,), out_bufs=(b_xn,), u=(M_tot, D), f=(eps_n,)))
-
-            # v_raw -> b_b, r_raw -> b_c
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_xn, w[p + "val_proj"]), out_bufs=(b_b,), u=(EM_pad, D, D)))
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_xn, w[p + "global_metric"]), out_bufs=(b_c,), u=(EM_pad, Rg, D)))
+            # Fused mp_norm(x) -> (b_xn, b_q, b_s) + compressed INT8@8 NAX val_proj & global_metric!
+            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(b_x,), out_bufs=(b_xn, b_q, b_s), u=(M_tot, D, EM_pad), f=(eps_n,)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "val_proj"]), out_bufs=(b_b,), u=(EM_pad, D, D, 0)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "global_metric"]), out_bufs=(b_c,), u=(EM_pad, Rg, D, 0)))
 
             # Stage 1: norm(v,r) + global_gram -> b_d, team_pool + blend_pool -> b_e (t_in)
             self._add_op(_make_op(
@@ -505,26 +537,26 @@ class CompiledPlanWally:
                 f=(eps_n,),
             ))
 
-            # gram_out -> b_b, x_mid = mp_lerp(xn, norm(b_b), blend_gram) -> b_d
+            # gram_out -> b_b, fused mp_lerp -> (b_d, b_q, b_s), compressed INT8@8 NAX FFN!
             self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_a, w[p + "gram_out"]), out_bufs=(b_b,), u=(EM_pad, D, D)))
             self._add_op(_make_op(
                 MG_OP_MP_LERP,
                 in_bufs=(b_xn, b_b, self.buf_scalars),
-                out_bufs=(b_d,),
-                u=(M_tot, D, sc0 + 2, 1),
+                out_bufs=(b_d, b_q, b_s),
+                u=(M_tot, D, sc0 + 2, 1, EM_pad),
                 f=(eps_n, eps_l),
             ))
 
-            # FFN SwiGLU: packed gate_up -> b_a, mp_swiglu -> b_b, ffn_down -> b_c
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_d, w[p + "ffn_gate_up"]), out_bufs=(b_a,), u=(EM_pad, 2 * H, D)))
+            # FFN SwiGLU: compressed INT8@8 NAX gate_up -> fused mp_swiglu_i8 (write_bf=0!) -> INT8@8 NAX ffn_down!
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_gate_up"]), out_bufs=(b_a,), u=(EM_pad, 2 * H, D, 0)))
             self._add_op(_make_op(
                 MG_OP_MP_SWIGLU,
                 in_bufs=(b_a,),
-                out_bufs=(b_b,),
-                u=(M_tot, H),
+                out_bufs=(b_b, b_q, b_s),
+                u=(M_tot, H, EM_pad, 0),
                 f=(1.0 / float(self.nc.mp_silu_scale),),
             ))
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(b_b, w[p + "ffn_down"]), out_bufs=(b_c,), u=(EM_pad, D, H)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_down"]), out_bufs=(b_c,), u=(EM_pad, D, H, 0)))
 
             # x_new = mp_lerp(x_mid=b_d, norm(b_c), blend_ffn)
             if self.recurrent:
@@ -690,6 +722,9 @@ class CompiledPlanWally:
         hp[40] = float(self.pack_cfg.cart_ds_power)
         hp[41] = float(self.pack_cfg.cart_ds_clip)
         _copy_f32_to_ptr(hp, self.lib.mesh_graph_buffer_ptr(self.g, self.buf_head_params))
+        if self._g_repack:
+            wt = ctypes.c_double(0.0)
+            self.lib.mesh_graph_run_fused(self._g_repack, 1, 0, ctypes.byref(wt))
 
     def set_geo(self, geo: dict[str, torch.Tensor] | None) -> None:
         if geo is not None and "map_center" in geo and "map_radius" in geo:
@@ -735,6 +770,35 @@ class CompiledPlanWally:
             fsq_codes=None,
             pred_skill=None,
         )
+
+    @torch.no_grad()
+    def forward_sample(
+        self,
+        obs: torch.Tensor,
+        carts: torch.Tensor,
+        teams: torch.Tensor,
+        geo: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Single-CB forward + in-GPU Philox sample + pack_plan (ZERO Python distribution overhead!)."""
+        assert self.plan_view is not None and self.sample_view is not None, (
+            "forward_sample requires CompiledPlanWally(do_pack=True, write_sample=True)"
+        )
+        self.obs_view.copy_(obs.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.carts_view.copy_(carts.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.teams_view.copy_(teams.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.set_geo(geo)
+        self.run_inplace(1, 0)
+        sv = self.sample_view
+        ho = self.head_out_view
+        return {
+            "plan": self.plan_view.clone(),
+            "cont": sv[:, :, 0:11].to(torch.bfloat16),
+            "cart_pick": sv[:, :, 11].to(torch.int16),
+            "rival_pick": sv[:, :, 12].to(torch.int16),
+            "logp": sv[:, :, 13].clone(),
+            "value_winnie": ho[:, :, 11].to(torch.float32),
+            "value_lou": ho[:, :, 12].to(torch.float32),
+        }
 
 
 # ============================================================================
@@ -1416,6 +1480,9 @@ class CompiledPlanTrainer:
             raise RuntimeError("mesh_graph_create failed for CompiledPlanTrainer")
 
         self._w_bufs: dict[str, int] = {}
+        self._wq_bufs: dict[str, tuple[int, int]] = {}
+        self._repack_specs: list[tuple[str, int, int]] = []
+        self._g_repack: int | None = None
         self._gw_bufs: dict[str, int] = {}
         self._gw_shapes: dict[str, tuple[int, ...]] = {}
         self._build_graph(model)
@@ -1425,6 +1492,9 @@ class CompiledPlanTrainer:
             raise RuntimeError(f"mesh_graph_compile failed for CompiledPlanTrainer: {rc}")
 
     def close(self) -> None:
+        if getattr(self, "_g_repack", None):
+            self.lib.mesh_graph_destroy(self._g_repack)
+            self._g_repack = None
         if getattr(self, "g", None):
             self.lib.mesh_graph_destroy(self.g)
             self.g = None
@@ -1494,10 +1564,15 @@ class CompiledPlanTrainer:
         self._gw_bufs["type_embed"] = self._add_buf(3 * D * 4, MG_BUF_STATE)
         self._gw_shapes["type_embed"] = (3, D)
 
+        def add_i8_w_and_gw(key: str, rows: int, cols: int) -> None:
+            self._add_w_and_gw(key, rows, cols)
+            self._wq_bufs[key] = (self._add_buf(rows * cols, MG_BUF_STATE), self._add_buf(rows * 4, MG_BUF_STATE))
+            self._repack_specs.append((key, rows, cols))
+
         for bi in range(n_uniq_blk):
             p = f"b{bi}."
-            self._add_w_and_gw(p + "val_proj", D, D)
-            self._add_w_and_gw(p + "global_metric", Rg, D)
+            add_i8_w_and_gw(p + "val_proj", D, D)
+            add_i8_w_and_gw(p + "global_metric", Rg, D)
             self._w_bufs[p + "pool_score"] = self._add_buf(D * 2, MG_BUF_WEIGHT)
             self._gw_bufs[p + "pool_score"] = self._add_buf(D * 4, MG_BUF_STATE)
             self._gw_shapes[p + "pool_score"] = (1, D)
@@ -1507,8 +1582,8 @@ class CompiledPlanTrainer:
             self._add_w_and_gw(p + "team_mutate_proj", D, D)
             self._add_w_and_gw(p + "team_bcast_proj", D, D)
             self._add_w_and_gw(p + "gram_out", D, D)
-            self._add_w_and_gw(p + "ffn_gate_up", 2 * H, D)
-            self._add_w_and_gw(p + "ffn_down", D, H)
+            add_i8_w_and_gw(p + "ffn_gate_up", 2 * H, D)
+            add_i8_w_and_gw(p + "ffn_down", D, H)
 
         self._add_w_and_gw("cart_q", D, D)
         self._add_w_and_gw("cart_k", D, D)
@@ -1516,7 +1591,22 @@ class CompiledPlanTrainer:
         self._add_w_and_gw("rival_k", D, D)
         self._add_w_and_gw("heads_packed", 64, D)
         w = self._w_bufs
+        wq = self._wq_bufs
         gw = self._gw_bufs
+
+        # Zero-copy in-GPU weight repack graph (W_bf16 -> W_had_i8 + W_s_f32 in <0.03 ms!)
+        self._g_repack = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+        for key, rows, cols in self._repack_specs:
+            iw = self.lib.mesh_graph_import_buffer(self._g_repack, self.g, w[key])
+            iq = self.lib.mesh_graph_import_buffer(self._g_repack, self.g, wq[key][0])
+            is_ = self.lib.mesh_graph_import_buffer(self._g_repack, self.g, wq[key][1])
+            op_r = _make_op(MG_OP_FWHT_PACK_I8, in_bufs=(iw,), out_bufs=(iq, is_), u=(rows, cols, 0))
+            self.lib.mesh_graph_add_op(self._g_repack, ctypes.byref(op_r))
+        self.lib.mesh_graph_compile(self._g_repack)
+
+        # Shared reusable INT8 activation quantization scratch for exact rollout<->train parity
+        b_q = self._add_buf(EM_pad * max(D, H), MG_BUF_STATE)
+        b_s = self._add_buf(EM_pad * 4, MG_BUF_STATE)
 
         # Write static NormConfig
         ncfg_arr = np.array([
@@ -1591,9 +1681,10 @@ class CompiledPlanTrainer:
             }
             st_acts.append(a)
 
-            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(x_states[s],), out_bufs=(a["xn"],), u=(M_tot, D), f=(eps_n,)))
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["xn"], w[p + "val_proj"]), out_bufs=(a["v_raw"],), u=(EM_pad, D, D)))
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["xn"], w[p + "global_metric"]), out_bufs=(a["r_raw"],), u=(EM_pad, Rg, D)))
+            # Exact bit-identical compressed had_int8 forward matching CompiledPlanWally (DeclaredForward!)
+            self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(x_states[s],), out_bufs=(a["xn"], b_q, b_s), u=(M_tot, D, EM_pad), f=(eps_n,)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "val_proj"]), out_bufs=(a["v_raw"],), u=(EM_pad, D, D, 0)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "global_metric"]), out_bufs=(a["r_raw"],), u=(EM_pad, Rg, D, 0)))
             # Normalize into separate v_norm/r_norm so v_raw/r_raw stay preserved for backward!
             self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(a["v_raw"],), out_bufs=(a["v_norm"],), u=(M_tot, D), f=(eps_n,)))
             self._add_op(_make_op(MG_OP_MP_NORM, in_bufs=(a["r_raw"],), out_bufs=(a["r_norm"],), u=(M_tot, Rg), f=(eps_n,)))
@@ -1634,13 +1725,13 @@ class CompiledPlanTrainer:
             self._add_op(_make_op(
                 MG_OP_MP_LERP,
                 in_bufs=(a["xn"], a["gram_out_raw"], self.buf_scalars),
-                out_bufs=(a["x_mid"],),
-                u=(M_tot, D, sc0 + 2, 1),
+                out_bufs=(a["x_mid"], b_q, b_s),
+                u=(M_tot, D, sc0 + 2, 1, EM_pad),
                 f=(eps_n, eps_l),
             ))
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["x_mid"], w[p + "ffn_gate_up"]), out_bufs=(a["gate_up"],), u=(EM_pad, 2 * H, D)))
-            self._add_op(_make_op(MG_OP_MP_SWIGLU, in_bufs=(a["gate_up"],), out_bufs=(a["hid"],), u=(M_tot, H), f=(inv_silu,)))
-            self._add_op(_make_op(MG_OP_LINEAR, in_bufs=(a["hid"], w[p + "ffn_down"]), out_bufs=(a["ffn_raw"],), u=(EM_pad, D, H)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_gate_up"]), out_bufs=(a["gate_up"],), u=(EM_pad, 2 * H, D, 0)))
+            self._add_op(_make_op(MG_OP_MP_SWIGLU, in_bufs=(a["gate_up"],), out_bufs=(a["hid"], b_q, b_s), u=(M_tot, H, EM_pad, 1), f=(inv_silu,)))
+            self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_down"]), out_bufs=(a["ffn_raw"],), u=(EM_pad, D, H, 0)))
             if self.recurrent:
                 self._add_op(_make_op(
                     MG_OP_MP_LERP,
@@ -1994,6 +2085,9 @@ class CompiledPlanTrainer:
         hp[44] = float(mc.cont_logstd_bounds[1])
         hp[45] = float(mc.value_gain_bounds[0])
         _copy_f32_to_ptr(hp, self.lib.mesh_graph_buffer_ptr(self.g, self.buf_hp))
+        if self._g_repack:
+            wt = ctypes.c_double(0.0)
+            self.lib.mesh_graph_run_fused(self._g_repack, 1, 0, ctypes.byref(wt))
 
     def set_geo(self, geo: dict[str, torch.Tensor] | None) -> None:
         if geo is not None and "map_center" in geo and "map_radius" in geo:
@@ -2176,3 +2270,508 @@ class CompiledPlanTrainer:
         model.value_bias.grad = sg[34:36].to(device=dev, dtype=dt)
         model.dyn_drift_gain.grad = sg[36].to(device=dev, dtype=dt)
         model.dyn_action_gain.grad = sg[37].to(device=dev, dtype=dt)
+
+
+# ============================================================================
+# 5. MetalCGTRewardComputer — Fused In-GPU CGT Step Reward (MG_OP_SIMDT_REWARD)
+# ============================================================================
+
+class MetalCGTRewardComputer:
+    """Fused in-GPU CGT step reward + Winnie/Lou role masks (<0.05 ms for E=256)."""
+
+    def __init__(self, E: int, N: int, J: int, K: int):
+        self.lib = _load_mesh_graph_lib()
+        self.E = int(E)
+        self.N = int(N)
+        self.J = int(J)
+        self.K = int(K)
+        self.g = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+        if not self.g:
+            raise RuntimeError("mesh_graph_create failed for MetalCGTRewardComputer")
+
+        def add_b(nbytes: int) -> int:
+            return int(self.lib.mesh_graph_add_buffer(self.g, max(64, int(nbytes)), MG_BUF_STATE, None, -1, 0))
+
+        self.b_oi = add_b(self.E * self.N * OBS_WIDTH * 2)
+        self.b_ci = add_b(self.E * self.J * CART_WIDTH * 2)
+        self.b_ti = add_b(self.E * self.K * TEAM_WIDTH * 2)
+        self.b_oo = add_b(self.E * self.N * OBS_WIDTH * 2)
+        self.b_co = add_b(self.E * self.J * CART_WIDTH * 2)
+        self.b_to = add_b(self.E * self.K * TEAM_WIDTH * 2)
+        self.b_ex = add_b(self.E * 3 * 4)
+        self.b_rc = add_b(16 * 4)
+        self.b_rew = add_b(self.E * self.N * 4)
+        self.b_wmi = add_b(self.E * self.N)
+        self.b_wmo = add_b(self.E * self.N)
+
+        op = _make_op(
+            MG_OP_SIMDT_REWARD,
+            in_bufs=(self.b_oi, self.b_ci, self.b_ti, self.b_oo, self.b_co, self.b_to),
+            out_bufs=(self.b_rew, self.b_wmi, self.b_wmo),
+            u=(self.E, self.N, self.J, self.K, self.b_ex, self.b_rc),
+        )
+        self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
+        self.lib.mesh_graph_compile(self.g)
+
+        self.oi_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_oi), (self.E, self.N, OBS_WIDTH))
+        self.ci_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_ci), (self.E, self.J, CART_WIDTH))
+        self.ti_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_ti), (self.E, self.K, TEAM_WIDTH))
+        self.oo_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_oo), (self.E, self.N, OBS_WIDTH))
+        self.co_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_co), (self.E, self.J, CART_WIDTH))
+        self.to_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_to), (self.E, self.K, TEAM_WIDTH))
+        self.ex_view = _ptr_to_torch_i32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_ex), (self.E, 3))
+        self.rc_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_rc), (16,))
+        self.rew_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_rew), (self.E, self.N))
+        self.wmi_u8 = _ptr_to_u8_array(self.lib.mesh_graph_buffer_ptr(self.g, self.b_wmi), self.E * self.N).reshape(self.E, self.N)
+        self.wmo_u8 = _ptr_to_u8_array(self.lib.mesh_graph_buffer_ptr(self.g, self.b_wmo), self.E * self.N).reshape(self.E, self.N)
+
+    def close(self) -> None:
+        if getattr(self, "g", None):
+            self.lib.mesh_graph_destroy(self.g)
+            self.g = None
+
+    def __del__(self) -> None:
+        self.close()
+
+    def set_config(self, rcfg: Any, terminal_win_bonus: float = 1.5) -> None:
+        arr = np.array([
+            float(rcfg.cart_partial_cp_weight),
+            float(rcfg.winner_barrier_margin),
+            float(rcfg.winner_barrier_weight),
+            float(rcfg.potential_shaping_weight),
+            float(rcfg.potential_shaping_gamma),
+            float(rcfg.loser_potential_self_weight),
+            float(rcfg.lane_progress_weight),
+            float(rcfg.rival_lane_penalty),
+            1.0 if bool(rcfg.normalize_lane_by_scale) else 0.0,
+            float(rcfg.push_weight),
+            float(rcfg.push_scale),
+            float(rcfg.contest_weight),
+            float(rcfg.contest_scale),
+            float(rcfg.pickup_weight),
+            float(rcfg.pickup_scale),
+            float(terminal_win_bonus),
+        ], dtype=np.float32)
+        self.rc_view.copy_(torch.from_numpy(arr))
+
+    @torch.no_grad()
+    def compute(
+        self,
+        obs_in: torch.Tensor,
+        carts_in: torch.Tensor,
+        teams_in: torch.Tensor,
+        obs_out: torch.Tensor,
+        carts_out: torch.Tensor,
+        teams_out: torch.Tensor,
+        was_finished: torch.Tensor,
+        now_finished: torch.Tensor,
+        winner_team_1based: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.oi_view.copy_(obs_in.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.ci_view.copy_(carts_in.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.ti_view.copy_(teams_in.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.oo_view.copy_(obs_out.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.co_view.copy_(carts_out.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.to_view.copy_(teams_out.detach().to(device="cpu", dtype=torch.bfloat16))
+        self.ex_view[:, 0].copy_(was_finished.detach().to(device="cpu", dtype=torch.int32))
+        self.ex_view[:, 1].copy_(now_finished.detach().to(device="cpu", dtype=torch.int32))
+        self.ex_view[:, 2].copy_(winner_team_1based.detach().to(device="cpu", dtype=torch.int32))
+        wt = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run_fused(self.g, 1, 0, ctypes.byref(wt))
+        return (
+            self.rew_view.clone(),
+            torch.from_numpy(self.wmi_u8.copy() != 0),
+            torch.from_numpy(self.wmo_u8.copy() != 0),
+        )
+
+
+# ============================================================================
+# 6. CompiledAuroraOptimizer — Single-CB Metal 4 NAX Aurora + Clip + EMA + Repack
+# ============================================================================
+
+@dataclass
+class CompiledAuroraState:
+    """Persistent FP32 optimizer state (momentum, Adam v, step) preserved across iterations."""
+    mom: dict[str, np.ndarray]
+    v: dict[str, np.ndarray]
+    step: int = 0
+
+    @classmethod
+    def empty(cls) -> "CompiledAuroraState":
+        return cls(mom={}, v={}, step=0)
+
+
+class CompiledAuroraOptimizer:
+    """
+    Compiles the ENTIRE Aurora spectral optimizer step into ONE single Metal 4 command buffer:
+      1. Exact unit-norm / mp_norm tangent projection + global L2 gradient norm^2
+      2. Global L2 grad-clip + Nesterov momentum
+      3. 5-step Metal 4 NAX Newton-Schulz + Aurora tall-matrix row-leverage D refinement
+      4. EDM2 unit-norm projection + EMA update + live BF16 pack into CompiledPlanTrainer
+      5. Scalar + 1D UnitLinear Adam update + live scalars/hp pack + zero_grads
+      6. In-place had_int8 Rademacher-FWHT-64 weight repack into CompiledPlanTrainer!
+    Zero PyTorch MPS calls and zero CPU<->MPS sync stalls inside the optimization loop!
+    """
+
+    def __init__(
+        self,
+        trainer: CompiledPlanTrainer,
+        model: PlanWally,
+        ema_model: PlanWally,
+        opt_cfg: Any,
+        state: CompiledAuroraState | None = None,
+    ):
+        self.lib = trainer.lib
+        self.trainer = trainer
+        self.opt_cfg = opt_cfg
+        self.state = state if state is not None else CompiledAuroraState.empty()
+        self.g = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+        if not self.g:
+            raise RuntimeError("mesh_graph_create failed for CompiledAuroraOptimizer")
+
+        D, H = trainer.d, trainer.h
+        n_uniq_blk = 1 if trainer.recurrent else trainer.depth
+        S_tot = 41 + 4 * n_uniq_blk + (trainer.depth if trainer.recurrent else 0)
+        self._n_uniq_blk = n_uniq_blk
+        self._S_tot = S_tot
+
+        def add_b(nbytes: int) -> int:
+            return int(self.lib.mesh_graph_add_buffer(self.g, max(64, int(nbytes)), MG_BUF_STATE, None, -1, 0))
+
+        def imp(src_id: int) -> int:
+            return int(self.lib.mesh_graph_import_buffer(self.g, trainer.g, src_id))
+
+        def add_op(op: MeshGraphOp) -> None:
+            self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
+
+        # Import trainer's live weight, grad, quantized weight, scalar & head_params buffers zero-copy
+        iw = {k: imp(bid) for k, bid in trainer._w_bufs.items()}
+        igw = {k: imp(bid) for k, bid in trainer._gw_bufs.items()}
+        iwq = {k: (imp(qb), imp(sb)) for k, (qb, sb) in trainer._wq_bufs.items()}
+        i_sc_live = imp(trainer.buf_scalars)
+        i_hp_live = imp(trainer.buf_hp)
+        i_sc_grads = imp(trainer.buf_sc_grads)
+
+        # Shared config / diag / scratch buffers
+        self.b_cfg = add_b(16 * 4)
+        self.b_bounds = add_b(16 * 4)
+        self.b_norm_sq = add_b(16)
+        self.b_step = add_b(16)
+        self.b_diag = add_b(16)
+
+        max_r_pad = _align(D, 64)
+        max_c_pad = _align(max(D, H), 64)
+        s_x = add_b(max_r_pad * max_c_pad * 2)
+        s_bx = add_b(max_r_pad * max_c_pad * 2)
+        s_a = add_b(max_r_pad * max_r_pad * 2)
+        s_a2 = add_b(max_r_pad * max_r_pad * 2)
+        s_b = add_b(max_r_pad * max_r_pad * 2)
+        s_geff = add_b(max(D, H) * D * 4)
+        s_dvec = add_b(max(D, H) * 4)
+
+        # Collect parameter descriptors matching PlanWally + CompiledPlanTrainer layout
+        # 2D specs: (name, param, ema_param, live_key, k_pad, row_off, do_unit, is_te)
+        self._p2d_specs: list[tuple[str, torch.nn.Parameter, torch.nn.Parameter, str, int, int, bool, bool]] = [
+            ("enc_obs", model.enc_obs.weight, ema_model.enc_obs.weight, "enc_obs", 128, 0, True, False),
+            ("enc_cart", model.enc_cart.weight, ema_model.enc_cart.weight, "enc_cart", 64, 0, True, False),
+            ("enc_team", model.enc_team.weight, ema_model.enc_team.weight, "enc_team", 64, 0, True, False),
+            ("type_embed", model.type_embed, ema_model.type_embed, "type_embed", D, 0, False, True),
+        ]
+        # 1D UnitLinear specs (min(shape) == 1 -> Adam branch in Aurora + unit-norm):
+        self._p1d_specs: list[tuple[str, torch.nn.Parameter, torch.nn.Parameter, str, int, int]] = []
+        for bi in range(n_uniq_blk):
+            blk = model.blocks[bi]
+            eblk = ema_model.blocks[bi]
+            p = f"b{bi}."
+            self._p2d_specs.extend([
+                (p + "val_proj", blk.val_proj.weight, eblk.val_proj.weight, p + "val_proj", D, 0, True, False),
+                (p + "global_metric", blk.global_metric.weight, eblk.global_metric.weight, p + "global_metric", D, 0, True, False),
+                (p + "team_metric", blk.team_metric.weight, eblk.team_metric.weight, p + "team_metric", D, 0, True, False),
+                (p + "rival_metric", blk.rival_metric.weight, eblk.rival_metric.weight, p + "rival_metric", D, 0, True, False),
+                (p + "team_val_proj", blk.team_val_proj.weight, eblk.team_val_proj.weight, p + "team_val_proj", D, 0, True, False),
+                (p + "team_mutate_proj", blk.team_mutate_proj.weight, eblk.team_mutate_proj.weight, p + "team_mutate_proj", D, 0, True, False),
+                (p + "team_bcast_proj", blk.team_bcast_proj.weight, eblk.team_bcast_proj.weight, p + "team_bcast_proj", D, 0, True, False),
+                (p + "gram_out", blk.gram_out.weight, eblk.gram_out.weight, p + "gram_out", D, 0, True, False),
+                (p + "ffn_gate", blk.ffn_gate.weight, eblk.ffn_gate.weight, p + "ffn_gate_up", D, 0, True, False),
+                (p + "ffn_up", blk.ffn_up.weight, eblk.ffn_up.weight, p + "ffn_gate_up", D, H, True, False),
+                (p + "ffn_down", blk.ffn_down.weight, eblk.ffn_down.weight, p + "ffn_down", H, 0, True, False),
+            ])
+            self._p1d_specs.append((p + "pool_score", blk.pool_score.weight, eblk.pool_score.weight, p + "pool_score", D, 0))
+
+        self._p2d_specs.extend([
+            ("cart_q", model.cart_q.weight, ema_model.cart_q.weight, "cart_q", D, 0, True, False),
+            ("cart_k", model.cart_k.weight, ema_model.cart_k.weight, "cart_k", D, 0, True, False),
+            ("rival_q", model.rival_q.weight, ema_model.rival_q.weight, "rival_q", D, 0, True, False),
+            ("rival_k", model.rival_k.weight, ema_model.rival_k.weight, "rival_k", D, 0, True, False),
+            ("cont_proj", model.cont_proj.weight, ema_model.cont_proj.weight, "heads_packed", D, 0, True, False),
+            ("value_proj", model.value_proj.weight, ema_model.value_proj.weight, "heads_packed", D, 11, True, False),
+            ("dyn_action_proj", model.dyn_action_proj.weight, ema_model.dyn_action_proj.weight, "heads_packed", D, 14, True, False),
+        ])
+        self._p1d_specs.append(("dyn_drift_proj", model.dyn_drift_proj.weight, ema_model.dyn_drift_proj.weight, "heads_packed", D, 13))
+
+        # Allocate per-parameter FP32 master, EMA, momentum, Adam v, and g_proj buffers
+        self._bufs_2d: dict[str, tuple[int, int, int, int, tuple[int, int]]] = {}
+        for name, param, _, _, _, _, _, _ in self._p2d_specs:
+            m, k = int(param.shape[0]), int(param.shape[1])
+            nb = m * k * 4
+            self._bufs_2d[name] = (add_b(nb), add_b(nb), add_b(nb), add_b(nb), (m, k))
+
+        self._bufs_1d: dict[str, tuple[int, int, int, int, int, int]] = {}
+        for name, param, _, _, _, _ in self._p1d_specs:
+            k = int(param.numel())
+            nb = k * 4
+            self._bufs_1d[name] = (add_b(nb), add_b(nb), add_b(nb), add_b(nb), add_b(nb), k)
+
+        self.b_sc_m = add_b(S_tot * 4)
+        self.b_sc_e = add_b(S_tot * 4)
+        self.b_sc_mom = add_b(S_tot * 4)
+        self.b_sc_v = add_b(S_tot * 4)
+        self.b_sc_gp = add_b(S_tot * 4)
+
+        eps_w = max(float(trainer.nc.unit_norm_eps), 1e-4)
+        eps_n = max(float(trainer.nc.mp_norm_eps), 1e-4)
+        ns_a, ns_b, ns_c = (float(v) for v in opt_cfg.ns_coeffs)
+        ns_steps = int(opt_cfg.ns_steps)
+        pp_iters = int(opt_cfg.pp_iterations)
+
+        # --- Pass 1: Tangent projection + global L2 norm^2 across ALL 39 params ---
+        for name, _, _, lkey, k_pad, row_off, _, is_te in self._p2d_specs:
+            bm, _, _, bgp, (m, k) = self._bufs_2d[name]
+            add_op(_make_op(
+                MG_OP_OPT_TANGENT_NORM,
+                in_bufs=(bm, igw[lkey]),
+                out_bufs=(bgp, self.b_norm_sq),
+                u=(m, k, k_pad, 1 if is_te else 0, row_off),
+                f=(eps_w, eps_n),
+            ))
+        for name, _, _, lkey, k_pad, row_off in self._p1d_specs:
+            bm, _, _, _, bgp, k = self._bufs_1d[name]
+            add_op(_make_op(
+                MG_OP_OPT_TANGENT_NORM,
+                in_bufs=(bm, igw[lkey]),
+                out_bufs=(bgp, self.b_norm_sq),
+                u=(1, k, k_pad, 0, row_off),
+                f=(eps_w, eps_n),
+            ))
+        add_op(_make_op(
+            MG_OP_OPT_TANGENT_NORM,
+            in_bufs=(-1, i_sc_grads),
+            out_bufs=(self.b_sc_gp, self.b_norm_sq),
+            u=(1, S_tot, S_tot, 2, 0),
+            f=(eps_w, eps_n),
+        ))
+
+        def emit_ns(r_pad: int, c_pad: int) -> None:
+            for _ in range(ns_steps):
+                add_op(_make_op(MG_OP_LINEAR, in_bufs=(s_x, s_x), out_bufs=(s_a,), u=(r_pad, r_pad, c_pad)))
+                add_op(_make_op(MG_OP_LINEAR, in_bufs=(s_a, s_a), out_bufs=(s_a2,), u=(r_pad, r_pad, r_pad)))
+                add_op(_make_op(MG_OP_OPT_NS_AXPBY, in_bufs=(s_a, s_a2), out_bufs=(s_b,), u=(r_pad * r_pad,), f=(ns_b, ns_c)))
+                add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(s_b, s_x), out_bufs=(s_bx,), u=(r_pad, c_pad, r_pad, 0)))
+                add_op(_make_op(MG_OP_OPT_NS_AXPBY, in_bufs=(s_x, s_bx), out_bufs=(s_x,), u=(r_pad * c_pad,), f=(ns_a, 1.0)))
+
+        # --- Pass 2: 2D Aurora spectral updates + unit-norm + EMA + live BF16 + zero gw ---
+        for name, _, _, lkey, k_pad, row_off, do_unit, is_te in self._p2d_specs:
+            bm, be, bmom, bgp, (m, k) = self._bufs_2d[name]
+            trans = m > k
+            r_pad = _align(min(m, k), 64)
+            c_pad = _align(max(m, k), 64)
+            use_d = trans and (pp_iters > 0)
+            pflags = (1 if trans else 0) | (2 if use_d else 0)
+            add_op(_make_op(
+                MG_OP_OPT_MOM_PREP,
+                in_bufs=(bgp, self.b_norm_sq, self.b_cfg, s_dvec if use_d else -1),
+                out_bufs=(bmom, s_geff, s_x),
+                u=(m, k, r_pad, c_pad, pflags),
+            ))
+            emit_ns(r_pad, c_pad)
+            if use_d:
+                for _ in range(pp_iters):
+                    add_op(_make_op(
+                        MG_OP_OPT_AURORA_DREF,
+                        in_bufs=(s_x, s_geff, self.b_cfg),
+                        out_bufs=(s_dvec,),
+                        u=(m, k, r_pad, c_pad),
+                    ))
+                    emit_ns(r_pad, c_pad)
+            aflags = (1 if trans else 0) | (2 if do_unit else 0) | (4 if is_te else 0)
+            add_op(_make_op(
+                MG_OP_OPT_APPLY_2D,
+                in_bufs=(s_x, self.b_cfg, igw[lkey]),
+                out_bufs=(bm, be, iw[lkey]),
+                u=(m, k, r_pad, c_pad, k_pad, row_off, aflags),
+            ))
+
+        # --- Pass 3: 1D UnitLinear Adam updates (pool_score, dyn_drift_proj) ---
+        for name, _, _, lkey, k_pad, row_off in self._p1d_specs:
+            bm, be, bmom, bv, bgp, k = self._bufs_1d[name]
+            add_op(_make_op(
+                MG_OP_OPT_APPLY_1D,
+                in_bufs=(bgp, self.b_norm_sq, self.b_cfg, self.b_step, bmom, bv),
+                out_bufs=(bm, be, iw[lkey]),
+                u=(k, k_pad, row_off, igw[lkey], 0, 0, 0, 0),
+            ))
+
+        # --- Pass 4: Scalar bank Adam + live scalars/hp pack + diag + step++ + zero sc_grads/norm_sq ---
+        add_op(_make_op(
+            MG_OP_OPT_APPLY_1D,
+            in_bufs=(i_sc_grads, self.b_norm_sq, self.b_cfg, self.b_step, self.b_sc_mom, self.b_sc_v),
+            out_bufs=(self.b_sc_m, self.b_sc_e, i_sc_live),
+            u=(S_tot, n_uniq_blk, trainer.depth, 1 if trainer.recurrent else 0, i_hp_live, self.b_bounds, self.b_diag, 1),
+        ))
+
+        # --- Pass 5: In-place had_int8 weight repack directly inside the SAME command buffer! ---
+        for key, rows, cols in trainer._repack_specs:
+            add_op(_make_op(
+                MG_OP_FWHT_PACK_I8,
+                in_bufs=(iw[key],),
+                out_bufs=(iwq[key][0], iwq[key][1]),
+                u=(rows, cols, 0),
+            ))
+
+        rc = self.lib.mesh_graph_compile(self.g)
+        if rc != 0:
+            raise RuntimeError(f"mesh_graph_compile failed for CompiledAuroraOptimizer: {rc}")
+
+        # Host unified-memory views
+        self.cfg_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_cfg), (16,))
+        self.bounds_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_bounds), (16,))
+        self.step_view = _ptr_to_torch_i32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_step), (1,))
+        self.diag_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_diag), (2,))
+        self._load_config(trainer, opt_cfg)
+        self.load_from_models_(model, ema_model)
+
+    def close(self) -> None:
+        if getattr(self, "g", None):
+            self.lib.mesh_graph_destroy(self.g)
+            self.g = None
+
+    def __del__(self) -> None:
+        self.close()
+
+    def _load_config(self, trainer: CompiledPlanTrainer, oc: Any) -> None:
+        mc = trainer.mc
+        nc = trainer.nc
+        cfg_arr = np.array([
+            float(oc.lr), float(oc.scalar_lr), float(oc.mu), 1.0 if oc.nesterov else 0.0,
+            float(oc.grad_clip), float(oc.pp_beta), float(oc.eps),
+            float(oc.d_init_clamp[0]), float(oc.d_init_clamp[1]),
+            float(oc.d_iter_clamp[0]), float(oc.d_iter_clamp[1]),
+            float(oc.ema_decay), float(nc.unit_norm_eps), float(nc.mp_norm_eps),
+            float(oc.scalar_beta2), float(oc.scalar_eps),
+        ], dtype=np.float32)
+        self.cfg_view.copy_(torch.from_numpy(cfg_arr))
+        bnd_arr = np.array([
+            float(mc.temp_bounds[0]), float(mc.temp_bounds[1]), float(mc.cont_gain_bound),
+            float(mc.cont_logstd_bounds[0]), float(mc.cont_logstd_bounds[1]),
+            float(mc.value_gain_bounds[0]), float(mc.value_gain_bounds[1]),
+            float(mc.dyn_gain_bounds[0]), float(mc.dyn_gain_bounds[1]),
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ], dtype=np.float32)
+        self.bounds_view.copy_(torch.from_numpy(bnd_arr))
+
+    def _pack_scalars(self, model: PlanWally) -> np.ndarray:
+        vals: list[float] = []
+        vals.extend(model.cont_gain.detach().float().cpu().view(-1).tolist())
+        vals.extend(model.cont_bias.detach().float().cpu().view(-1).tolist())
+        vals.extend(model.cont_logstd.detach().float().cpu().view(-1).tolist())
+        vals.append(float(model.value_gain.detach().float().item()))
+        vals.extend(model.value_bias.detach().float().cpu().view(-1).tolist())
+        vals.append(float(model.dyn_drift_gain.detach().float().item()))
+        vals.append(float(model.dyn_action_gain.detach().float().item()))
+        vals.append(float(model.log_temp_cart.detach().float().item()))
+        vals.append(float(model.log_temp_rival.detach().float().item()))
+        vals.append(float(model.type_blend.detach().float().item()))
+        for bi in range(self._n_uniq_blk):
+            blk = model.blocks[bi]
+            vals.extend([
+                float(blk.blend_pool.detach().float().item()),
+                float(blk.blend_team_mut.detach().float().item()),
+                float(blk.blend_gram.detach().float().item()),
+                float(blk.blend_ffn.detach().float().item()),
+            ])
+        if self.trainer.recurrent:
+            vals.extend(model.step_blends.detach().float().cpu().view(-1).tolist()[: self.trainer.depth])
+        return np.asarray(vals, dtype=np.float32)
+
+    def _unpack_scalars_(self, model: PlanWally, arr: np.ndarray) -> None:
+        dev = model.cont_gain.device
+        dt = model.cont_gain.dtype
+        t = torch.from_numpy(arr)
+        model.cont_gain.copy_(t[0:11].to(device=dev, dtype=dt))
+        model.cont_bias.copy_(t[11:22].to(device=dev, dtype=dt))
+        model.cont_logstd.copy_(t[22:33].to(device=dev, dtype=dt))
+        model.value_gain.copy_(t[33].to(device=dev, dtype=dt))
+        model.value_bias.copy_(t[34:36].to(device=dev, dtype=dt))
+        model.dyn_drift_gain.copy_(t[36].to(device=dev, dtype=dt))
+        model.dyn_action_gain.copy_(t[37].to(device=dev, dtype=dt))
+        model.log_temp_cart.copy_(t[38].to(device=dev, dtype=dt))
+        model.log_temp_rival.copy_(t[39].to(device=dev, dtype=dt))
+        model.type_blend.copy_(t[40].to(device=dev, dtype=dt))
+        off = 41
+        for bi in range(self._n_uniq_blk):
+            blk = model.blocks[bi]
+            blk.blend_pool.copy_(t[off + 0].to(device=dev, dtype=dt))
+            blk.blend_team_mut.copy_(t[off + 1].to(device=dev, dtype=dt))
+            blk.blend_gram.copy_(t[off + 2].to(device=dev, dtype=dt))
+            blk.blend_ffn.copy_(t[off + 3].to(device=dev, dtype=dt))
+            off += 4
+        if self.trainer.recurrent:
+            model.step_blends[: self.trainer.depth].copy_(t[off : off + self.trainer.depth].to(device=dev, dtype=dt))
+
+    @torch.no_grad()
+    def load_from_models_(self, model: PlanWally, ema_model: PlanWally) -> None:
+        st = self.state
+        for name, param, eparam, _, _, _, _, _ in self._p2d_specs:
+            bm, be, bmom, _, shape = self._bufs_2d[name]
+            _copy_f32_to_ptr(param.detach().to(device="cpu", dtype=torch.float32).numpy(), self.lib.mesh_graph_buffer_ptr(self.g, bm))
+            _copy_f32_to_ptr(eparam.detach().to(device="cpu", dtype=torch.float32).numpy(), self.lib.mesh_graph_buffer_ptr(self.g, be))
+            m_arr = st.mom.get(name)
+            if m_arr is not None and m_arr.shape == shape:
+                _copy_f32_to_ptr(m_arr, self.lib.mesh_graph_buffer_ptr(self.g, bmom))
+        for name, param, eparam, _, _, _ in self._p1d_specs:
+            bm, be, bmom, bv, _, k = self._bufs_1d[name]
+            _copy_f32_to_ptr(param.detach().to(device="cpu", dtype=torch.float32).view(-1).numpy(), self.lib.mesh_graph_buffer_ptr(self.g, bm))
+            _copy_f32_to_ptr(eparam.detach().to(device="cpu", dtype=torch.float32).view(-1).numpy(), self.lib.mesh_graph_buffer_ptr(self.g, be))
+            if name in st.mom and st.mom[name].size == k:
+                _copy_f32_to_ptr(st.mom[name], self.lib.mesh_graph_buffer_ptr(self.g, bmom))
+                _copy_f32_to_ptr(st.v[name], self.lib.mesh_graph_buffer_ptr(self.g, bv))
+        _copy_f32_to_ptr(self._pack_scalars(model), self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_m))
+        _copy_f32_to_ptr(self._pack_scalars(ema_model), self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_e))
+        if "__scalars__" in st.mom and st.mom["__scalars__"].size == self._S_tot:
+            _copy_f32_to_ptr(st.mom["__scalars__"], self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_mom))
+            _copy_f32_to_ptr(st.v["__scalars__"], self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_v))
+        self.step_view[0] = int(st.step)
+
+    @torch.no_grad()
+    def step(self) -> tuple[float, float]:
+        """Run 1 complete fused Metal 4 Aurora step (<1 ms!). Returns (grad_norm, cont_std)."""
+        wt = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run_fused(self.g, 1, 0, ctypes.byref(wt))
+        return float(self.diag_view[0].item()), float(self.diag_view[1].item())
+
+    @torch.no_grad()
+    def export_to_models_(self, model: PlanWally, ema_model: PlanWally) -> None:
+        """Copy updated weights & persistent momentum/v state back ONCE at end of epoch."""
+        st = self.state
+        for name, param, eparam, _, _, _, _, _ in self._p2d_specs:
+            bm, be, bmom, _, shape = self._bufs_2d[name]
+            wm = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bm), shape)
+            we = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, be), shape)
+            param.copy_(wm.to(device=param.device, dtype=param.dtype))
+            eparam.copy_(we.to(device=eparam.device, dtype=eparam.dtype))
+            st.mom[name] = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bmom), shape).numpy().copy()
+        for name, param, eparam, _, _, _ in self._p1d_specs:
+            bm, be, bmom, bv, _, k = self._bufs_1d[name]
+            wm = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bm), (1, k))
+            we = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, be), (1, k))
+            param.copy_(wm.to(device=param.device, dtype=param.dtype))
+            eparam.copy_(we.to(device=eparam.device, dtype=eparam.dtype))
+            st.mom[name] = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bmom), (k,)).numpy().copy()
+            st.v[name] = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bv), (k,)).numpy().copy()
+        sc_m = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_m), (self._S_tot,)).numpy().copy()
+        sc_e = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_e), (self._S_tot,)).numpy().copy()
+        self._unpack_scalars_(model, sc_m)
+        self._unpack_scalars_(ema_model, sc_e)
+        st.mom["__scalars__"] = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_mom), (self._S_tot,)).numpy().copy()
+        st.v["__scalars__"] = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_v), (self._S_tot,)).numpy().copy()
+        st.step = int(self.step_view[0].item())

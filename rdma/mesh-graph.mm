@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -29,6 +30,7 @@
 #include "mesh-graph.h"
 #include "mesh-simdt.h"
 #include "mesh-simdt-bwd.h"
+#include "mesh-opt.h"
 extern "C" {
 #include "mesh-call.h"
 #include "mesh-codec.h"
@@ -1605,6 +1607,402 @@ template [[host_name("gemm_nt_nax_2_2_2_2_1")]] [[kernel]] void gemm_nt_nax<bflo
 template [[host_name("gemm_nt_nax_2_2_1_1_1")]] [[kernel]] void gemm_nt_nax<bfloat, 2, 2, 1, 1, 1>(const device bfloat*, const device bfloat*, device bfloat*, const constant BwdParams*, uint, uint3);
 template [[host_name("gemm_gradw_nax_2_2_1_1_4")]] [[kernel]] void gemm_gradw_nax<bfloat, 2, 2, 1, 1, 4>(const device bfloat*, const device bfloat*, device float*, const constant BwdParams*, uint, uint3);
 template [[host_name("gemm_gradw_nax_2_2_1_1_1")]] [[kernel]] void gemm_gradw_nax<bfloat, 2, 2, 1, 1, 1>(const device bfloat*, const device bfloat*, device float*, const constant BwdParams*, uint, uint3);
+
+// ---- Compressed Streaming Rademacher-FWHT-64 + Native M5 INT8@8 NAX GEMM ----
+// Exact same Rademacher sign mask & FWHT-64 butterfly as sm120_wcodec_gemm.cu / mesh-codec.h!
+inline float rad_sign64_mg(uint idx) {
+  constexpr ulong MASK = 0x965a3c69a5c3695aul;
+  return ((MASK >> (idx & 63u)) & 1ul) ? 1.0f : -1.0f;
+}
+
+inline void fwht64_simd_pair_mg(thread float& a, thread float& b, uint lane) {
+  float s = a + b, d = a - b;
+  a = s; b = d;
+  #pragma unroll
+  for (uint mask = 1u; mask <= 16u; mask <<= 1u) {
+    float oa = simd_shuffle_xor(a, ushort(mask));
+    float ob = simd_shuffle_xor(b, ushort(mask));
+    bool hi = (lane & mask) != 0u;
+    a = hi ? (oa - a) : (a + oa);
+    b = hi ? (ob - b) : (b + ob);
+  }
+  a *= 0.125f;
+  b *= 0.125f;
+}
+
+// Barrier-free 1-simdgroup-per-row fast path (K <= 512, 4 rows/TG, ZERO threadgroup barriers!)
+[[kernel]] void fwht64_pack_i8_sg(
+    const device bfloat* src [[buffer(0)]],
+    device int8_t* q_out [[buffer(1)]],
+    device float* s_out [[buffer(2)]],
+    constant uint* u [[buffer(3)]],
+    uint tgp [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+  const uint M = u[0], K = u[1], trans = u[2];
+  const uint row = tgp * 4u + sg;
+  if (row >= M) return;
+  const uint n_blk = K >> 6u; // <= 8
+  float ra[8], rb[8];
+  float lmax = 0.0f;
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    const uint c0 = blk * 64u + lane * 2u;
+    float a, b;
+    if (!trans) {
+      const ulong base = ulong(row) * ulong(K) + c0;
+      a = float(src[base]) * rad_sign64_mg(lane * 2u);
+      b = float(src[base + 1u]) * rad_sign64_mg(lane * 2u + 1u);
+    } else {
+      a = float(src[ulong(c0) * ulong(M) + row]) * rad_sign64_mg(lane * 2u);
+      b = float(src[ulong(c0 + 1u) * ulong(M) + row]) * rad_sign64_mg(lane * 2u + 1u);
+    }
+    fwht64_simd_pair_mg(a, b, lane);
+    ra[blk] = a; rb[blk] = b;
+    lmax = max(lmax, max(fabs(a), fabs(b)));
+  }
+  const float amax = max(simd_max(lmax), 1e-8f);
+  const float inv_s = 127.0f / amax;
+  if (lane == 0u) s_out[row] = amax / 127.0f;
+  device char2* q2 = reinterpret_cast<device char2*>(q_out + ulong(row) * ulong(K));
+  for (uint blk = 0u; blk < n_blk; blk++) {
+    q2[blk * 32u + lane] = char2(
+        char(clamp(int(rint(ra[blk] * inv_s)), -127, 127)),
+        char(clamp(int(rint(rb[blk] * inv_s)), -127, 127)));
+  }
+}
+
+// Single-pass register Rademacher-FWHT-64 + per-row dynamic int8_t quantizer (K > 512).
+[[kernel]] void fwht64_pack_i8_row(
+    const device bfloat* src [[buffer(0)]],
+    device int8_t* q_out [[buffer(1)]],
+    device float* s_out [[buffer(2)]],
+    constant uint* u [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+  const uint M = u[0], K = u[1], trans = u[2];
+  if (row >= M) return;
+  const uint n_blk = K >> 6u;
+  threadgroup float sg_max[4];
+
+  if (n_blk <= 16u) {
+    float ra[4], rb[4];
+    float lmax = 0.0f;
+    uint reg_i = 0u;
+    for (uint blk = sg; blk < n_blk; blk += 4u, reg_i++) {
+      const uint c0 = blk * 64u + lane * 2u;
+      float a, b;
+      if (!trans) {
+        const ulong base = ulong(row) * ulong(K) + c0;
+        a = float(src[base]) * rad_sign64_mg(lane * 2u);
+        b = float(src[base + 1u]) * rad_sign64_mg(lane * 2u + 1u);
+      } else {
+        a = float(src[ulong(c0) * ulong(M) + row]) * rad_sign64_mg(lane * 2u);
+        b = float(src[ulong(c0 + 1u) * ulong(M) + row]) * rad_sign64_mg(lane * 2u + 1u);
+      }
+      fwht64_simd_pair_mg(a, b, lane);
+      ra[reg_i] = a; rb[reg_i] = b;
+      lmax = max(lmax, max(fabs(a), fabs(b)));
+    }
+    lmax = simd_max(lmax);
+    if (lane == 0u) sg_max[sg] = lmax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float amax = max(max(max(sg_max[0], sg_max[1]), max(sg_max[2], sg_max[3])), 1e-8f);
+    const float inv_s = 127.0f / amax;
+    if (tid == 0u) s_out[row] = amax / 127.0f;
+
+    device char2* q2 = reinterpret_cast<device char2*>(q_out + ulong(row) * ulong(K));
+    reg_i = 0u;
+    for (uint blk = sg; blk < n_blk; blk += 4u, reg_i++) {
+      q2[blk * 32u + lane] = char2(
+          char(clamp(int(rint(ra[reg_i] * inv_s)), -127, 127)),
+          char(clamp(int(rint(rb[reg_i] * inv_s)), -127, 127)));
+    }
+  } else {
+    float lmax = 0.0f;
+    for (uint blk = sg; blk < n_blk; blk += 4u) {
+      const uint c0 = blk * 64u + lane * 2u;
+      float a, b;
+      if (!trans) {
+        const ulong base = ulong(row) * ulong(K) + c0;
+        a = float(src[base]) * rad_sign64_mg(lane * 2u);
+        b = float(src[base + 1u]) * rad_sign64_mg(lane * 2u + 1u);
+      } else {
+        a = float(src[ulong(c0) * ulong(M) + row]) * rad_sign64_mg(lane * 2u);
+        b = float(src[ulong(c0 + 1u) * ulong(M) + row]) * rad_sign64_mg(lane * 2u + 1u);
+      }
+      fwht64_simd_pair_mg(a, b, lane);
+      lmax = max(lmax, max(fabs(a), fabs(b)));
+    }
+    lmax = simd_max(lmax);
+    if (lane == 0u) sg_max[sg] = lmax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float amax = max(max(max(sg_max[0], sg_max[1]), max(sg_max[2], sg_max[3])), 1e-8f);
+    const float inv_s = 127.0f / amax;
+    if (tid == 0u) s_out[row] = amax / 127.0f;
+
+    device char2* q2 = reinterpret_cast<device char2*>(q_out + ulong(row) * ulong(K));
+    for (uint blk = sg; blk < n_blk; blk += 4u) {
+      const uint c0 = blk * 64u + lane * 2u;
+      float a, b;
+      if (!trans) {
+        const ulong base = ulong(row) * ulong(K) + c0;
+        a = float(src[base]) * rad_sign64_mg(lane * 2u);
+        b = float(src[base + 1u]) * rad_sign64_mg(lane * 2u + 1u);
+      } else {
+        a = float(src[ulong(c0) * ulong(M) + row]) * rad_sign64_mg(lane * 2u);
+        b = float(src[ulong(c0 + 1u) * ulong(M) + row]) * rad_sign64_mg(lane * 2u + 1u);
+      }
+      fwht64_simd_pair_mg(a, b, lane);
+      q2[blk * 32u + lane] = char2(
+          char(clamp(int(rint(a * inv_s)), -127, 127)),
+          char(clamp(int(rint(b * inv_s)), -127, 127)));
+    }
+  }
+}
+
+struct I8GemmParams { int M, N, K, accum; };
+
+[[kernel, max_total_threads_per_threadgroup(128)]] void gemm_i8_nax_64x64(
+    const device int8_t* X [[buffer(0)]],
+    const device float* SX [[buffer(1)]],
+    const device int8_t* W [[buffer(2)]],
+    const device float* SW [[buffer(3)]],
+    device bfloat* Y [[buffer(4)]],
+    const constant I8GemmParams* params [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  constexpr int RM = 64, CN = 64;
+  const int M = params->M, N = params->N, K = params->K, accum = params->accum;
+  const int row = int(group.x) * RM, col = int(group.y) * CN;
+  if (row >= M || col >= N) return;
+
+  threadgroup float sx_sh[64], sw_sh[64];
+  if (tid < 64u) {
+    sx_sh[tid] = (row + int(tid) < M) ? SX[row + int(tid)] : 0.0f;
+  } else {
+    const uint c = tid - 64u;
+    sw_sh[c] = (col + int(c) < N) ? SW[col + int(c)] : 0.0f;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using i8_tensor_t = metal::tensor<device int8_t, extents_t, metal::tensor_inline>;
+  using bf_tensor_t = metal::tensor<device bfloat, extents_t, metal::tensor_inline>;
+  i8_tensor_t tA((device int8_t*)X, extents_t(K, M), strides_t{1, K});
+  i8_tensor_t tB((device int8_t*)W, extents_t(K, N), strides_t{1, K});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      RM, CN, static_cast<int>(metal::dynamic_extent), false, true, false,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroups<4>> op;
+  auto acc = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, int32_t>();
+  UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) acc[i] = 0;
+
+  auto sa = tA.slice(0, row);
+  auto sb = tB.slice(0, col);
+  op.run(sa, sb, acc);
+
+  bf_tensor_t tY(Y, extents_t(N, M), strides_t{1, N});
+  auto sy = tY.slice(col, row);
+  auto Dout = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, bfloat>();
+  if (accum) {
+    Dout.load(sy);
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = bfloat(float(Dout[i]) + float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]));
+    }
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = bfloat(float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]));
+    }
+  }
+  Dout.store(sy);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void gemm_i8_nax_32x32(
+    const device int8_t* X [[buffer(0)]],
+    const device float* SX [[buffer(1)]],
+    const device int8_t* W [[buffer(2)]],
+    const device float* SW [[buffer(3)]],
+    device bfloat* Y [[buffer(4)]],
+    const constant I8GemmParams* params [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  constexpr int RM = 32, CN = 32;
+  const int M = params->M, N = params->N, K = params->K, accum = params->accum;
+  const int row = int(group.x) * RM, col = int(group.y) * CN;
+  if (row >= M || col >= N) return;
+
+  threadgroup float sx_sh[32], sw_sh[32];
+  sx_sh[tid] = (row + int(tid) < M) ? SX[row + int(tid)] : 0.0f;
+  sw_sh[tid] = (col + int(tid) < N) ? SW[col + int(tid)] : 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using i8_tensor_t = metal::tensor<device int8_t, extents_t, metal::tensor_inline>;
+  using bf_tensor_t = metal::tensor<device bfloat, extents_t, metal::tensor_inline>;
+  i8_tensor_t tA((device int8_t*)X, extents_t(K, M), strides_t{1, K});
+  i8_tensor_t tB((device int8_t*)W, extents_t(K, N), strides_t{1, K});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      RM, CN, static_cast<int>(metal::dynamic_extent), false, true, false,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto acc = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, int32_t>();
+  UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) acc[i] = 0;
+
+  auto sa = tA.slice(0, row);
+  auto sb = tB.slice(0, col);
+  op.run(sa, sb, acc);
+
+  bf_tensor_t tY(Y, extents_t(N, M), strides_t{1, N});
+  auto sy = tY.slice(col, row);
+  auto Dout = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, bfloat>();
+  if (accum) {
+    Dout.load(sy);
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = bfloat(float(Dout[i]) + float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]));
+    }
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = bfloat(float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]));
+    }
+  }
+  Dout.store(sy);
+}
+
+// ---- Hardware NAX Batched CGT Global Gram Kernels (dynamic_extent -> exact for ANY M_ent!) ----
+struct GramNaxParams { int E, M_ent, D, R, accum; float inv_m; };
+
+// 1. Batched KV[e, R, D] = (R_norm[e]^T @ V_norm[e]) * inv_m  (grid = (R/32, D/32, E), 32 th)
+[[kernel, max_total_threads_per_threadgroup(32)]] void cgt_gram_kv_nax(
+    const device bfloat* R_all [[buffer(0)]],
+    const device bfloat* V_all [[buffer(1)]],
+    device bfloat* KV_all [[buffer(2)]],
+    const constant GramNaxParams* p [[buffer(3)]],
+    uint3 grp [[threadgroup_position_in_grid]]) {
+  const int E = p->E, M_ent = p->M_ent, D = p->D, R = p->R;
+  const int e = int(grp.z), r0 = int(grp.x) * 32, d0 = int(grp.y) * 32;
+  if (e >= E || r0 >= R || d0 >= D) return;
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using tensor_t = metal::tensor<device bfloat, extents_t, metal::tensor_inline>;
+  const device bfloat* Re = R_all + int64_t(e) * M_ent * R;
+  const device bfloat* Ve = V_all + int64_t(e) * M_ent * D;
+  device bfloat* KVe = KV_all + int64_t(e) * R * D;
+
+  tensor_t tA((device bfloat*)Re, extents_t(R, M_ent), strides_t{1, R});
+  tensor_t tB((device bfloat*)Ve, extents_t(D, M_ent), strides_t{1, D});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      32, 32, static_cast<int>(metal::dynamic_extent), true, false, true,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto Dacc = op.template get_destination_cooperative_tensor<tensor_t, tensor_t, float>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] = 0.0f;
+
+  auto sa = tA.slice(r0, 0);
+  auto sb = tB.slice(d0, 0);
+  op.run(sa, sb, Dacc);
+
+  const float s = p->inv_m;
+  auto Dout = op.template get_destination_cooperative_tensor<tensor_t, tensor_t, bfloat>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = bfloat(Dacc[i] * s);
+  tensor_t tD(KVe, extents_t(D, R), strides_t{1, D});
+  auto sd = tD.slice(d0, r0);
+  Dout.store(sd);
+}
+
+// 2. Batched Out[e, M_ent, D] = R_norm[e] @ KV[e]  (accum=1 for dV += R @ dKV; grid = (cdiv(M_ent,32), D/32, E), 32 th)
+[[kernel, max_total_threads_per_threadgroup(32)]] void cgt_gram_out_nax(
+    const device bfloat* R_all [[buffer(0)]],
+    const device bfloat* KV_all [[buffer(1)]],
+    device bfloat* Out_all [[buffer(2)]],
+    const constant GramNaxParams* p [[buffer(3)]],
+    uint3 grp [[threadgroup_position_in_grid]]) {
+  const int E = p->E, M_ent = p->M_ent, D = p->D, R = p->R, accum = p->accum;
+  const int e = int(grp.z), m0 = int(grp.x) * 32, d0 = int(grp.y) * 32;
+  if (e >= E || m0 >= M_ent || d0 >= D) return;
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using tensor_t = metal::tensor<device bfloat, extents_t, metal::tensor_inline>;
+  const device bfloat* Re = R_all + int64_t(e) * M_ent * R;
+  const device bfloat* KVe = KV_all + int64_t(e) * R * D;
+  device bfloat* Oe = Out_all + int64_t(e) * M_ent * D;
+
+  tensor_t tA((device bfloat*)Re, extents_t(R, M_ent), strides_t{1, R});
+  tensor_t tB((device bfloat*)KVe, extents_t(D, R), strides_t{1, D});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      32, 32, static_cast<int>(metal::dynamic_extent), false, false, true,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto Dacc = op.template get_destination_cooperative_tensor<tensor_t, tensor_t, float>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] = 0.0f;
+
+  auto sa = tA.slice(0, m0);
+  auto sb = tB.slice(d0, 0);
+  op.run(sa, sb, Dacc);
+
+  tensor_t tD(Oe, extents_t(D, M_ent), strides_t{1, D});
+  auto sd = tD.slice(d0, m0);
+  auto Dout = op.template get_destination_cooperative_tensor<tensor_t, tensor_t, bfloat>();
+  if (accum) {
+    Dout.load(sd);
+    UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = bfloat(float(Dout[i]) + Dacc[i]);
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = bfloat(Dacc[i]);
+  }
+  Dout.store(sd);
+}
+
+// 3. Fused Batched dR[e, M_ent, R] = dOut[e] @ KV[e]^T + V[e] @ dKV[e]^T (grid = (cdiv(M_ent,32), R/32, E), 32 th)
+[[kernel, max_total_threads_per_threadgroup(32)]] void cgt_gram_bwd_dr_nax(
+    const device bfloat* dOut_all [[buffer(0)]],
+    const device bfloat* KV_all [[buffer(1)]],
+    const device bfloat* V_all [[buffer(2)]],
+    const device bfloat* dKV_all [[buffer(3)]],
+    device bfloat* dR_all [[buffer(4)]],
+    const constant GramNaxParams* p [[buffer(5)]],
+    uint3 grp [[threadgroup_position_in_grid]]) {
+  const int E = p->E, M_ent = p->M_ent, D = p->D, R = p->R;
+  const int e = int(grp.z), m0 = int(grp.x) * 32, r0 = int(grp.y) * 32;
+  if (e >= E || m0 >= M_ent || r0 >= R) return;
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using tensor_t = metal::tensor<device bfloat, extents_t, metal::tensor_inline>;
+  const device bfloat* dOe = dOut_all + int64_t(e) * M_ent * D;
+  const device bfloat* KVe = KV_all + int64_t(e) * R * D;
+  const device bfloat* Ve = V_all + int64_t(e) * M_ent * D;
+  const device bfloat* dKVe = dKV_all + int64_t(e) * R * D;
+  device bfloat* dRe = dR_all + int64_t(e) * M_ent * R;
+
+  tensor_t tA1((device bfloat*)dOe, extents_t(D, M_ent), strides_t{1, D});
+  tensor_t tB1((device bfloat*)KVe, extents_t(D, R), strides_t{1, D});
+  tensor_t tA2((device bfloat*)Ve, extents_t(D, M_ent), strides_t{1, D});
+  tensor_t tB2((device bfloat*)dKVe, extents_t(D, R), strides_t{1, D});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      32, 32, static_cast<int>(metal::dynamic_extent), false, true, true,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto Dacc = op.template get_destination_cooperative_tensor<tensor_t, tensor_t, float>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dacc[i] = 0.0f;
+
+  auto sa1 = tA1.slice(0, m0); auto sb1 = tB1.slice(0, r0); op.run(sa1, sb1, Dacc);
+  auto sa2 = tA2.slice(0, m0); auto sb2 = tB2.slice(0, r0); op.run(sa2, sb2, Dacc);
+
+  auto Dout = op.template get_destination_cooperative_tensor<tensor_t, tensor_t, bfloat>();
+  UNROLL_ALL for (uint16_t i = 0; i < Dacc.get_capacity(); i++) Dout[i] = bfloat(Dacc[i]);
+  tensor_t tD(dRe, extents_t(R, M_ent), strides_t{1, R});
+  auto sd = tD.slice(r0, m0);
+  Dout.store(sd);
+}
 )MSL";
 }
 
@@ -1627,6 +2025,7 @@ struct mesh_graph {
   id<MTLLibrary> lib_gemm = nil;
   id<MTLLibrary> lib_simdt = nil;
   id<MTLLibrary> lib_simdt_bwd = nil;
+  id<MTLLibrary> lib_opt = nil;
   std::unordered_map<std::string, id<MTLComputePipelineState>> psos;
 
   id<MTLBuffer> table_buf = nil;
@@ -1649,26 +2048,96 @@ struct mesh_graph {
   std::vector<mesh_graph_op> ops;
   id<MTLBuffer> sdpa_scratch = nil;
   size_t sdpa_scratch_bytes = 0;
+  id<MTLBuffer> gram_kv_buf = nil;
+  size_t gram_kv_bytes = 0;
   uint64_t step_gen = 0;
   int out_tok_buf_id = -1;
 };
 
+struct SharedMetalCtx {
+  std::mutex mu;
+  id<MTLDevice> dev = nil;
+  id<MTLCommandQueue> q = nil;
+  id<MTLLibrary> lib_core = nil;
+  id<MTLLibrary> lib_gemm = nil;
+  id<MTLLibrary> lib_simdt = nil;
+  id<MTLLibrary> lib_simdt_bwd = nil;
+  id<MTLLibrary> lib_opt = nil;
+  std::unordered_map<std::string, id<MTLComputePipelineState>> psos;
+};
+
+static SharedMetalCtx &shared_metal() {
+  static SharedMetalCtx *ctx = new SharedMetalCtx();
+  return *ctx;
+}
+
+static bool init_shared_metal(SharedMetalCtx &sc) {
+  std::lock_guard<std::mutex> lk(sc.mu);
+  if (sc.dev && sc.q && sc.lib_core && sc.lib_gemm && sc.lib_simdt && sc.lib_simdt_bwd && sc.lib_opt) return true;
+  sc.dev = MTLCreateSystemDefaultDevice();
+  sc.q = [sc.dev newCommandQueue];
+  NSError *err = nil;
+  NSString *src_core = [NSString stringWithUTF8String:build_core_msl().c_str()];
+  sc.lib_core = [sc.dev newLibraryWithSource:src_core options:nil error:&err];
+  if (!sc.lib_core) {
+    fprintf(stderr, "mesh-graph: core MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    return false;
+  }
+  MTLCompileOptions *opts = [MTLCompileOptions new];
+  opts.languageVersion = (MTLLanguageVersion)((4u << 16) | 0u);
+  NSString *src_gemm = [NSString stringWithUTF8String:build_gemm_msl().c_str()];
+  sc.lib_gemm = [sc.dev newLibraryWithSource:src_gemm options:opts error:&err];
+  if (!sc.lib_gemm) {
+    fprintf(stderr, "mesh-graph: gemm MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    return false;
+  }
+  NSString *src_simdt = [NSString stringWithUTF8String:mesh_simdt::build_simdt_msl().c_str()];
+  sc.lib_simdt = [sc.dev newLibraryWithSource:src_simdt options:nil error:&err];
+  if (!sc.lib_simdt) {
+    fprintf(stderr, "mesh-graph: simdt MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    return false;
+  }
+  NSString *src_bwd = [NSString stringWithUTF8String:mesh_simdt::build_simdt_bwd_msl().c_str()];
+  sc.lib_simdt_bwd = [sc.dev newLibraryWithSource:src_bwd options:nil error:&err];
+  if (!sc.lib_simdt_bwd) {
+    fprintf(stderr, "mesh-graph: simdt_bwd MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    return false;
+  }
+  NSString *src_opt = [NSString stringWithUTF8String:mesh_simdt::build_opt_msl().c_str()];
+  sc.lib_opt = [sc.dev newLibraryWithSource:src_opt options:nil error:&err];
+  if (!sc.lib_opt) {
+    fprintf(stderr, "mesh-graph: opt MSL compile error: %s\n", err.localizedDescription.UTF8String);
+    return false;
+  }
+  return true;
+}
+
 static id<MTLComputePipelineState> get_pso(mesh_graph *g, id<MTLLibrary> lib, const std::string &name) {
   auto it = g->psos.find(name);
   if (it != g->psos.end()) return it->second;
-  NSError *err = nil;
-  id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]];
-  if (!fn) {
-    fprintf(stderr, "mesh-graph: missing Metal function '%s'\n", name.c_str());
-    return nil;
+  SharedMetalCtx &sc = shared_metal();
+  {
+    std::lock_guard<std::mutex> lk(sc.mu);
+    auto sit = sc.psos.find(name);
+    if (sit != sc.psos.end()) {
+      g->psos[name] = sit->second;
+      return sit->second;
+    }
+    NSError *err = nil;
+    id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]];
+    if (!fn) {
+      fprintf(stderr, "mesh-graph: missing Metal function '%s'\n", name.c_str());
+      return nil;
+    }
+    id<MTLComputePipelineState> pso = [g->dev newComputePipelineStateWithFunction:fn error:&err];
+    if (!pso) {
+      fprintf(stderr, "mesh-graph: PSO error for '%s': %s\n", name.c_str(), err.localizedDescription.UTF8String);
+      return nil;
+    }
+    sc.psos[name] = pso;
+    g->psos[name] = pso;
+    return pso;
   }
-  id<MTLComputePipelineState> pso = [g->dev newComputePipelineStateWithFunction:fn error:&err];
-  if (!pso) {
-    fprintf(stderr, "mesh-graph: PSO error for '%s': %s\n", name.c_str(), err.localizedDescription.UTF8String);
-    return nil;
-  }
-  g->psos[name] = pso;
-  return pso;
 }
 
 static int bootstrap_allgather(mesh_graph *g, const void *sendbuf, void *recvbuf, size_t nbytes) {
@@ -2523,35 +2992,76 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
       }
       case MG_OP_MP_NORM: {
         const BufSlot &bx = g->bufs[op.in[0]], &by = g->bufs[op.out[0]];
-        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_norm")];
-        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
-        [enc setBuffer:by.mtl offset:by.off atIndex:1];
-        [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
-        [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        if (op.out[1] >= 0) {
+          const BufSlot &bq = g->bufs[op.out[1]], &bs = g->bufs[op.out[2]];
+          const uint32_t rows_pad = std::max(op.u[0], op.u[2]);
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_norm_i8")];
+          [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+          [enc setBuffer:by.mtl offset:by.off atIndex:1];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:2];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:3];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+          [enc dispatchThreadgroups:MTLSizeMake((rows_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_norm")];
+          [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+          [enc setBuffer:by.mtl offset:by.off atIndex:1];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
+          [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
         break;
       }
       case MG_OP_MP_LERP: {
         const BufSlot &ba = g->bufs[op.in[0]], &bb = g->bufs[op.in[1]], &bsc = g->bufs[op.in[2]], &bo = g->bufs[op.out[0]];
-        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_lerp")];
-        [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
-        [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
-        [enc setBuffer:bsc.mtl offset:bsc.off atIndex:2];
-        [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
-        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
-        [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
-        [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        if (op.out[1] >= 0) {
+          const BufSlot &bq = g->bufs[op.out[1]], &bs = g->bufs[op.out[2]];
+          const uint32_t rows_pad = std::max(op.u[0], op.u[4]);
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_lerp_i8")];
+          [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
+          [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
+          [enc setBuffer:bsc.mtl offset:bsc.off atIndex:2];
+          [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:4];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:5];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:6];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:7];
+          [enc dispatchThreadgroups:MTLSizeMake((rows_pad + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_lerp")];
+          [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
+          [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
+          [enc setBuffer:bsc.mtl offset:bsc.off atIndex:2];
+          [enc setBuffer:bo.mtl offset:bo.off atIndex:3];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+          [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
         break;
       }
       case MG_OP_MP_SWIGLU: {
         const BufSlot &bgu = g->bufs[op.in[0]], &bhid = g->bufs[op.out[0]];
-        const uint32_t rows = op.u[0], H = op.u[1];
-        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_swiglu")];
-        [enc setBuffer:bgu.mtl offset:bgu.off atIndex:0];
-        [enc setBuffer:bhid.mtl offset:bhid.off atIndex:1];
-        [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
-        [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
-        [enc dispatchThreads:MTLSizeMake(H, rows, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(H, 256), 1, 1)];
+        if (op.out[1] >= 0) {
+          const BufSlot &bq = g->bufs[op.out[1]], &bs = g->bufs[op.out[2]];
+          const uint32_t rows_pad = std::max(op.u[0], op.u[2]);
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_swiglu_i8")];
+          [enc setBuffer:bgu.mtl offset:bgu.off atIndex:0];
+          [enc setBuffer:bhid.mtl offset:bhid.off atIndex:1];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:2];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:3];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+          [enc dispatchThreadgroups:MTLSizeMake(rows_pad, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+          const uint32_t rows = op.u[0], H = op.u[1];
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_mp_swiglu")];
+          [enc setBuffer:bgu.mtl offset:bgu.off atIndex:0];
+          [enc setBuffer:bhid.mtl offset:bhid.off atIndex:1];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
+          [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
+          [enc dispatchThreads:MTLSizeMake(H, rows, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(H, 256), 1, 1)];
+        }
         break;
       }
       case MG_OP_CGT_GRAM_STAGE1: {
@@ -2577,10 +3087,10 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
           [enc setBytes:op.f length:sizeof(op.f) atIndex:3];
           [enc dispatchThreadgroups:MTLSizeMake((M_tot + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         }
-        // 2. Global Gram (associative 9KB SRAM G=(r@r^T)*inv_m for M_ent<=48, else 4KB tiled kv_sh)
+        // 2. Global Gram (associative 9KB SRAM for M_ent<=32, else hardware NAX batched KV + Out!)
         {
-          const uint32_t ug[4] = {E, M_ent, D, R};
-          if (M_ent <= 48u) {
+          if (M_ent <= 32u) {
+            const uint32_t ug[4] = {E, M_ent, D, R};
             [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_global_gram_small")];
             [enc setBuffer:br.mtl offset:br.off atIndex:0];
             [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
@@ -2588,12 +3098,21 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
             [enc setBytes:ug length:sizeof(ug) atIndex:3];
             [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
           } else {
-            [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_cgt_global_gram")];
+            struct { int E, M_ent, D, R, accum; float inv_m; } gp = {
+                int(E), int(M_ent), int(D), int(R), 0, 1.0f / std::sqrt(float(std::max(1u, M_ent)))};
+            [enc setComputePipelineState:get_pso(g, g->lib_gemm, "cgt_gram_kv_nax")];
             [enc setBuffer:br.mtl offset:br.off atIndex:0];
             [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
+            [enc setBuffer:g->gram_kv_buf offset:0 atIndex:2];
+            [enc setBytes:&gp length:sizeof(gp) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((R + 31u) / 32u, (D + 31u) / 32u, E) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+            [enc setComputePipelineState:get_pso(g, g->lib_gemm, "cgt_gram_out_nax")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:g->gram_kv_buf offset:0 atIndex:1];
             [enc setBuffer:bglob.mtl offset:bglob.off atIndex:2];
-            [enc setBytes:ug length:sizeof(ug) atIndex:3];
-            [enc dispatchThreadgroups:MTLSizeMake((D + 31u) / 32u, E, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [enc setBytes:&gp length:sizeof(gp) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((M_ent + 31u) / 32u, (D + 31u) / 32u, E) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
           }
         }
         // 3. Team pool + blend_pool -> t_in
@@ -2675,7 +3194,7 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         const uint32_t rows = op.u[0] * op.u[1];
         uint32_t up[8];
         memcpy(up, op.u, sizeof(up));
-        up[6] = step_idx;
+        up[6] = static_cast<uint32_t>(g->step_gen) + step_idx;
         [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_plan_post_pack")];
         [enc setBuffer:bhr.mtl offset:bhr.off atIndex:0];
         [enc setBuffer:bcl.mtl offset:bcl.off atIndex:1];
@@ -2948,10 +3467,10 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
           [enc setBytes:op.f length:sizeof(op.f) atIndex:11];
           [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
-        // 2. Global Gram backward (accumulates into d_v_norm, writes d_r_norm)
+        // 2. Global Gram backward (associative SRAM for M_ent<=32, else hardware NAX batched dKV + dV + fused dR!)
         {
-          const uint32_t ug[4] = {E, M_ent, D, R};
-          if (M_ent <= 48u) {
+          if (M_ent <= 32u) {
+            const uint32_t ug[4] = {E, M_ent, D, R};
             [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_global_gram_bwd_small")];
             [enc setBuffer:br.mtl offset:br.off atIndex:0];
             [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
@@ -2961,19 +3480,39 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
             [enc setBytes:ug length:sizeof(ug) atIndex:5];
             [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
           } else {
-            [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_global_gram_bwd_dv")];
-            [enc setBuffer:br.mtl offset:br.off atIndex:0];
-            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:1];
-            [enc setBuffer:bdv.mtl offset:bdv.off atIndex:2];
-            [enc setBytes:ug length:sizeof(ug) atIndex:3];
-            [enc dispatchThreadgroups:MTLSizeMake((D + 31u) / 32u, E, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_cgt_global_gram_bwd_dr")];
+            const size_t one_kv = static_cast<size_t>(E) * R * D * 2u;
+            const float inv_m = 1.0f / std::sqrt(float(std::max(1u, M_ent)));
+            struct { int E, M_ent, D, R, accum; float inv_m; } gp0 = {int(E), int(M_ent), int(D), int(R), 0, inv_m};
+            struct { int E, M_ent, D, R, accum; float inv_m; } gp1 = {int(E), int(M_ent), int(D), int(R), 1, inv_m};
+            // KV = (R^T @ V) * inv_m -> offset 0
+            [enc setComputePipelineState:get_pso(g, g->lib_gemm, "cgt_gram_kv_nax")];
             [enc setBuffer:br.mtl offset:br.off atIndex:0];
             [enc setBuffer:bv.mtl offset:bv.off atIndex:1];
-            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:2];
-            [enc setBuffer:bdr.mtl offset:bdr.off atIndex:3];
-            [enc setBytes:ug length:sizeof(ug) atIndex:4];
-            [enc dispatchThreadgroups:MTLSizeMake((R + 31u) / 32u, E, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [enc setBuffer:g->gram_kv_buf offset:0 atIndex:2];
+            [enc setBytes:&gp0 length:sizeof(gp0) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((R + 31u) / 32u, (D + 31u) / 32u, E) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            // dKV = (R^T @ dOut) * inv_m -> offset one_kv
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:1];
+            [enc setBuffer:g->gram_kv_buf offset:one_kv atIndex:2];
+            [enc setBytes:&gp0 length:sizeof(gp0) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((R + 31u) / 32u, (D + 31u) / 32u, E) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            // dV += R @ dKV
+            [enc setComputePipelineState:get_pso(g, g->lib_gemm, "cgt_gram_out_nax")];
+            [enc setBuffer:br.mtl offset:br.off atIndex:0];
+            [enc setBuffer:g->gram_kv_buf offset:one_kv atIndex:1];
+            [enc setBuffer:bdv.mtl offset:bdv.off atIndex:2];
+            [enc setBytes:&gp1 length:sizeof(gp1) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((M_ent + 31u) / 32u, (D + 31u) / 32u, E) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            // dR = dOut @ KV^T + V @ dKV^T (fused single NAX kernel!)
+            [enc setComputePipelineState:get_pso(g, g->lib_gemm, "cgt_gram_bwd_dr_nax")];
+            [enc setBuffer:bdglob.mtl offset:bdglob.off atIndex:0];
+            [enc setBuffer:g->gram_kv_buf offset:0 atIndex:1];
+            [enc setBuffer:bv.mtl offset:bv.off atIndex:2];
+            [enc setBuffer:g->gram_kv_buf offset:one_kv atIndex:3];
+            [enc setBuffer:bdr.mtl offset:bdr.off atIndex:4];
+            [enc setBytes:&gp0 length:sizeof(gp0) atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake((M_ent + 31u) / 32u, (R + 31u) / 32u, E) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
           }
         }
         break;
@@ -3027,6 +3566,183 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(n, 256), 1, 1)];
         break;
       }
+      case MG_OP_FWHT_PACK_I8: {
+        const BufSlot &bsrc = g->bufs[op.in[0]];
+        const BufSlot &bq = g->bufs[op.out[0]], &bs = g->bufs[op.out[1]];
+        const uint32_t M = op.u[0], K = op.u[1];
+        if (K <= 512u) {
+          [enc setComputePipelineState:get_pso(g, g->lib_gemm, "fwht64_pack_i8_sg")];
+          [enc setBuffer:bsrc.mtl offset:bsrc.off atIndex:0];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:1];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:2];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+          [enc dispatchThreadgroups:MTLSizeMake((M + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+          [enc setComputePipelineState:get_pso(g, g->lib_gemm, "fwht64_pack_i8_row")];
+          [enc setBuffer:bsrc.mtl offset:bsrc.off atIndex:0];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:1];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:2];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+          [enc dispatchThreadgroups:MTLSizeMake(M, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        break;
+      }
+      case MG_OP_LINEAR_I8: {
+        const BufSlot &bx = g->bufs[op.in[0]], &bsx = g->bufs[op.in[1]];
+        const BufSlot &bw = g->bufs[op.in[2]], &bsw = g->bufs[op.in[3]];
+        const BufSlot &by = g->bufs[op.out[0]];
+        const int M = static_cast<int>(op.u[0]), N = static_cast<int>(op.u[1]), K = static_cast<int>(op.u[2]);
+        const int accum = static_cast<int>(op.u[3]);
+        const int params[4] = {M, N, K, accum};
+        const bool use_64 = (M >= 64 && N >= 64);
+        [enc setComputePipelineState:get_pso(g, g->lib_gemm, use_64 ? "gemm_i8_nax_64x64" : "gemm_i8_nax_32x32")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bsx.mtl offset:bsx.off atIndex:1];
+        [enc setBuffer:bw.mtl offset:bw.off atIndex:2];
+        [enc setBuffer:bsw.mtl offset:bsw.off atIndex:3];
+        [enc setBuffer:by.mtl offset:by.off atIndex:4];
+        [enc setBytes:params length:sizeof(params) atIndex:5];
+        if (use_64) {
+          [enc dispatchThreadgroups:MTLSizeMake((M + 63) / 64, (N + 63) / 64, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+          [enc dispatchThreadgroups:MTLSizeMake((M + 31) / 32, (N + 31) / 32, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+        break;
+      }
+      case MG_OP_SIMDT_REWARD: {
+        // in[0..5] = {obs_in, carts_in, teams_in, obs_out, carts_out, teams_out}
+        // out[0..2] = {rew_out, wm_in_out, wm_out_out}; u[4]=extra_i_buf, u[5]=rcfg_buf
+        const BufSlot &boi = g->bufs[op.in[0]], &bci = g->bufs[op.in[1]], &bti = g->bufs[op.in[2]];
+        const BufSlot &boo = g->bufs[op.in[3]], &bco = g->bufs[op.in[4]], &bto = g->bufs[op.in[5]];
+        const BufSlot &bex = g->bufs[op.u[4]], &brc = g->bufs[op.u[5]];
+        const BufSlot &brew = g->bufs[op.out[0]], &bwmi = g->bufs[op.out[1]], &bwmo = g->bufs[op.out[2]];
+        [enc setComputePipelineState:get_pso(g, g->lib_simdt, "mg_simdt_cgt_reward")];
+        [enc setBuffer:boi.mtl offset:boi.off atIndex:0];
+        [enc setBuffer:bci.mtl offset:bci.off atIndex:1];
+        [enc setBuffer:bti.mtl offset:bti.off atIndex:2];
+        [enc setBuffer:boo.mtl offset:boo.off atIndex:3];
+        [enc setBuffer:bco.mtl offset:bco.off atIndex:4];
+        [enc setBuffer:bto.mtl offset:bto.off atIndex:5];
+        [enc setBuffer:bex.mtl offset:bex.off atIndex:6];
+        [enc setBuffer:brc.mtl offset:brc.off atIndex:7];
+        [enc setBuffer:brew.mtl offset:brew.off atIndex:8];
+        [enc setBuffer:bwmi.mtl offset:bwmi.off atIndex:9];
+        [enc setBuffer:bwmo.mtl offset:bwmo.off atIndex:10];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:11];
+        [enc dispatchThreadgroups:MTLSizeMake(op.u[0], 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_OPT_TANGENT_NORM: {
+        const BufSlot &bw = (op.in[0] >= 0 ? g->bufs[op.in[0]] : g->bufs[op.in[1]]);
+        const BufSlot &bgw = g->bufs[op.in[1]];
+        const BufSlot &bgp = g->bufs[op.out[0]], &bnrm = g->bufs[op.out[1]];
+        [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_tangent_norm")];
+        [enc setBuffer:bw.mtl offset:bw.off atIndex:0];
+        [enc setBuffer:bgw.mtl offset:bgw.off atIndex:1];
+        [enc setBuffer:bgp.mtl offset:bgp.off atIndex:2];
+        [enc setBuffer:bnrm.mtl offset:bnrm.off atIndex:3];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:5];
+        const uint32_t tgs = (op.u[3] == 2u) ? 1u : ((op.u[0] + 3u) / 4u);
+        [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_OPT_MOM_PREP: {
+        const BufSlot &bgp = g->bufs[op.in[0]], &bnrm = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
+        const BufSlot &bdv = (op.in[3] >= 0 ? g->bufs[op.in[3]] : bgp);
+        const BufSlot &bmom = g->bufs[op.out[0]], &bge = g->bufs[op.out[1]], &bx = g->bufs[op.out[2]];
+        [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_mom_prep")];
+        [enc setBuffer:bgp.mtl offset:bgp.off atIndex:0];
+        [enc setBuffer:bnrm.mtl offset:bnrm.off atIndex:1];
+        [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:2];
+        [enc setBuffer:bdv.mtl offset:bdv.off atIndex:3];
+        [enc setBuffer:bmom.mtl offset:bmom.off atIndex:4];
+        [enc setBuffer:bge.mtl offset:bge.off atIndex:5];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:6];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        break;
+      }
+      case MG_OP_OPT_NS_AXPBY: {
+        const BufSlot &ba = g->bufs[op.in[0]], &bb = g->bufs[op.in[1]], &by = g->bufs[op.out[0]];
+        const uint32_t n4 = (op.u[0] + 3u) / 4u;
+        [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_ns_axpby")];
+        [enc setBuffer:ba.mtl offset:ba.off atIndex:0];
+        [enc setBuffer:bb.mtl offset:bb.off atIndex:1];
+        [enc setBuffer:by.mtl offset:by.off atIndex:2];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:4];
+        [enc dispatchThreads:MTLSizeMake(n4, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(n4, 256u), 1, 1)];
+        break;
+      }
+      case MG_OP_OPT_AURORA_DREF: {
+        const BufSlot &bx = g->bufs[op.in[0]], &bge = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
+        const BufSlot &bdv = g->bufs[op.out[0]];
+        [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_aurora_dref")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bge.mtl offset:bge.off atIndex:1];
+        [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:2];
+        [enc setBuffer:bdv.mtl offset:bdv.off atIndex:3];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        break;
+      }
+      case MG_OP_OPT_APPLY_2D: {
+        const BufSlot &bx = g->bufs[op.in[0]], &bcfg = g->bufs[op.in[1]], &bgw = g->bufs[op.in[2]];
+        const BufSlot &bwm = g->bufs[op.out[0]], &bwe = g->bufs[op.out[1]], &bwl = g->bufs[op.out[2]];
+        [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_apply_2d")];
+        [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
+        [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:1];
+        [enc setBuffer:bgw.mtl offset:bgw.off atIndex:2];
+        [enc setBuffer:bwm.mtl offset:bwm.off atIndex:3];
+        [enc setBuffer:bwe.mtl offset:bwe.off atIndex:4];
+        [enc setBuffer:bwl.mtl offset:bwl.off atIndex:5];
+        [enc setBytes:op.u length:sizeof(op.u) atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        break;
+      }
+      case MG_OP_OPT_APPLY_1D: {
+        if (op.u[7] == 0u) {
+          const BufSlot &bgp = g->bufs[op.in[0]], &bnrm = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
+          const BufSlot &bst = g->bufs[op.in[3]], &bmom = g->bufs[op.in[4]], &bv = g->bufs[op.in[5]];
+          const BufSlot &bwm = g->bufs[op.out[0]], &bwe = g->bufs[op.out[1]], &bwl = g->bufs[op.out[2]];
+          const BufSlot &bgw = g->bufs[op.u[3]];
+          [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_apply_1d_unit")];
+          [enc setBuffer:bgp.mtl offset:bgp.off atIndex:0];
+          [enc setBuffer:bnrm.mtl offset:bnrm.off atIndex:1];
+          [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:2];
+          [enc setBuffer:bst.mtl offset:bst.off atIndex:3];
+          [enc setBuffer:bmom.mtl offset:bmom.off atIndex:4];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:5];
+          [enc setBuffer:bwm.mtl offset:bwm.off atIndex:6];
+          [enc setBuffer:bwe.mtl offset:bwe.off atIndex:7];
+          [enc setBuffer:bwl.mtl offset:bwl.off atIndex:8];
+          [enc setBuffer:bgw.mtl offset:bgw.off atIndex:9];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:10];
+          [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else {
+          const BufSlot &bscg = g->bufs[op.in[0]], &bnrm = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
+          const BufSlot &bst = g->bufs[op.in[3]], &bmom = g->bufs[op.in[4]], &bv = g->bufs[op.in[5]];
+          const BufSlot &bscm = g->bufs[op.out[0]], &bsce = g->bufs[op.out[1]], &bscl = g->bufs[op.out[2]];
+          const BufSlot &bhpl = g->bufs[op.u[4]], &bbnd = g->bufs[op.u[5]], &bdiag = g->bufs[op.u[6]];
+          [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_apply_scalars")];
+          [enc setBuffer:bscg.mtl offset:bscg.off atIndex:0];
+          [enc setBuffer:bnrm.mtl offset:bnrm.off atIndex:1];
+          [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:2];
+          [enc setBuffer:bst.mtl offset:bst.off atIndex:3];
+          [enc setBuffer:bmom.mtl offset:bmom.off atIndex:4];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:5];
+          [enc setBuffer:bscm.mtl offset:bscm.off atIndex:6];
+          [enc setBuffer:bsce.mtl offset:bsce.off atIndex:7];
+          [enc setBuffer:bscl.mtl offset:bscl.off atIndex:8];
+          [enc setBuffer:bhpl.mtl offset:bhpl.off atIndex:9];
+          [enc setBuffer:bbnd.mtl offset:bbnd.off atIndex:10];
+          [enc setBuffer:bdiag.mtl offset:bdiag.off atIndex:11];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:12];
+          [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        break;
+      }
       default:
         break;
     }
@@ -3050,39 +3766,18 @@ mesh_graph_t *mesh_graph_create(int world_size, int rank, const char *comm_id, i
   g->rank = rank;
   g->default_wire = default_wire_mode;
 
-  g->dev = MTLCreateSystemDefaultDevice();
-  g->q = [g->dev newCommandQueue];
-  NSError *err = nil;
-  NSString *src_core = [NSString stringWithUTF8String:build_core_msl().c_str()];
-  g->lib_core = [g->dev newLibraryWithSource:src_core options:nil error:&err];
-  if (!g->lib_core) {
-    fprintf(stderr, "mesh-graph: core MSL compile error: %s\n", err.localizedDescription.UTF8String);
+  SharedMetalCtx &sc = shared_metal();
+  if (!init_shared_metal(sc)) {
     delete g;
     return nullptr;
   }
-  MTLCompileOptions *opts = [MTLCompileOptions new];
-  opts.languageVersion = (MTLLanguageVersion)((4u << 16) | 0u); // Metal 4.0 for MPP tensor_ops
-  NSString *src_gemm = [NSString stringWithUTF8String:build_gemm_msl().c_str()];
-  g->lib_gemm = [g->dev newLibraryWithSource:src_gemm options:opts error:&err];
-  if (!g->lib_gemm) {
-    fprintf(stderr, "mesh-graph: gemm MSL compile error: %s\n", err.localizedDescription.UTF8String);
-    delete g;
-    return nullptr;
-  }
-  NSString *src_simdt = [NSString stringWithUTF8String:mesh_simdt::build_simdt_msl().c_str()];
-  g->lib_simdt = [g->dev newLibraryWithSource:src_simdt options:nil error:&err];
-  if (!g->lib_simdt) {
-    fprintf(stderr, "mesh-graph: simdt MSL compile error: %s\n", err.localizedDescription.UTF8String);
-    delete g;
-    return nullptr;
-  }
-  NSString *src_bwd = [NSString stringWithUTF8String:mesh_simdt::build_simdt_bwd_msl().c_str()];
-  g->lib_simdt_bwd = [g->dev newLibraryWithSource:src_bwd options:nil error:&err];
-  if (!g->lib_simdt_bwd) {
-    fprintf(stderr, "mesh-graph: simdt_bwd MSL compile error: %s\n", err.localizedDescription.UTF8String);
-    delete g;
-    return nullptr;
-  }
+  g->dev = sc.dev;
+  g->q = sc.q;
+  g->lib_core = sc.lib_core;
+  g->lib_gemm = sc.lib_gemm;
+  g->lib_simdt = sc.lib_simdt;
+  g->lib_simdt_bwd = sc.lib_simdt_bwd;
+  g->lib_opt = sc.lib_opt;
 
   if (g->world_size > 1) {
     if (mesh_attach(&g->ctx) != 0) {
@@ -3279,6 +3974,26 @@ int mesh_graph_compile(mesh_graph_t *g) {
                                        length:cnt * sizeof(uint32_t)
                                       options:MTLResourceStorageModeShared];
       l_off += cnt;
+    }
+  }
+  // Pre-allocate gram_kv_buf once at compile time (never reallocate inside unretained CB!)
+  {
+    size_t max_gram_bytes = 0;
+    for (const auto &op : g->ops) {
+      if (op.kind == MG_OP_CGT_GRAM_STAGE1) {
+        const size_t need = static_cast<size_t>(op.u[0]) * op.u[5] * op.u[4] * 2u;
+        if (need > max_gram_bytes) max_gram_bytes = need;
+      } else if (op.kind == MG_OP_CGT_STAGE1_BWD) {
+        const size_t E_b = op.u[0] & 0xFFFFu;
+        const size_t D_b = op.u[2] & 0xFFFFu;
+        const size_t R_b = op.u[2] >> 16;
+        const size_t need = 2u * E_b * R_b * D_b * 2u;
+        if (need > max_gram_bytes) max_gram_bytes = need;
+      }
+    }
+    if (max_gram_bytes > g->gram_kv_bytes) {
+      g->gram_kv_buf = [g->dev newBufferWithLength:max_gram_bytes options:MTLResourceStorageModePrivate];
+      g->gram_kv_bytes = max_gram_bytes;
     }
   }
   mesh_graph_barrier(g);
