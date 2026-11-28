@@ -1246,6 +1246,7 @@ class CompiledGraphFlowTrainer:
         actor_mask: torch.Tensor,
         wm_in: torch.Tensor,
         *,
+        active_env: torch.Tensor | None = None,
         value_coef: float = 0.5,
         dyn_coef: float = 0.10,
         grad_scale: float = 1.0,
@@ -1258,6 +1259,13 @@ class CompiledGraphFlowTrainer:
         cfg = self.cfg
         self.diag_view.zero_()
 
+        if active_env is None:
+            act_src = torch.ones((B_cur, self.N), dtype=torch.float32)
+        elif active_env.ndim == 1:
+            act_src = active_env.detach().to(device="cpu", dtype=torch.float32).view(B_cur, 1).expand(B_cur, self.N)
+        else:
+            act_src = active_env.detach().to(device="cpu", dtype=torch.float32)
+
         if B_cur == self.E:
             self.obs_view.copy_(obs.detach().to(device="cpu", dtype=torch.bfloat16))
             self.nav_view.copy_(nav.detach().to(device="cpu", dtype=torch.bfloat16))
@@ -1267,6 +1275,7 @@ class CompiledGraphFlowTrainer:
             u_t_cpu = u_target.detach().to(device="cpu", dtype=torch.float32)
             self.u_targ_view.copy_(u_t_cpu)
             am_cpu = actor_mask.detach().to(device="cpu", dtype=torch.float32)
+            act_cpu = act_src
             wm_cpu = wm_in.detach().to(device="cpu", dtype=torch.float32)
             adv_cpu = adv.detach().to(device="cpu", dtype=torch.float32)
             ret_cpu = gae_ret.detach().to(device="cpu", dtype=torch.float32)
@@ -1284,6 +1293,7 @@ class CompiledGraphFlowTrainer:
             u_t_cpu[:B_cur].copy_(u_target.detach().to(device="cpu", dtype=torch.float32))
             self.u_targ_view.copy_(u_t_cpu)
             am_cpu = torch.zeros((self.E, self.N), dtype=torch.float32); am_cpu[:B_cur].copy_(actor_mask.detach().to(device="cpu", dtype=torch.float32))
+            act_cpu = torch.zeros((self.E, self.N), dtype=torch.float32); act_cpu[:B_cur].copy_(act_src)
             wm_cpu = torch.zeros((self.E, self.N), dtype=torch.float32); wm_cpu[:B_cur].copy_(wm_in.detach().to(device="cpu", dtype=torch.float32))
             adv_cpu = torch.zeros((self.E, self.N), dtype=torch.float32); adv_cpu[:B_cur].copy_(adv.detach().to(device="cpu", dtype=torch.float32))
             ret_cpu = torch.zeros((self.E, self.N), dtype=torch.float32); ret_cpu[:B_cur].copy_(gae_ret.detach().to(device="cpu", dtype=torch.float32))
@@ -1315,13 +1325,15 @@ class CompiledGraphFlowTrainer:
             w_norm[:B_cur].copy_(w_valid)
 
         am_sum = max(float(am_cpu[:B_cur].sum().item()), 1.0)
-        wm_sum = max(float(wm_cpu[:B_cur].sum().item()), 1.0)
-        lm_sum = max(float((1.0 - wm_cpu[:B_cur]).sum().item()), 1.0)
+        act_v = act_cpu[:B_cur]
+        wm_sum = max(float((wm_cpu[:B_cur] * act_v).sum().item()), 1.0)
+        lm_sum = max(float(((1.0 - wm_cpu[:B_cur]) * act_v).sum().item()), 1.0)
+        act_sum = max(float(act_v.sum().item()), 1.0)
 
         self.targ_f_view[:, :, 0].copy_(w_norm)
         self.targ_f_view[:, :, 1].copy_(ret_cpu)
         self.targ_f_view[:, :, 2].copy_(drho_cpu)
-        self.targ_f_view[:, :, 3].copy_(am_cpu)
+        self.targ_f_view[:, :, 3].copy_(act_cpu)
         self.targ_f_view[:, :, 4].copy_(wm_cpu)
         self.targ_f_view[:, :, 5].copy_(t0_cpu)
 
@@ -1339,7 +1351,7 @@ class CompiledGraphFlowTrainer:
         self.lcfg_view[:20].copy_(torch.tensor([
             float(taus_cpu[0]), float(taus_cpu[1]), float(taus_cpu[2]), float(taus_cpu[3]),
             0.0, 0.0, float(value_coef), float(dyn_coef),
-            1.0 / am_sum, 1.0 / wm_sum, 1.0 / lm_sum, 1.0 / float(B_cur * self.N),
+            1.0 / am_sum, 1.0 / wm_sum, 1.0 / lm_sum, 1.0 / act_sum,
             self._val_g_cur, self._val_b_cur[0], self._val_b_cur[1],
             self._dd_g_cur, self._da_g_cur, float(grad_scale), float(self.nc.mp_unit_vec_eps),
             float(B_cur),

@@ -44,6 +44,7 @@ class GraphFlowBatch:
     obs_drho: torch.Tensor     # [M, N] fp32
     wm_in: torch.Tensor        # [M, N] bool
     actor_mask: torch.Tensor   # [M, N] bool
+    active_env: torch.Tensor   # [M] bool (~was_finished)
     nav_kern: torch.Tensor     # [W_nav, W_nav] fp32
     geo: dict[str, torch.Tensor]
     group_size: int
@@ -286,6 +287,7 @@ class GraphFlowRolloutPool:
         buf_val_w = torch.empty((H, E, N), dtype=torch.float32)
         buf_val_l = torch.empty((H, E, N), dtype=torch.float32)
         buf_not_done = torch.empty((H, E), dtype=torch.bool)
+        buf_active_env = torch.empty((H, E), dtype=torch.bool)
         buf_actor_mask = torch.empty((H, E, N), dtype=torch.bool)
 
         arm_to_teams: dict[str, list[int]] = defaultdict(list)
@@ -419,6 +421,7 @@ class GraphFlowRolloutPool:
             buf_val_w[t] = val_w
             buf_val_l[t] = val_l
             buf_not_done[t] = ~now_finished
+            buf_active_env[t] = active_env
             buf_actor_mask[t] = main_mask & active_env[:, None]
             obs_in, nav_in, carts_in, teams_in, acc_in = obs_out, nav_out, carts_out, teams_out, acc_out
 
@@ -497,6 +500,7 @@ class GraphFlowRolloutPool:
             obs_drho=buf_drho.reshape(M, N),
             wm_in=buf_wm_in.reshape(M, N),
             actor_mask=buf_actor_mask.reshape(M, N),
+            active_env=buf_active_env.reshape(M),
             nav_kern=slot.nav_kern,
             geo=slot.geo,
             group_size=G,
@@ -564,11 +568,23 @@ class GraphFlowTrainer:
         lcfg = self.cfg.losses
         sc = self.cfg.sim_dt
 
-        # Preserve G-sized counterfactual groups when shuffling so ESS-targeted Boltzmann bisection operates per-group!
+        # Drop all-finished (t, b) groups BEFORE microbatching/shuffling so dead post-game ticks never touch GPU or ESS!
+        n_groups_all = M_tot // G
+        valid_g_mask = batch.actor_mask[: n_groups_all * G].view(n_groups_all, G * N).any(dim=-1)
+        valid_g_ids = torch.nonzero(valid_g_mask, as_tuple=False).squeeze(-1)
+        n_groups_tot = int(valid_g_ids.numel())
+        if n_groups_tot == 0:
+            return {
+                "update_wall_s": round(time.perf_counter() - t0, 3),
+                "opt_steps": 0, "policy_version": int(self.policy_version),
+                "mb_envs": 0, "accum_steps": 0, "live_group_frac": 0.0,
+                "loss_total": 0.0, "loss_vel": 0.0, "loss_val": 0.0, "loss_dyn": 0.0,
+                "ess_frac": 0.0, "alpha": 0.0, "u_norm": 0.0, "v_norm": 0.0, "grad_norm": 0.0,
+            }
+
         target_rows = max(512, int(sc.target_microbatch_rows))
         raw_mb = max(G, min(M_tot, int(round(target_rows / max(1, entities_per_env)))))
         mb_envs = max(G, (raw_mb // G) * G)
-        n_groups_tot = M_tot // G
         groups_per_mb = max(1, mb_envs // G)
         n_micros = max(1, (n_groups_tot + groups_per_mb - 1) // groups_per_mb)
         target_steps = max(1, int(sc.target_opt_steps_per_epoch))
@@ -583,7 +599,7 @@ class GraphFlowTrainer:
         opt_steps = 0
 
         for _ in range(max(1, int(epochs))):
-            g_perm = torch.randperm(n_groups_tot)
+            g_perm = valid_g_ids[torch.randperm(n_groups_tot)]
             mb_starts = list(range(0, n_groups_tot, groups_per_mb))
             in_accum = 0
             for mi, g_start in enumerate(mb_starts):
@@ -591,7 +607,7 @@ class GraphFlowTrainer:
                     rem_micros = len(mb_starts) - mi
                     win_size = min(accum, rem_micros)
                 g_ids = g_perm[g_start : g_start + groups_per_mb]
-                # Expand group IDs -> contiguous [B_mb * G] env indices!
+                # Expand live group IDs -> contiguous [B_mb * G] env indices!
                 idx = (g_ids[:, None] * G + torch.arange(G)[None, :]).reshape(-1)
                 if idx.numel() < G:
                     continue
@@ -599,6 +615,7 @@ class GraphFlowTrainer:
                     batch.obs[idx], batch.nav[idx], batch.carts[idx], batch.teams[idx], batch.acc[idx],
                     batch.u_vel[idx], adv_c[idx], batch.gae_ret[idx], batch.obs_drho[idx],
                     batch.actor_mask[idx], batch.wm_in[idx],
+                    active_env=batch.active_env[idx],
                     value_coef=float(lcfg.critic_weight),
                     dyn_coef=float(lcfg.dyn_weight),
                     grad_scale=1.0 / float(max(1, win_size)),
@@ -626,6 +643,7 @@ class GraphFlowTrainer:
             "policy_version": int(self.policy_version),
             "mb_envs": mb_envs,
             "accum_steps": accum,
+            "live_group_frac": round(float(n_groups_tot) / float(max(1, n_groups_all)), 4),
             "loss_total": _mean("loss_total"),
             "loss_vel": _mean("loss_vel"),
             "loss_val": _mean("loss_val"),

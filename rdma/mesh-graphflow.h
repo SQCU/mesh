@@ -1806,18 +1806,19 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     const float w_norm = tf[0] * valid_env;
     const float gae_ret = tf[1];
     const float obs_drho = tf[2];
-    const float wm = tf[4] * valid_env;
-    const float lm = (1.0f - tf[4]) * valid_env;
+    const float act = tf[3] * valid_env;
+    const float wm = tf[4] * act;
+    const float lm = (1.0f - tf[4]) * act;
     const uint t0 = uint(clamp(int(rint(tf[5])), 0, int(max(1u, K)) - 1));
     const device float* ut = u_targ + en_idx * A_dim;
 
-    // Critic & dynamics backward (strictly masked by valid_env so padded tail rows contribute EXACT 0!)
+    // Critic & dynamics backward (strictly masked by act = active_env & valid_env so finished/padded rows contribute EXACT 0!)
     float da_dot = (tid < 32u) ? (dyn_act_w[tid] * u_lat_targ[en_idx * 32ul + tid]) : 0.0f;
     const float da_raw = gf_tg_sum((tid < 32u) ? da_dot : 0.0f, lane, sg, 4u, tg_red);
 
     if (tid < 64u) {
       float dv_out = 0.0f;
-      if (tid < 3u && valid_env > 0.5f) {
+      if (tid < 3u && act > 0.5f) {
         const ulong vb = en_idx * 64ul;
         const float raw0 = float(val_drift[vb + 0u]);
         const float raw1 = float(val_drift[vb + 1u]);
@@ -1911,9 +1912,9 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    const float un_a = (valid_env > 0.5f && tid < A_dim && tid != W_nav + t0) ? (ut[tid] * ut[tid]) : 0.0f;
+    const float un_a = (act > 0.5f && tid < A_dim && tid != W_nav + t0) ? (ut[tid] * ut[tid]) : 0.0f;
     const float un_s = gf_tg_sum(un_a, lane, sg, 4u, tg_red) * inv_A;
-    if (tid == 0u && valid_env > 0.5f) loc_unorm += sqrt(un_s) * inv_en;
+    if (tid == 0u && act > 0.5f) loc_unorm += sqrt(un_s) * inv_en;
   }
 
   // Tight-frame isotropy regularizer on B_H: (0.25 / (B_cur * 32^2)) * ||B_H^T B_H - (A_dim/32) I||_F^2

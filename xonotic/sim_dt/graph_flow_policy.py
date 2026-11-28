@@ -891,6 +891,7 @@ class GraphFlowPolicy(nn.Module):
         obs_drho: torch.Tensor,      # [E, N] float32 dynamics target
         actor_mask: torch.Tensor,    # [E, N] bool/float32
         wm_in: torch.Tensor,         # [E, N] bool/float32 (1=Winnie, 0=Lou)
+        active_env: torch.Tensor | None = None,  # [E] or [E, N] bool/float32 (~was_finished)
         value_coef: float = 0.5,
         dyn_coef: float = 0.10,
         group_size: int = 1,
@@ -910,11 +911,19 @@ class GraphFlowPolicy(nn.Module):
         bot_t0 = enc["bot_t0"]  # [E, N]
 
         am = actor_mask.to(device=dev, dtype=torch.float32)
-        wm = wm_in.to(device=dev, dtype=torch.float32)
-        lm = 1.0 - wm
+        if active_env is None:
+            act = torch.ones((E, N), device=dev, dtype=torch.float32)
+        elif active_env.ndim == 1:
+            act = active_env.to(device=dev, dtype=torch.float32).view(E, 1).expand(E, N)
+        else:
+            act = active_env.to(device=dev, dtype=torch.float32)
+        wm_raw = wm_in.to(device=dev, dtype=torch.float32)
+        wm = wm_raw * act
+        lm = (1.0 - wm_raw) * act
         am_sum = am.sum().clamp_min(1.0)
         wm_sum = wm.sum().clamp_min(1.0)
         lm_sum = lm.sum().clamp_min(1.0)
+        act_sum = act.sum().clamp_min(1.0)
 
         # Mask own-team slot of u_target
         u_t = u_target.to(device=dev, dtype=torch.float32)
@@ -986,13 +995,13 @@ class GraphFlowPolicy(nn.Module):
         ll = (F.huber_loss(vl, ret_f, reduction="none", delta=1.0) * lm).sum() / lm_sum
         loss_val = lw + ll
 
-        # Dynamics auxiliary loss
+        # Dynamics auxiliary loss (masked by active_env so finished post-game ticks contribute exact 0!)
         da_gain = self.dyn_action_gain.float().clamp(*cfg.dyn_gain_bounds)
         dyn_act = da_gain * _unit_linear(
             u_lat_targ.to(self.dyn_action_proj.weight.dtype), self.dyn_action_proj.weight, self.norm_cfg.unit_norm_eps
         ).squeeze(-1).float()
         dyn_pred = enc["dyn_drift"] + dyn_act
-        loss_dyn = F.huber_loss(dyn_pred, obs_drho.to(device=dev, dtype=torch.float32), reduction="mean", delta=1.0)
+        loss_dyn = (F.huber_loss(dyn_pred, obs_drho.to(device=dev, dtype=torch.float32), reduction="none", delta=1.0) * act).sum() / act_sum
 
         loss_total = loss_vel + float(value_coef) * loss_val + float(dyn_coef) * loss_dyn
 
