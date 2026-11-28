@@ -1006,7 +1006,9 @@ def evaluate_playerwise_pvp_elo(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Eval-time behavior & multimodal diversity analyzer for GraphFlowPolicy")
-    ap.add_argument("--ckpt-dir", type=str, required=True)
+    ap.add_argument("--ckpt-dir", type=str, default="")
+    ap.add_argument("--champion-specs", nargs="*", default=None, help="Cross-architecture tournament entries: label=/path/to/dir:ckpt_stem ...")
+    ap.add_argument("--out-json", type=str, default="")
     ap.add_argument("--config", type=str, default=str(CONFIGS_DIR / "sim_dt_grpo_pfsp.json"))
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--horizon", type=int, default=80)
@@ -1026,64 +1028,85 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_training_config(args.config)
-    ckpt_dir = Path(args.ckpt_dir).expanduser().resolve()
     world = build_gas_world_graph(
         map_name=f"eval_gf_k{args.teams}_j{args.carts}_n{args.players}",
         teams=args.teams, carts=args.carts, players=args.players, tiles=args.tiles,
         seed=8101, device=torch.device("cpu"),
     )
 
-    arch_meta_p = ckpt_dir / "arch_meta.json"
-    if arch_meta_p.exists():
-        am = json.loads(arch_meta_p.read_text())
-        gf_cfg = make_graph_flow_config(
-            args.arch or str(am.get("arch", "tied4")),
-            mhc_streams=args.mhc_streams if args.mhc_streams > 0 else int(am.get("mhc_streams", 1)),
-            ou_rho=args.ou_rho if args.ou_rho >= 0.0 else float(am.get("ou_rho", 0.0)),
-        )
-    elif args.arch or args.mhc_streams > 1 or args.ou_rho >= 0.0:
-        gf_cfg = make_graph_flow_config(
-            args.arch or "tied4",
-            mhc_streams=max(1, int(args.mhc_streams)),
-            ou_rho=max(0.0, float(args.ou_rho)),
-        )
-    else:
-        gf_cfg = GraphFlowConfig()
+    def _load_cfg_for_dir(d: Path) -> GraphFlowConfig:
+        am_p = d / "arch_meta.json"
+        if am_p.exists():
+            am = json.loads(am_p.read_text())
+            return make_graph_flow_config(
+                args.arch or str(am.get("arch", "tied4")),
+                mhc_streams=args.mhc_streams if args.mhc_streams > 0 else int(am.get("mhc_streams", 1)),
+                ou_rho=args.ou_rho if args.ou_rho >= 0.0 else float(am.get("ou_rho", 0.0)),
+            )
+        if args.arch or args.mhc_streams > 1 or args.ou_rho >= 0.0:
+            return make_graph_flow_config(
+                args.arch or "tied4",
+                mhc_streams=max(1, int(args.mhc_streams)),
+                ou_rho=max(0.0, float(args.ou_rho)),
+            )
+        return GraphFlowConfig()
+
     models: dict[str, GraphFlowPolicy | None] = {"default": None}
-    cand_names = [
-        "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2",
-        "exploiter_2", "main_final", "ema_fast_final", "ema_slow_final", "ema_final",
-        "best_online", "exp_0_final", "exp_1_final", "main_snap_final",
-    ]
-    # Also auto-discover metric-promoted frozen exploiters (`exp_f*.pt`) & snapshots (`main_s*.pt`)
-    for extra_p in sorted(ckpt_dir.glob("exp_f*.pt")) + sorted(ckpt_dir.glob("main_s*.pt")):
-        if extra_p.stem not in cand_names:
-            cand_names.append(extra_p.stem)
-    for name in cand_names:
-        p = ckpt_dir / f"{name}.pt"
-        if p.exists():
-            m = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+    champion_mode = bool(args.champion_specs)
+    if champion_mode:
+        ckpt_dir = Path(args.out_json).expanduser().resolve().parent if args.out_json else Path("/tmp")
+        for spec in args.champion_specs:
+            # Format: label=/path/to/dir:stem
+            label, rest = spec.split("=", 1)
+            dir_s, stem = rest.rsplit(":", 1)
+            d = Path(dir_s).expanduser().resolve()
+            gfc = _load_cfg_for_dir(d)
+            p = d / f"{stem}.pt"
+            if not p.exists():
+                raise FileNotFoundError(f"Champion checkpoint not found: {p}")
+            m = GraphFlowPolicy(gfc, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
             m.load_state_dict(torch.load(p, map_location="cpu", weights_only=True))
             m.eval()
-            models[name] = m
+            models[label] = m
+    else:
+        if not args.ckpt_dir:
+            raise ValueError("Provide --ckpt-dir or --champion-specs")
+        ckpt_dir = Path(args.ckpt_dir).expanduser().resolve()
+        gf_cfg = _load_cfg_for_dir(ckpt_dir)
+        cand_names = [
+            "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2",
+            "exploiter_2", "main_final", "ema_fast_final", "ema_slow_final", "ema_final",
+            "best_online", "exp_0_final", "exp_1_final", "main_snap_final",
+        ]
+        # Also auto-discover metric-promoted frozen exploiters (`exp_f*.pt`) & snapshots (`main_s*.pt`)
+        for extra_p in sorted(ckpt_dir.glob("exp_f*.pt")) + sorted(ckpt_dir.glob("main_s*.pt")):
+            if extra_p.stem not in cand_names:
+                cand_names.append(extra_p.stem)
+        for name in cand_names:
+            p = ckpt_dir / f"{name}.pt"
+            if p.exists():
+                m = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+                m.load_state_dict(torch.load(p, map_location="cpu", weights_only=True))
+                m.eval()
+                models[name] = m
 
     t0 = time.perf_counter()
     results: dict[str, Any] = {"regimes": {}, "branch_diversity": {}}
-    # Evaluate 7 DR regimes on core arms (plus exploiters & EMAs if present!)
-    beh_arms = [a for a in ("default", "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online") if a in models]
-    for ri, reg in enumerate(EVAL_REGIMES):
-        results["regimes"][reg["name"]] = {}
-        for ai, arm_name in enumerate(beh_arms):
-            results["regimes"][reg["name"]][arm_name] = evaluate_arm_on_regime(
-                arm_name, models[arm_name], world, reg,
-                cfg=cfg, E=args.envs, H=args.horizon, seed=90000 + ri * 1000 + ai * 37,
-            )
+    if not champion_mode:
+        beh_arms = [a for a in ("default", "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online") if a in models]
+        for ri, reg in enumerate(EVAL_REGIMES):
+            results["regimes"][reg["name"]] = {}
+            for ai, arm_name in enumerate(beh_arms):
+                results["regimes"][reg["name"]][arm_name] = evaluate_arm_on_regime(
+                    arm_name, models[arm_name], world, reg,
+                    cfg=cfg, E=args.envs, H=args.horizon, seed=90000 + ri * 1000 + ai * 37,
+                )
 
-    for arm_name in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online"):
-        if arm_name in models and models[arm_name] is not None:
-            results["branch_diversity"][arm_name] = evaluate_multimodal_branch_diversity(models[arm_name], world, cfg)
+        for arm_name in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online"):
+            if arm_name in models and models[arm_name] is not None:
+                results["branch_diversity"][arm_name] = evaluate_multimodal_branch_diversity(models[arm_name], world, cfg)
 
-    if (args.league_eval or args.full_eval) and len(models) >= 2:
+    if (args.league_eval or args.full_eval or champion_mode) and len(models) >= 2:
         results["league_tournament"] = evaluate_league_tournament(
             models, cfg, E_match=int(args.league_envs), H=int(args.league_horizon),
         )
@@ -1093,36 +1116,43 @@ def main() -> None:
         lt_e = results["league_tournament"]["elo_overall"]
         top_league = [a for a in sorted(lt_e.keys(), key=lambda x: lt_e[x], reverse=True) if a != "default"][:3]
 
-    if (args.diversity_eval or args.full_eval) and len(models) >= 2:
-        cand_div = ["main_init", "exploiter_1", "exploiter_2", "exp_f0", "exp_1_final", "main_final", "main_snap_final", "ema_fast_final", "ema_slow_final", "best_online", *top_league]
-        div_keys = list(dict.fromkeys(a for a in cand_div if a in models and models[a] is not None))
+    if (args.diversity_eval or args.full_eval or champion_mode) and len(models) >= 2:
+        if champion_mode:
+            div_keys = [a for a in models if a != "default" and models[a] is not None]
+        else:
+            cand_div = ["main_init", "exploiter_1", "exploiter_2", "exp_f0", "exp_1_final", "main_final", "main_snap_final", "ema_fast_final", "ema_slow_final", "best_online", *top_league]
+            div_keys = list(dict.fromkeys(a for a in cand_div if a in models and models[a] is not None))
         div_models = {a: models[a] for a in div_keys}
         results["effector_diversity"] = evaluate_effector_diversity_suite(div_models, world, cfg)
 
-    if (args.pvp_elo_eval or args.full_eval) and len(models) >= 2:
-        cand_pvp = ["main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "main_snap_final", "ema_fast_final", "ema_slow_final", "best_online", *top_league]
-        pvp_focal = list(dict.fromkeys(a for a in cand_pvp if a in models and models[a] is not None))
+    if (args.pvp_elo_eval or args.full_eval or champion_mode) and len(models) >= 2:
+        if champion_mode:
+            pvp_focal = [a for a in models if a != "default" and models[a] is not None]
+        else:
+            cand_pvp = ["main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "main_snap_final", "ema_fast_final", "ema_slow_final", "best_online", *top_league]
+            pvp_focal = list(dict.fromkeys(a for a in cand_pvp if a in models and models[a] is not None))
         results["playerwise_pvp_elo"] = evaluate_playerwise_pvp_elo(models, cfg, focal_arms=pvp_focal)
 
-    out_path = ckpt_dir / "graph_flow_behavior_eval.json"
+    out_path = Path(args.out_json).expanduser().resolve() if args.out_json else (ckpt_dir / "graph_flow_behavior_eval.json")
     out_path.write_text(json.dumps(results, indent=2))
     print(f"[eval-graph-flow] Done in {time.perf_counter()-t0:.2f}s (E={args.envs}, H={args.horizon}, W_nav={world.num_nav}, I_item={world.num_items}) -> {out_path}\n", flush=True)
 
-    print("=== 1. OUTCOME COMPETENCE & REALIZED GOAL-KIND MIX ACROSS 7 DR REGIMES ===")
-    print(f"{'Regime':24s} | {'Arm':14s} | {'PW-WR':6s} {'1st%':6s} {'Margin':7s} {'K/D':5s} {'Push':6s} {'Pick':5s} {'Quad%':5s} | {'GoalKind [Cart/Item/Enem/Nav]%':30s}")
-    print("-" * 121)
-    for reg in EVAL_REGIMES:
-        rn = reg["name"]
-        for arm_name in beh_arms:
-            o = results["regimes"][rn][arm_name]["outcomes"]
-            gk = o["gk_pct"]
-            print(
-                f"{rn:24s} | {arm_name:14s} | {o['pairwise_win_rate']:6.3f} {o['first_place_rate']:6.3f} "
-                f"{o['score_margin']:+7.1f} {o['kd_ratio']:5.2f} {o['cart_push']:6.1f} {o['pickups']:5.1f} {o['quad_frac']*100:5.1f} | "
-                f"{gk[0]:5.1f} / {gk[1]:5.1f} / {gk[2]:5.1f} / {gk[3]:5.1f}"
-            )
+    if results["regimes"]:
+        print("=== 1. OUTCOME COMPETENCE & REALIZED GOAL-KIND MIX ACROSS 7 DR REGIMES ===")
+        print(f"{'Regime':24s} | {'Arm':14s} | {'PW-WR':6s} {'1st%':6s} {'Margin':7s} {'K/D':5s} {'Push':6s} {'Pick':5s} {'Quad%':5s} | {'GoalKind [Cart/Item/Enem/Nav]%':30s}")
+        print("-" * 121)
+        for reg in EVAL_REGIMES:
+            rn = reg["name"]
+            for arm_name in beh_arms:
+                o = results["regimes"][rn][arm_name]["outcomes"]
+                gk = o["gk_pct"]
+                print(
+                    f"{rn:24s} | {arm_name:14s} | {o['pairwise_win_rate']:6.3f} {o['first_place_rate']:6.3f} "
+                    f"{o['score_margin']:+7.1f} {o['kd_ratio']:5.2f} {o['cart_push']:6.1f} {o['pickups']:5.1f} {o['quad_frac']*100:5.1f} | "
+                    f"{gk[0]:5.1f} / {gk[1]:5.1f} / {gk[2]:5.1f} / {gk[3]:5.1f}"
+                )
 
-    if "main_final" in models:
+    if results["regimes"] and "main_final" in models:
         print("\n=== 2. CONTINUOUS STEERING FIELD & PCA SPECTRUM ===")
         print(f"{'Regime':24s} | {'Arm':14s} | {'||u||':5s} {'Sat%':5s} {'rCart':6s} {'rItem':6s} {'rEnem':6s} {'Post':6s} | {'FocLd':6s} {'FocSt':6s} {'FocWk':6s} | {'PCA(1/3/8) EffR':18s}")
         print("-" * 126)
