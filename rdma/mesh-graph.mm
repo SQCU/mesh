@@ -1763,6 +1763,80 @@ inline void fwht64_simd_pair_mg(thread float& a, thread float& b, uint lane) {
   }
 }
 
+// Coalesced 64x64 TG-SRAM-tiled transpose + Rademacher-FWHT-64 Pass 1: exact per-column amax via atomic_max.
+[[kernel]] void fwht64_trans_amax_64x64(
+    const device bfloat* src [[buffer(0)]],
+    device atomic_uint* s_u32 [[buffer(1)]],
+    constant uint* u [[buffer(2)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+  const uint M = u[0];
+  const uint m0 = group.x * 64u, k0 = group.y * 64u;
+  threadgroup bfloat sh[64][65];
+  const uint col0 = lane * 2u;
+  for (uint r = sg; r < 64u; r += 4u) {
+    const ulong base = ulong(k0 + r) * ulong(M) + ulong(m0 + col0);
+    sh[r][col0]      = (m0 + col0 < M)      ? src[base]      : bfloat(0.0f);
+    sh[r][col0 + 1u] = (m0 + col0 + 1u < M) ? src[base + 1u] : bfloat(0.0f);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint c = sg; c < 64u; c += 4u) {
+    const uint mc = m0 + c;
+    if (mc < M) {
+      float a = float(sh[lane * 2u][c]) * rad_sign64_mg(lane * 2u);
+      float b = float(sh[lane * 2u + 1u][c]) * rad_sign64_mg(lane * 2u + 1u);
+      fwht64_simd_pair_mg(a, b, lane);
+      const float cmax = simd_max(max(fabs(a), fabs(b)));
+      if (lane == 0u) {
+        atomic_fetch_max_explicit(&s_u32[mc], as_type<uint>(cmax), memory_order_relaxed);
+      }
+    }
+  }
+}
+
+// Coalesced 64x64 TG-SRAM-tiled transpose + Rademacher-FWHT-64 Pass 2: quantize & coalesced char2 write.
+[[kernel]] void fwht64_trans_quant_64x64(
+    const device bfloat* src [[buffer(0)]],
+    device int8_t* q_out [[buffer(1)]],
+    const device float* s_in [[buffer(2)]],
+    constant uint* u [[buffer(3)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+  const uint M = u[0], K = u[1];
+  const uint m0 = group.x * 64u, k0 = group.y * 64u;
+  threadgroup bfloat sh[64][65];
+  const uint col0 = lane * 2u;
+  for (uint r = sg; r < 64u; r += 4u) {
+    const ulong base = ulong(k0 + r) * ulong(M) + ulong(m0 + col0);
+    sh[r][col0]      = (m0 + col0 < M)      ? src[base]      : bfloat(0.0f);
+    sh[r][col0 + 1u] = (m0 + col0 + 1u < M) ? src[base + 1u] : bfloat(0.0f);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint c = sg; c < 64u; c += 4u) {
+    const uint mc = m0 + c;
+    if (mc < M) {
+      float a = float(sh[lane * 2u][c]) * rad_sign64_mg(lane * 2u);
+      float b = float(sh[lane * 2u + 1u][c]) * rad_sign64_mg(lane * 2u + 1u);
+      fwht64_simd_pair_mg(a, b, lane);
+      const float amax = max(s_in[mc], 1e-8f);
+      const float inv_s = 127.0f / amax;
+      device char2* q2 = reinterpret_cast<device char2*>(q_out + ulong(mc) * ulong(K) + ulong(k0));
+      q2[lane] = char2(
+          char(clamp(int(rint(a * inv_s)), -127, 127)),
+          char(clamp(int(rint(b * inv_s)), -127, 127)));
+    }
+  }
+}
+
+[[kernel]] void fwht64_trans_scale_div(
+    device float* s_out [[buffer(0)]],
+    constant uint* u [[buffer(1)]],
+    uint m [[thread_position_in_grid]]) {
+  if (m < u[0]) s_out[m] = max(s_out[m], 1e-8f) / 127.0f;
+}
+
 struct I8GemmParams { int M, N, K, accum; };
 
 [[kernel, max_total_threads_per_threadgroup(128)]] void gemm_i8_nax_64x64(
@@ -3807,8 +3881,33 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
       case MG_OP_FWHT_PACK_I8: {
         const BufSlot &bsrc = g->bufs[op.in[0]];
         const BufSlot &bq = g->bufs[op.out[0]], &bs = g->bufs[op.out[1]];
-        const uint32_t M = op.u[0], K = op.u[1];
-        if (K <= 512u) {
+        const uint32_t M = op.u[0], K = op.u[1], trans = op.u[2];
+        if (trans == 1u && K >= 256u && (K & 63u) == 0u) {
+          // 100% coalesced 64x64 TG-SRAM tiled transpose + FWHT-64 + exact atomic_max scale!
+          [enc setComputePipelineState:get_pso(g, g->lib_simdt_bwd, "mg_zero_f32")];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:0];
+          [enc setBytes:&M length:sizeof(M) atIndex:1];
+          [enc dispatchThreads:MTLSizeMake(M, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(M, 256u), 1, 1)];
+
+          const MTLSize grid = MTLSizeMake((M + 63u) / 64u, K / 64u, 1);
+          [enc setComputePipelineState:get_pso(g, g->lib_gemm, "fwht64_trans_amax_64x64")];
+          [enc setBuffer:bsrc.mtl offset:bsrc.off atIndex:0];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:1];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:2];
+          [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+
+          [enc setComputePipelineState:get_pso(g, g->lib_gemm, "fwht64_trans_quant_64x64")];
+          [enc setBuffer:bsrc.mtl offset:bsrc.off atIndex:0];
+          [enc setBuffer:bq.mtl offset:bq.off atIndex:1];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:2];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+          [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+
+          [enc setComputePipelineState:get_pso(g, g->lib_gemm, "fwht64_trans_scale_div")];
+          [enc setBuffer:bs.mtl offset:bs.off atIndex:0];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:1];
+          [enc dispatchThreads:MTLSizeMake(M, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<uint32_t>(M, 256u), 1, 1)];
+        } else if (K <= 512u) {
           [enc setComputePipelineState:get_pso(g, g->lib_gemm, "fwht64_pack_i8_sg")];
           [enc setBuffer:bsrc.mtl offset:bsrc.off atIndex:0];
           [enc setBuffer:bq.mtl offset:bq.off atIndex:1];
@@ -4191,14 +4290,15 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         const uint32_t mode = op.u[6];
         const uint32_t tgs = (mode == 1u) ? (op.u[0] * op.u[3])
                            : ((mode == 0u) ? ((op.u[7] + 3u) / 4u) : ((op.u[0] * op.u[2] + 3u) / 4u));
-        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_dpp_gram")];
+        const char *kn = (mode == 0u) ? "mg_dpp_gram_m0" : ((mode == 1u) ? "mg_dpp_gram_m1" : "mg_dpp_gram_m2");
+        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, kn)];
         [enc setBuffer:b0.mtl offset:b0.off atIndex:0];
-        [enc setBuffer:b1.mtl offset:b1.off atIndex:1];
-        [enc setBuffer:bm.mtl offset:bm.off atIndex:2];
-        [enc setBuffer:bs.mtl offset:bs.off atIndex:3];
+        if (mode != 0u) [enc setBuffer:b1.mtl offset:b1.off atIndex:1];
+        if (mode == 1u) [enc setBuffer:bm.mtl offset:bm.off atIndex:2];
+        if (mode == 2u) [enc setBuffer:bs.mtl offset:bs.off atIndex:3];
         [enc setBuffer:bo.mtl offset:bo.off atIndex:4];
         [enc setBytes:op.u length:sizeof(op.u) atIndex:5];
-        [enc setBytes:op.f length:sizeof(op.f) atIndex:6];
+        if (mode != 0u) [enc setBytes:op.f length:sizeof(op.f) atIndex:6];
         [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         break;
       }
@@ -4214,17 +4314,20 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         const uint32_t mode = op.u[6];
         const uint32_t tgs = (mode == 1u) ? (op.u[0] * op.u[3])
                            : ((mode == 0u) ? ((op.u[0] * op.u[1] + 3u) / 4u) : ((op.u[0] * op.u[2] + 3u) / 4u));
-        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_dpp_gram_bwd")];
+        const char *kn = (mode == 0u) ? "mg_dpp_gram_bwd_m0"
+                       : ((mode == 2u) ? "mg_dpp_gram_bwd_m2"
+                                       : ((op.u[1] <= 64u) ? "mg_dpp_gram_bwd_m1_64" : "mg_dpp_gram_bwd_m1_128"));
+        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, kn)];
         [enc setBuffer:b0.mtl offset:b0.off atIndex:0];
-        [enc setBuffer:b1.mtl offset:b1.off atIndex:1];
-        [enc setBuffer:b2.mtl offset:b2.off atIndex:2];
-        [enc setBuffer:bm.mtl offset:bm.off atIndex:3];
-        [enc setBuffer:bs.mtl offset:bs.off atIndex:4];
+        if (mode != 0u) [enc setBuffer:b1.mtl offset:b1.off atIndex:1];
+        if (mode != 0u) [enc setBuffer:b2.mtl offset:b2.off atIndex:2];
+        if (mode == 1u) [enc setBuffer:bm.mtl offset:bm.off atIndex:3];
+        if (mode == 2u) [enc setBuffer:bs.mtl offset:bs.off atIndex:4];
         [enc setBuffer:bo0.mtl offset:bo0.off atIndex:5];
-        [enc setBuffer:bo1.mtl offset:bo1.off atIndex:6];
-        [enc setBuffer:bsg.mtl offset:bsg.off atIndex:7];
+        if (mode != 0u) [enc setBuffer:bo1.mtl offset:bo1.off atIndex:6];
+        if (mode == 2u) [enc setBuffer:bsg.mtl offset:bsg.off atIndex:7];
         [enc setBytes:op.u length:sizeof(op.u) atIndex:8];
-        [enc setBytes:op.f length:sizeof(op.f) atIndex:9];
+        if (mode != 0u) [enc setBytes:op.f length:sizeof(op.f) atIndex:9];
         [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         break;
       }

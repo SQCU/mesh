@@ -931,70 +931,83 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
 
 // ============================================================================
 // 5. MG_OP_DPP_GRAM & BWD (Exact FP32 Per-Team DPP Kernel B(I+B^T B)^{-1}B^T V!)
+//   Split into separate kernels per mode so mode 0/2 use 0 bytes TG SRAM!
 //   mode 0: slice x_bot = x_mid[:, :N, :] -> [EN_pad, D]
-//   mode 1: 1 TG per (e, k), 128 threads, r_dpp <= 32, exact FP32 Cholesky in TG SRAM!
+//   mode 1: 1 TG per (e, k), 128 threads, r_dpp <= 16, exact FP32 Cholesky in TG SRAM!
 //   mode 2: merge x_mid2 = [mp_lerp(x_mid[:N], norm(dpp_raw), blend_dpp), x_mid[N:]]
 // ============================================================================
-[[kernel]] void mg_dpp_gram(
-    const device bfloat* in0 [[buffer(0)]],      // m0: x_mid; m1: B_norm [EN_pad, R]; m2: x_mid
-    const device bfloat* in1 [[buffer(1)]],      // m1: V_norm [EN_pad, D]; m2: dpp_raw [EN_pad, D]
-    const device int* ent_meta [[buffer(2)]],    // m1: entity_teams + team_ids
-    const device float* scalars [[buffer(3)]],   // m2: scalars
-    device bfloat* out0 [[buffer(4)]],           // m0: x_bot; m1: Y_dpp [EN_pad, D]; m2: x_mid2
-    constant uint* u [[buffer(5)]],              // [E, N, M_ent, K, D, R, mode, sc_bd|pad_rows]
-    constant float* f [[buffer(6)]],             // [eps_n, eps_l]
+[[kernel]] void mg_dpp_gram_m0(
+    const device bfloat* in0 [[buffer(0)]],
+    device bfloat* out0 [[buffer(4)]],
+    constant uint* u [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint E = u[0], N = u[1], M_ent = u[2], D = u[4], aux = u[7];
+  const uint row = tgp * 4u + sg;
+  if (row >= aux) return;
+  device bfloat* dst = out0 + ulong(row) * D;
+  const uint n_el = min(8u, (D + 31u) / 32u);
+  if (row >= E * N) {
+    for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = bfloat(0.0f); }
+    return;
+  }
+  const uint e = row / N, n = row % N;
+  const device bfloat* src = in0 + (ulong(e) * M_ent + n) * D;
+  for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = src[c]; }
+}
+
+[[kernel]] void mg_dpp_gram_m2(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device float* scalars [[buffer(3)]],
+    device bfloat* out0 [[buffer(4)]],
+    constant uint* u [[buffer(5)]],
+    constant float* f [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint E = u[0], N = u[1], M_ent = u[2], D = u[4], aux = u[7];
+  const uint row = tgp * 4u + sg;
+  if (row >= E * M_ent) return;
+  const uint e = row / M_ent, m = row % M_ent;
+  const device bfloat* xr = in0 + ulong(row) * D;
+  device bfloat* dst = out0 + ulong(row) * D;
+  const uint n_el = min(8u, (D + 31u) / 32u);
+  if (m >= N) {
+    for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = xr[c]; }
+    return;
+  }
+  const device bfloat* dr = in1 + (ulong(e) * N + m) * D;
+  const float eps_n = max(f[0], 1e-4f), eps_l = max(f[1], 1e-4f);
+  const float bd = clamp(scalars[aux], 0.0f, 1.0f);
+  const float inv_l = rsqrt((1.0f - bd) * (1.0f - bd) + bd * bd + eps_l);
+  float dv[8];
+  float ss = 0.0f;
+  for (uint i = 0; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    float v = (c < D) ? float(dr[c]) : 0.0f;
+    dv[i] = v; ss += v * v;
+  }
+  const float inv_d = rsqrt(simd_sum(ss) / float(D) + eps_n);
+  for (uint i = 0; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    if (c < D) dst[c] = bfloat(((1.0f - bd) * float(xr[c]) + bd * (dv[i] * inv_d)) * inv_l);
+  }
+}
+
+[[kernel]] void mg_dpp_gram_m1(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device int* ent_meta [[buffer(2)]],
+    device bfloat* out0 [[buffer(4)]],
+    constant uint* u [[buffer(5)]],
+    constant float* f [[buffer(6)]],
     uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint tgp [[threadgroup_position_in_grid]]) {
-  const uint E = u[0], N = u[1], M_ent = u[2], K = u[3], D = u[4], R = u[5], mode = u[6], aux = u[7];
-
-  if (mode == 0u) {
-    const uint row = tgp * 4u + sg;
-    if (row >= aux) return;
-    device bfloat* dst = out0 + ulong(row) * D;
-    const uint n_el = min(8u, (D + 31u) / 32u);
-    if (row >= E * N) {
-      for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = bfloat(0.0f); }
-      return;
-    }
-    const uint e = row / N, n = row % N;
-    const device bfloat* src = in0 + (ulong(e) * M_ent + n) * D;
-    for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = src[c]; }
-    return;
-  }
-
-  if (mode == 2u) {
-    const uint row = tgp * 4u + sg;
-    if (row >= E * M_ent) return;
-    const uint e = row / M_ent, m = row % M_ent;
-    const device bfloat* xr = in0 + ulong(row) * D;
-    device bfloat* dst = out0 + ulong(row) * D;
-    const uint n_el = min(8u, (D + 31u) / 32u);
-    if (m >= N) {
-      for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dst[c] = xr[c]; }
-      return;
-    }
-    const device bfloat* dr = in1 + (ulong(e) * N + m) * D;
-    const float eps_n = max(f[0], 1e-4f), eps_l = max(f[1], 1e-4f);
-    const float bd = clamp(scalars[aux], 0.0f, 1.0f);
-    const float inv_l = rsqrt((1.0f - bd) * (1.0f - bd) + bd * bd + eps_l);
-    float dv[8];
-    float ss = 0.0f;
-    for (uint i = 0; i < n_el; i++) {
-      uint c = lane + i * 32u;
-      float v = (c < D) ? float(dr[c]) : 0.0f;
-      dv[i] = v; ss += v * v;
-    }
-    const float inv_d = rsqrt(simd_sum(ss) / float(D) + eps_n);
-    for (uint i = 0; i < n_el; i++) {
-      uint c = lane + i * 32u;
-      if (c < D) dst[c] = bfloat(((1.0f - bd) * float(xr[c]) + bd * (dv[i] * inv_d)) * inv_l);
-    }
-    return;
-  }
-
-  // mode == 1: 1 TG per (e, k), 128 threads, exact FP32 Cholesky for I + Bs^T Bs (R <= 16)
+  const uint E = u[0], N = u[1], M_ent = u[2], K = u[3], D = u[4], R = u[5];
   const uint ek = tgp;
   if (ek >= E * K) return;
   const uint e = ek / K, k = ek % K;
@@ -1003,8 +1016,9 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
 
   threadgroup uint sh_idx[128];
   threadgroup uint sh_cnt;
-  threadgroup float sh_B[128 * 16]; // supports N <= 128, R <= 16
+  threadgroup float sh_B[128 * 16];
   threadgroup float sh_L[16 * 16];
+  threadgroup float sh_invL[16];
 
   if (tid == 0u) {
     uint cnt = 0u;
@@ -1017,7 +1031,6 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   const uint nk = sh_cnt;
   if (nk == 0u) return;
 
-  // Load B_raw [nk, 64] (first R cols), apply mp_norm over R * inv_sr -> sh_B [nk, R]
   const float eps_n = max(f[0], 1e-4f);
   for (uint i = sg; i < nk; i += 4u) {
     const device bfloat* br = in0 + (ulong(e) * N + sh_idx[i]) * 64ul;
@@ -1028,7 +1041,6 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // Build G = I + Bs^T Bs [R, R] in parallel across all 128 threads (R=16 => R*R=256!)
   for (uint pq = tid; pq < R * R; pq += 128u) {
     const uint p = pq / R, q = pq % R;
     float s = (p == q) ? 1.0f : 0.0f;
@@ -1037,20 +1049,23 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // Exact FP32 Cholesky in-place (R <= 16: ~680 FLOPs, <0.2 us!)
   if (tid == 0u) {
     for (uint i = 0; i < R; i++) {
       for (uint j = 0; j <= i; j++) {
         float s = sh_L[i * R + j];
         for (uint p = 0; p < j; p++) s -= sh_L[i * R + p] * sh_L[j * R + p];
-        if (i == j) sh_L[i * R + i] = sqrt(max(s, 1e-6f));
-        else sh_L[i * R + j] = s / sh_L[j * R + j];
+        if (i == j) {
+          const float diag = sqrt(max(s, 1e-6f));
+          sh_L[i * R + i] = diag;
+          sh_invL[i] = 1.0f / diag;
+        } else {
+          sh_L[i * R + j] = s * sh_invL[j];
+        }
       }
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // Solve G z = Bs^T V[:, d] and write Y[idx[i], d] = Bs[i] . z for each channel d!
   for (uint d = tid; d < D; d += 128u) {
     float z[16];
     for (uint r = 0; r < R; r++) z[r] = 0.0f;
@@ -1058,17 +1073,15 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       const float vi = float(in1[(ulong(e) * N + sh_idx[i]) * D + d]);
       for (uint r = 0; r < R; r++) z[r] += sh_B[i * R + r] * vi;
     }
-    // Forward solve L y = z
     for (uint i = 0; i < R; i++) {
       float s = z[i];
       for (uint p = 0; p < i; p++) s -= sh_L[i * R + p] * z[p];
-      z[i] = s / sh_L[i * R + i];
+      z[i] = s * sh_invL[i];
     }
-    // Back solve L^T x = y
     for (int i = int(R) - 1; i >= 0; i--) {
       float s = z[i];
       for (uint p = uint(i + 1); p < R; p++) s -= sh_L[p * R + uint(i)] * z[p];
-      z[i] = s / sh_L[uint(i) * R + uint(i)];
+      z[i] = s * sh_invL[uint(i)];
     }
     for (uint i = 0; i < nk; i++) {
       float yv = 0.0f;
@@ -1078,101 +1091,118 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   }
 }
 
-[[kernel]] void mg_dpp_gram_bwd(
-    const device bfloat* in0 [[buffer(0)]],      // m0: d_x_bot; m1: B_norm; m2: x_mid
-    const device bfloat* in1 [[buffer(1)]],      // m1: V_norm; m2: dpp_raw
-    const device bfloat* in2 [[buffer(2)]],      // m1: dY_dpp; m2: d_x_mid2
-    const device int* ent_meta [[buffer(3)]],    // m1: ent_meta
-    const device float* scalars [[buffer(4)]],   // m2: scalars
-    device bfloat* out0 [[buffer(5)]],           // m0: d_x_mid (+=); m1: dB_norm; m2: d_x_mid
-    device bfloat* out1 [[buffer(6)]],           // m1: dV_norm; m2: d_dpp_raw
-    device float* d_sc_grads [[buffer(7)]],      // m2: d_sc_grads
-    constant uint* u [[buffer(8)]],              // [E, N, M_ent, K, D, R, mode, sc_bd|(sg_bd<<16)]
-    constant float* f [[buffer(9)]],             // [eps_n, eps_l]
+[[kernel]] void mg_dpp_gram_bwd_m0(
+    const device bfloat* in0 [[buffer(0)]],
+    device bfloat* out0 [[buffer(5)]],
+    constant uint* u [[buffer(8)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint E = u[0], N = u[1], M_ent = u[2], D = u[4];
+  const uint row = tgp * 4u + sg;
+  if (row >= E * N) return;
+  const uint e = row / N, n = row % N;
+  const device bfloat* src = in0 + ulong(row) * D;
+  device bfloat* dst = out0 + (ulong(e) * M_ent + n) * D;
+  const uint n_el = min(8u, (D + 31u) / 32u);
+  for (uint i = 0; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    if (c < D) dst[c] = bfloat(float(dst[c]) + float(src[c]));
+  }
+}
+
+[[kernel]] void mg_dpp_gram_bwd_m2(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device bfloat* in2 [[buffer(2)]],
+    const device float* scalars [[buffer(4)]],
+    device bfloat* out0 [[buffer(5)]],
+    device bfloat* out1 [[buffer(6)]],
+    device float* d_sc_grads [[buffer(7)]],
+    constant uint* u [[buffer(8)]],
+    constant float* f [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint E = u[0], N = u[1], M_ent = u[2], D = u[4];
+  const uint sc_bd = u[7] & 0xFFFFu, sg_bd = u[7] >> 16;
+  const uint row = tgp * 4u + sg;
+  if (row >= E * M_ent) return;
+  const uint e = row / M_ent, m = row % M_ent;
+  const device bfloat* xr = in0 + ulong(row) * D;
+  const device bfloat* dy = in2 + ulong(row) * D;
+  device bfloat* dx = out0 + ulong(row) * D;
+  const uint n_el = min(8u, (D + 31u) / 32u);
+  if (m >= N) {
+    for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dx[c] = dy[c]; }
+    return;
+  }
+  const device bfloat* dr = in1 + (ulong(e) * N + m) * D;
+  device bfloat* ddr = out1 + (ulong(e) * N + m) * D;
+  const float eps_n = max(f[0], 1e-4f), eps_l = max(f[1], 1e-4f);
+  const float bd = clamp(scalars[sc_bd], 0.0f, 1.0f);
+  const float den = (1.0f - bd) * (1.0f - bd) + bd * bd + eps_l;
+  const float inv_l = rsqrt(den);
+  float dv[8];
+  float ss = 0.0f;
+  for (uint i = 0; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    float v = (c < D) ? float(dr[c]) : 0.0f;
+    dv[i] = v; ss += v * v;
+  }
+  const float inv_d = rsqrt(simd_sum(ss) / float(D) + eps_n);
+  float db_norm[8];
+  float dot_bd = 0.0f, dot_d = 0.0f;
+  for (uint i = 0; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    if (c < D) {
+      float a = float(xr[c]), b = dv[i] * inv_d, g = float(dy[c]);
+      float y = ((1.0f - bd) * a + bd * b) * inv_l;
+      dx[c] = bfloat(g * (1.0f - bd) * inv_l);
+      db_norm[i] = g * bd * inv_l;
+      dot_bd += g * ((b - a) * inv_l - y * (2.0f * bd - 1.0f) / den);
+      dot_d += db_norm[i] * b;
+    }
+  }
+  const float g_bd = simd_sum(dot_bd);
+  const float md = simd_sum(dot_d) / float(D);
+  if (lane == 0u) gf_atomic_add_f32(&d_sc_grads[sg_bd], g_bd * bd * (1.0f - bd));
+  for (uint i = 0; i < n_el; i++) {
+    uint c = lane + i * 32u;
+    if (c < D) ddr[c] = bfloat((db_norm[i] - (dv[i] * inv_d) * md) * inv_d);
+  }
+}
+
+// Fast <16 KB TG-SRAM exact analytical DPP backward for N <= 64 (register dB + coalesced simd_sum + zero bank conflicts!)
+[[kernel]] void mg_dpp_gram_bwd_m1_64(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device bfloat* in2 [[buffer(2)]],
+    const device int* ent_meta [[buffer(3)]],
+    device bfloat* out0 [[buffer(5)]],
+    device bfloat* out1 [[buffer(6)]],
+    constant uint* u [[buffer(8)]],
+    constant float* f [[buffer(9)]],
     uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint tgp [[threadgroup_position_in_grid]]) {
-  const uint E = u[0], N = u[1], M_ent = u[2], K = u[3], D = u[4], R = u[5], mode = u[6];
-  const uint sc_bd = u[7] & 0xFFFFu, sg_bd = u[7] >> 16;
-
-  if (mode == 0u) {
-    const uint row = tgp * 4u + sg;
-    if (row >= E * N) return;
-    const uint e = row / N, n = row % N;
-    const device bfloat* src = in0 + ulong(row) * D;
-    device bfloat* dst = out0 + (ulong(e) * M_ent + n) * D;
-    const uint n_el = min(8u, (D + 31u) / 32u);
-    for (uint i = 0; i < n_el; i++) {
-      uint c = lane + i * 32u;
-      if (c < D) dst[c] = bfloat(float(dst[c]) + float(src[c]));
-    }
-    return;
-  }
-
-  if (mode == 2u) {
-    const uint row = tgp * 4u + sg;
-    if (row >= E * M_ent) return;
-    const uint e = row / M_ent, m = row % M_ent;
-    const device bfloat* xr = in0 + ulong(row) * D;
-    const device bfloat* dy = in2 + ulong(row) * D;
-    device bfloat* dx = out0 + ulong(row) * D;
-    const uint n_el = min(8u, (D + 31u) / 32u);
-    if (m >= N) {
-      for (uint i = 0; i < n_el; i++) { uint c = lane + i * 32u; if (c < D) dx[c] = dy[c]; }
-      return;
-    }
-    const device bfloat* dr = in1 + (ulong(e) * N + m) * D;
-    device bfloat* ddr = out1 + (ulong(e) * N + m) * D;
-    const float eps_n = max(f[0], 1e-4f), eps_l = max(f[1], 1e-4f);
-    const float bd = clamp(scalars[sc_bd], 0.0f, 1.0f);
-    const float den = (1.0f - bd) * (1.0f - bd) + bd * bd + eps_l;
-    const float inv_l = rsqrt(den);
-    float dv[8];
-    float ss = 0.0f;
-    for (uint i = 0; i < n_el; i++) {
-      uint c = lane + i * 32u;
-      float v = (c < D) ? float(dr[c]) : 0.0f;
-      dv[i] = v; ss += v * v;
-    }
-    const float inv_d = rsqrt(simd_sum(ss) / float(D) + eps_n);
-    float db_norm[8];
-    float dot_bd = 0.0f, dot_d = 0.0f;
-    for (uint i = 0; i < n_el; i++) {
-      uint c = lane + i * 32u;
-      if (c < D) {
-        float a = float(xr[c]), b = dv[i] * inv_d, g = float(dy[c]);
-        float y = ((1.0f - bd) * a + bd * b) * inv_l;
-        dx[c] = bfloat(g * (1.0f - bd) * inv_l);
-        db_norm[i] = g * bd * inv_l;
-        dot_bd += g * ((b - a) * inv_l - y * (2.0f * bd - 1.0f) / den);
-        dot_d += db_norm[i] * b;
-      }
-    }
-    const float g_bd = simd_sum(dot_bd);
-    const float md = simd_sum(dot_d) / float(D);
-    if (lane == 0u) gf_atomic_add_f32(&d_sc_grads[sg_bd], g_bd * bd * (1.0f - bd));
-    for (uint i = 0; i < n_el; i++) {
-      uint c = lane + i * 32u;
-      if (c < D) ddr[c] = bfloat((db_norm[i] - (dv[i] * inv_d) * md) * inv_d);
-    }
-    return;
-  }
-
-  // mode == 1: Exact analytical DPP backward!
-  // dV = Bs W,  dBs = dY Z^T + V W^T - Bs (Z W^T + W Z^T)
+  const uint E = u[0], N = u[1], M_ent = u[2], K = u[3], D = u[4], R = u[5];
   const uint ek = tgp;
   if (ek >= E * K) return;
   const uint e = ek / K, k = ek % K;
   const int my_tid = ent_meta[ulong(E) * M_ent + ulong(e) * K + k];
   const float inv_sr = rsqrt(float(max(1u, R)));
 
-  threadgroup uint sh_idx[128];
+  threadgroup uint sh_idx[64];
   threadgroup uint sh_cnt;
-  threadgroup float sh_B[128 * 16];
+  threadgroup float sh_B[64 * 16];
   threadgroup float sh_L[16 * 16];
-  threadgroup float sh_M[16 * 16]; // Z W^T + W Z^T
-  threadgroup float sh_dB[128 * 16];
+  threadgroup float sh_invL[16];
+  threadgroup float sh_M[16 * 16];
+  threadgroup float sh_invB[64];
+  threadgroup float sh_Zc[16 * 65];
+  threadgroup float sh_Wc[16 * 65];
 
   if (tid == 0u) {
     uint cnt = 0u;
@@ -1184,21 +1214,15 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   if (nk == 0u) return;
 
   const float eps_n = max(f[0], 1e-4f);
-  threadgroup float sh_invB[128];
   for (uint i = sg; i < nk; i += 4u) {
     const device bfloat* br = in0 + (ulong(e) * N + sh_idx[i]) * 64ul;
     const float v = (lane < R) ? float(br[lane]) : 0.0f;
     const float ss = simd_sum((lane < R) ? (v * v) : 0.0f);
     const float inv = rsqrt(ss / float(max(1u, R)) + eps_n);
     if (lane == 0u) sh_invB[i] = inv;
-    if (lane < R) {
-      sh_B[i * R + lane] = (v * inv) * inv_sr;
-      sh_dB[i * R + lane] = 0.0f;
-    }
+    if (lane < R) sh_B[i * R + lane] = (v * inv) * inv_sr;
   }
-  for (uint pq = tid; pq < R * R; pq += 128u) {
-    sh_M[pq] = 0.0f;
-  }
+  for (uint pq = tid; pq < R * R; pq += 128u) sh_M[pq] = 0.0f;
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (uint pq = tid; pq < R * R; pq += 128u) {
@@ -1214,19 +1238,20 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       for (uint j = 0; j <= i; j++) {
         float s = sh_L[i * R + j];
         for (uint p = 0; p < j; p++) s -= sh_L[i * R + p] * sh_L[j * R + p];
-        if (i == j) sh_L[i * R + i] = sqrt(max(s, 1e-6f));
-        else sh_L[i * R + j] = s / sh_L[j * R + j];
+        if (i == j) {
+          const float diag = sqrt(max(s, 1e-6f));
+          sh_L[i * R + i] = diag;
+          sh_invL[i] = 1.0f / diag;
+        } else {
+          sh_L[i * R + j] = s * sh_invL[j];
+        }
       }
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // Store Z[R, D] and W[R, D] in TG SRAM? Wait: R=16, D=256 => 16*256*4 = 16 KB!
-  // Actually we only need 8 KB if we do Z/W in two tiny passes or store sh_Z[16*256] (16KB) — wait:
-  // sh_B(8KB) + sh_dB(8KB) + sh_Z(16KB) = 32KB (right at TG limit!).
-  // Even better: store sh_Z[16*64] per chunk of 64 channels (only 4KB!) -> ZERO memory pressure & exact!
-  threadgroup float sh_Zc[16 * 64];
-  threadgroup float sh_Wc[16 * 64];
+  float reg_dB[16];
+  for (uint ki = 0u; ki < 16u; ki++) reg_dB[ki] = 0.0f;
 
   for (uint d0 = 0; d0 < D; d0 += 64u) {
     const uint d_len = min(64u, D - d0);
@@ -1244,17 +1269,17 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       for (uint i = 0; i < R; i++) {
         float sv = v[i];
         for (uint p = 0; p < i; p++) sv -= sh_L[i * R + p] * v[p];
-        v[i] = sv / sh_L[i * R + i];
+        v[i] = sv * sh_invL[i];
       }
       for (int i = int(R) - 1; i >= 0; i--) {
         float sv = v[i];
         for (uint p = uint(i + 1); p < R; p++) sv -= sh_L[p * R + uint(i)] * v[p];
-        v[i] = sv / sh_L[uint(i) * R + uint(i)];
+        v[i] = sv * sh_invL[uint(i)];
       }
       if (!is_w) {
-        for (uint r = 0; r < R; r++) sh_Zc[r * 64u + loc_d] = v[r];
+        for (uint r = 0; r < R; r++) sh_Zc[r * 65u + loc_d] = v[r];
       } else {
-        for (uint r = 0; r < R; r++) sh_Wc[r * 64u + loc_d] = v[r];
+        for (uint r = 0; r < R; r++) sh_Wc[r * 65u + loc_d] = v[r];
         for (uint i = 0; i < nk; i++) {
           float dv = 0.0f;
           for (uint r = 0; r < R; r++) dv += sh_B[i * R + r] * v[r];
@@ -1264,29 +1289,210 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Accumulate sh_M[p, q] += sum_{dc} (Z[p,dc]*W[q,dc] + W[p,dc]*Z[q,dc])
     for (uint pq = tid; pq < R * R; pq += 128u) {
       const uint p = pq / R, q = pq % R;
-      float acc = 0.0f;
-      for (uint dc = 0; dc < d_len; dc++) {
-        acc += sh_Zc[p * 64u + dc] * sh_Wc[q * 64u + dc] + sh_Wc[p * 64u + dc] * sh_Zc[q * 64u + dc];
+      if (p <= q) {
+        float acc = 0.0f;
+        for (uint dc = 0; dc < d_len; dc++) {
+          acc += sh_Zc[p * 65u + dc] * sh_Wc[q * 65u + dc] + sh_Wc[p * 65u + dc] * sh_Zc[q * 65u + dc];
+        }
+        sh_M[pq] += acc;
       }
-      sh_M[pq] += acc;
     }
-    // Accumulate sh_dB[i, r] += sum_{dc} (dY[i, d]*Z[r, dc] + V[i, d]*W[r, dc])
-    for (uint idx = tid; idx < nk * R; idx += 128u) {
-      const uint i = idx / R, r = idx % R;
+    for (uint ki = 0u, i = sg; i < nk; ki++, i += 4u) {
       const ulong base = (ulong(e) * N + sh_idx[i]) * D + d0;
-      float acc = 0.0f;
-      for (uint dc = 0; dc < d_len; dc++) {
-        acc += float(in2[base + dc]) * sh_Zc[r * 64u + dc] + float(in1[base + dc]) * sh_Wc[r * 64u + dc];
+      const bool lo = (lane < d_len), hi = (lane + 32u < d_len);
+      const float dy0 = lo ? float(in2[base + lane]) : 0.0f;
+      const float dy1 = hi ? float(in2[base + 32u + lane]) : 0.0f;
+      const float v0  = lo ? float(in1[base + lane]) : 0.0f;
+      const float v1  = hi ? float(in1[base + 32u + lane]) : 0.0f;
+      for (uint r = 0; r < R; r++) {
+        const float z0 = lo ? sh_Zc[r * 65u + lane] : 0.0f;
+        const float z1 = hi ? sh_Zc[r * 65u + 32u + lane] : 0.0f;
+        const float w0 = lo ? sh_Wc[r * 65u + lane] : 0.0f;
+        const float w1 = hi ? sh_Wc[r * 65u + 32u + lane] : 0.0f;
+        const float s = simd_sum(dy0 * z0 + dy1 * z1 + v0 * w0 + v1 * w1);
+        if (lane == r) reg_dB[ki] += s;
       }
-      sh_dB[idx] += acc;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
-  // Finalize dB_norm -> mp_norm_bwd(B_raw) -> out0 [EN_pad, 64] (cols R..63 = 0)
+  for (uint pq = tid; pq < R * R; pq += 128u) {
+    const uint p = pq / R, q = pq % R;
+    if (p > q) sh_M[pq] = sh_M[q * R + p];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint ki = 0u, i = sg; i < nk; ki++, i += 4u) {
+    const ulong row = ulong(e) * N + sh_idx[i];
+    device bfloat* dst = out0 + row * 64ul;
+    float d_bn = 0.0f, bn = 0.0f;
+    if (lane < R) {
+      float sub = 0.0f;
+      for (uint p = 0; p < R; p++) sub += sh_B[i * R + p] * sh_M[p * R + lane];
+      d_bn = (reg_dB[ki] - sub) * inv_sr;
+      bn = sh_B[i * R + lane] * sqrt(float(max(1u, R)));
+    }
+    const float dot = simd_sum((lane < R) ? (d_bn * bn) : 0.0f) / float(max(1u, R));
+    const float inv = sh_invB[i];
+    dst[lane] = (lane < R) ? bfloat((d_bn - bn * dot) * inv) : bfloat(0.0f);
+    dst[32u + lane] = bfloat(0.0f);
+  }
+}
+
+// Bounds-safe exact analytical DPP backward for N in 65..128 (coalesced simd_sum + zero bank conflicts)
+[[kernel]] void mg_dpp_gram_bwd_m1_128(
+    const device bfloat* in0 [[buffer(0)]],
+    const device bfloat* in1 [[buffer(1)]],
+    const device bfloat* in2 [[buffer(2)]],
+    const device int* ent_meta [[buffer(3)]],
+    device bfloat* out0 [[buffer(5)]],
+    device bfloat* out1 [[buffer(6)]],
+    constant uint* u [[buffer(8)]],
+    constant float* f [[buffer(9)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint E = u[0], N = u[1], M_ent = u[2], K = u[3], D = u[4], R = u[5];
+  const uint ek = tgp;
+  if (ek >= E * K) return;
+  const uint e = ek / K, k = ek % K;
+  const int my_tid = ent_meta[ulong(E) * M_ent + ulong(e) * K + k];
+  const float inv_sr = rsqrt(float(max(1u, R)));
+
+  threadgroup uint sh_idx[128];
+  threadgroup uint sh_cnt;
+  threadgroup float sh_B[128 * 16];
+  threadgroup float sh_L[16 * 16];
+  threadgroup float sh_invL[16];
+  threadgroup float sh_M[16 * 16];
+  threadgroup float sh_dB[128 * 16];
+  threadgroup float sh_invB[128];
+  threadgroup float sh_Zc[16 * 65];
+  threadgroup float sh_Wc[16 * 65];
+
+  if (tid == 0u) {
+    uint cnt = 0u;
+    for (uint n = 0; n < N; n++) if (ent_meta[ulong(e) * M_ent + n] == my_tid) sh_idx[cnt++] = n;
+    sh_cnt = cnt;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint nk = sh_cnt;
+  if (nk == 0u) return;
+
+  const float eps_n = max(f[0], 1e-4f);
+  for (uint i = sg; i < nk; i += 4u) {
+    const device bfloat* br = in0 + (ulong(e) * N + sh_idx[i]) * 64ul;
+    const float v = (lane < R) ? float(br[lane]) : 0.0f;
+    const float ss = simd_sum((lane < R) ? (v * v) : 0.0f);
+    const float inv = rsqrt(ss / float(max(1u, R)) + eps_n);
+    if (lane == 0u) sh_invB[i] = inv;
+    if (lane < R) {
+      sh_B[i * R + lane] = (v * inv) * inv_sr;
+      sh_dB[i * R + lane] = 0.0f;
+    }
+  }
+  for (uint pq = tid; pq < R * R; pq += 128u) sh_M[pq] = 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint pq = tid; pq < R * R; pq += 128u) {
+    const uint p = pq / R, q = pq % R;
+    float s = (p == q) ? 1.0f : 0.0f;
+    for (uint i = 0; i < nk; i++) s += sh_B[i * R + p] * sh_B[i * R + q];
+    sh_L[pq] = s;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (tid == 0u) {
+    for (uint i = 0; i < R; i++) {
+      for (uint j = 0; j <= i; j++) {
+        float s = sh_L[i * R + j];
+        for (uint p = 0; p < j; p++) s -= sh_L[i * R + p] * sh_L[j * R + p];
+        if (i == j) {
+          const float diag = sqrt(max(s, 1e-6f));
+          sh_L[i * R + i] = diag;
+          sh_invL[i] = 1.0f / diag;
+        } else {
+          sh_L[i * R + j] = s * sh_invL[j];
+        }
+      }
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint d0 = 0; d0 < D; d0 += 64u) {
+    const uint d_len = min(64u, D - d0);
+    const uint loc_d = tid & 63u;
+    if (loc_d < d_len) {
+      const uint d = d0 + loc_d;
+      const bool is_w = (tid >= 64u);
+      float v[16];
+      for (uint r = 0; r < R; r++) v[r] = 0.0f;
+      for (uint i = 0; i < nk; i++) {
+        const ulong off = (ulong(e) * N + sh_idx[i]) * D + d;
+        const float xi = is_w ? float(in2[off]) : float(in1[off]);
+        for (uint r = 0; r < R; r++) v[r] += sh_B[i * R + r] * xi;
+      }
+      for (uint i = 0; i < R; i++) {
+        float sv = v[i];
+        for (uint p = 0; p < i; p++) sv -= sh_L[i * R + p] * v[p];
+        v[i] = sv * sh_invL[i];
+      }
+      for (int i = int(R) - 1; i >= 0; i--) {
+        float sv = v[i];
+        for (uint p = uint(i + 1); p < R; p++) sv -= sh_L[p * R + uint(i)] * v[p];
+        v[i] = sv * sh_invL[uint(i)];
+      }
+      if (!is_w) {
+        for (uint r = 0; r < R; r++) sh_Zc[r * 65u + loc_d] = v[r];
+      } else {
+        for (uint r = 0; r < R; r++) sh_Wc[r * 65u + loc_d] = v[r];
+        for (uint i = 0; i < nk; i++) {
+          float dv = 0.0f;
+          for (uint r = 0; r < R; r++) dv += sh_B[i * R + r] * v[r];
+          out1[(ulong(e) * N + sh_idx[i]) * D + d] = bfloat(dv);
+        }
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint pq = tid; pq < R * R; pq += 128u) {
+      const uint p = pq / R, q = pq % R;
+      if (p <= q) {
+        float acc = 0.0f;
+        for (uint dc = 0; dc < d_len; dc++) {
+          acc += sh_Zc[p * 65u + dc] * sh_Wc[q * 65u + dc] + sh_Wc[p * 65u + dc] * sh_Zc[q * 65u + dc];
+        }
+        sh_M[pq] += acc;
+      }
+    }
+    for (uint i = sg; i < nk; i += 4u) {
+      const ulong base = (ulong(e) * N + sh_idx[i]) * D + d0;
+      const bool lo = (lane < d_len), hi = (lane + 32u < d_len);
+      const float dy0 = lo ? float(in2[base + lane]) : 0.0f;
+      const float dy1 = hi ? float(in2[base + 32u + lane]) : 0.0f;
+      const float v0  = lo ? float(in1[base + lane]) : 0.0f;
+      const float v1  = hi ? float(in1[base + 32u + lane]) : 0.0f;
+      for (uint r = 0; r < R; r++) {
+        const float z0 = lo ? sh_Zc[r * 65u + lane] : 0.0f;
+        const float z1 = hi ? sh_Zc[r * 65u + 32u + lane] : 0.0f;
+        const float w0 = lo ? sh_Wc[r * 65u + lane] : 0.0f;
+        const float w1 = hi ? sh_Wc[r * 65u + 32u + lane] : 0.0f;
+        const float s = simd_sum(dy0 * z0 + dy1 * z1 + v0 * w0 + v1 * w1);
+        if (lane == 0u) sh_dB[i * R + r] += s;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  for (uint pq = tid; pq < R * R; pq += 128u) {
+    const uint p = pq / R, q = pq % R;
+    if (p > q) sh_M[pq] = sh_M[q * R + p];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
   for (uint i = sg; i < nk; i += 4u) {
     const ulong row = ulong(e) * N + sh_idx[i];
     device bfloat* dst = out0 + row * 64ul;
