@@ -1456,10 +1456,20 @@ class CompiledGraphFlowTrainer:
 class GraphFlowOptimizer:
     """Fast FP32 Aurora-polar (for 2D unit-norm matrices) + AdamW (for Mealy-Jet MLP & scalars) step."""
 
-    def __init__(self, model: GraphFlowPolicy, ema_model: GraphFlowPolicy | None, opt_cfg: OptimizerConfig):
+    def __init__(
+        self,
+        model: GraphFlowPolicy,
+        ema_model: GraphFlowPolicy | None,
+        opt_cfg: OptimizerConfig,
+        *,
+        ema_fast_model: GraphFlowPolicy | None = None,
+        lr_mult: float = 1.0,
+    ):
         self.model = model
         self.ema_model = ema_model
+        self.ema_fast_model = ema_fast_model
         self.cfg = opt_cfg
+        self.lr_mult = float(lr_mult)
         self.step_count = 0
         self.m_state: dict[str, torch.Tensor] = {}
         self.v_state: dict[str, torch.Tensor] = {}
@@ -1482,11 +1492,11 @@ class GraphFlowOptimizer:
         return X.T if transposed else X
 
     @torch.no_grad()
-    def step(self, *, ema_decay: float = 0.995) -> float:
+    def step(self, *, ema_decay: float = 0.992, ema_fast_decay: float = 0.96) -> float:
         self.step_count += 1
         t = self.step_count
-        lr_2d = float(self.cfg.lr)
-        lr_1d = float(self.cfg.scalar_lr)
+        lr_2d = float(self.cfg.lr) * self.lr_mult
+        lr_1d = float(self.cfg.scalar_lr) * self.lr_mult
         mu = float(self.cfg.mu)
         b1, b2 = 0.9, 0.999
 
@@ -1547,8 +1557,11 @@ class GraphFlowOptimizer:
             p.copy_(wm.to(p.dtype))
 
         if self.ema_model is not None:
-            for (n, p), (_, pe) in zip(self.model.named_parameters(), self.ema_model.named_parameters()):
+            for (n, _), (_, pe) in zip(self.model.named_parameters(), self.ema_model.named_parameters()):
                 pe.copy_((ema_decay * pe.float() + (1.0 - ema_decay) * self.master[n]).to(pe.dtype))
+        if self.ema_fast_model is not None:
+            for (n, _), (_, pe) in zip(self.model.named_parameters(), self.ema_fast_model.named_parameters()):
+                pe.copy_((ema_fast_decay * pe.float() + (1.0 - ema_fast_decay) * self.master[n]).to(pe.dtype))
         return gnorm
 
     @torch.no_grad()

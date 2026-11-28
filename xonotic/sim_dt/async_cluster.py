@@ -169,7 +169,8 @@ class RDMAWeightAllReducer:
         self.rank = int(rank)
         self.n_params = sum(p.numel() for p in model.parameters())
         self.dim = 256
-        self.rows = (self.n_params + self.dim - 1) // self.dim
+        # Reserve 1 extra FP32 slot at index self.n_params to piggyback ||delta_r||_2^2 for exact 4-Studio GradSNR!
+        self.rows = (self.n_params + 1 + self.dim - 1) // self.dim
         self.n_pad = self.rows * self.dim
         self.g = self.lib.mesh_graph_create(self.world_size, self.rank, comm_id.encode("utf-8"), MG_WIRE_F32)
         if not self.g:
@@ -220,15 +221,39 @@ class RDMAWeightAllReducer:
         return float(wall.value)
 
     @torch.no_grad()
-    def average_master_(self, opt: Any) -> float:
-        """All-reduce FP32 optimizer master weights directly over /mesh0 RDMA (zero BF16 round-trip!)."""
+    def average_master_(self, opt: Any, *, prev_flat: torch.Tensor | None = None) -> tuple[float, float, float]:
+        """All-reduce FP32 optimizer master weights directly over /mesh0 RDMA (zero BF16 round-trip!).
+
+        If `prev_flat` (FP32 master snapshot before local update) is provided, piggybacks ||delta_r||^2
+        into slot `w_view[n_params]` to compute exact cross-Studio 4-rank GradSNR and delta coherence
+        with ZERO extra RDMA calls!
+        Returns (rdma_wall_ms, cluster_grad_snr, cluster_delta_coh).
+        """
         off = opt.export_master_flat_(self.w_view)
-        if off < self.n_pad:
+        if prev_flat is not None:
+            local_sq = float((self.w_view[:off] - prev_flat).square().sum().item())
+            self.w_view[off] = local_sq
+            if off + 1 < self.n_pad:
+                self.w_view[off + 1 :].zero_()
+        elif off < self.n_pad:
             self.w_view[off:].zero_()
+
         wall = ctypes.c_double(0.0)
         self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
-        opt.load_master_flat_(self.w_view, scale=1.0 / float(self.world_size))
-        return float(wall.value)
+        inv_ws = 1.0 / float(self.world_size)
+
+        cluster_snr = 0.0
+        cluster_coh = 0.0
+        if prev_flat is not None and self.world_size > 1:
+            mean_sq = float(self.w_view[off].item()) * inv_ws
+            avg_delta = self.w_view[:off] * inv_ws - prev_flat
+            sig_sq = float(avg_delta.square().sum().item())
+            var_mean = max(mean_sq - sig_sq, 0.0) / float(self.world_size - 1)
+            cluster_coh = sig_sq / max(mean_sq, 1e-12)
+            cluster_snr = min(sig_sq / max(var_mean, 1e-12), 999.0)
+
+        opt.load_master_flat_(self.w_view, scale=inv_ws)
+        return float(wall.value), round(cluster_snr, 3), round(cluster_coh, 4)
 
 
 def run_rdma_dp(args: argparse.Namespace) -> None:
@@ -715,9 +740,9 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
                 pfsp_wr=pfsp_wr,
             )
             upd = learner.update(batch, epochs=max(1, int(cfg.sim_dt.ppo_epochs)))
-            rdma_ms = 0.0
+            rdma_ms, _, _ = (0.0, 0.0, 0.0)
             if reducer is not None:
-                rdma_ms = reducer.average_master_(learner.opt)
+                rdma_ms, _, _ = reducer.average_master_(learner.opt)
             tot_rdma_ms += rdma_ms
             pool.sync_variant_("main", model)
             pool.sync_variant_("ema", ema_model)
@@ -787,9 +812,324 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
         )
 
 
+def run_rdma_dp_league(args: argparse.Namespace) -> None:
+    """5-Phase Full-DR Blender + Dual-EMA + Adversarial Frozen Exploiter League over 4-Studio /mesh0 RDMA.
+
+    Phases:
+      1. main_p1   : Main pretraining in full parametric DR blender (K=2..14, N=12..104, J=4..48,
+                     tiles=2..9, tile_size/cp/point_limit DR, mixed_dr rosters, 4 physics profiles,
+                     world refresh every refresh_every iters) vs PFSP [default, main_init, ema_fast, ema_slow, main]
+      2. exploiter_1: Fresh-init adversarial exploiter trained strictly against frozen main_p1 -> frozen & added to league
+      3. main_p2   : Main hardening vs PFSP including frozen exploiter_1
+      4. exploiter_2: Warm-started adversarial counter trained strictly against frozen main_p2 -> frozen & added to league
+      5. main_final: Final main hardening vs PFSP including both frozen exploiters + all snapshots + dual EMAs
+    Logs exact within-Studio Step GradSNR (all/backbone/basis/flow/critic) + cross-Studio 4-Rank GradSNR!
+    """
+    from sim_dt.graph_flow_policy import GraphFlowConfig, GraphFlowPolicy, clone_graph_flow_model
+    from sim_dt.graph_flow_trainer import GraphFlowRolloutPool, GraphFlowTrainer
+
+    overrides: dict[str, Any] = {}
+    sd: dict[str, Any] = {}
+    if args.base_envs > 0:
+        sd["base_envs"] = args.base_envs
+    if args.group_size > 0:
+        sd["group_size"] = args.group_size
+    if args.horizon > 0:
+        sd["rollout_horizon"] = args.horizon
+    if args.ppo_epochs > 0:
+        sd["ppo_epochs"] = args.ppo_epochs
+    if sd:
+        overrides["sim_dt"] = sd
+    cfg = load_training_config(args.config, overrides=overrides or None)
+
+    torch.manual_seed(cfg.seeds.model_init)
+    np.random.seed(cfg.seeds.model_init)
+    gf_cfg = GraphFlowConfig()
+    main_model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+    ema_fast = clone_graph_flow_model(main_model)
+    ema_slow = clone_graph_flow_model(main_model)
+    main_init = clone_graph_flow_model(main_model)
+
+    ws = int(args.tp_world_size)
+    reducer = RDMAWeightAllReducer(main_model, ws, args.tp_rank, args.tp_comm_id) if ws > 1 else None
+    variants: dict[str, GraphFlowPolicy | None] = {
+        "main": main_model,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "main_init": main_init,
+    }
+    G = int(cfg.sim_dt.group_size) if int(cfg.sim_dt.group_size) > 0 else 4
+    n_worlds = max(3, int(args.num_worlds))
+    pool = GraphFlowRolloutPool(
+        cfg, variants,
+        num_worlds=n_worlds,
+        group_size=G,
+        seed_base=cfg.seeds.match_base + int(args.tp_rank) * 100003,
+        world_seed_base=cfg.seeds.match_base,
+        blender_dr=True,
+        self_play_only=False,
+        roster_mode=str(args.roster_mode),
+        randomize_physics=not bool(args.no_physics_dr),
+    )
+    main_learner = GraphFlowTrainer(main_model, None, cfg)
+
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
+    if out_dir is not None and args.tp_rank == 0:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+
+    pfsp_pool = ["default", "main_init", "ema_fast", "ema_slow", "main"]
+    pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
+    refresh_every = max(n_worlds, int(args.refresh_worlds_every))
+    world_gen = 0
+    global_it = 0
+    tot_sim_s = 0.0
+    tot_ag_steps = 0
+    tot_rdma_ms = 0.0
+    t_start = time.perf_counter()
+    history: list[dict[str, Any]] = []
+    phase_summaries: dict[str, Any] = {}
+    prev_flat = torch.empty((sum(p.numel() for p in main_model.parameters()),), dtype=torch.float32)
+
+    def _update_synced_emas_(src_opt: Any, fast_m: GraphFlowPolicy, slow_m: GraphFlowPolicy, d_fast: float = 0.90, d_slow: float = 0.97) -> None:
+        with torch.no_grad():
+            for (n, _), (_, pf), (_, ps) in zip(
+                src_opt.model.named_parameters(), fast_m.named_parameters(), slow_m.named_parameters()
+            ):
+                wm = src_opt.master[n]
+                pf.copy_((d_fast * pf.float() + (1.0 - d_fast) * wm).to(pf.dtype))
+                ps.copy_((d_slow * ps.float() + (1.0 - d_slow) * wm).to(ps.dtype))
+
+    def _run_phase(
+        phase_name: str,
+        n_iters: int,
+        learner: GraphFlowTrainer,
+        train_arm: str,
+        *,
+        exploiter_target: str | None = None,
+        update_emas: bool = True,
+    ) -> dict[str, Any]:
+        nonlocal world_gen, global_it, tot_sim_s, tot_ag_steps, tot_rdma_ms
+        p_t0 = time.perf_counter()
+        p_recs: list[dict[str, Any]] = []
+        p_wr_vs_target: list[float] = []
+        if args.tp_rank == 0:
+            w_desc = ", ".join(f"K={s.K}/J={s.J}/N={s.N}/W={s.W_nav}" for s in pool.slots[:6])
+            print(
+                f"\n=== [PHASE {phase_name}] arm={train_arm} iters={n_iters} target={exploiter_target or 'PFSP'} | "
+                f"pool({len(pool.slots)}): {w_desc} ... ===",
+                flush=True,
+            )
+        for pit in range(1, n_iters + 1):
+            global_it += 1
+            if global_it > 1 and ((global_it - 1) % refresh_every == 0):
+                world_gen += 1
+                pool.refresh_all_worlds_(world_gen)
+                if args.tp_rank == 0:
+                    w_desc = ", ".join(f"K={s.K}/J={s.J}/N={s.N}/W={s.W_nav}" for s in pool.slots[:6])
+                    print(f"  [WORLD REFRESH gen={world_gen}] {w_desc} ...", flush=True)
+
+            batch = pool.sample_batch(
+                policy_version=learner.policy_version,
+                pfsp_pool=pfsp_pool,
+                pfsp_wr=pfsp_wr,
+                train_arm=train_arm,
+                exploiter_target=exploiter_target,
+            )
+            learner.opt.export_master_flat_(prev_flat)
+            upd = learner.update(batch, epochs=max(1, int(cfg.sim_dt.ppo_epochs)))
+
+            rdma_ms, c_snr, c_coh = (0.0, 0.0, 0.0)
+            if reducer is not None:
+                rdma_ms, c_snr, c_coh = reducer.average_master_(learner.opt, prev_flat=prev_flat)
+            tot_rdma_ms += rdma_ms
+            pool.sync_variant_(train_arm, learner.model)
+            if update_emas:
+                _update_synced_emas_(learner.opt, ema_fast, ema_slow)
+                pool.sync_variant_("ema_fast", ema_fast)
+                pool.sync_variant_("ema_slow", ema_slow)
+
+            if exploiter_target is None:
+                alpha_ema = float(cfg.sim_dt.pfsp_update_ema)
+                for opp_arm, wr_val in batch.opp_wr_obs.items():
+                    if opp_arm in pfsp_wr:
+                        pfsp_wr[opp_arm] = alpha_ema * pfsp_wr[opp_arm] + (1.0 - alpha_ema) * float(wr_val)
+            elif exploiter_target in batch.opp_wr_obs:
+                p_wr_vs_target.append(float(batch.opp_wr_obs[exploiter_target]))
+
+            M, N, _ = batch.obs.shape
+            tot_sim_s += float(batch.stats["sim_s"]) * ws
+            tot_ag_steps += int(M * 2 * N) * ws
+            elapsed = max(time.perf_counter() - t_start, 1e-6)
+
+            rec = {
+                "global_iter": global_it,
+                "phase": phase_name,
+                "phase_iter": pit,
+                "arm": train_arm,
+                "world": batch.world_meta,
+                "rollout": batch.stats,
+                "update": upd,
+                "rdma_ms": round(rdma_ms, 2),
+                "cluster_snr": c_snr,
+                "cluster_coh": c_coh,
+            }
+            p_recs.append(rec)
+            if args.tp_rank == 0:
+                history.append(rec)
+                if pit == 1 or pit % max(1, args.log_every) == 0 or pit == n_iters:
+                    wm = batch.world_meta
+                    gk = batch.stats["gk_pct"]
+                    g_snr = upd.get("grad_snr", 0.0)
+                    g_coh = upd.get("grad_coh", 0.0)
+                    live_f = upd.get("live_group_frac", 1.0)
+                    tgt_str = f" wrTgt={batch.opp_wr_obs.get(exploiter_target, 0.5):.2f}" if exploiter_target else ""
+                    print(
+                        f"  [{phase_name:11s} {pit:02d}/{n_iters:02d}] (K={wm['K']:2d} J={wm['J']:2d} W={wm['W_nav']:2d} N={N:3d} lv={live_f:.2f}) | "
+                        f"roll={batch.stats['wall_s']:.2f}s upd={upd['update_wall_s']:.2f}s rdma={rdma_ms:.0f}ms | "
+                        f"vel={upd['loss_vel']:.3f} val={upd['loss_val']:.3f} ess={upd['ess_frac']:.2f} a={upd['alpha']:.2f} | "
+                        f"SNR(st={g_snr:.2f}/c={g_coh:.2f}, 4r={c_snr:.2f}/c={c_coh:.2f}) | "
+                        f"uRms={batch.stats['u_rms']:.2f} sat={batch.stats['sat_frac']:.3f} GK={gk[0]:.0f}/{gk[1]:.0f}/{gk[2]:.0f}/{gk[3]:.0f}% "
+                        f"dSc(m={batch.stats['main_dscore_mean']:.1f},o={batch.stats['opp_dscore_mean']:.1f}){tgt_str} | "
+                        f"{tot_ag_steps/elapsed/1e6:.2f}M/s",
+                        flush=True,
+                    )
+
+        def _pmean(fn):
+            vals = [fn(r) for r in p_recs]
+            return round(float(np.mean(vals)), 4) if vals else 0.0
+
+        return {
+            "phase": phase_name,
+            "arm": train_arm,
+            "iters": n_iters,
+            "wall_s": round(time.perf_counter() - p_t0, 2),
+            "mean_loss_vel": _pmean(lambda r: r["update"]["loss_vel"]),
+            "mean_loss_val": _pmean(lambda r: r["update"]["loss_val"]),
+            "mean_live_group_frac": _pmean(lambda r: r["update"].get("live_group_frac", 1.0)),
+            "mean_step_snr": _pmean(lambda r: r["update"].get("grad_snr", 0.0)),
+            "mean_step_coh": _pmean(lambda r: r["update"].get("grad_coh", 0.0)),
+            "mean_cluster_snr": _pmean(lambda r: r["cluster_snr"]),
+            "mean_cluster_coh": _pmean(lambda r: r["cluster_coh"]),
+            "mean_step_snr_by_grp": {
+                g: _pmean(lambda r, gg=g: r["update"].get("grad_snr_by_grp", {}).get(gg, 0.0))
+                for g in ("backbone", "basis", "flow", "critic")
+            },
+            "mean_sat_frac": _pmean(lambda r: r["rollout"]["sat_frac"]),
+            "mean_dscore_margin": _pmean(lambda r: r["rollout"]["main_dscore_mean"] - r["rollout"]["opp_dscore_mean"]),
+            "wr_vs_target_last8": round(float(np.mean(p_wr_vs_target[-8:])), 4) if p_wr_vs_target else None,
+        }
+
+    exp1_learner: GraphFlowTrainer | None = None
+    exp2_learner: GraphFlowTrainer | None = None
+    try:
+        # Phase 1: Full-DR Pretraining of main
+        phase_summaries["p1_main"] = _run_phase("p1_main", int(args.p1_iters), main_learner, "main")
+        main_p1 = clone_graph_flow_model(main_model)
+        pool.sync_variant_("main_p1", main_p1)
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(main_p1.state_dict(), out_dir / "main_p1.pt")
+
+        # Phase 2: Fresh-init Adversarial Exploiter 1 targeting frozen main_p1!
+        torch.manual_seed(cfg.seeds.model_init + 101)
+        exp1_model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+        pool.sync_variant_("exploiter_1", exp1_model)
+        exp1_learner = GraphFlowTrainer(exp1_model, None, cfg, lr_mult=float(cfg.optimizer.exploiter_lr_mult))
+        phase_summaries["p2_exp1"] = _run_phase(
+            "p2_exp1", int(args.exp_iters), exp1_learner, "exploiter_1",
+            exploiter_target="main_p1", update_emas=False,
+        )
+        exp1_learner.close(); exp1_learner = None
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(exp1_model.state_dict(), out_dir / "exploiter_1.pt")
+        pfsp_pool.extend(["main_p1", "exploiter_1"])
+        pfsp_wr["main_p1"] = 0.45
+        pfsp_wr["exploiter_1"] = 0.25  # prioritize neutralizing exploiter_1 immediately!
+
+        # Phase 3: Main Hardening vs PFSP (including frozen exploiter_1!)
+        phase_summaries["p3_main"] = _run_phase("p3_main", int(args.p2_iters), main_learner, "main")
+        main_p2 = clone_graph_flow_model(main_model)
+        pool.sync_variant_("main_p2", main_p2)
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(main_p2.state_dict(), out_dir / "main_p2.pt")
+
+        # Phase 4: Warm-start Adversarial Exploiter 2 targeting frozen main_p2!
+        torch.manual_seed(cfg.seeds.model_init + 202)
+        exp2_model = clone_graph_flow_model(main_p2)
+        with torch.no_grad():
+            exp2_model.fj_w2.weight.add_(0.02 * torch.randn_like(exp2_model.fj_w2.weight))
+            exp2_model.fj_w2.bias.add_(0.02 * torch.randn_like(exp2_model.fj_w2.bias))
+        pool.sync_variant_("exploiter_2", exp2_model)
+        exp2_learner = GraphFlowTrainer(exp2_model, None, cfg, lr_mult=float(cfg.optimizer.exploiter_lr_mult))
+        phase_summaries["p4_exp2"] = _run_phase(
+            "p4_exp2", int(args.exp_iters), exp2_learner, "exploiter_2",
+            exploiter_target="main_p2", update_emas=False,
+        )
+        exp2_learner.close(); exp2_learner = None
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(exp2_model.state_dict(), out_dir / "exploiter_2.pt")
+        pfsp_pool.extend(["main_p2", "exploiter_2"])
+        pfsp_wr["main_p2"] = 0.45
+        pfsp_wr["exploiter_2"] = 0.25
+
+        # Phase 5: Final Main Hardening vs Both Frozen Exploiters + Full League!
+        phase_summaries["p5_main"] = _run_phase("p5_main", int(args.p3_iters), main_learner, "main")
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(main_model.state_dict(), out_dir / "main_final.pt")
+            torch.save(ema_fast.state_dict(), out_dir / "ema_fast_final.pt")
+            torch.save(ema_slow.state_dict(), out_dir / "ema_slow_final.pt")
+    finally:
+        if exp1_learner is not None:
+            exp1_learner.close()
+        if exp2_learner is not None:
+            exp2_learner.close()
+        pool.close()
+        main_learner.close()
+        if reducer is not None:
+            reducer.close()
+
+    if args.tp_rank == 0:
+        wall = max(time.perf_counter() - t_start, 1e-6)
+        summary = {
+            "policy": "graph-flow-league",
+            "world_size": ws,
+            "group_size": G,
+            "num_worlds": n_worlds,
+            "world_refreshes": world_gen,
+            "total_iters": global_it,
+            "wall_s": round(wall, 2),
+            "total_sim_s": round(tot_sim_s, 1),
+            "total_agent_steps": int(tot_ag_steps),
+            "cluster_agent_steps_s": round(tot_ag_steps / wall, 0),
+            "cluster_speedup_x": round(tot_sim_s / wall, 1),
+            "mean_rdma_ms": round(tot_rdma_ms / max(1, global_it), 2),
+            "pfsp_wr": {k: round(v, 4) for k, v in pfsp_wr.items()},
+            "phases": phase_summaries,
+            "history": history,
+        }
+        if out_dir is not None:
+            (out_dir / "league_history.json").write_text(json.dumps(summary, indent=2))
+        print(
+            f"\n[GF-LEAGUE x{ws} COMPLETE] {global_it} iters ({world_gen+1} world gens) in {wall:.1f}s | "
+            f"{tot_ag_steps/1e6:.1f}M ag-steps @ {tot_ag_steps/wall/1e6:.2f}M ag-st/s ({tot_sim_s/wall:.0f}x RT)",
+            flush=True,
+        )
+        for pn, ps in phase_summaries.items():
+            g = ps["mean_step_snr_by_grp"]
+            print(
+                f"  phase={pn:8s} ({ps['iters']:2d}it, {ps['wall_s']:5.1f}s) | "
+                f"vel={ps['mean_loss_vel']:.3f} val={ps['mean_loss_val']:.3f} lv={ps['mean_live_group_frac']:.2f} sat={ps['mean_sat_frac']:.4f} | "
+                f"StepSNR={ps['mean_step_snr']:.2f} (bb={g['backbone']:.2f}, B={g['basis']:.2f}, fl={g['flow']:.2f}, cr={g['critic']:.2f}) | "
+                f"4RankSNR={ps['mean_cluster_snr']:.2f} (coh={ps['mean_cluster_coh']:.3f}) | "
+                f"dScMgn={ps['mean_dscore_margin']:+.1f}"
+                + (f" wrVsTgt={ps['wr_vs_target_last8']:.3f}" if ps["wr_vs_target_last8"] is not None else ""),
+                flush=True,
+            )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="4-Studio RDMA Data-Parallel + Async Actor-Learner + /mesh0 TP Trainer")
-    ap.add_argument("--role", choices=("rdma-dp", "rdma-dp-flow", "learner", "actor", "tp-bench"), required=True)
+    ap.add_argument("--role", choices=("rdma-dp", "rdma-dp-flow", "rdma-dp-league", "learner", "actor", "tp-bench"), required=True)
     ap.add_argument("--config", type=str, default=str(CONFIGS_DIR / "sim_dt_grpo_pfsp.json"))
     ap.add_argument("--bind", type=str, default="0.0.0.0:29810")
     ap.add_argument("--learner-addr", type=str, default="10.0.0.124:29810")
@@ -797,6 +1137,11 @@ def main() -> None:
     ap.add_argument("--actor-id", type=int, default=1)
     ap.add_argument("--num-worlds", type=int, default=4)
     ap.add_argument("--iterations", type=int, default=8)
+    ap.add_argument("--p1-iters", type=int, default=48)
+    ap.add_argument("--p2-iters", type=int, default=48)
+    ap.add_argument("--p3-iters", type=int, default=40)
+    ap.add_argument("--exp-iters", type=int, default=24)
+    ap.add_argument("--refresh-worlds-every", type=int, default=18)
     ap.add_argument("--base-envs", type=int, default=0)
     ap.add_argument("--group-size", type=int, default=0)
     ap.add_argument("--horizon", type=int, default=0)
@@ -816,6 +1161,8 @@ def main() -> None:
         run_rdma_dp(args)
     elif args.role == "rdma-dp-flow":
         run_rdma_dp_flow(args)
+    elif args.role == "rdma-dp-league":
+        run_rdma_dp_league(args)
     elif args.role == "learner":
         run_learner(args)
     elif args.role == "actor":

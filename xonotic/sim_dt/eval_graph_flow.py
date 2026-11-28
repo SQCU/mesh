@@ -45,7 +45,250 @@ from sim_dt.graph_flow_policy import (
 from sim_dt.metal_graphflow import CompiledGraphFlowPolicy
 from sim_dt.metal_runtime import MetalDeltaTimePayloadEngine
 from sim_dt.world_graph import build_gas_world_graph
+from solver.strat.league_curriculum import alpha_rank_3team
 from solver.strat.train_config import CONFIGS_DIR, load_training_config
+
+
+UNSEEN_LEAGUE_WORLDS: list[dict[str, Any]] = [
+    {"name": "unseen_k2_duel",   "scale": "small", "seed": 99101, "teams": 2,  "carts": 6,  "players": 16, "tiles": 2, "tile_size": 1536.0, "cp": 3, "physics": "baseline"},
+    {"name": "unseen_k3_tri",    "scale": "small", "seed": 99102, "teams": 3,  "carts": 11, "players": 24, "tiles": 3, "tile_size": 1792.0, "cp": 4, "physics": "fast"},
+    {"name": "unseen_k4_quad",   "scale": "small", "seed": 99103, "teams": 4,  "carts": 14, "players": 32, "tiles": 4, "tile_size": 1664.0, "cp": 4, "physics": "volatile"},
+    {"name": "unseen_k6_mid",    "scale": "mid",   "seed": 99104, "teams": 6,  "carts": 20, "players": 42, "tiles": 4, "tile_size": 1792.0, "cp": 4, "physics": "baseline"},
+    {"name": "unseen_k8_crowd",  "scale": "mid",   "seed": 99105, "teams": 8,  "carts": 28, "players": 56, "tiles": 6, "tile_size": 2048.0, "cp": 5, "physics": "slow"},
+    {"name": "unseen_k12_mega",  "scale": "large", "seed": 99106, "teams": 12, "carts": 40, "players": 84, "tiles": 9, "tile_size": 1792.0, "cp": 4, "physics": "baseline"},
+]
+
+
+def fit_bradley_terry_elo(
+    arms: list[str],
+    wins: np.ndarray,
+    games: np.ndarray,
+    *,
+    anchor: str = "default",
+    anchor_elo: float = 1000.0,
+    prior: float = 0.25,
+    n_iter: int = 400,
+) -> dict[str, float]:
+    """Exact MM algorithm for Maximum-Likelihood Bradley-Terry Elo anchored at `anchor` = `anchor_elo`."""
+    n = len(arms)
+    w = wins.astype(np.float64) + prior
+    g = games.astype(np.float64) + 2.0 * prior
+    np.fill_diagonal(w, 0.0)
+    np.fill_diagonal(g, 0.0)
+    p = np.ones((n,), dtype=np.float64)
+    w_tot = w.sum(axis=1)
+    for _ in range(n_iter):
+        denom = np.sum(g / (p[:, None] + p[None, :] + 1e-12), axis=1)
+        p_new = np.maximum(w_tot / np.maximum(denom, 1e-12), 1e-9)
+        p = p_new / np.exp(np.mean(np.log(p_new)))
+    elo = 400.0 * np.log10(p)
+    a_idx = arms.index(anchor) if anchor in arms else 0
+    elo = elo - elo[a_idx] + float(anchor_elo)
+    return {arms[i]: round(float(elo[i]), 1) for i in range(n)}
+
+
+@torch.no_grad()
+def evaluate_league_tournament(
+    models: dict[str, GraphFlowPolicy | None],
+    cfg: Any,
+    *,
+    E_match: int = 48,
+    H: int = 72,
+    seed: int = 88000,
+) -> dict[str, Any]:
+    """Held-out unseen parametric-world multi-team tournament across K=2..12 + balanced/mixed_dr rosters.
+
+    Computes:
+      - Exact Bradley-Terry Elo (overall, by scale Small/Mid/Large, by roster balanced vs mixed_dr) + 95% CIs
+      - Full pairwise win-rate matrix across all league arms (including frozen exploiters & EMAs!)
+      - Exact 3-team alpha-Rank stationary distribution
+    """
+    arms = list(models.keys())
+    A = len(arms)
+    arm_idx = {a: i for i, a in enumerate(arms)}
+    wins_all = np.zeros((A, A), dtype=np.float64)
+    games_all = np.zeros((A, A), dtype=np.float64)
+    wins_by_scale = {sc: np.zeros((A, A), dtype=np.float64) for sc in ("small", "mid", "large")}
+    games_by_scale = {sc: np.zeros((A, A), dtype=np.float64) for sc in ("small", "mid", "large")}
+    wins_by_roster = {rm: np.zeros((A, A), dtype=np.float64) for rm in ("balanced_fixed", "mixed_dr")}
+    games_by_roster = {rm: np.zeros((A, A), dtype=np.float64) for rm in ("balanced_fixed", "mixed_dr")}
+    match_records: list[dict[str, float]] = []
+    boot_outcomes: list[tuple[int, int, float]] = []
+
+    rng = np.random.default_rng(seed)
+    t0 = time.perf_counter()
+
+    for wi, wspec in enumerate(UNSEEN_LEAGUE_WORLDS):
+        K = int(wspec["teams"])
+        J = int(wspec["carts"])
+        N = int(wspec["players"])
+        world = build_gas_world_graph(
+            map_name=wspec["name"],
+            teams=K, carts=J, players=N, tiles=int(wspec["tiles"]),
+            tile_size=float(wspec["tile_size"]),
+            checkpoints_per_cart=int(wspec["cp"]),
+            seed=int(wspec["seed"]),
+            device=torch.device("cpu"),
+        )
+        Wn = int(world.num_nav)
+        A_dim = Wn + K + 4
+        geo = {"map_center": world.map_center.clone(), "map_radius": world.map_radius.clone()}
+        rules = make_rules_for_profile(float(cfg.sim_dt.point_limit_base), wspec["physics"])
+        compiled: dict[str, CompiledGraphFlowPolicy | None] = {
+            a: (CompiledGraphFlowPolicy(m, E=E_match, N=N, W_nav=Wn, J=J, K=K, nav_kern=world.nav_kern) if m is not None else None)
+            for a, m in models.items()
+        }
+        p_team_1d = (np.arange(N, dtype=np.int32) % K) + 1
+        team_masks = [torch.from_numpy(p_team_1d == (k + 1)).view(1, N).expand(E_match, N) for k in range(K)]
+
+        # Build balanced match seatings covering every arm pair evenly!
+        seatings: list[list[str]] = []
+        if K == 2:
+            for i in range(A):
+                for j in range(i + 1, A):
+                    seatings.append([arms[i], arms[j]])
+        else:
+            # Cover every distinct pair (i, j) by placing them in seats 0 & 1 + rotating/randomizing remaining K-2 seats!
+            n_lobbies = max(A * 2, 18)
+            for li in range(n_lobbies):
+                if K <= A:
+                    perm = rng.permutation(A)[:K]
+                    seatings.append([arms[int(x)] for x in perm])
+                else:
+                    # K > A (e.g. K=12, A=9): include every arm at least once + sample remaining uniformly
+                    base = list(rng.permutation(A))
+                    extra = list(rng.choice(A, size=K - A, replace=True))
+                    full = base + extra
+                    rng.shuffle(full)
+                    seatings.append([arms[int(x)] for x in full])
+            # Also guarantee direct head-to-head inclusion of key pairs (exploiters vs targets, main_final vs EMAs/default)
+            key_pairs = [
+                ("main_final", "default"), ("main_final", "main_init"), ("main_final", "ema_slow_final"),
+                ("main_final", "ema_fast_final"), ("exploiter_1", "main_p1"), ("exploiter_1", "main_p2"),
+                ("exploiter_1", "main_final"), ("exploiter_2", "main_p2"), ("exploiter_2", "main_final"),
+            ]
+            for a1, a2 in key_pairs:
+                if a1 in arm_idx and a2 in arm_idx:
+                    others = [arms[int(x)] for x in rng.choice(A, size=max(0, K - 2), replace=True)]
+                    s = [a1, a2, *others]
+                    rng.shuffle(s)
+                    seatings.append(s)
+
+        for rm in ("balanced_fixed", "mixed_dr"):
+            eng = MetalDeltaTimePayloadEngine(world, num_envs=E_match, num_players=N, rules=rules, base_seed=seed + wi * 1000 + (0 if rm == "balanced_fixed" else 500))
+            for si, seats in enumerate(seatings):
+                eng.reset(torch.ones((E_match,), dtype=torch.bool))
+                sk = sample_roster_skills(rng, E_match, N, K, rm)
+                eng.set_skills(sk)
+                arm_to_tmask: dict[str, torch.Tensor] = {}
+                for ti, a in enumerate(seats):
+                    if a == "default":
+                        continue
+                    arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
+
+                obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+                for _ in range(H):
+                    u_vel = torch.zeros((E_match, N, A_dim), dtype=torch.float32)
+                    has_vel = torch.zeros((E_match, N), dtype=torch.bool)
+                    for a, tmask in arm_to_tmask.items():
+                        cp = compiled[a]
+                        if cp is None:
+                            continue
+                        res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
+                        u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
+                        has_vel = has_vel | tmask
+                    eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
+                    eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=True, n_steps=1, tau_rel=2.5)
+                    eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=False, n_steps=1, tau_rel=2.5)
+                    obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+
+                sc = eng.t_score.numpy()  # [E_match, K]
+                # Record pairwise outcomes across every pair of distinct arms in this match!
+                for ti in range(K):
+                    ai = arm_idx[seats[ti]]
+                    for tj in range(ti + 1, K):
+                        aj = arm_idx[seats[tj]]
+                        if ai == aj:
+                            continue
+                        w_ij = np.where(sc[:, ti] > sc[:, tj] + 1e-6, 1.0, np.where(sc[:, tj] > sc[:, ti] + 1e-6, 0.0, 0.5))
+                        s_ij = float(w_ij.sum())
+                        n_ij = float(E_match)
+                        wins_all[ai, aj] += s_ij
+                        wins_all[aj, ai] += n_ij - s_ij
+                        games_all[ai, aj] += n_ij
+                        games_all[aj, ai] += n_ij
+                        wins_by_scale[wspec["scale"]][ai, aj] += s_ij
+                        wins_by_scale[wspec["scale"]][aj, ai] += n_ij - s_ij
+                        games_by_scale[wspec["scale"]][ai, aj] += n_ij
+                        games_by_scale[wspec["scale"]][aj, ai] += n_ij
+                        wins_by_roster[rm][ai, aj] += s_ij
+                        wins_by_roster[rm][aj, ai] += n_ij - s_ij
+                        games_by_roster[rm][ai, aj] += n_ij
+                        games_by_roster[rm][aj, ai] += n_ij
+                        boot_outcomes.append((ai, aj, s_ij / n_ij))
+                if K == 3 and len(set(seats)) == 3:
+                    for e_i in range(E_match):
+                        match_records.append({seats[0]: float(sc[e_i, 0]), seats[1]: float(sc[e_i, 1]), seats[2]: float(sc[e_i, 2])})
+            eng.close()
+
+        for cp in compiled.values():
+            if cp is not None:
+                cp.close()
+
+    elo_all = fit_bradley_terry_elo(arms, wins_all, games_all)
+    elo_scale = {sc: fit_bradley_terry_elo(arms, wins_by_scale[sc], games_by_scale[sc]) for sc in ("small", "mid", "large")}
+    elo_roster = {rm: fit_bradley_terry_elo(arms, wins_by_roster[rm], games_by_roster[rm]) for rm in ("balanced_fixed", "mixed_dr")}
+
+    # Bootstrap 95% CIs over lobby blocks
+    boot_elos: dict[str, list[float]] = {a: [] for a in arms}
+    n_bo = len(boot_outcomes)
+    if n_bo > 0:
+        for _ in range(120):
+            bw = np.zeros((A, A), dtype=np.float64)
+            bg = np.zeros((A, A), dtype=np.float64)
+            idxs = rng.integers(0, n_bo, size=n_bo)
+            for idx_b in idxs:
+                ai, aj, wr = boot_outcomes[int(idx_b)]
+                bw[ai, aj] += wr
+                bw[aj, ai] += 1.0 - wr
+                bg[ai, aj] += 1.0
+                bg[aj, ai] += 1.0
+            be = fit_bradley_terry_elo(arms, bw, bg)
+            for a in arms:
+                boot_elos[a].append(be[a])
+    elo_ci = {
+        a: [round(float(np.percentile(boot_elos[a], 2.5)), 1), round(float(np.percentile(boot_elos[a], 97.5)), 1)]
+        if boot_elos[a] else [elo_all[a], elo_all[a]]
+        for a in arms
+    }
+
+    # Exact 3-team alpha-Rank (uses direct 3-team match records + pairwise fallback!)
+    for i in range(A):
+        for j in range(i + 1, A):
+            if games_all[i, j] > 0:
+                wr = wins_all[i, j] / games_all[i, j]
+                # Feed aggregate pairwise matches into alpha_rank_3team alongside 3-team games
+                match_records.append({arms[i]: float(wr), arms[j]: float(1.0 - wr)})
+    arank = alpha_rank_3team(arms, match_records, alpha=4.0, m_pop=20)
+
+    pw_mat = {
+        arms[i]: {
+            arms[j]: (round(float(wins_all[i, j] / games_all[i, j]), 3) if games_all[i, j] > 0 else None)
+            for j in range(A)
+        }
+        for i in range(A)
+    }
+    return {
+        "wall_s": round(time.perf_counter() - t0, 2),
+        "total_pair_games": int(games_all.sum() // 2),
+        "arms": arms,
+        "elo_overall": elo_all,
+        "elo_ci95": elo_ci,
+        "elo_by_scale": elo_scale,
+        "elo_by_roster": elo_roster,
+        "alpha_rank": arank,
+        "pairwise_wr": pw_mat,
+    }
 
 
 EVAL_REGIMES: list[dict[str, Any]] = [
@@ -405,6 +648,9 @@ def main() -> None:
     ap.add_argument("--carts", type=int, default=16)
     ap.add_argument("--players", type=int, default=36)
     ap.add_argument("--tiles", type=int, default=4)
+    ap.add_argument("--league-eval", action="store_true")
+    ap.add_argument("--league-envs", type=int, default=48)
+    ap.add_argument("--league-horizon", type=int, default=72)
     args = ap.parse_args()
 
     cfg = load_training_config(args.config)
@@ -417,7 +663,11 @@ def main() -> None:
 
     gf_cfg = GraphFlowConfig()
     models: dict[str, GraphFlowPolicy | None] = {"default": None}
-    for name in ("main_init", "main_mid", "main_final"):
+    cand_names = (
+        "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2",
+        "exploiter_2", "main_final", "ema_fast_final", "ema_slow_final", "ema_final",
+    )
+    for name in cand_names:
         p = ckpt_dir / f"{name}.pt"
         if p.exists():
             m = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
@@ -427,50 +677,56 @@ def main() -> None:
 
     t0 = time.perf_counter()
     results: dict[str, Any] = {"regimes": {}, "branch_diversity": {}}
+    # Evaluate 7 DR regimes on core arms (plus exploiters & EMAs if present!)
+    beh_arms = [a for a in ("default", "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2", "exploiter_2", "main_final", "ema_slow_final") if a in models]
     for ri, reg in enumerate(EVAL_REGIMES):
         results["regimes"][reg["name"]] = {}
-        for ai, (arm_name, mdl) in enumerate(models.items()):
+        for ai, arm_name in enumerate(beh_arms):
             results["regimes"][reg["name"]][arm_name] = evaluate_arm_on_regime(
-                arm_name, mdl, world, reg,
+                arm_name, models[arm_name], world, reg,
                 cfg=cfg, E=args.envs, H=args.horizon, seed=90000 + ri * 1000 + ai * 37,
             )
 
-    for arm_name in ("main_init", "main_final"):
+    for arm_name in ("main_init", "exploiter_1", "exploiter_2", "main_final", "ema_slow_final"):
         if arm_name in models and models[arm_name] is not None:
             results["branch_diversity"][arm_name] = evaluate_multimodal_branch_diversity(models[arm_name], world, cfg)
+
+    if args.league_eval and len(models) >= 2:
+        results["league_tournament"] = evaluate_league_tournament(
+            models, cfg, E_match=int(args.league_envs), H=int(args.league_horizon),
+        )
 
     out_path = ckpt_dir / "graph_flow_behavior_eval.json"
     out_path.write_text(json.dumps(results, indent=2))
     print(f"[eval-graph-flow] Done in {time.perf_counter()-t0:.2f}s (E={args.envs}, H={args.horizon}, W_nav={world.num_nav}, I_item={world.num_items}) -> {out_path}\n", flush=True)
 
     print("=== 1. OUTCOME COMPETENCE & REALIZED GOAL-KIND MIX ACROSS 7 DR REGIMES ===")
-    print(f"{'Regime':24s} | {'Arm':11s} | {'PW-WR':6s} {'1st%':6s} {'Margin':7s} {'K/D':5s} {'Push':6s} {'Pick':5s} {'Quad%':5s} | {'GoalKind [Cart/Item/Enem/Nav]%':30s}")
-    print("-" * 118)
+    print(f"{'Regime':24s} | {'Arm':14s} | {'PW-WR':6s} {'1st%':6s} {'Margin':7s} {'K/D':5s} {'Push':6s} {'Pick':5s} {'Quad%':5s} | {'GoalKind [Cart/Item/Enem/Nav]%':30s}")
+    print("-" * 121)
     for reg in EVAL_REGIMES:
         rn = reg["name"]
-        for arm_name in models:
+        for arm_name in beh_arms:
             o = results["regimes"][rn][arm_name]["outcomes"]
             gk = o["gk_pct"]
             print(
-                f"{rn:24s} | {arm_name:11s} | {o['pairwise_win_rate']:6.3f} {o['first_place_rate']:6.3f} "
+                f"{rn:24s} | {arm_name:14s} | {o['pairwise_win_rate']:6.3f} {o['first_place_rate']:6.3f} "
                 f"{o['score_margin']:+7.1f} {o['kd_ratio']:5.2f} {o['cart_push']:6.1f} {o['pickups']:5.1f} {o['quad_frac']*100:5.1f} | "
                 f"{gk[0]:5.1f} / {gk[1]:5.1f} / {gk[2]:5.1f} / {gk[3]:5.1f}"
             )
 
     if "main_final" in models:
-        print("\n=== 2. CONTINUOUS STEERING FIELD & PCA SPECTRUM (main_init vs main_final) ===")
-        print(f"{'Regime':24s} | {'Arm':10s} | {'||u||':5s} {'Sat%':5s} {'rCart':6s} {'rItem':6s} {'rEnem':6s} {'Post':6s} | {'FocLd':6s} {'FocSt':6s} {'FocWk':6s} | {'PCA(1/3/8) EffR':18s}")
-        print("-" * 122)
+        print("\n=== 2. CONTINUOUS STEERING FIELD & PCA SPECTRUM ===")
+        print(f"{'Regime':24s} | {'Arm':14s} | {'||u||':5s} {'Sat%':5s} {'rCart':6s} {'rItem':6s} {'rEnem':6s} {'Post':6s} | {'FocLd':6s} {'FocSt':6s} {'FocWk':6s} | {'PCA(1/3/8) EffR':18s}")
+        print("-" * 126)
+        show_arms = [a for a in ("main_init", "exploiter_1", "exploiter_2", "main_final", "ema_slow_final") if a in beh_arms]
         for reg in EVAL_REGIMES:
             rn = reg["name"]
-            for an in ("main_init", "main_final"):
-                if an not in models:
-                    continue
+            for an in show_arms:
                 r = results["regimes"][rn][an]
                 s = r["steering_all"]
                 p = r["pca"]
                 print(
-                    f"{rn:24s} | {an:10s} | {s['u_norm']:5.2f} {s['sat_frac']*100:5.1f} {s['r_cart']:+6.2f} {s['r_item']:+6.2f} {s['r_enemy']:+6.2f} {s['posture']:+6.2f} | "
+                    f"{rn:24s} | {an:14s} | {s['u_norm']:5.2f} {s['sat_frac']*100:5.1f} {s['r_cart']:+6.2f} {s['r_item']:+6.2f} {s['r_enemy']:+6.2f} {s['posture']:+6.2f} | "
                     f"{s['foc_lead']:+6.2f} {s['foc_strong']:+6.2f} {s['foc_weak']:+6.2f} | "
                     f"{p['top1_var']:.2f}/{p['top3_var']:.2f}/{p['top8_var']:.2f} ({p['eff_rank']:4.1f})"
                 )
@@ -488,10 +744,35 @@ def main() -> None:
         print("\n=== 4. MULTIMODAL ROLLOUT-GROUP DIVERSITY & CONDITIONAL p(u|s0) ENDPOINTS ===")
         for an, dv in results["branch_diversity"].items():
             print(
-                f"  {an:10s}: zero_err={dv['zero_collapse_max_u']:.1e} | "
+                f"  {an:14s}: zero_err={dv['zero_collapse_max_u']:.1e} | "
                 f"G8(u_L2={dv['s0_branch_u_l2']:.3f} u_cos={dv['s0_branch_u_cos']:+.3f} pos_div={dv['end_pos_divergence_u']:.1f}u gk_dis={dv['end_goal_kind_disagree']:.3f} sc_std={dv['end_score_std_across_G']:.2f}) | "
                 f"p(u|s0,128)(uRms={dv['s0_128_u_rms']:.2f} sat={dv['s0_128_sat_frac']*100:.2f}% spr/mu={dv['s0_128_spread_over_mean']:.2f} cos={dv['s0_128_pair_cos']:+.3f} tmEffR={dv['s0_128_eff_rank']:.1f} bot0EffR={dv['s0_bot0_eff_rank']:.1f} BH_effR={dv['bh_eff_rank']:.1f} bimod={dv['s0_bot0_bimod']:.3f})"
             )
+
+    if "league_tournament" in results:
+        lt = results["league_tournament"]
+        print(f"\n=== 5. UNSEEN PARAMETRIC-WORLD LEAGUE ELO & ALPHA-RANK ({lt['total_pair_games']:,} pair-games in {lt['wall_s']:.1f}s) ===")
+        print(f"{'Arm':15s} | {'Elo (95% CI)':20s} | {'Small':6s} {'Mid':6s} {'Large':6s} | {'Bal':6s} {'MixDR':6s} | {'aRank':6s}")
+        print("-" * 82)
+        ranked = sorted(lt["arms"], key=lambda a: lt["elo_overall"][a], reverse=True)
+        for a in ranked:
+            ci = lt["elo_ci95"][a]
+            print(
+                f"{a:15s} | {lt['elo_overall'][a]:6.1f} [{ci[0]:6.1f},{ci[1]:6.1f}] | "
+                f"{lt['elo_by_scale']['small'][a]:6.1f} {lt['elo_by_scale']['mid'][a]:6.1f} {lt['elo_by_scale']['large'][a]:6.1f} | "
+                f"{lt['elo_by_roster']['balanced_fixed'][a]:6.1f} {lt['elo_by_roster']['mixed_dr'][a]:6.1f} | "
+                f"{lt['alpha_rank'].get(a, 0.0):6.3f}"
+            )
+        print("\n=== 6. PAIRWISE WIN-RATE MATRIX (Row beats Col) ===")
+        hdr = f"{'Arm':15s} | " + " ".join(f"{a[:7]:>7s}" for a in ranked)
+        print(hdr)
+        print("-" * len(hdr))
+        for a in ranked:
+            cells = []
+            for b in ranked:
+                v = lt["pairwise_wr"][a][b]
+                cells.append("    -  " if a == b or v is None else f"{v:7.3f}")
+            print(f"{a:15s} | " + " ".join(cells))
 
 
 if __name__ == "__main__":

@@ -3,8 +3,10 @@ and Metal 4 NAX Advantage-Weighted Boltzmann Flow Matching Trainer.
 """
 from __future__ import annotations
 
+import math
+import random
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +56,54 @@ class GraphFlowBatch:
     stats: dict[str, Any]
 
 
+def sample_blender_world_spec(seed: int, slot_idx: int) -> dict[str, Any]:
+    """Full-blender stratified parametric world sampler spanning the entire Metal-safe domain:
+      Tier 0 (Small): K in [2, 4],  N/K in [4, 10], J in [4, 18],  tiles in [2, 4]
+      Tier 1 (Mid):   K in [5, 8],  N/K in [4, 9],  J in [9, 32],  tiles in [3, 6]
+      Tier 2 (Large): K in [9, 14], N/K in [3, 8],  J in [15, 48], tiles in [6, 9]
+    Also randomizes tile_size, joint_width, checkpoints_per_cart, and point_limit_base!
+    Guarantees K <= 14, J <= 52, N <= 108, W_nav <= 48, A_dim <= 66, M_ent <= 228.
+    """
+    rng = random.Random(int(seed))
+    tier = int(slot_idx) % 3
+    if tier == 0:
+        K = rng.choice((2, 3, 4))
+        per_team = rng.randint(4, 10)
+        mult = rng.uniform(1.5, 4.5)
+        tiles = rng.choice((2, 3, 4))
+        tile_size = rng.choice((1408.0, 1664.0, 1792.0, 2048.0))
+    elif tier == 1:
+        K = rng.choice((5, 6, 7, 8))
+        per_team = rng.randint(4, 9)
+        mult = rng.uniform(1.6, 4.0)
+        tiles = rng.choice((3, 4, 6))
+        tile_size = rng.choice((1536.0, 1792.0, 2048.0))
+    else:
+        K = rng.choice((9, 10, 11, 12, 14))
+        per_team = rng.randint(3, 8)
+        mult = rng.uniform(1.5, 3.6)
+        tiles = rng.choice((6, 8, 9))
+        tile_size = rng.choice((1664.0, 1792.0, 2176.0))
+    N = max(max(12, 3 * K), min(104, K * per_team))
+    N = (N // K) * K
+    if N < 12:
+        N = K * max(3, int(math.ceil(12.0 / K)))
+    J = max(K + 1, min(48, int(round(K * mult))))
+    return {
+        "seed": int(seed),
+        "family": "gas_world_bsp",
+        "tier": tier,
+        "teams": K,
+        "carts": J,
+        "players": N,
+        "tiles": tiles,
+        "tile_size": float(tile_size),
+        "joint_width": float(rng.choice((288.0, 320.0, 352.0, 384.0))),
+        "checkpoints_per_cart": int(rng.choice((3, 4, 5))),
+        "point_limit_base": float(rng.choice((120.0, 160.0, 200.0))),
+    }
+
+
 class _GraphFlowSlot:
     """One persistent world slot owning live & counterfactual-fork Metal engines + compiled GraphFlowPolicies."""
 
@@ -88,7 +138,8 @@ class _GraphFlowSlot:
         self.roster_mode = str(roster_mode)
         self.dr_rng = np.random.default_rng(seed_base + 4242)
         self.noise_gen = torch.Generator(device="cpu").manual_seed(seed_base + 7777)
-        self.rules = make_rules_for_profile(float(sc.point_limit_base), self.physics_profile)
+        pl_base = float(spec.get("point_limit_base", sc.point_limit_base))
+        self.rules = make_rules_for_profile(pl_base, self.physics_profile)
         self.geo = {"map_center": world.map_center.clone(), "map_radius": world.map_radius.clone()}
         self.nav_kern = world.nav_kern.detach().cpu().float().contiguous()
 
@@ -150,6 +201,7 @@ class GraphFlowRolloutPool:
         group_size: int = 4,
         seed_base: int = 30000,
         world_seed_base: int | None = None,
+        blender_dr: bool = False,
         self_play_only: bool = False,
         roster_mode: str = "mixed_dr",
         randomize_physics: bool = True,
@@ -161,47 +213,70 @@ class GraphFlowRolloutPool:
         self.sc = cfg.sim_dt
         self.variants = variants
         self.G = max(1, int(group_size))
+        self.blender_dr = bool(blender_dr)
         self.self_play_only = bool(self_play_only)
         self.roster_mode = str(roster_mode)
+        self.randomize_physics = bool(randomize_physics)
+        self.tau_rel = float(tau_rel)
+        self.n_phys_substeps = int(n_phys_substeps)
         self.team_corr = float(team_corr)
+        self.seed_base = int(seed_base)
+        self.world_seed_base = int(seed_base if world_seed_base is None else world_seed_base)
         self.rng = np.random.default_rng(seed_base + 777)
         self.slots: list[_GraphFlowSlot] = []
         self._cursor = 0
-        phys_cycle = ("baseline", "fast", "slow", "volatile") if randomize_physics else ("baseline",)
-        w_seed = int(seed_base if world_seed_base is None else world_seed_base)
+        self._refresh_gen = 0
+        self._phys_cycle = ("baseline", "fast", "slow", "volatile") if randomize_physics else ("baseline",)
 
         for wi in range(max(1, int(num_worlds))):
-            spec = sample_world_spec(w_seed + (wi + 1) * 101, cfg.world)
-            map_name = f"gf_w{wi}_k{spec['teams']}_j{spec['carts']}_n{spec['players']}"
-            world = build_gas_world_graph(
-                map_name=map_name,
-                teams=int(spec["teams"]),
-                carts=int(spec["carts"]),
-                players=int(spec["players"]),
-                tiles=int(spec["tiles"]),
-                seed=int(spec["seed"]),
-                device=torch.device("cpu"),
-            )
-            self.slots.append(
-                _GraphFlowSlot(
-                    world, spec, cfg, variants,
-                    seed_base=seed_base + wi * 10009,
-                    group_size=self.G,
-                    physics_profile=phys_cycle[wi % len(phys_cycle)],
-                    roster_mode=self.roster_mode,
-                    tau_rel=tau_rel,
-                    n_phys_substeps=n_phys_substeps,
-                )
-            )
+            self.slots.append(self._make_slot(wi, self.world_seed_base + (wi + 1) * 101, self.seed_base + wi * 10009))
 
-        # Stagger initial match phases once at pool creation
-        for wi, slot in enumerate(self.slots):
-            stagger = (wi * 12) % 40
-            if stagger > 0:
-                slot.live_eng.step(self.sc.dt, mode=self.sc.mode, n_steps=stagger)
-                fin = slot.live_eng.t_finished
-                if bool(fin.any().item()):
-                    slot.live_eng.reset(fin)
+    def _make_slot(self, wi: int, w_seed: int, m_seed: int) -> _GraphFlowSlot:
+        if self.blender_dr:
+            spec = sample_blender_world_spec(w_seed, wi)
+        else:
+            spec = sample_world_spec(w_seed, self.cfg.world)
+        map_name = f"gf_w{wi}_s{w_seed}_k{spec['teams']}_j{spec['carts']}_n{spec['players']}"
+        world = build_gas_world_graph(
+            map_name=map_name,
+            teams=int(spec["teams"]),
+            carts=int(spec["carts"]),
+            players=int(spec["players"]),
+            tiles=int(spec["tiles"]),
+            tile_size=float(spec.get("tile_size", 1792.0)),
+            joint_width=float(spec.get("joint_width", 320.0)),
+            checkpoints_per_cart=int(spec.get("checkpoints_per_cart", 4)),
+            seed=int(spec["seed"]),
+            device=torch.device("cpu"),
+        )
+        slot = _GraphFlowSlot(
+            world, spec, self.cfg, self.variants,
+            seed_base=m_seed,
+            group_size=self.G,
+            physics_profile=self._phys_cycle[(wi + self._refresh_gen) % len(self._phys_cycle)],
+            roster_mode=self.roster_mode,
+            tau_rel=self.tau_rel,
+            n_phys_substeps=self.n_phys_substeps,
+        )
+        stagger = ((wi + self._refresh_gen) * 12) % 40
+        if stagger > 0:
+            slot.live_eng.step(self.sc.dt, mode=self.sc.mode, n_steps=stagger)
+            fin = slot.live_eng.t_finished
+            if bool(fin.any().item()):
+                slot.live_eng.reset(fin)
+        return slot
+
+    def refresh_all_worlds_(self, gen: int) -> None:
+        """Replace all pool slots with fresh parametric worlds (matched across RDMA ranks!)."""
+        self._refresh_gen = int(gen)
+        n_w = len(self.slots)
+        for s in self.slots:
+            s.close()
+        self.slots.clear()
+        for wi in range(n_w):
+            w_seed = self.world_seed_base + self._refresh_gen * 10007 + (wi + 1) * 101
+            m_seed = self.seed_base + self._refresh_gen * 50021 + wi * 10009
+            self.slots.append(self._make_slot(wi, w_seed, m_seed))
 
     def close(self) -> None:
         for s in self.slots:
@@ -213,20 +288,40 @@ class GraphFlowRolloutPool:
         for s in self.slots:
             s.sync_variant_(arm, model)
 
-    def _choose_seats(self, K: int, pfsp_pool: list[str], pfsp_wr: dict[str, float]) -> list[str]:
+    def _choose_seats(
+        self,
+        K: int,
+        pfsp_pool: list[str],
+        pfsp_wr: dict[str, float],
+        *,
+        train_arm: str = "main",
+        exploiter_target: str | None = None,
+    ) -> list[str]:
+        if exploiter_target is not None:
+            # Adversarial exploiter training: Seat 0 is exploiter, rivals are predominantly the frozen target!
+            seats = [train_arm]
+            for s_i in range(1, K):
+                if s_i == K - 1 and K >= 4 and float(self.rng.random()) < 0.25:
+                    seats.append("default")
+                else:
+                    seats.append(exploiter_target)
+            return seats
         if self.self_play_only or K <= 1:
-            return ["main"] * K
+            return [train_arm] * K
         lg = self.cfg.league
-        seats = ["main"]
+        seats = [train_arm]
         cands = sorted(set(pfsp_pool))
         w = np.asarray(
             [max(lg.pfsp_min_weight, 1.0 - float(pfsp_wr.get(a, lg.pfsp_default_winrate))) ** lg.pfsp_power for a in cands],
             dtype=np.float64,
         )
         w /= w.sum()
-        seats.append("default")
-        for _ in range(K - 2):
+        if K == 2:
             seats.append(str(self.rng.choice(cands, p=w)))
+        else:
+            seats.append("default" if float(self.rng.random()) < 0.45 else str(self.rng.choice(cands, p=w)))
+            for _ in range(K - 2):
+                seats.append(str(self.rng.choice(cands, p=w)))
         return seats
 
     @torch.no_grad()
@@ -238,6 +333,8 @@ class GraphFlowRolloutPool:
         pfsp_wr: dict[str, float] | None = None,
         seat_arms: list[str] | None = None,
         slot_index: int | None = None,
+        train_arm: str = "main",
+        exploiter_target: str | None = None,
     ) -> GraphFlowBatch:
         t0 = time.perf_counter()
         idx = self._cursor % len(self.slots) if slot_index is None else (int(slot_index) % len(self.slots))
@@ -249,7 +346,13 @@ class GraphFlowRolloutPool:
         lcfg = self.cfg.losses
 
         if seat_arms is None:
-            seat_arms = self._choose_seats(K, pfsp_pool or ["default", "main_init", "ema", "main"], pfsp_wr or {})
+            seat_arms = self._choose_seats(
+                K,
+                pfsp_pool or ["default", "main_init", "ema", "main"],
+                pfsp_wr or {},
+                train_arm=train_arm,
+                exploiter_target=exploiter_target,
+            )
 
         if G > 1:
             assert slot.fork_eng is not None
@@ -294,7 +397,7 @@ class GraphFlowRolloutPool:
         for ti, arm in enumerate(seat_arms):
             arm_to_teams[arm].append(ti + 1)
 
-        c_main = slot._get_pol("main")
+        c_main = slot._get_pol(train_arm)
         assert c_main is not None
         d_e = c_main.d_e
         sigma_b = float(c_main.cfg.sigma_base)
@@ -341,7 +444,7 @@ class GraphFlowRolloutPool:
             val_w = torch.zeros((E, N), dtype=torch.float32)
             val_l = torch.zeros((E, N), dtype=torch.float32)
 
-            if len(arm_to_teams) == 1 and "main" in arm_to_teams:
+            if len(arm_to_teams) == 1 and train_arm in arm_to_teams:
                 res = c_main.sample_velocity(obs_c, nav_c, carts_c, teams_c, acc_c, geo=slot.geo, eps=eps_main)
                 u_vel = res["u_vel"]
                 has_vel.fill_(True)
@@ -358,11 +461,11 @@ class GraphFlowRolloutPool:
                     cpol = slot._get_pol(arm)
                     if cpol is None:
                         continue
-                    eps_cur = eps_main if arm == "main" else None
+                    eps_cur = eps_main if arm == train_arm else None
                     res = cpol.sample_velocity(obs_c, nav_c, carts_c, teams_c, acc_c, geo=slot.geo, eps=eps_cur)
                     u_vel = torch.where(mask.unsqueeze(-1), res["u_vel"], u_vel)
                     has_vel = has_vel | mask
-                    if arm == "main":
+                    if arm == train_arm:
                         main_mask = mask
                         val_w = res["value_winnie"]
                         val_l = res["value_lou"]
@@ -529,13 +632,27 @@ class GraphFlowRolloutPool:
 class GraphFlowTrainer:
     """Metal 4 NAX Advantage-Weighted Boltzmann Flow Matching + Winnie/Lou Critic Trainer."""
 
-    def __init__(self, model: GraphFlowPolicy, ema_model: GraphFlowPolicy | None, cfg: TrainingConfig):
+    def __init__(
+        self,
+        model: GraphFlowPolicy,
+        ema_model: GraphFlowPolicy | None,
+        cfg: TrainingConfig,
+        *,
+        ema_fast_model: GraphFlowPolicy | None = None,
+        lr_mult: float = 1.0,
+        max_cache: int = 12,
+    ):
         self.model = model.to(device=torch.device("cpu"))
         self.ema_model = ema_model.to(device=torch.device("cpu")) if ema_model is not None else clone_graph_flow_model(self.model)
+        self.ema_fast_model = ema_fast_model.to(device=torch.device("cpu")) if ema_fast_model is not None else None
         self.cfg = cfg
-        self.opt = GraphFlowOptimizer(self.model, self.ema_model, cfg.optimizer)
+        self.opt = GraphFlowOptimizer(
+            self.model, self.ema_model, cfg.optimizer,
+            ema_fast_model=self.ema_fast_model, lr_mult=lr_mult,
+        )
         self.policy_version = 0
-        self._cache: dict[tuple[int, int, int, int, int], CompiledGraphFlowTrainer] = {}
+        self.max_cache = max(2, int(max_cache))
+        self._cache: OrderedDict[tuple[int, int, int, int, int], CompiledGraphFlowTrainer] = OrderedDict()
 
     def close(self) -> None:
         for tr in self._cache.values():
@@ -546,15 +663,29 @@ class GraphFlowTrainer:
         key = (mb_envs, N, Wn, J, K)
         tr = self._cache.get(key)
         if tr is None:
+            while len(self._cache) >= self.max_cache:
+                _, old_tr = self._cache.popitem(last=False)
+                old_tr.close()
             tr = CompiledGraphFlowTrainer(self.model, E_mb=mb_envs, N=N, W_nav=Wn, J=J, K=K, nav_kern=nav_kern)
             self._cache[key] = tr
         else:
+            self._cache.move_to_end(key)
             tr.set_nav_kern(nav_kern)
             tr.sync_weights_(self.model)
         return tr
 
     def reload_after_rdma_(self) -> None:
         self.opt.reload_master_from_model_()
+
+    @staticmethod
+    def _param_group(name: str) -> str:
+        if name.startswith(("fj_", "flow_cond_")):
+            return "flow"
+        if name.startswith("basis_"):
+            return "basis"
+        if name.startswith(("value_", "dyn_")):
+            return "critic"
+        return "backbone"
 
     @torch.no_grad()
     def update(self, batch: GraphFlowBatch, *, epochs: int = 2) -> dict[str, Any]:
@@ -598,6 +729,11 @@ class GraphFlowTrainer:
         diags: list[dict[str, float]] = []
         opt_steps = 0
 
+        # Exact within-iteration Step GradSNR accumulators (global + backbone/basis/flow/critic!)
+        g_sum: dict[str, torch.Tensor] = {}
+        q_sum_grp: dict[str, float] = {"all": 0.0, "backbone": 0.0, "basis": 0.0, "flow": 0.0, "critic": 0.0}
+        n_snr_steps = 0
+
         for _ in range(max(1, int(epochs))):
             g_perm = valid_g_ids[torch.randperm(n_groups_tot)]
             mb_starts = list(range(0, n_groups_tot, groups_per_mb))
@@ -625,6 +761,29 @@ class GraphFlowTrainer:
                 if in_accum >= win_size or (mi + 1) >= len(mb_starts):
                     self.model.zero_grad(set_to_none=True)
                     tr.export_grads_to_model_(self.model)
+                    # Record FP32 step gradient for exact GradSNR across steps!
+                    all_finite = True
+                    for nm, prm in self.model.named_parameters():
+                        if prm.grad is None:
+                            continue
+                        gf = prm.grad.detach().float()
+                        if not torch.isfinite(gf).all():
+                            all_finite = False
+                            break
+                    if all_finite:
+                        n_snr_steps += 1
+                        for nm, prm in self.model.named_parameters():
+                            if prm.grad is None:
+                                continue
+                            gf = prm.grad.detach().float()
+                            sq = float(gf.square().sum().item())
+                            grp = self._param_group(nm)
+                            q_sum_grp["all"] += sq
+                            q_sum_grp[grp] += sq
+                            if nm not in g_sum:
+                                g_sum[nm] = gf.clone()
+                            else:
+                                g_sum[nm].add_(gf)
                     gn = self.opt.step()
                     tr.sync_weights_(self.model)
                     tr.zero_grads_()
@@ -632,6 +791,27 @@ class GraphFlowTrainer:
                     opt_steps += 1
                     sd["grad_norm"] = gn
                     diags.append(sd)
+
+        # Compute exact Step GradSNR = (m-1)*S / (Q_mean - S) & Coherence = S / Q_mean
+        snr_out: dict[str, float] = {}
+        coh_out: dict[str, float] = {}
+        if n_snr_steps >= 2:
+            inv_m = 1.0 / float(n_snr_steps)
+            s_grp: dict[str, float] = {"all": 0.0, "backbone": 0.0, "basis": 0.0, "flow": 0.0, "critic": 0.0}
+            for nm, gs in g_sum.items():
+                msq = float((gs * inv_m).square().sum().item())
+                s_grp["all"] += msq
+                s_grp[self._param_group(nm)] += msq
+            for grp in ("all", "backbone", "basis", "flow", "critic"):
+                q_mean = q_sum_grp[grp] * inv_m
+                sig = s_grp[grp]
+                var_mean = max(q_mean - sig, 0.0) / float(n_snr_steps - 1)
+                coh_out[grp] = round(sig / max(q_mean, 1e-12), 4)
+                snr_out[grp] = round(min(sig / max(var_mean, 1e-12), 999.0), 3)
+        else:
+            for grp in ("all", "backbone", "basis", "flow", "critic"):
+                coh_out[grp] = 0.0
+                snr_out[grp] = 0.0
 
         self.policy_version += opt_steps
         def _mean(k: str) -> float:
@@ -653,4 +833,8 @@ class GraphFlowTrainer:
             "u_norm": _mean("u_norm"),
             "v_norm": _mean("v_norm"),
             "grad_norm": _mean("grad_norm"),
+            "grad_snr": snr_out["all"],
+            "grad_coh": coh_out["all"],
+            "grad_snr_by_grp": snr_out,
+            "grad_coh_by_grp": coh_out,
         }
