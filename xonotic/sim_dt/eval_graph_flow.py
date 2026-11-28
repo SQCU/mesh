@@ -638,6 +638,350 @@ def evaluate_multimodal_branch_diversity(
     }
 
 
+def _vendi_score_rbf(X: np.ndarray) -> float:
+    """Exact Vendi Score VS_1 = exp(-sum_i lam_i log lam_i) on RBF Gram matrix (median-bandwidth heuristic)."""
+    n = int(X.shape[0])
+    if n < 2:
+        return 1.0
+    diff = X[:, None, :] - X[None, :, :]
+    d2 = np.sum(diff * diff, axis=-1)
+    off = d2[~np.eye(n, dtype=bool)]
+    med = float(np.median(off)) if off.size > 0 else 1.0
+    if med <= 1e-10:
+        return 1.0
+    K = np.exp(-d2 / (2.0 * med)) / float(n)
+    ev = np.maximum(np.linalg.eigvalsh(K), 0.0)
+    ev = ev / max(float(ev.sum()), 1e-12)
+    return float(np.exp(-np.sum(np.where(ev > 1e-12, ev * np.log(np.maximum(ev, 1e-12)), 0.0))))
+
+
+def _non_gaussianity_index(X: np.ndarray, rng: np.random.Generator) -> float:
+    """Normalized Energy Distance ED(P, N(mu, Sigma)) / sqrt(tr(Sigma)) measuring non-Gaussianity of p(u | s_0)."""
+    n, d = X.shape
+    if n < 8:
+        return 0.0
+    mu = X.mean(axis=0)
+    Xc = X - mu
+    cov = (Xc.T @ Xc) / float(n - 1)
+    tr_s = float(np.trace(cov))
+    if tr_s <= 1e-10:
+        return 0.0
+    ev, evec = np.linalg.eigh(cov)
+    ev = np.maximum(ev, 0.0)
+    Z = rng.standard_normal((n, d))
+    Y = mu[None, :] + (Z * np.sqrt(ev)[None, :]) @ evec.T
+    d_xy = np.sqrt(np.maximum(np.sum((X[:, None, :] - Y[None, :, :]) ** 2, axis=-1), 0.0)).mean()
+    d_xx = np.sqrt(np.maximum(np.sum((X[:, None, :] - X[None, :, :]) ** 2, axis=-1), 0.0)).mean()
+    d_yy = np.sqrt(np.maximum(np.sum((Y[:, None, :] - Y[None, :, :]) ** 2, axis=-1), 0.0)).mean()
+    ed2 = max(2.0 * float(d_xy) - float(d_xx) - float(d_yy), 0.0)
+    return float(np.sqrt(ed2) / np.sqrt(tr_s))
+
+
+@torch.no_grad()
+def evaluate_effector_diversity_suite(
+    models: dict[str, GraphFlowPolicy | None],
+    world: Any,
+    cfg: Any,
+    *,
+    n_states: int = 16,
+    n_draws: int = 64,
+    qd_G: int = 16,
+    qd_H: int = 16,
+    seed: int = 79000,
+) -> dict[str, Any]:
+    """Production Effector Coinductive Vector Machine Diversity across 16 mid-match states x 5 PvP-Elo strata.
+
+    Reports per arm:
+      - Vendi Score (VS_1) over single-bot and team-joint p(u | s_0)
+      - Non-Gaussianity Index (NGI = normalized Energy Distance vs moment-matched Gaussian)
+      - Quality-Diversity High-EV Vendi Score (QD-VS over top-25% CRN rollout branches!)
+      - BH_effR, bot0EffR, tmEffR, sat_frac, zero_collapse_max_u
+    """
+    K, J, N, Wn = int(world.teams), int(world.carts), int(world.players_default), int(world.num_nav)
+    A_dim = Wn + K + 4
+    geo = {"map_center": world.map_center.clone(), "map_radius": world.map_radius.clone()}
+    rng = np.random.default_rng(seed)
+    p_team_1d = (np.arange(N, dtype=np.int32) % K) + 1
+    main_idx = np.nonzero(p_team_1d == 1)[0]
+    strata_regimes = ["balanced_fixed", "stacked_main_weak", "mixed_enemies_main_weak", "stacked_main_strong", "within_team_carry_weak"]
+
+    # Harvest 16 canonical mid-match savestates across the 5 PvP-Elo roster strata!
+    rules = make_rules_for_profile(float(cfg.sim_dt.point_limit_base), "baseline")
+    eng_s = MetalDeltaTimePayloadEngine(world, num_envs=n_states, num_players=N, rules=rules, base_seed=seed)
+    skills = np.zeros((n_states, N), dtype=np.float32)
+    for si in range(n_states):
+        rm = strata_regimes[si % len(strata_regimes)]
+        skills[si] = sample_roster_skills(rng, 1, N, K, rm)[0]
+    eng_s.set_skills(skills)
+    eng_s.step(0.4, n_steps=20)
+    snap_all = eng_s.snapshot()
+    obs_s, nav_s, carts_s, teams_s, acc_s, _ = eng_s.observe_graph_tensors()
+    obs_s, nav_s, carts_s, teams_s, acc_s = obs_s.clone(), nav_s.clone(), carts_s.clone(), teams_s.clone(), acc_s.clone()
+    eng_s.close()
+
+    out: dict[str, Any] = {}
+    for arm_name, model in models.items():
+        if model is None:
+            continue
+        c_draw = CompiledGraphFlowPolicy(model, E=n_draws, N=N, W_nav=Wn, J=J, K=K, nav_kern=world.nav_kern)
+        z0 = c_draw.sample_velocity(
+            obs_s[:1].expand(n_draws, -1, -1).contiguous(),
+            nav_s[:1].expand(n_draws, -1, -1).contiguous(),
+            carts_s[:1].expand(n_draws, -1, -1).contiguous(),
+            teams_s[:1].expand(n_draws, -1, -1).contiguous(),
+            acc_s[:1].expand(n_draws, -1, -1).contiguous(),
+            geo=geo, output_scale=0.0,
+        )
+        zero_err = float(z0["u_vel"].abs().max().item())
+
+        vs_bot_l, vs_tm_l, ngi_bot_l, ngi_tm_l = [], [], [], []
+        b0_eff_l, tm_eff_l, bh_eff_l, sat_l = [], [], [], []
+        for si in range(n_states):
+            res = c_draw.sample_velocity(
+                obs_s[si : si + 1].expand(n_draws, -1, -1).contiguous(),
+                nav_s[si : si + 1].expand(n_draws, -1, -1).contiguous(),
+                carts_s[si : si + 1].expand(n_draws, -1, -1).contiguous(),
+                teams_s[si : si + 1].expand(n_draws, -1, -1).contiguous(),
+                acc_s[si : si + 1].expand(n_draws, -1, -1).contiguous(),
+                geo=geo,
+            )
+            U_tm = res["u_vel"][:, main_idx, :].reshape(n_draws, -1).numpy()
+            U_b0 = res["u_vel"][:, main_idx[0], :].numpy()
+            sat_l.append(float((np.abs(U_tm) >= (float(model.cfg.u_clip) - 0.1)).mean()))
+            vs_bot_l.append(_vendi_score_rbf(U_b0))
+            vs_tm_l.append(_vendi_score_rbf(U_tm))
+            ngi_bot_l.append(_non_gaussianity_index(U_b0, rng))
+            ngi_tm_l.append(_non_gaussianity_index(U_tm, rng))
+            for arr, lst in ((U_b0, b0_eff_l), (U_tm, tm_eff_l)):
+                ac = arr - arr.mean(axis=0, keepdims=True)
+                ev = np.maximum(np.linalg.eigvalsh((ac.T @ ac) / float(n_draws - 1)), 0.0)
+                p = ev / max(float(ev.sum()), 1e-12)
+                lst.append(float(np.exp(-np.sum(np.where(p > 1e-12, p * np.log(np.maximum(p, 1e-12)), 0.0)))))
+            if si < 4:
+                enc = model.encode_backbone(obs_s[si : si + 1], nav_s[si : si + 1], carts_s[si : si + 1], teams_s[si : si + 1], acc_s[si : si + 1], world.nav_kern, geo=geo)
+                sv = np.linalg.svd(enc["B_H"][0].float().numpy(), compute_uv=False)
+                pb = (sv ** 2) / max(float((sv ** 2).sum()), 1e-12)
+                bh_eff_l.append(float(np.exp(-np.sum(np.where(pb > 1e-12, pb * np.log(np.maximum(pb, 1e-12)), 0.0)))))
+        c_draw.close()
+
+        # Quality-Diversity High-EV Vendi Score (QD-VS): top-25% CRN branches from first 8 canonical states!
+        B_qd = min(8, n_states)
+        E_qd = B_qd * qd_G
+        fork_q = MetalDeltaTimePayloadEngine(world, num_envs=E_qd, num_players=N, rules=rules, base_seed=seed + 313)
+        src_u8 = np.frombuffer(snap_all.data, dtype=np.uint8).reshape(n_states, snap_all.env_stride)[:B_qd]
+        fork_q._state_u8[:] = np.repeat(src_u8, qd_G, axis=0)
+        c_qd = CompiledGraphFlowPolicy(model, E=E_qd, N=N, W_nav=Wn, J=J, K=K, nav_kern=world.nav_kern)
+        main_mask_q = torch.from_numpy(p_team_1d == 1).view(1, N).expand(E_qd, N)
+        gen_q = torch.Generator(device="cpu").manual_seed(seed + 701)
+        start_sc = fork_q.t_score.clone()
+        u0_team = None
+        for step in range(qd_H):
+            ob, nv, ct, tm, ac, _ = fork_q.observe_graph_tensors()
+            pt = torch.round(ob[:, :, 1].float()).to(torch.int64)
+            eps = sample_orthogonal_team_bot_noise(B_qd, qd_G, N, model.d_e, pt, K, team_corr=0.45, sigma=model.cfg.sigma_base, generator=gen_q)
+            res = c_qd.sample_velocity(ob, nv, ct, tm, ac, geo=geo, eps=eps)
+            if step == 0:
+                u0_team = res["u_vel"][:, main_idx, :].reshape(B_qd, qd_G, -1).numpy()
+            fork_q.apply_vel(res["u_vel"], main_mask_q, tau_rel=2.5)
+            fork_q.step(0.4, n_steps=2, tau_rel=2.5)
+        d_sc = (fork_q.t_score - start_sc).numpy()
+        margin_q = (d_sc[:, 0] - d_sc[:, 1:].mean(axis=1)).reshape(B_qd, qd_G)
+        qd_vs_l = []
+        top_k = max(3, qd_G // 4)
+        assert u0_team is not None
+        for b_i in range(B_qd):
+            top_idx = np.argsort(margin_q[b_i])[-top_k:]
+            qd_vs_l.append(_vendi_score_rbf(u0_team[b_i, top_idx]))
+        c_qd.close()
+        fork_q.close()
+
+        out[arm_name] = {
+            "zero_err": zero_err,
+            "vendi_bot0": round(float(np.mean(vs_bot_l)), 2),
+            "vendi_team": round(float(np.mean(vs_tm_l)), 2),
+            "ngi_bot0": round(float(np.mean(ngi_bot_l)), 4),
+            "ngi_team": round(float(np.mean(ngi_tm_l)), 4),
+            "qd_vendi_top25": round(float(np.mean(qd_vs_l)), 2),
+            "bot0_eff_rank": round(float(np.mean(b0_eff_l)), 2),
+            "team_eff_rank": round(float(np.mean(tm_eff_l)), 2),
+            "bh_eff_rank": round(float(np.mean(bh_eff_l)), 2),
+            "sat_frac": round(float(np.mean(sat_l)), 4),
+        }
+    return out
+
+
+@torch.no_grad()
+def evaluate_playerwise_pvp_elo(
+    models: dict[str, GraphFlowPolicy | None],
+    cfg: Any,
+    *,
+    focal_arms: list[str],
+    E_block: int = 24,
+    H: int = 64,
+    seed: int = 86000,
+) -> dict[str, Any]:
+    """Playerwise Expected PvP Elo indexed by focal-player skill stratum [-8, 0, +4, +12, +20] across 4 pools.
+
+    For each pool (P_stock, P_league_bal, P_league_asym, P_adversarial) and each focal-player skill stratum s_p:
+      - Runs paired CRN matches where Seat 0's focal player (bot 0) has skill s_p and is controlled by `arm`
+        vs identical CRN baseline where the same player is controlled by `default` (stock HavocBot).
+      - Computes team-outcome PvP Elo-equivalent (anchored at default = 1000) + individual unique-attribution
+        combat K/D, dmg_ratio, cart_push, and whole-block bootstrap 95% CIs + p10/median/p90/worst!
+    """
+    t0 = time.perf_counter()
+    world = build_gas_world_graph(
+        map_name="pvp_elo_k6_n36", teams=6, carts=18, players=36, tiles=4, tile_size=1792.0,
+        checkpoints_per_cart=4, seed=99201, device=torch.device("cpu"),
+    )
+    K, J, N, Wn = int(world.teams), int(world.carts), int(world.players_default), int(world.num_nav)
+    A_dim = Wn + K + 4
+    geo = {"map_center": world.map_center.clone(), "map_radius": world.map_radius.clone()}
+    rules = make_rules_for_profile(float(cfg.sim_dt.point_limit_base), "baseline")
+    strata = [-8.0, 0.0, 4.0, 12.0, 20.0]
+
+    avail_league = [a for a in models.keys() if a != "default"]
+    adv_cands = [a for a in avail_league if "exp" in a] or avail_league
+    pools_spec = [
+        ("P_stock",       "balanced_fixed", ["default"] * (K - 1)),
+        ("P_league_bal",  "balanced_fixed", [avail_league[i % len(avail_league)] for i in range(K - 1)] if avail_league else ["default"] * (K - 1)),
+        ("P_league_asym", "mixed_dr",       [avail_league[i % len(avail_league)] for i in range(K - 1)] if avail_league else ["default"] * (K - 1)),
+        ("P_adversarial", "mixed_dr",       [adv_cands[i % len(adv_cands)] for i in range(K - 1)] if adv_cands else ["default"] * (K - 1)),
+    ]
+
+    compiled: dict[str, CompiledGraphFlowPolicy | None] = {
+        a: (CompiledGraphFlowPolicy(m, E=E_block, N=N, W_nav=Wn, J=J, K=K, nav_kern=world.nav_kern) if m is not None else None)
+        for a, m in models.items()
+    }
+    p_team_1d = (np.arange(N, dtype=np.int32) % K) + 1
+    team_masks = [torch.from_numpy(p_team_1d == (k + 1)).view(1, N).expand(E_block, N) for k in range(K)]
+    t1_idx = np.nonzero(p_team_1d == 1)[0]
+    focal_bot = int(t1_idx[0])
+
+    def _run_seat(seat0_arm: str, opp_seats: list[str], skills_mat: np.ndarray, base_seed: int) -> tuple[np.ndarray, dict[str, float]]:
+        eng = MetalDeltaTimePayloadEngine(world, num_envs=E_block, num_players=N, rules=rules, base_seed=base_seed)
+        eng.reset(torch.ones((E_block,), dtype=torch.bool))
+        eng.set_skills(skills_mat)
+        seats = [seat0_arm, *opp_seats]
+        arm_to_tmask: dict[str, torch.Tensor] = {}
+        for ti, a in enumerate(seats):
+            if a == "default":
+                continue
+            arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
+        kills, deaths, dmg_out, dmg_in, push = 0.0, 0.0, 0.0, 0.0, 0.0
+        obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+        for _ in range(H):
+            u_vel = torch.zeros((E_block, N, A_dim), dtype=torch.float32)
+            has_vel = torch.zeros((E_block, N), dtype=torch.bool)
+            for a, tmask in arm_to_tmask.items():
+                cp = compiled[a]
+                if cp is None:
+                    continue
+                res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
+                u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
+                has_vel = has_vel | tmask
+            eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
+            eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=True, n_steps=2, tau_rel=2.5)
+            sv = eng.state_views()
+            kills += float(sv["p_kills"][:, focal_bot].sum().item())
+            deaths += float(sv["p_deaths"][:, focal_bot].sum().item())
+            dmg_out += float(sv["p_dmg_dealt"][:, focal_bot].sum().item())
+            dmg_in += float(sv["p_dmg_taken"][:, focal_bot].sum().item())
+            push += float(sv["p_cart_push"][:, focal_bot].sum().item())
+            obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+        sc = eng.t_score.numpy()
+        eng.close()
+        pw = np.mean(
+            np.where(sc[:, 0:1] > sc[:, 1:] + 1e-6, 1.0, np.where(sc[:, 1:] > sc[:, 0:1] + 1e-6, 0.0, 0.5)),
+            axis=1,
+        )
+        return pw, {
+            "kd": round(kills / max(deaths, 1.0), 3),
+            "dmg_ratio": round(dmg_out / max(dmg_in, 1.0), 3),
+            "push": round(push / float(E_block), 1),
+        }
+
+    def _wr_to_elo(wr: float, n_eff: float) -> float:
+        p = (wr * n_eff + 0.5) / (n_eff + 1.0)
+        p = min(max(p, 1e-4), 1.0 - 1e-4)
+        return float(1000.0 + 400.0 * np.log10(p / (1.0 - p)))
+
+    rng = np.random.default_rng(seed)
+    # Precompute paired CRN baseline (`default` in seat 0) per (pool, stratum)
+    base_cache: dict[tuple[str, float], tuple[np.ndarray, np.ndarray, int]] = {}
+    for pi, (pname, rmode, opp_seats) in enumerate(pools_spec):
+        for si, sk_val in enumerate(strata):
+            bseed = seed + pi * 1000 + si * 53
+            sk_mat = sample_roster_skills(np.random.default_rng(bseed + 7), E_block, N, K, rmode)
+            sk_mat[:, focal_bot] = float(sk_val)
+            pw_def, _ = _run_seat("default", opp_seats, sk_mat, bseed)
+            base_cache[(pname, sk_val)] = (pw_def, sk_mat, bseed)
+
+    results: dict[str, Any] = {"strata": strata, "pools": [p[0] for p in pools_spec], "arms": {}}
+    try:
+        for arm in focal_arms:
+            if arm not in models or models[arm] is None:
+                continue
+            by_stratum: dict[str, Any] = {}
+            by_pool: dict[str, float] = {}
+            all_strata_elos: list[float] = []
+            boot_blocks: list[np.ndarray] = []
+
+            pool_acc: dict[str, list[np.ndarray]] = {p[0]: [] for p in pools_spec}
+            for sk_val in strata:
+                s_wins_l: list[np.ndarray] = []
+                kd_l, dr_l, pu_l = [], [], []
+                for pname, _, opp_seats in pools_spec:
+                    pw_def, sk_mat, bseed = base_cache[(pname, sk_val)]
+                    pw_arm, cstat = _run_seat(arm, opp_seats, sk_mat, bseed)
+                    # Paired CRN head-to-head outcome vs default at identical seed & focal skill!
+                    paired_w = np.where(pw_arm > pw_def + 1e-6, 1.0, np.where(pw_def > pw_arm + 1e-6, 0.0, 0.5))
+                    s_wins_l.append(paired_w)
+                    pool_acc[pname].append(paired_w)
+                    boot_blocks.append(paired_w)
+                    kd_l.append(cstat["kd"])
+                    dr_l.append(cstat["dmg_ratio"])
+                    pu_l.append(cstat["push"])
+                sw = np.concatenate(s_wins_l)
+                elo_s = _wr_to_elo(float(sw.mean()), float(sw.size))
+                all_strata_elos.append(elo_s)
+                by_stratum[f"{sk_val:+.0f}"] = {
+                    "elo": round(elo_s, 1),
+                    "paired_wr": round(float(sw.mean()), 4),
+                    "kd": round(float(np.mean(kd_l)), 3),
+                    "dmg_ratio": round(float(np.mean(dr_l)), 3),
+                    "push": round(float(np.mean(pu_l)), 1),
+                }
+            for pname, arrs in pool_acc.items():
+                pw_p = np.concatenate(arrs)
+                by_pool[pname] = round(_wr_to_elo(float(pw_p.mean()), float(pw_p.size)), 1)
+
+            # Whole-block bootstrap 95% CI on overall playerwise PvP Elo
+            all_w = np.concatenate(boot_blocks)
+            overall_elo = _wr_to_elo(float(all_w.mean()), float(all_w.size))
+            n_blk = len(boot_blocks)
+            b_elos = []
+            for _ in range(150):
+                b_idx = rng.integers(0, n_blk, size=n_blk)
+                bw = np.concatenate([boot_blocks[int(k)] for k in b_idx])
+                b_elos.append(_wr_to_elo(float(bw.mean()), float(bw.size)))
+            results["arms"][arm] = {
+                "overall_pvp_elo": round(overall_elo, 1),
+                "ci95": [round(float(np.percentile(b_elos, 2.5)), 1), round(float(np.percentile(b_elos, 97.5)), 1)],
+                "p10_elo": round(float(np.percentile(all_strata_elos, 10)), 1),
+                "median_elo": round(float(np.median(all_strata_elos)), 1),
+                "p90_elo": round(float(np.percentile(all_strata_elos, 90)), 1),
+                "worst_stratum_elo": round(float(min(all_strata_elos)), 1),
+                "by_pool": by_pool,
+                "by_stratum": by_stratum,
+            }
+    finally:
+        for cp in compiled.values():
+            if cp is not None:
+                cp.close()
+    results["wall_s"] = round(time.perf_counter() - t0, 2)
+    return results
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Eval-time behavior & multimodal diversity analyzer for GraphFlowPolicy")
     ap.add_argument("--ckpt-dir", type=str, required=True)
@@ -651,6 +995,9 @@ def main() -> None:
     ap.add_argument("--league-eval", action="store_true")
     ap.add_argument("--league-envs", type=int, default=48)
     ap.add_argument("--league-horizon", type=int, default=72)
+    ap.add_argument("--pvp-elo-eval", action="store_true")
+    ap.add_argument("--diversity-eval", action="store_true")
+    ap.add_argument("--full-eval", action="store_true")
     args = ap.parse_args()
 
     cfg = load_training_config(args.config)
@@ -663,10 +1010,15 @@ def main() -> None:
 
     gf_cfg = GraphFlowConfig()
     models: dict[str, GraphFlowPolicy | None] = {"default": None}
-    cand_names = (
+    cand_names = [
         "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2",
         "exploiter_2", "main_final", "ema_fast_final", "ema_slow_final", "ema_final",
-    )
+        "best_online", "exp_0_final", "exp_1_final", "main_snap_final",
+    ]
+    # Also auto-discover metric-promoted frozen exploiters (`exp_f*.pt`) & snapshots (`main_s*.pt`)
+    for extra_p in sorted(ckpt_dir.glob("exp_f*.pt")) + sorted(ckpt_dir.glob("main_s*.pt")):
+        if extra_p.stem not in cand_names:
+            cand_names.append(extra_p.stem)
     for name in cand_names:
         p = ckpt_dir / f"{name}.pt"
         if p.exists():
@@ -678,7 +1030,7 @@ def main() -> None:
     t0 = time.perf_counter()
     results: dict[str, Any] = {"regimes": {}, "branch_diversity": {}}
     # Evaluate 7 DR regimes on core arms (plus exploiters & EMAs if present!)
-    beh_arms = [a for a in ("default", "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2", "exploiter_2", "main_final", "ema_slow_final") if a in models]
+    beh_arms = [a for a in ("default", "main_init", "main_p1", "exploiter_1", "main_mid", "main_p2", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online") if a in models]
     for ri, reg in enumerate(EVAL_REGIMES):
         results["regimes"][reg["name"]] = {}
         for ai, arm_name in enumerate(beh_arms):
@@ -687,14 +1039,22 @@ def main() -> None:
                 cfg=cfg, E=args.envs, H=args.horizon, seed=90000 + ri * 1000 + ai * 37,
             )
 
-    for arm_name in ("main_init", "exploiter_1", "exploiter_2", "main_final", "ema_slow_final"):
+    for arm_name in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online"):
         if arm_name in models and models[arm_name] is not None:
             results["branch_diversity"][arm_name] = evaluate_multimodal_branch_diversity(models[arm_name], world, cfg)
 
-    if args.league_eval and len(models) >= 2:
+    if (args.league_eval or args.full_eval) and len(models) >= 2:
         results["league_tournament"] = evaluate_league_tournament(
             models, cfg, E_match=int(args.league_envs), H=int(args.league_horizon),
         )
+
+    if (args.diversity_eval or args.full_eval) and len(models) >= 2:
+        div_models = {a: models[a] for a in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "exp_0_final", "main_final", "ema_slow_final", "best_online") if a in models and models[a] is not None}
+        results["effector_diversity"] = evaluate_effector_diversity_suite(div_models, world, cfg)
+
+    if (args.pvp_elo_eval or args.full_eval) and len(models) >= 2:
+        pvp_focal = [a for a in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online") if a in models and models[a] is not None]
+        results["playerwise_pvp_elo"] = evaluate_playerwise_pvp_elo(models, cfg, focal_arms=pvp_focal)
 
     out_path = ckpt_dir / "graph_flow_behavior_eval.json"
     out_path.write_text(json.dumps(results, indent=2))
@@ -773,6 +1133,33 @@ def main() -> None:
                 v = lt["pairwise_wr"][a][b]
                 cells.append("    -  " if a == b or v is None else f"{v:7.3f}")
             print(f"{a:15s} | " + " ".join(cells))
+
+    if "effector_diversity" in results:
+        print("\n=== 7. EFFECTOR COINDUCTIVE VECTOR MACHINE DIVERSITY p(u | s0) (16 states x 5 PvP strata) ===")
+        print(f"{'Arm':15s} | {'VS_bot0':7s} {'VS_tm':7s} {'QD-VS':7s} | {'NGI_b0':7s} {'NGI_tm':7s} | {'BH_r':5s} {'b0_r':5s} {'tm_r':5s} {'Sat%':5s}")
+        print("-" * 88)
+        for an, d in results["effector_diversity"].items():
+            print(
+                f"{an:15s} | {d['vendi_bot0']:7.2f} {d['vendi_team']:7.2f} {d['qd_vendi_top25']:7.2f} | "
+                f"{d['ngi_bot0']:7.4f} {d['ngi_team']:7.4f} | "
+                f"{d['bh_eff_rank']:5.1f} {d['bot0_eff_rank']:5.1f} {d['team_eff_rank']:5.1f} {d['sat_frac']*100:5.2f}"
+            )
+
+    if "playerwise_pvp_elo" in results:
+        pv = results["playerwise_pvp_elo"]
+        print(f"\n=== 8. PLAYERWISE EXPECTED PVP ELO INDEXED BY SKILL STRATUM ({pv['wall_s']:.1f}s, default=1000) ===")
+        print(f"{'Arm':15s} | {'PvP Elo (95% CI)':20s} | {'p10/med/p90 (min)':22s} | {'-8':6s} {'0':6s} {'+4':6s} {'+12':6s} {'+20':6s} | {'Pools(Stk/Bal/Asy/Adv)'}")
+        print("-" * 124)
+        for an, d in pv["arms"].items():
+            ci = d["ci95"]
+            bs = d["by_stratum"]
+            bp = d["by_pool"]
+            print(
+                f"{an:15s} | {d['overall_pvp_elo']:6.1f} [{ci[0]:6.1f},{ci[1]:6.1f}] | "
+                f"{d['p10_elo']:5.0f}/{d['median_elo']:5.0f}/{d['p90_elo']:5.0f} ({d['worst_stratum_elo']:5.0f}) | "
+                f"{bs['-8']['elo']:6.1f} {bs['+0']['elo']:6.1f} {bs['+4']['elo']:6.1f} {bs['+12']['elo']:6.1f} {bs['+20']['elo']:6.1f} | "
+                f"{bp['P_stock']:.0f}/{bp['P_league_bal']:.0f}/{bp['P_league_asym']:.0f}/{bp['P_adversarial']:.0f}"
+            )
 
 
 if __name__ == "__main__":

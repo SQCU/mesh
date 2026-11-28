@@ -670,6 +670,292 @@ class GraphFlowRolloutPool:
             },
         )
 
+    @torch.no_grad()
+    def sample_batch_multi(
+        self,
+        *,
+        active_arms: list[str],
+        seat_arms: list[str],
+        policy_versions: dict[str, int] | None = None,
+        slot_index: int | None = None,
+    ) -> tuple[dict[str, GraphFlowBatch], dict[str, Any]]:
+        """ONE shared Metal physics rollout harvesting counterfactual GraphFlowBatches for ALL concurrent active learners!"""
+        t0 = time.perf_counter()
+        idx = self._cursor % len(self.slots) if slot_index is None else (int(slot_index) % len(self.slots))
+        self._cursor += 1
+        slot = self.slots[idx]
+        sc = self.sc
+        B, G, E, H = slot.B, slot.G, slot.E, int(sc.rollout_horizon)
+        N, Wn, J, K, A_dim = slot.N, slot.W_nav, slot.J, slot.K, slot.A_dim
+        lcfg = self.cfg.losses
+        pvers = policy_versions or {}
+
+        # Normalize seat_arms length to K
+        seats = list(seat_arms[:K])
+        while len(seats) < K:
+            seats.append("default")
+
+        arm_to_teams: dict[str, list[int]] = defaultdict(list)
+        for ti, arm in enumerate(seats):
+            arm_to_teams[arm].append(ti + 1)
+
+        present_active = [a for a in active_arms if a in arm_to_teams]
+        if not present_active:
+            present_active = [active_arms[0]]
+            seats[0] = present_active[0]
+            arm_to_teams.clear()
+            for ti, arm in enumerate(seats):
+                arm_to_teams[arm].append(ti + 1)
+
+        if G > 1:
+            assert slot.fork_eng is not None
+            fin0 = slot.live_eng.t_finished
+            if bool(fin0.any().item()):
+                slot.live_eng.reset(fin0)
+                fids = np.nonzero(fin0.numpy())[0]
+                slot.live_eng.set_skills(
+                    sample_roster_skills(slot.dr_rng, len(fids), N, K, slot.roster_mode), env_ids=fids,
+                )
+            snap = slot.live_eng.snapshot()
+            src = np.frombuffer(snap.data, dtype=np.uint8).reshape(B, snap.env_stride)
+            slot.fork_eng._state_u8[:] = np.repeat(src, G, axis=0)
+            if not bool(sc.common_random_numbers):
+                sm = snap.soff_meta
+                mu32 = slot.fork_eng._state_u8[:, sm : sm + 32].view(np.uint32)
+                seeds = mu32[:, 3].astype(np.uint64) | (mu32[:, 4].astype(np.uint64) << np.uint64(32))
+                seeds = seeds + np.tile(np.arange(G, dtype=np.uint64), B) * np.uint64(10007)
+                mu32[:, 3] = (seeds & np.uint64(0xFFFFFFFF)).astype(np.uint32)
+                mu32[:, 4] = (seeds >> np.uint64(32)).astype(np.uint32)
+            eng = slot.fork_eng
+        else:
+            eng = slot.live_eng
+
+        buf_obs = torch.empty((H, E, N, 84), dtype=torch.bfloat16)
+        buf_nav = torch.empty((H, E, Wn, 16), dtype=torch.bfloat16)
+        buf_carts = torch.empty((H, E, J, 18), dtype=torch.bfloat16)
+        buf_teams = torch.empty((H, E, K, 7), dtype=torch.bfloat16)
+        buf_acc = torch.empty((H, E, N, A_dim), dtype=torch.float32)
+        buf_u_vel = torch.empty((H, E, N, A_dim), dtype=torch.float32)
+        buf_reward = torch.empty((H, E, N), dtype=torch.float32)
+        buf_drho = torch.empty((H, E, N), dtype=torch.float32)
+        buf_wm_in = torch.empty((H, E, N), dtype=torch.bool)
+        buf_wm_out = torch.empty((H, E, N), dtype=torch.bool)
+        buf_not_done = torch.empty((H, E), dtype=torch.bool)
+        buf_active_env = torch.empty((H, E), dtype=torch.bool)
+
+        buf_val_w = {a: torch.zeros((H, E, N), dtype=torch.float32) for a in present_active}
+        buf_val_l = {a: torch.zeros((H, E, N), dtype=torch.float32) for a in present_active}
+        buf_amask = {a: torch.zeros((H, E, N), dtype=torch.bool) for a in present_active}
+
+        pol_map = {a: slot._get_pol(a) for a in arm_to_teams if a != "default"}
+        start_scores = eng.t_score.clone()
+        score_outs = 0
+        gk_hist = {a: np.zeros((4,), dtype=np.int64) for a in present_active}
+        sat_cnt = {a: 0 for a in present_active}
+        sat_tot = {a: 0 for a in present_active}
+        u_sq_sum = {a: 0.0 for a in present_active}
+        u_sq_cnt = {a: 0 for a in present_active}
+
+        obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
+        for t in range(H):
+            if G == 1:
+                fin_pre = eng.t_finished
+                if bool(fin_pre.any().item()):
+                    eng.reset(fin_pre)
+                    fids = np.nonzero(fin_pre.numpy())[0]
+                    eng.set_skills(sample_roster_skills(slot.dr_rng, len(fids), N, K, slot.roster_mode), env_ids=fids)
+                    obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
+                was_finished = torch.zeros((E,), dtype=torch.bool)
+            else:
+                was_finished = eng.t_finished.clone()
+
+            obs_c = obs_in.clone()
+            nav_c = nav_in.clone()
+            carts_c = carts_in.clone()
+            teams_c = teams_in.clone()
+            acc_c = acc_in.clone()
+            p_team = torch.round(obs_c[:, :, OBS["TEAM"]].float()).to(torch.int64)
+
+            u_vel = torch.zeros((E, N, A_dim), dtype=torch.float32)
+            has_vel = torch.zeros((E, N), dtype=torch.bool)
+            active_masks_t: dict[str, torch.Tensor] = {}
+
+            for arm, t_list in arm_to_teams.items():
+                mask = torch.zeros((E, N), dtype=torch.bool)
+                for tid in t_list:
+                    mask = mask | (p_team == tid)
+                if arm == "default":
+                    continue
+                cpol = pol_map.get(arm)
+                if cpol is None:
+                    continue
+                eps_cur = None
+                if arm in buf_amask:
+                    eps_cur = sample_orthogonal_team_bot_noise(
+                        B, G, N, cpol.d_e, p_team, K,
+                        team_corr=self.team_corr, sigma=float(cpol.cfg.sigma_base), generator=slot.noise_gen,
+                    )
+                res = cpol.sample_velocity(obs_c, nav_c, carts_c, teams_c, acc_c, geo=slot.geo, eps=eps_cur)
+                u_vel = torch.where(mask.unsqueeze(-1), res["u_vel"], u_vel)
+                has_vel = has_vel | mask
+                if arm in buf_amask:
+                    active_masks_t[arm] = mask
+                    buf_val_w[arm][t] = res["value_winnie"]
+                    buf_val_l[arm][t] = res["value_lou"]
+                    if bool(mask.any().item()):
+                        um = res["u_vel"][mask]
+                        sat_cnt[arm] += int((um.abs() >= (float(cpol.cfg.u_clip) - 0.1)).sum().item())
+                        sat_tot[arm] += int(um.numel())
+                        u_sq_sum[arm] += float(um.square().mean(dim=-1).sqrt().sum().item())
+                        u_sq_cnt[arm] += int(um.shape[0])
+
+            eng.apply_vel(u_vel, has_vel, tau_rel=slot.tau_rel)
+            eng.step(float(sc.dt), mode=str(sc.mode), reset_outcomes=True, n_steps=slot.n_phys_substeps, tau_rel=slot.tau_rel)
+
+            obs_out, nav_out, carts_out, teams_out, acc_out, _ = eng.observe_graph_tensors()
+            now_finished = eng.t_finished
+            score_outs += int(((~was_finished) & now_finished).sum().item())
+
+            rew, wm_in, wm_out = slot.rew_gpu.compute(
+                obs_c, carts_c, teams_c, obs_out, carts_out, teams_out,
+                was_finished, now_finished, eng.t_winner,
+            )
+            rc = _team_eff_rho_flat(carts_c, teams_c, obs_c, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
+            rn = _team_eff_rho_flat(carts_out, teams_out, obs_out, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
+            drho = torch.asinh(lcfg.dyn_drho_scale * (rn - rc))
+
+            sv = eng.state_views()
+            gk_all = sv["p_goal_kind"].numpy()
+            active_env = ~was_finished
+            buf_obs[t] = obs_c
+            buf_nav[t] = nav_c
+            buf_carts[t] = carts_c
+            buf_teams[t] = teams_c
+            buf_acc[t] = acc_c
+            buf_u_vel[t] = u_vel
+            buf_reward[t] = rew
+            buf_drho[t] = drho
+            buf_wm_in[t] = wm_in
+            buf_wm_out[t] = wm_out
+            buf_not_done[t] = ~now_finished
+            buf_active_env[t] = active_env
+            for arm in present_active:
+                m_a = active_masks_t[arm]
+                buf_amask[arm][t] = m_a & active_env[:, None]
+                gk_m = gk_all[m_a.numpy()]
+                if gk_m.size > 0:
+                    for k_i in range(4):
+                        gk_hist[arm][k_i] += int((gk_m == k_i).sum())
+            obs_in, nav_in, carts_in, teams_in, acc_in = obs_out, nav_out, carts_out, teams_out, acc_out
+
+        end_finished = eng.t_finished.clone()
+        end_scores = eng.t_score.clone()
+        if G > 1:
+            slot.live_eng._state_u8[:] = slot.fork_eng._state_u8[0::G]
+
+        M = H * E
+        obs_flat = buf_obs.reshape(M, N, 84)
+        nav_flat = buf_nav.reshape(M, Wn, 16)
+        carts_flat = buf_carts.reshape(M, J, 18)
+        teams_flat = buf_teams.reshape(M, K, 7)
+        acc_flat = buf_acc.reshape(M, N, A_dim)
+        u_flat = buf_u_vel.reshape(M, N, A_dim)
+        drho_flat = buf_drho.reshape(M, N)
+        wm_flat = buf_wm_in.reshape(M, N)
+        act_flat = buf_active_env.reshape(M)
+
+        gamma = float(lcfg.gamma)
+        lam = float(lcfg.gae_lambda)
+        d_scores = end_scores - start_scores
+        d_sc_np = d_scores.numpy()
+        wall_s = time.perf_counter() - t0
+        sim_s = E * H * slot.n_phys_substeps * float(sc.dt)
+        world_meta = {"K": K, "J": J, "N": N, "W_nav": Wn, "M": int(slot.spec["tiles"]), "slot": idx}
+
+        batches: dict[str, GraphFlowBatch] = {}
+        for arm in present_active:
+            cpol = pol_map[arm]
+            assert cpol is not None
+            out_f = cpol.sample_velocity(obs_in, nav_in, carts_in, teams_in, acc_in, geo=slot.geo, output_scale=0.0)
+            val_in = torch.where(buf_wm_in, buf_val_w[arm], buf_val_l[arm])
+            v_boot = torch.where(buf_wm_out[H - 1], out_f["value_winnie"], out_f["value_lou"])
+            v_boot = torch.where((~end_finished)[:, None], v_boot, torch.zeros_like(v_boot))
+
+            gae_adv = torch.zeros((H, E, N), dtype=torch.float32)
+            next_gae = torch.zeros((E, N), dtype=torch.float32)
+            for t in range(H - 1, -1, -1):
+                still = buf_not_done[t][:, None]
+                same_role = buf_wm_in[t] == buf_wm_out[t]
+                v_nxt = val_in[t + 1] if t + 1 < H else v_boot
+                v_nxt = torch.where(still & same_role, v_nxt, torch.zeros_like(v_nxt))
+                g_nxt = torch.where(still & same_role, next_gae, torch.zeros_like(next_gae))
+                delta = buf_reward[t] + gamma * v_nxt - val_in[t]
+                cur_gae = delta + gamma * lam * g_nxt
+                gae_adv[t] = cur_gae
+                next_gae = cur_gae
+            gae_ret = gae_adv + val_in
+
+            am_f = buf_amask[arm].float()
+            am_sum = am_f.sum().clamp_min(1.0)
+            g_mean = (gae_adv * am_f).sum() / am_sum
+            g_std = (((gae_adv - g_mean).square() * am_f).sum() / am_sum).clamp_min(1e-6).sqrt()
+            gae_norm = (gae_adv - g_mean) / g_std
+
+            if G > 1 and float(sc.grpo_weight) > 0.0:
+                disc_pows = (gamma ** torch.arange(H, dtype=torch.float32)).view(H, 1, 1)
+                m0 = buf_amask[arm][0].float()
+                mcnt = m0.sum(dim=-1).clamp_min(1.0)
+                ep_ret_ag = (buf_reward * disc_pows).sum(dim=0) + (gamma ** H) * v_boot
+                ep_ret_tm = (ep_ret_ag * m0).sum(dim=-1) / mcnt
+                grp_ret = ep_ret_tm.view(B, G)
+                grp_std = grp_ret.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-3)
+                grpo_adv = ((grp_ret - grp_ret.mean(dim=1, keepdim=True)) / grp_std).view(1, E, 1).expand(H, E, N)
+                adv = float(sc.grpo_weight) * grpo_adv + float(sc.gae_weight) * gae_norm
+            else:
+                adv = gae_norm
+
+            opp_wr_obs: dict[str, list[float]] = defaultdict(list)
+            my_seats = [ti for ti, s in enumerate(seats) if s == arm]
+            opp_seats = [ti for ti, s in enumerate(seats) if s != arm]
+            for mi in my_seats:
+                for oj in opp_seats:
+                    w = np.where(d_sc_np[:, mi] > d_sc_np[:, oj] + 1e-6, 1.0,
+                                 np.where(d_sc_np[:, oj] > d_sc_np[:, mi] + 1e-6, 0.0, 0.5))
+                    opp_wr_obs[seats[oj]].append(float(w.mean()))
+            gk_tot = max(1, int(gk_hist[arm].sum()))
+            my_sc_mean = float(d_scores[:, my_seats].mean().item()) if my_seats else 0.0
+            opp_sc_mean = float(d_scores[:, opp_seats].mean().item()) if opp_seats else 0.0
+            batches[arm] = GraphFlowBatch(
+                obs=obs_flat, nav=nav_flat, carts=carts_flat, teams=teams_flat, acc=acc_flat, u_vel=u_flat,
+                adv=adv.reshape(M, N), gae_ret=gae_ret.reshape(M, N), obs_drho=drho_flat,
+                wm_in=wm_flat, actor_mask=buf_amask[arm].reshape(M, N), active_env=act_flat,
+                nav_kern=slot.nav_kern, geo=slot.geo, group_size=G,
+                policy_version=int(pvers.get(arm, 0)), world_meta=world_meta,
+                opp_wr_obs={a: float(np.mean(vs)) for a, vs in opp_wr_obs.items()},
+                stats={
+                    "wall_s": round(wall_s, 3),
+                    "sim_s": round(sim_s, 1),
+                    "sat_frac": round(float(sat_cnt[arm]) / max(1, sat_tot[arm]), 4),
+                    "u_rms": round(float(u_sq_sum[arm]) / max(1, u_sq_cnt[arm]), 4),
+                    "main_dscore_mean": round(my_sc_mean, 2),
+                    "opp_dscore_mean": round(opp_sc_mean, 2),
+                    "gk_pct": [round(100.0 * c / gk_tot, 1) for c in gk_hist[arm].tolist()],
+                    "seats": seats,
+                },
+            )
+
+        shared_stats = {
+            "wall_s": round(wall_s, 3),
+            "sim_s": round(sim_s, 1),
+            "speedup_x": round(sim_s / max(wall_s, 1e-6), 1),
+            "agent_steps": int(E * H * slot.n_phys_substeps * N),
+            "score_outs": score_outs,
+            "seats": seats,
+            "world": world_meta,
+            "present_active": present_active,
+        }
+        return batches, shared_stats
+
 
 class GraphFlowTrainer:
     """Metal 4 NAX INT8@INT8 Advantage-Weighted Boltzmann Flow Matching + All-GPU Aurora Optimizer."""

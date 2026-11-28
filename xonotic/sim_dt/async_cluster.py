@@ -335,6 +335,20 @@ class RDMAWeightAllReducer:
             opt.apply_delta_flat_(prev_flat, self.w_view_bf16, scale=inv_ws)
             return float(wall.value), round(cluster_snr, 3), round(cluster_coh, 4)
 
+        if self.use_had8:
+            assert self.w_view_bf16 is not None and self._tmp_f32 is not None
+            off = opt.export_master_flat_(self._tmp_f32)
+            self.w_view_bf16[:off].copy_(self._tmp_f32[:off].to(torch.bfloat16))
+            if off < self.n_pad:
+                self.w_view_bf16[off:].zero_()
+            if self.sq_view is not None:
+                self.sq_view.zero_()
+            wall = ctypes.c_double(0.0)
+            self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+            self._tmp_f32[:off].copy_(self.w_view_bf16[:off].float())
+            opt.load_master_flat_(self._tmp_f32, scale=inv_ws)
+            return float(wall.value), 0.0, 0.0
+
         assert self.w_view is not None
         off = opt.export_master_flat_(self.w_view)
         if prev_flat is not None:
@@ -360,6 +374,96 @@ class RDMAWeightAllReducer:
 
         opt.load_master_flat_(self.w_view, scale=inv_ws)
         return float(wall.value), round(cluster_snr, 3), round(cluster_coh, 4)
+
+    @torch.no_grad()
+    def average_masters_multi_(
+        self,
+        opts: list[Any],
+        prev_flats: list[torch.Tensor],
+        active_flags: list[bool] | None = None,
+    ) -> tuple[float, list[float], list[float]]:
+        """Batch-sync K concurrent learners in ONE SINGLE /mesh0 HAD8_GATHER crossing + per-arm 4-Rank GradSNR!"""
+        inv_ws = 1.0 / float(self.world_size)
+        K_arms = len(opts)
+        act = [True] * K_arms if active_flags is None else list(active_flags)
+        assert self.use_had8 and self.w_view_bf16 is not None and self.sq_view is not None and self._tmp_f32 is not None
+        self.sq_view.zero_()
+        offs: list[tuple[int, int]] = []
+        cursor = 0
+        for i, (opt, pf, is_act) in enumerate(zip(opts, prev_flats, act)):
+            n_i = int(pf.numel())
+            if is_act:
+                cnt = opt.export_master_flat_(self._tmp_f32[cursor : cursor + n_i])
+                delta = self._tmp_f32[cursor : cursor + cnt] - pf[:cnt]
+                self.sq_view[i] = float(delta.square().sum().item())
+                self.w_view_bf16[cursor : cursor + cnt].copy_(delta.to(torch.bfloat16))
+            else:
+                cnt = n_i
+                self.w_view_bf16[cursor : cursor + cnt].zero_()
+            offs.append((cursor, cursor + cnt))
+            cursor += cnt
+        if cursor < self.n_pad:
+            self.w_view_bf16[cursor:].zero_()
+
+        wall = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+
+        snrs: list[float] = []
+        cohs: list[float] = []
+        for i, (opt, pf, is_act, (c0, c1)) in enumerate(zip(opts, prev_flats, act, offs)):
+            if not is_act:
+                snrs.append(0.0)
+                cohs.append(0.0)
+                continue
+            c_snr, c_coh = 0.0, 0.0
+            if self.world_size > 1:
+                mean_sq = float(self.sq_view[i].item()) * inv_ws
+                avg_d = self.w_view_bf16[c0:c1].float() * inv_ws
+                sig_sq = float(avg_d.square().sum().item())
+                var_mean = max(mean_sq - sig_sq, 0.0) / float(self.world_size - 1)
+                c_coh = sig_sq / max(mean_sq, 1e-12)
+                c_snr = min(sig_sq / max(var_mean, 1e-12), 999.0)
+            opt.apply_delta_flat_(pf, self.w_view_bf16[c0:c1], scale=inv_ws)
+            snrs.append(round(c_snr, 3))
+            cohs.append(round(c_coh, 4))
+        return float(wall.value), snrs, cohs
+
+
+class RDMAControlBroadcaster:
+    """Tiny 1-page /mesh0 FP32 Gather broadcast from rank 0 to all ranks (<0.1 ms, zero TCP/NFS!)."""
+
+    def __init__(self, world_size: int, rank: int, comm_id: str, n_slots: int = 16):
+        self.lib = _load_mesh_graph_lib()
+        self.world_size = int(world_size)
+        self.rank = int(rank)
+        self.n_slots = int(n_slots)
+        self.g = self.lib.mesh_graph_create(self.world_size, self.rank, comm_id.encode("utf-8"), MG_WIRE_GATHER)
+        if not self.g:
+            raise RuntimeError("mesh_graph_create failed for RDMAControlBroadcaster")
+        self.b = int(self.lib.mesh_graph_add_buffer(self.g, self.n_slots * 4, MG_BUF_STATE, None, -1, 0))
+        cid = int(self.lib.mesh_graph_add_crossing(self.g, self.n_slots, 4, MG_WIRE_GATHER, 0))
+        op = _make_op(MG_OP_ALLREDUCE, dtype=MG_DTYPE_F32, in_bufs=(self.b,), out_bufs=(self.b,), u=(cid, 1, self.n_slots))
+        self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
+        rc = self.lib.mesh_graph_compile(self.g)
+        if rc != 0:
+            raise RuntimeError(f"mesh_graph_compile failed for RDMAControlBroadcaster: {rc}")
+        self.view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b), (self.n_slots,))
+
+    def close(self) -> None:
+        if getattr(self, "g", None):
+            self.lib.mesh_graph_destroy(self.g)
+            self.g = None
+
+    @torch.no_grad()
+    def broadcast_from_r0(self, values: list[float] | None = None) -> list[float]:
+        """Rank 0 provides `values`, all other ranks contribute zeros -> AllReduce sum == exact broadcast!"""
+        self.view.zero_()
+        if self.rank == 0 and values is not None:
+            for i, v in enumerate(values[: self.n_slots]):
+                self.view[i] = float(v)
+        wall = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+        return [float(x) for x in self.view.tolist()]
 
 
 def run_rdma_dp(args: argparse.Namespace) -> None:
@@ -808,7 +912,11 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
     main_init = clone_graph_flow_model(model)
 
     ws = int(args.tp_world_size)
-    reducer = RDMAWeightAllReducer(model, ws, args.tp_rank, args.tp_comm_id) if ws > 1 else None
+    reducer = (
+        RDMAWeightAllReducer(model, ws, args.tp_rank, args.tp_comm_id, wire_mode=str(args.wire_mode))
+        if ws > 1
+        else None
+    )
     variants: dict[str, GraphFlowPolicy | None] = {"main": model, "ema": ema_model, "main_init": main_init}
     G = int(cfg.sim_dt.group_size) if int(cfg.sim_dt.group_size) > 0 else 4
     pool = GraphFlowRolloutPool(
@@ -822,6 +930,8 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
         randomize_physics=not bool(args.no_physics_dr),
     )
     learner = GraphFlowTrainer(model, ema_model, cfg)
+    pool.attach_weight_bank_("main", learner.bank, model)
+    prev_flat = torch.empty((sum(p.numel() for p in model.parameters()),), dtype=torch.float32)
     pfsp_pool = ["default", "main_init", "ema", "main"]
     pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
 
@@ -845,10 +955,11 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
                 pfsp_pool=pfsp_pool,
                 pfsp_wr=pfsp_wr,
             )
+            learner.opt.export_master_flat_(prev_flat)
             upd = learner.update(batch, epochs=max(1, int(cfg.sim_dt.ppo_epochs)))
             rdma_ms, _, _ = (0.0, 0.0, 0.0)
             if reducer is not None:
-                rdma_ms, _, _ = reducer.average_master_(learner.opt)
+                rdma_ms, _, _ = reducer.average_master_(learner.opt, prev_flat=prev_flat)
             tot_rdma_ms += rdma_ms
             pool.sync_variant_("main", model)
             pool.sync_variant_("ema", ema_model)
@@ -1240,9 +1351,648 @@ def run_rdma_dp_league(args: argparse.Namespace) -> None:
             )
 
 
+def _wilson_ci95(wins: float, n: float) -> tuple[float, float]:
+    """Exact Wilson score 95% confidence interval for a win-rate proportion."""
+    if n <= 0.0:
+        return 0.0, 1.0
+    z = 1.96
+    p = max(0.0, min(1.0, float(wins) / float(n)))
+    denom = 1.0 + (z * z) / n
+    center = (p + (z * z) / (2.0 * n)) / denom
+    rad = (z / denom) * float(np.sqrt((p * (1.0 - p) + (z * z) / (4.0 * n)) / n))
+    return max(0.0, center - rad), min(1.0, center + rad)
+
+
+@torch.no_grad()
+def _fast_shadow_eval(
+    models: dict[str, Any],
+    cfg: Any,
+    *,
+    E_match: int = 20,
+    H: int = 44,
+    seed: int = 77100,
+) -> dict[str, Any]:
+    """Fast (<2.5s) held-out paired-CRN shadow eval on 3 unseen worlds (K=3, 6, 8) for online metric-triggered lifecycle."""
+    from sim_dt.dataset_sampler import make_rules_for_profile, sample_roster_skills
+    from sim_dt.eval_graph_flow import fit_bradley_terry_elo
+    from sim_dt.metal_graphflow import CompiledGraphFlowPolicy
+
+    t0 = time.perf_counter()
+    arms = list(models.keys())
+    A = len(arms)
+    arm_idx = {a: i for i, a in enumerate(arms)}
+    wins = np.zeros((A, A), dtype=np.float64)
+    games = np.zeros((A, A), dtype=np.float64)
+
+    shadow_worlds = (
+        {"name": "sh_k3", "seed": 98101, "teams": 3, "carts": 10, "players": 24, "tiles": 3, "tile_size": 1792.0, "cp": 4, "physics": "fast"},
+        {"name": "sh_k6", "seed": 98102, "teams": 6, "carts": 20, "players": 42, "tiles": 4, "tile_size": 1792.0, "cp": 4, "physics": "baseline"},
+        {"name": "sh_k8", "seed": 98103, "teams": 8, "carts": 26, "players": 56, "tiles": 5, "tile_size": 1920.0, "cp": 4, "physics": "volatile"},
+    )
+    rng = np.random.default_rng(seed)
+
+    for wi, wspec in enumerate(shadow_worlds):
+        K, J, N = int(wspec["teams"]), int(wspec["carts"]), int(wspec["players"])
+        world = build_gas_world_graph(
+            map_name=wspec["name"], teams=K, carts=J, players=N, tiles=int(wspec["tiles"]),
+            tile_size=float(wspec["tile_size"]), checkpoints_per_cart=int(wspec["cp"]),
+            seed=int(wspec["seed"]), device=torch.device("cpu"),
+        )
+        Wn = int(world.num_nav)
+        A_dim = Wn + K + 4
+        geo = {"map_center": world.map_center.clone(), "map_radius": world.map_radius.clone()}
+        rules = make_rules_for_profile(float(cfg.sim_dt.point_limit_base), wspec["physics"])
+        compiled = {
+            a: (CompiledGraphFlowPolicy(m, E=E_match, N=N, W_nav=Wn, J=J, K=K, nav_kern=world.nav_kern) if m is not None else None)
+            for a, m in models.items()
+        }
+        p_team_1d = (np.arange(N, dtype=np.int32) % K) + 1
+        team_masks = [torch.from_numpy(p_team_1d == (k + 1)).view(1, N).expand(E_match, N) for k in range(K)]
+
+        # Seatings guaranteeing direct head-to-head coverage of main/emas/exploiters/main_snap/default
+        seatings: list[list[str]] = []
+        if K == 3:
+            key_triples = [
+                ["main", "main_snap", "default"],
+                ["exp_0", "main_snap", "main"],
+                ["exp_1", "main_snap", "main"],
+                ["main", "ema_slow", "default"],
+                ["exp_0", "exp_1", "default"],
+                ["main", "main_init", "ema_fast"],
+            ]
+            for trp in key_triples:
+                if all(x in arm_idx for x in trp):
+                    seatings.append(trp)
+            for a in arms:
+                if a.startswith("exp_f"):
+                    seatings.append(["main", a, "default"])
+        else:
+            n_lob = 4 if K >= 8 else 5
+            for li in range(n_lob):
+                if K <= A:
+                    base_p = ["main", "main_snap", "exp_0", "exp_1", "default", "ema_slow"]
+                    base_p = [x for x in base_p if x in arm_idx][:K]
+                    rem = [x for x in arms if x not in base_p]
+                    if len(base_p) < K and rem:
+                        pick = list(rng.choice(rem, size=min(len(rem), K - len(base_p)), replace=False))
+                        base_p.extend(pick)
+                    while len(base_p) < K:
+                        base_p.append(arms[int(rng.integers(0, A))])
+                    if li > 0:
+                        rng.shuffle(base_p)
+                    seatings.append(base_p)
+                else:
+                    base = list(rng.permutation(A))
+                    extra = list(rng.choice(A, size=K - A, replace=True))
+                    full = base + extra
+                    rng.shuffle(full)
+                    seatings.append([arms[int(x)] for x in full])
+
+        eng = MetalDeltaTimePayloadEngine(world, num_envs=E_match, num_players=N, rules=rules, base_seed=seed + wi * 1009)
+        try:
+            for si, seats in enumerate(seatings):
+                rm = "balanced_fixed" if (si % 2 == 0) else "mixed_dr"
+                eng.reset(torch.ones((E_match,), dtype=torch.bool))
+                eng.set_skills(sample_roster_skills(rng, E_match, N, K, rm))
+                arm_to_tmask: dict[str, torch.Tensor] = {}
+                for ti, a in enumerate(seats):
+                    if a == "default":
+                        continue
+                    arm_to_tmask[a] = team_masks[ti] if a not in arm_to_tmask else (arm_to_tmask[a] | team_masks[ti])
+                obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+                for _ in range(H):
+                    u_vel = torch.zeros((E_match, N, A_dim), dtype=torch.float32)
+                    has_vel = torch.zeros((E_match, N), dtype=torch.bool)
+                    for a, tmask in arm_to_tmask.items():
+                        cp = compiled[a]
+                        if cp is None:
+                            continue
+                        res = cp.sample_velocity(obs, nav, carts, teams, acc, geo=geo)
+                        u_vel = torch.where(tmask.unsqueeze(-1), res["u_vel"], u_vel)
+                        has_vel = has_vel | tmask
+                    eng.apply_vel(u_vel, has_vel, tau_rel=2.5)
+                    eng.step(float(cfg.sim_dt.dt), mode=str(cfg.sim_dt.mode), reset_outcomes=True, n_steps=2, tau_rel=2.5)
+                    obs, nav, carts, teams, acc, _ = eng.observe_graph_tensors()
+                sc = eng.t_score.numpy()
+                for ti in range(K):
+                    ai = arm_idx[seats[ti]]
+                    for tj in range(ti + 1, K):
+                        aj = arm_idx[seats[tj]]
+                        if ai == aj:
+                            continue
+                        w_ij = np.where(sc[:, ti] > sc[:, tj] + 1e-6, 1.0, np.where(sc[:, tj] > sc[:, ti] + 1e-6, 0.0, 0.5))
+                        s_ij = float(w_ij.sum())
+                        n_ij = float(E_match)
+                        wins[ai, aj] += s_ij
+                        wins[aj, ai] += n_ij - s_ij
+                        games[ai, aj] += n_ij
+                        games[aj, ai] += n_ij
+        finally:
+            eng.close()
+            for cp in compiled.values():
+                if cp is not None:
+                    cp.close()
+
+    elos = fit_bradley_terry_elo(arms, wins, games, anchor="default", anchor_elo=1000.0)
+
+    def _pair_stat(a: str, b: str) -> tuple[float, float, float, float]:
+        if a not in arm_idx or b not in arm_idx:
+            return 0.5, 0.0, 1.0, 0.0
+        i, j = arm_idx[a], arm_idx[b]
+        g_ij = float(games[i, j])
+        w_ij = float(wins[i, j])
+        if g_ij <= 0.0:
+            return 0.5, 0.0, 1.0, 0.0
+        lo, hi = _wilson_ci95(w_ij, g_ij)
+        return w_ij / g_ij, lo, hi, g_ij
+
+    best_arm = max(arms, key=lambda a: elos[a])
+    return {
+        "wall_s": round(time.perf_counter() - t0, 2),
+        "elos": elos,
+        "best_arm": best_arm,
+        "best_elo": float(elos[best_arm]),
+        "pairs": {
+            "exp0_vs_snap": _pair_stat("exp_0", "main_snap"),
+            "exp1_vs_snap": _pair_stat("exp_1", "main_snap"),
+            "exp0_vs_main": _pair_stat("exp_0", "main"),
+            "exp1_vs_main": _pair_stat("exp_1", "main"),
+            "main_vs_snap": _pair_stat("main", "main_snap"),
+            "emaslow_vs_main": _pair_stat("ema_slow", "main"),
+            "main_vs_default": _pair_stat("main", "default"),
+        },
+    }
+
+
+def run_rdma_dp_concurrent(args: argparse.Namespace) -> None:
+    """Concurrent Batched Main + k=2 Exploiters over 4-Studio /mesh0 HAD8_GATHER RDMA — ZERO Arbitrary Phases!
+
+    - Runs `main`, `exp_0` (fresh-init adversary), and `exp_1` (warm-start adversary) CONCURRENTLY in the SAME
+      shared physics rollouts (`GraphFlowRolloutPool.sample_batch_multi`), packing all 3 parameter deltas into
+      ONE single `/mesh0` HAD8_GATHER RDMA crossing per iteration!
+    - Metric-triggered online lifecycle every `--eval-every` iters:
+      * Promote & freeze winning exploiters (`Wilson_LCB95 > 0.52` vs `main_snap` or `main`) into permanent PFSP
+        archive and immediately respawn new challengers via `<0.1 ms` GPU `opt.reset_state_()`.
+      * Recycle stagnant exploiters (`age >= 3` evals, `WR < 0.45`, no `+0.02` gain).
+      * Advance `main_snap` when `Wilson_LCB95(WR(main vs main_snap)) > 0.54`.
+      * Soft-tether `main` 25% toward `ema_slow` if `Wilson_LCB95(WR(ema_slow vs main)) > 0.55`.
+      * Logs live `best_elo` and `ΔElo / wall-second` at every eval window!
+    """
+    from sim_dt.graph_flow_policy import GraphFlowConfig, GraphFlowPolicy, clone_graph_flow_model
+    from sim_dt.graph_flow_trainer import GraphFlowRolloutPool, GraphFlowTrainer
+
+    overrides: dict[str, Any] = {}
+    sd: dict[str, Any] = {}
+    if args.iterations > 0:
+        sd["iterations"] = args.iterations
+    if args.base_envs > 0:
+        sd["base_envs"] = args.base_envs
+    if args.group_size > 0:
+        sd["group_size"] = args.group_size
+    if args.horizon > 0:
+        sd["rollout_horizon"] = args.horizon
+    if args.ppo_epochs > 0:
+        sd["ppo_epochs"] = args.ppo_epochs
+    if sd:
+        overrides["sim_dt"] = sd
+    cfg = load_training_config(args.config, overrides=overrides or None)
+
+    torch.manual_seed(cfg.seeds.model_init)
+    np.random.seed(cfg.seeds.model_init)
+    gf_cfg = GraphFlowConfig()
+    main_model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+    ema_fast = clone_graph_flow_model(main_model)
+    ema_slow = clone_graph_flow_model(main_model)
+    main_init = clone_graph_flow_model(main_model)
+    main_snap = clone_graph_flow_model(main_model)
+
+    torch.manual_seed(cfg.seeds.model_init + 101)
+    exp0_model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+    torch.manual_seed(cfg.seeds.model_init + 202)
+    exp1_model = clone_graph_flow_model(main_model)
+    with torch.no_grad():
+        exp1_model.fj_w2.weight.add_(0.02 * torch.randn_like(exp1_model.fj_w2.weight))
+        exp1_model.fj_w2.bias.add_(0.02 * torch.randn_like(exp1_model.fj_w2.bias))
+
+    arm_names = ["main", "exp_0", "exp_1"]
+    n_one = int(sum(p.numel() for p in main_model.parameters()))
+    ws = int(args.tp_world_size)
+    reducer = (
+        RDMAWeightAllReducer(
+            main_model, ws, args.tp_rank, args.tp_comm_id,
+            wire_mode="had8_gather", n_params_override=len(arm_names) * n_one,
+        )
+        if ws > 1
+        else None
+    )
+    ctrl_bcast: RDMAControlBroadcaster | None = None
+    if ws > 1:
+        chost, cport_s = str(args.tp_comm_id).rsplit(":", 1)
+        ctrl_bcast = RDMAControlBroadcaster(ws, args.tp_rank, f"{chost}:{int(cport_s) + 1}", n_slots=16)
+
+    learners: dict[str, GraphFlowTrainer] = {
+        "main": GraphFlowTrainer(main_model, None, cfg, lr_mult=1.0),
+        "exp_0": GraphFlowTrainer(exp0_model, None, cfg, lr_mult=float(cfg.optimizer.exploiter_lr_mult)),
+        "exp_1": GraphFlowTrainer(exp1_model, None, cfg, lr_mult=float(cfg.optimizer.exploiter_lr_mult)),
+    }
+    models_live: dict[str, GraphFlowPolicy] = {"main": main_model, "exp_0": exp0_model, "exp_1": exp1_model}
+    variants: dict[str, GraphFlowPolicy | None] = {
+        "main": main_model,
+        "exp_0": exp0_model,
+        "exp_1": exp1_model,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "main_init": main_init,
+        "main_snap": main_snap,
+    }
+    G = int(cfg.sim_dt.group_size) if int(cfg.sim_dt.group_size) > 0 else 4
+    n_worlds = max(4, int(args.num_worlds))
+    pool = GraphFlowRolloutPool(
+        cfg, variants,
+        num_worlds=n_worlds,
+        group_size=G,
+        seed_base=cfg.seeds.match_base + int(args.tp_rank) * 100003,
+        world_seed_base=cfg.seeds.match_base,
+        blender_dr=True,
+        self_play_only=False,
+        roster_mode=str(args.roster_mode),
+        randomize_physics=not bool(args.no_physics_dr),
+    )
+    for arm in arm_names:
+        pool.attach_weight_bank_(arm, learners[arm].bank, models_live[arm])
+
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
+    if out_dir is not None and args.tp_rank == 0:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+
+    pfsp_pool = ["default", "main_init", "main_snap", "ema_fast", "ema_slow", "main", "exp_0", "exp_1"]
+    pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
+    frozen_archive: dict[str, GraphFlowPolicy] = {}
+    frozen_exp_count = 0
+    snap_count = 0
+
+    total_iters = int(args.iterations) if int(args.iterations) > 0 else 80
+    eval_every = max(4, int(args.eval_every))
+    refresh_every = max(n_worlds, int(args.refresh_worlds_every))
+    world_gen = 0
+    prev_flats = [torch.empty((n_one,), dtype=torch.float32) for _ in arm_names]
+    seat_rng = np.random.default_rng(cfg.seeds.match_base + int(args.tp_rank) * 997 + 17)
+
+    exp_age = [0, 0]
+    exp_wr_hist: list[list[float]] = [[], []]
+    init_elo_baseline: float | None = None
+    best_seen_elo = -1e9
+    best_seen_arm = "main"
+    tot_sim_s = 0.0
+    tot_ag_steps = 0
+    tot_rdma_ms = 0.0
+    tot_eval_s = 0.0
+    history: list[dict[str, Any]] = []
+    eval_trajectory: list[dict[str, Any]] = []
+    lifecycle_events: list[dict[str, Any]] = []
+    t_start = time.perf_counter()
+
+    def _update_synced_emas_(src_opt: Any, d_fast: float = 0.90, d_slow: float = 0.97) -> None:
+        with torch.no_grad():
+            for (n, _), (_, pf), (_, ps) in zip(
+                src_opt.model.named_parameters(), ema_fast.named_parameters(), ema_slow.named_parameters()
+            ):
+                wm = src_opt.master[n]
+                pf.copy_((d_fast * pf.float() + (1.0 - d_fast) * wm).to(pf.dtype))
+                ps.copy_((d_slow * ps.float() + (1.0 - d_slow) * wm).to(ps.dtype))
+
+    def _choose_concurrent_seats(K: int, it: int) -> list[str]:
+        lg = cfg.league
+        cands = sorted(set(pfsp_pool))
+        w = np.asarray(
+            [max(lg.pfsp_min_weight, 1.0 - float(pfsp_wr.get(a, lg.pfsp_default_winrate))) ** lg.pfsp_power for a in cands],
+            dtype=np.float64,
+        )
+        w /= w.sum()
+        if K == 2:
+            rot = it % 5
+            if rot == 0:
+                return ["main", "exp_0"]
+            if rot == 1:
+                return ["main", "exp_1"]
+            if rot == 2:
+                return ["exp_0", "main_snap"]
+            if rot == 3:
+                return ["exp_1", "main_snap"]
+            return ["main", str(seat_rng.choice(cands, p=w))]
+        seats = ["main", "exp_0", "exp_1"]
+        for s_i in range(3, K):
+            if s_i == 3 and float(seat_rng.random()) < 0.45:
+                seats.append("default")
+            elif s_i == 4 and float(seat_rng.random()) < 0.55:
+                seats.append("main_snap")
+            else:
+                seats.append(str(seat_rng.choice(cands, p=w)))
+        return seats
+
+    def _respawn_exploiter(j: int, seed_val: int) -> None:
+        arm = f"exp_{j}"
+        m = models_live[arm]
+        torch.manual_seed(int(seed_val))
+        with torch.no_grad():
+            if j == 0:
+                fresh = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+                m.load_state_dict(fresh.state_dict())
+            else:
+                m.load_state_dict(main_snap.state_dict())
+                m.fj_w2.weight.add_(0.025 * torch.randn_like(m.fj_w2.weight))
+                m.fj_w2.bias.add_(0.025 * torch.randn_like(m.fj_w2.bias))
+        learners[arm].opt.reset_state_()
+        pool.sync_variant_(arm, m)
+        exp_age[j] = 0
+        exp_wr_hist[j].clear()
+
+    if args.tp_rank == 0:
+        w_desc = ", ".join(f"K={s.K}/J={s.J}/N={s.N}/W={s.W_nav}" for s in pool.slots[:6])
+        print(
+            f"\n=== [CONCURRENT LEAGUE x{ws} k=2 EXPLOITERS] iters={total_iters} eval_every={eval_every} "
+            f"wire=had8_gather | pool({len(pool.slots)}): {w_desc} ===",
+            flush=True,
+        )
+
+    try:
+        for it in range(1, total_iters + 1):
+            if it > 1 and ((it - 1) % refresh_every == 0):
+                world_gen += 1
+                pool.refresh_all_worlds_(world_gen)
+                if args.tp_rank == 0:
+                    w_desc = ", ".join(f"K={s.K}/J={s.J}/N={s.N}/W={s.W_nav}" for s in pool.slots[:6])
+                    print(f"  [WORLD REFRESH gen={world_gen}] {w_desc}", flush=True)
+
+            slot_cur = pool.slots[pool._cursor % len(pool.slots)]
+            seats = _choose_concurrent_seats(slot_cur.K, it)
+            batches, sh = pool.sample_batch_multi(
+                active_arms=arm_names,
+                seat_arms=seats,
+                policy_versions={a: learners[a].policy_version for a in arm_names},
+            )
+
+            upds: dict[str, dict[str, Any]] = {}
+            active_flags: list[bool] = []
+            for i, arm in enumerate(arm_names):
+                if arm in batches:
+                    learners[arm].opt.export_master_flat_(prev_flats[i])
+                    upds[arm] = learners[arm].update(batches[arm], epochs=max(1, int(cfg.sim_dt.ppo_epochs)))
+                    active_flags.append(True)
+                else:
+                    active_flags.append(False)
+
+            rdma_ms = 0.0
+            c_snrs = [0.0] * len(arm_names)
+            c_cohs = [0.0] * len(arm_names)
+            if reducer is not None:
+                rdma_ms, c_snrs, c_cohs = reducer.average_masters_multi_(
+                    [learners[a].opt for a in arm_names], prev_flats, active_flags=active_flags,
+                )
+            tot_rdma_ms += rdma_ms
+
+            for arm, is_act in zip(arm_names, active_flags):
+                if is_act:
+                    pool.sync_variant_(arm, models_live[arm])
+            if active_flags[0]:
+                _update_synced_emas_(learners["main"].opt)
+                pool.sync_variant_("ema_fast", ema_fast)
+                pool.sync_variant_("ema_slow", ema_slow)
+                alpha_ema = float(cfg.sim_dt.pfsp_update_ema)
+                for opp_arm, wr_val in batches["main"].opp_wr_obs.items():
+                    if opp_arm in pfsp_wr:
+                        pfsp_wr[opp_arm] = alpha_ema * pfsp_wr[opp_arm] + (1.0 - alpha_ema) * float(wr_val)
+
+            tot_sim_s += float(sh["sim_s"]) * ws
+            tot_ag_steps += int(sh["agent_steps"]) * ws
+            elapsed = max(time.perf_counter() - t_start, 1e-6)
+            upd_wall = sum(float(u.get("update_wall_s", 0.0)) for u in upds.values())
+
+            if args.tp_rank == 0:
+                wm = sh["world"]
+                u_m = upds.get("main", {})
+                b_m = batches.get("main")
+                rec = {
+                    "iter": it,
+                    "wall_s": round(elapsed, 2),
+                    "world": wm,
+                    "roll_s": sh["wall_s"],
+                    "upd_s": round(upd_wall, 3),
+                    "rdma_ms": round(rdma_ms, 2),
+                    "active_arms": sh["present_active"],
+                    "cluster_snr": {a: c_snrs[i] for i, a in enumerate(arm_names)},
+                    "main_upd": u_m,
+                    "exp0_vel": upds.get("exp_0", {}).get("loss_vel", 0.0),
+                    "exp1_vel": upds.get("exp_1", {}).get("loss_vel", 0.0),
+                }
+                history.append(rec)
+                if it == 1 or it % max(1, args.log_every) == 0 or it == total_iters:
+                    gk = b_m.stats["gk_pct"] if b_m is not None else [0, 0, 0, 0]
+                    sat = b_m.stats["sat_frac"] if b_m is not None else 0.0
+                    dsm = b_m.stats["main_dscore_mean"] if b_m is not None else 0.0
+                    dso = b_m.stats["opp_dscore_mean"] if b_m is not None else 0.0
+                    print(
+                        f"  [CONC {it:03d}/{total_iters:03d}] (K={wm['K']:2d} J={wm['J']:2d} N={wm['N']:3d} arms={len(upds)}) | "
+                        f"roll={sh['wall_s']:.2f}s upd={upd_wall:.2f}s rdma={rdma_ms:.0f}ms | "
+                        f"vel(m={u_m.get('loss_vel',0):.3f},e0={rec['exp0_vel']:.3f},e1={rec['exp1_vel']:.3f}) "
+                        f"SNR(st={u_m.get('grad_snr',0):.2f},4r={c_snrs[0]:.2f}/{c_snrs[1]:.2f}/{c_snrs[2]:.2f}) | "
+                        f"sat={sat:.4f} dSc({dsm:.1f}/{dso:.1f}) | {tot_ag_steps/elapsed/1e6:.2f}M/s",
+                        flush=True,
+                    )
+
+            # Metric-triggered online shadow evaluation & lifecycle (ZERO step-count phases!)
+            if (it % eval_every == 0) or (it == total_iters):
+                cmd = [0.0] * 8  # [act_e0, act_e1, act_snap, act_tether, seed_e0, seed_e1, 0, 0]
+                if args.tp_rank == 0:
+                    ev_models: dict[str, Any] = {
+                        "default": None,
+                        "main_init": main_init,
+                        "main_snap": main_snap,
+                        "main": main_model,
+                        "ema_fast": ema_fast,
+                        "ema_slow": ema_slow,
+                        "exp_0": exp0_model,
+                        "exp_1": exp1_model,
+                    }
+                    # Include up to 4 most-recent frozen exploiters in shadow eval
+                    for fn in list(frozen_archive.keys())[-4:]:
+                        ev_models[fn] = frozen_archive[fn]
+                    ev = _fast_shadow_eval(ev_models, cfg, E_match=20, H=44, seed=77100 + it * 31)
+                    tot_eval_s += float(ev["wall_s"])
+                    train_wall = max(time.perf_counter() - t_start - tot_eval_s, 1e-6)
+                    if init_elo_baseline is None:
+                        init_elo_baseline = float(ev["elos"].get("main_init", 1000.0))
+                    if ev["best_elo"] > best_seen_elo:
+                        best_seen_elo = float(ev["best_elo"])
+                        best_seen_arm = str(ev["best_arm"])
+                        if out_dir is not None and ev_models.get(best_seen_arm) is not None:
+                            torch.save(ev_models[best_seen_arm].state_dict(), out_dir / "best_online.pt")
+                    d_elo_s = (ev["best_elo"] - init_elo_baseline) / train_wall
+
+                    # Evaluate metric-triggered lifecycle rules (only before final iter!)
+                    if it < total_iters:
+                        for j, key_s, key_m in [(0, "exp0_vs_snap", "exp0_vs_main"), (1, "exp1_vs_snap", "exp1_vs_main")]:
+                            wr_s, lo_s, _, _ = ev["pairs"][key_s]
+                            wr_m, lo_m, _, _ = ev["pairs"][key_m]
+                            exp_age[j] += 1
+                            exp_wr_hist[j].append(wr_s)
+                            if (lo_s > 0.52) or (lo_m > 0.52) or (wr_s >= 0.56 and wr_m >= 0.50 and exp_age[j] >= 1):
+                                cmd[j] = 1.0  # FREEZE & PROMOTE!
+                                cmd[4 + j] = float(cfg.seeds.model_init + 1000 * (frozen_exp_count + 1) + 77 * it + j)
+                            elif exp_age[j] >= 3 and wr_s < 0.45 and (wr_s - exp_wr_hist[j][-3]) < 0.02:
+                                cmd[j] = 2.0  # STAGNATION RECYCLE!
+                                cmd[4 + j] = float(cfg.seeds.model_init + 5000 + 97 * it + j)
+
+                        wr_ms, lo_ms, _, _ = ev["pairs"]["main_vs_snap"]
+                        if lo_ms > 0.54 or wr_ms >= 0.62:
+                            cmd[2] = 1.0  # ADVANCE main_snap!
+
+                        wr_em, lo_em, _, _ = ev["pairs"]["emaslow_vs_main"]
+                        if lo_em > 0.55:
+                            cmd[3] = 1.0  # EMA SOFT TETHER!
+
+                    ev_rec = {
+                        "iter": it,
+                        "wall_s": round(time.perf_counter() - t_start, 2),
+                        "train_wall_s": round(train_wall, 2),
+                        "eval_wall_s": ev["wall_s"],
+                        "best_arm": ev["best_arm"],
+                        "best_elo": ev["best_elo"],
+                        "delta_elo_per_s": round(d_elo_s, 3),
+                        "elos": ev["elos"],
+                        "pairs": {k: [round(x, 3) for x in v] for k, v in ev["pairs"].items()},
+                        "cmd": [int(c) for c in cmd[:4]],
+                    }
+                    eval_trajectory.append(ev_rec)
+                    e_s = ev["elos"]
+                    print(
+                        f"  [SHADOW EVAL it={it:03d} {ev['wall_s']:.1f}s] "
+                        f"Elo(main={e_s.get('main',0):.1f} emaS={e_s.get('ema_slow',0):.1f} "
+                        f"e0={e_s.get('exp_0',0):.1f} e1={e_s.get('exp_1',0):.1f} snap={e_s.get('main_snap',0):.1f} "
+                        f"init={e_s.get('main_init',0):.1f}) | BEST={ev['best_arm']}({ev['best_elo']:.1f}) "
+                        f"ΔElo/s={d_elo_s:+.2f} | wr(e0/s={ev['pairs']['exp0_vs_snap'][0]:.2f}, e1/s={ev['pairs']['exp1_vs_snap'][0]:.2f}, m/s={ev['pairs']['main_vs_snap'][0]:.2f}) | "
+                        f"cmd={ev_rec['cmd']}",
+                        flush=True,
+                    )
+
+                # Broadcast R0 lifecycle decision across all 4 Studios in lockstep!
+                if ctrl_bcast is not None:
+                    cmd = ctrl_bcast.broadcast_from_r0(cmd)
+
+                act_e = [int(round(cmd[0])), int(round(cmd[1]))]
+                act_snap = int(round(cmd[2]))
+                act_tether = int(round(cmd[3]))
+                rseeds = [int(round(cmd[4])), int(round(cmd[5]))]
+
+                for j in (0, 1):
+                    arm = f"exp_{j}"
+                    if act_e[j] == 1:
+                        fname = f"exp_f{frozen_exp_count}"
+                        frozen_exp_count += 1
+                        fclone = clone_graph_flow_model(models_live[arm])
+                        frozen_archive[fname] = fclone
+                        pool.sync_variant_(fname, fclone)
+                        pfsp_pool.append(fname)
+                        pfsp_wr[fname] = 0.25
+                        if out_dir is not None and args.tp_rank == 0:
+                            torch.save(fclone.state_dict(), out_dir / f"{fname}.pt")
+                        _respawn_exploiter(j, rseeds[j])
+                        if args.tp_rank == 0:
+                            lifecycle_events.append({"iter": it, "event": "promote_freeze", "arm": arm, "frozen_name": fname})
+                            print(f"    >>> [LIFECYCLE] Promoted & froze {arm} -> {fname} (archive={len(frozen_archive)}) + respawned!", flush=True)
+                    elif act_e[j] == 2:
+                        _respawn_exploiter(j, rseeds[j])
+                        if args.tp_rank == 0:
+                            lifecycle_events.append({"iter": it, "event": "recycle_stagnant", "arm": arm})
+                            print(f"    >>> [LIFECYCLE] Recycled stagnant {arm} with fresh seed!", flush=True)
+
+                if act_snap == 1:
+                    sname = f"main_s{snap_count}"
+                    snap_count += 1
+                    old_snap = clone_graph_flow_model(main_snap)
+                    frozen_archive[sname] = old_snap
+                    pool.sync_variant_(sname, old_snap)
+                    pfsp_pool.append(sname)
+                    pfsp_wr[sname] = 0.45
+                    main_snap.load_state_dict(main_model.state_dict())
+                    pool.sync_variant_("main_snap", main_snap)
+                    if out_dir is not None and args.tp_rank == 0:
+                        torch.save(old_snap.state_dict(), out_dir / f"{sname}.pt")
+                        lifecycle_events.append({"iter": it, "event": "advance_main_snap", "archived": sname})
+                        print(f"    >>> [LIFECYCLE] Advanced main_snap (archived {sname})!", flush=True)
+
+                if act_tether == 1:
+                    with torch.no_grad():
+                        opt_m = learners["main"].opt
+                        for (n, p), (_, ps) in zip(main_model.named_parameters(), ema_slow.named_parameters()):
+                            wm = opt_m.master[n]
+                            wm.copy_(0.75 * wm + 0.25 * ps.float())
+                            p.copy_(wm.to(p.dtype))
+                        opt_m.reload_master_from_model_()
+                    pool.sync_variant_("main", main_model)
+                    if args.tp_rank == 0:
+                        lifecycle_events.append({"iter": it, "event": "ema_tether"})
+                        print("    >>> [LIFECYCLE] Soft-tethered main 25% toward ema_slow!", flush=True)
+
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(main_model.state_dict(), out_dir / "main_final.pt")
+            torch.save(ema_fast.state_dict(), out_dir / "ema_fast_final.pt")
+            torch.save(ema_slow.state_dict(), out_dir / "ema_slow_final.pt")
+            torch.save(exp0_model.state_dict(), out_dir / "exp_0_final.pt")
+            torch.save(exp1_model.state_dict(), out_dir / "exp_1_final.pt")
+            torch.save(main_snap.state_dict(), out_dir / "main_snap_final.pt")
+    finally:
+        pool.close()
+        for lrn in learners.values():
+            lrn.close()
+        if reducer is not None:
+            reducer.close()
+        if ctrl_bcast is not None:
+            ctrl_bcast.close()
+
+    if args.tp_rank == 0:
+        wall = max(time.perf_counter() - t_start, 1e-6)
+        train_wall = max(wall - tot_eval_s, 1e-6)
+        final_d_elo_s = (best_seen_elo - (init_elo_baseline or 1000.0)) / train_wall if init_elo_baseline is not None else 0.0
+        summary = {
+            "policy": "graph-flow-concurrent-league",
+            "world_size": ws,
+            "group_size": G,
+            "num_worlds": n_worlds,
+            "world_refreshes": world_gen,
+            "total_iters": total_iters,
+            "wall_s": round(wall, 2),
+            "train_wall_s": round(train_wall, 2),
+            "eval_wall_s": round(tot_eval_s, 2),
+            "total_sim_s": round(tot_sim_s, 1),
+            "total_agent_steps": int(tot_ag_steps),
+            "cluster_agent_steps_s": round(tot_ag_steps / train_wall, 0),
+            "cluster_speedup_x": round(tot_sim_s / train_wall, 1),
+            "mean_rdma_ms": round(tot_rdma_ms / max(1, total_iters), 2),
+            "best_seen_arm": best_seen_arm,
+            "best_seen_elo": round(best_seen_elo, 1),
+            "delta_elo_per_s": round(final_d_elo_s, 3),
+            "frozen_exploiters": frozen_exp_count,
+            "snap_advances": snap_count,
+            "lifecycle_events": lifecycle_events,
+            "eval_trajectory": eval_trajectory,
+            "history": history,
+        }
+        if out_dir is not None:
+            (out_dir / "league_history.json").write_text(json.dumps(summary, indent=2))
+        print(
+            f"\n[CONCURRENT LEAGUE x{ws} COMPLETE] {total_iters} iters in {wall:.1f}s (train={train_wall:.1f}s, eval={tot_eval_s:.1f}s) | "
+            f"{tot_ag_steps/1e6:.1f}M ag-steps @ {tot_ag_steps/train_wall/1e6:.2f}M/s ({tot_sim_s/train_wall:.0f}x RT) | "
+            f"BEST={best_seen_arm}({best_seen_elo:.1f} Elo, ΔElo/s={final_d_elo_s:+.2f}) | "
+            f"frozen_exps={frozen_exp_count} snaps={snap_count}",
+            flush=True,
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="4-Studio RDMA Data-Parallel + Async Actor-Learner + /mesh0 TP Trainer")
-    ap.add_argument("--role", choices=("rdma-dp", "rdma-dp-flow", "rdma-dp-league", "learner", "actor", "tp-bench"), required=True)
+    ap.add_argument("--role", choices=("rdma-dp", "rdma-dp-flow", "rdma-dp-league", "rdma-dp-concurrent", "learner", "actor", "tp-bench"), required=True)
     ap.add_argument("--config", type=str, default=str(CONFIGS_DIR / "sim_dt_grpo_pfsp.json"))
     ap.add_argument("--bind", type=str, default="0.0.0.0:29810")
     ap.add_argument("--learner-addr", type=str, default="10.0.0.124:29810")
@@ -1250,6 +2000,7 @@ def main() -> None:
     ap.add_argument("--actor-id", type=int, default=1)
     ap.add_argument("--num-worlds", type=int, default=4)
     ap.add_argument("--iterations", type=int, default=8)
+    ap.add_argument("--eval-every", type=int, default=8)
     ap.add_argument("--p1-iters", type=int, default=48)
     ap.add_argument("--p2-iters", type=int, default=48)
     ap.add_argument("--p3-iters", type=int, default=40)
@@ -1277,6 +2028,8 @@ def main() -> None:
         run_rdma_dp_flow(args)
     elif args.role == "rdma-dp-league":
         run_rdma_dp_league(args)
+    elif args.role == "rdma-dp-concurrent":
+        run_rdma_dp_concurrent(args)
     elif args.role == "learner":
         run_learner(args)
     elif args.role == "actor":

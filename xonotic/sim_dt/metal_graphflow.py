@@ -1789,12 +1789,18 @@ class CompiledGraphFlowOptimizer:
             for bgs, n_el, grp in self._gsum_entries
         ]
         self._master_views: dict[str, torch.Tensor] = {}
-        for name, (bm, _, _, _, _, shape, _) in self._bufs_2d.items():
+        self._opt_state_views: list[torch.Tensor] = []
+        for name, (bm, _, bmom, _, _, shape, _) in self._bufs_2d.items():
             self._master_views[name] = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bm), shape)
-        for name, (bm, _, _, _, _, shape, _) in self._bufs_adam.items():
+            self._opt_state_views.append(_ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bmom), shape))
+        for name, (bm, bmom, bv, _, _, shape, _) in self._bufs_adam.items():
             v = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bm), shape)
             self._master_views[name] = v.view(p_map[name].shape)
+            self._opt_state_views.append(_ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bmom), shape))
+            self._opt_state_views.append(_ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, bv), shape))
         self._sc_m_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_m), (S_tot,))
+        self._opt_state_views.append(_ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_mom), (S_tot,)))
+        self._opt_state_views.append(_ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sc_v), (S_tot,)))
 
         # Map exact scalar names -> slices of _sc_m_view so master[] matches model.named_parameters()!
         self._sc_param_slices: list[tuple[str, int, int]] = [
@@ -1864,6 +1870,14 @@ class CompiledGraphFlowOptimizer:
         for n, p in self.model.named_parameters():
             self._master_views[n].copy_(p.detach().float())
         self.bank.sync_from_model_(self.model)
+
+    @torch.no_grad()
+    def reset_state_(self) -> None:
+        """Zero all GPU Aurora/Adam momentum & variance buffers and step counter (for instant exploiter respawn!)."""
+        for v in self._opt_state_views:
+            v.zero_()
+        self.step_view.zero_()
+        self.reload_master_from_model_()
 
     @torch.no_grad()
     def export_to_model_(self, model: GraphFlowPolicy | None = None) -> None:

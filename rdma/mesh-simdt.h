@@ -1440,6 +1440,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
   threadgroup float sh_p_hp[128];
   threadgroup int   sh_p_tgt[128];
   threadgroup float sh_p_dmg[128];
+  threadgroup int   sh_p_killer[128];
   threadgroup float sh_c_pos[64 * 3];
   threadgroup float sh_c_pos_old[64 * 3];
   threadgroup float sh_c_s[64];
@@ -2092,8 +2093,14 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     if (tid < N) {
       const uint p = tid;
       float dmg_in = 0.0f;
+      int best_att = -1;
+      float best_att_dmg = 0.0f;
       for (uint q = 0; q < N; q++) {
-        if (sh_p_tgt[q] == int(p)) dmg_in += sh_p_dmg[q];
+        if (sh_p_tgt[q] == int(p)) {
+          const float dq = sh_p_dmg[q];
+          dmg_in += dq;
+          if (dq > best_att_dmg) { best_att_dmg = dq; best_att = int(q); }
+        }
       }
       const int ctrl_mode = p_i1[7u * N + p];
       const bool use_acc = (A_dim >= W_nav + K + 4u) && (ctrl_mode != 1);
@@ -2116,6 +2123,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         p_f1[11u * N + p] += 1.0f;
         p_f1[16u * N + p] = 0.0f;
       }
+      sh_p_killer[p] = died ? best_att : -1;
       p_f1[0u * N + p] = hp;
       p_f1[1u * N + p] = arm;
       p_f1[9u * N + p] += dmg_in;
@@ -2124,10 +2132,10 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Attribute kills
+    // Attribute kills uniquely: only the highest-damage attacker on the fatal tick gets +1.0!
     if (tid < N) {
       const int tgt = sh_p_tgt[tid];
-      if (tgt >= 0 && sh_p_dmg[tid] > 0.0f && sh_p_alive[tgt] == 0u) {
+      if (tgt >= 0 && sh_p_killer[tgt] == int(tid)) {
         p_f1[10u * N + tid] += 1.0f;
       }
     }
