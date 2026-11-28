@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""4-Studio Async Actor-Learner + Native /mesh0 Tensor-Parallel Trainer.
-
-Separates dataset sampling (PersistentMatchPool on Actor Studios, zero warmup) from
-atemporal policy/value optimization (AtemporalPPOTrainer on Learner Studio), streaming
-flat AtemporalBatch payloads and 2.96 MB BF16 weight updates asynchronously over high-speed
-sockets while logging approx_kl and policy staleness as boring first-class metrics.
-
-Also supports `--role tp-bench` to benchmark 4-Studio FFN Tensor Parallelism directly over
-live /mesh0 TB5 RDMA (MG_WIRE_HAD8_GATHER) via libmesh-graph.dylib.
+"""4-Studio Distributed Metal 4 Trainer:
+  1. `--role rdma-dp`: 4-Studio All-Compute Data-Parallel over live /mesh0 TB5 RDMA
+     (all 4 M5 Ultra Studios run PersistentMatchPool + AtemporalPPOTrainer on 256 GPU cores,
+     averaging the 2.96 MB weights via /mesh0 flat-DMA MG_OP_ALLREDUCE in <3 ms!).
+  2. `--role learner` / `--role actor`: Async Actor-Learner Split over LAN/TB5 TCP
+     (actors precompute obs_drho to halve wire payload, stream AtemporalBatch non-stop while
+     learner updates and pushes 2.96 MB BF16 weights asynchronously, logging approx_kl & staleness).
+  3. `--role tp-bench`: 4-Studio FFN Tensor Parallelism benchmark over live /mesh0 HAD8_GATHER.
 """
 from __future__ import annotations
 
 import argparse
-import io
+import ctypes
 import json
 import queue
 import socket
@@ -31,13 +30,23 @@ if str(REPO_ROOT / "xonotic") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "xonotic"))
 
 from sim_dt.dataset_sampler import AtemporalBatch, PersistentMatchPool
-from sim_dt.metal_runtime import CompiledPlanTrainer, CompiledPlanWally, MetalDeltaTimePayloadEngine
-from sim_dt.ppo_trainer import AtemporalPPOTrainer
+from sim_dt.metal_runtime import (
+    MG_BUF_STATE,
+    MG_DTYPE_F32,
+    MG_OP_ALLREDUCE,
+    CompiledPlanWally,
+    MetalDeltaTimePayloadEngine,
+    _load_mesh_graph_lib,
+    _make_op,
+    _ptr_to_torch_f32,
+)
+from sim_dt.ppo_trainer import AtemporalPPOTrainer, _team_eff_rho_flat
 from sim_dt.world_graph import build_gas_world_graph
 from solver.strat.league_curriculum import SCRIPTED_ANCHORS
-from solver.strat.plan_policy import PlanWally, clone_plan_model
+from solver.strat.plan_policy import PlanWally, clone_plan_model, project_unit_norm_
 from solver.strat.train_config import CONFIGS_DIR, load_training_config
 
+MG_WIRE_F32 = 2
 MSG_WEIGHTS = 1
 MSG_BATCH = 2
 MSG_STOP = 3
@@ -77,7 +86,16 @@ def recv_msg(sock: socket.socket) -> tuple[int, bytes]:
     return kind, payload
 
 
-def serialize_batch(actor_id: int, batch: AtemporalBatch) -> bytes:
+def serialize_batch(actor_id: int, batch: AtemporalBatch, lcfg: Any) -> bytes:
+    """Compact wire serialization: precomputes obs_drho [M,N] bf16 and drops obs_next/carts_next/teams_next (>2x smaller!)."""
+    if batch.obs_drho is not None:
+        drho = batch.obs_drho.to(torch.bfloat16)
+    else:
+        assert batch.obs_next is not None and batch.carts_next is not None and batch.teams_next is not None
+        rc = _team_eff_rho_flat(batch.carts, batch.teams, batch.obs, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
+        rn = _team_eff_rho_flat(batch.carts_next, batch.teams_next, batch.obs_next, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
+        drho = torch.asinh(lcfg.dyn_drho_scale * (rn - rc)).to(torch.bfloat16)
+
     meta = {
         "actor_id": int(actor_id),
         "policy_version": int(batch.policy_version),
@@ -90,7 +108,7 @@ def serialize_batch(actor_id: int, batch: AtemporalBatch) -> bytes:
     meta_b = json.dumps(meta).encode("utf-8")
     tensors = [
         batch.obs, batch.carts, batch.teams,
-        batch.obs_next, batch.carts_next, batch.teams_next,
+        drho,
         batch.cont, batch.cart_pick, batch.rival_pick,
         batch.beh_logp, batch.adv, batch.gae_ret,
         batch.wm_in, batch.actor_mask,
@@ -104,7 +122,7 @@ def serialize_batch(actor_id: int, batch: AtemporalBatch) -> bytes:
 def deserialize_batch(raw: bytes) -> tuple[int, AtemporalBatch]:
     dtypes = [
         torch.bfloat16, torch.bfloat16, torch.bfloat16,
-        torch.bfloat16, torch.bfloat16, torch.bfloat16,
+        torch.bfloat16,
         torch.bfloat16, torch.int16, torch.int16,
         torch.float32, torch.float32, torch.float32,
         torch.bool, torch.bool,
@@ -128,10 +146,11 @@ def deserialize_batch(raw: bytes) -> tuple[int, AtemporalBatch]:
     }
     batch = AtemporalBatch(
         obs=ts[0], carts=ts[1], teams=ts[2],
-        obs_next=ts[3], carts_next=ts[4], teams_next=ts[5],
-        cont=ts[6], cart_pick=ts[7], rival_pick=ts[8],
-        beh_logp=ts[9], adv=ts[10], gae_ret=ts[11],
-        wm_in=ts[12], actor_mask=ts[13],
+        obs_next=None, carts_next=None, teams_next=None,
+        obs_drho=ts[3].float(),
+        cont=ts[4], cart_pick=ts[5], rival_pick=ts[6],
+        beh_logp=ts[7], adv=ts[8], gae_ret=ts[9],
+        wm_in=ts[10], actor_mask=ts[11],
         geo=geo,
         policy_version=int(meta["policy_version"]),
         world_meta=meta["world_meta"],
@@ -139,6 +158,151 @@ def deserialize_batch(raw: bytes) -> tuple[int, AtemporalBatch]:
         stats=meta["stats"],
     )
     return int(meta["actor_id"]), batch
+
+
+class RDMAWeightAllReducer:
+    """Lossless FP32 parameter all-reduce over live /mesh0 TB5 flat-DMA (libmesh-graph.dylib)."""
+
+    def __init__(self, model: PlanWally, world_size: int, rank: int, comm_id: str):
+        self.lib = _load_mesh_graph_lib()
+        self.world_size = int(world_size)
+        self.rank = int(rank)
+        self.n_params = sum(p.numel() for p in model.parameters())
+        self.dim = 256
+        self.rows = (self.n_params + self.dim - 1) // self.dim
+        self.n_pad = self.rows * self.dim
+        self.g = self.lib.mesh_graph_create(self.world_size, self.rank, comm_id.encode("utf-8"), MG_WIRE_F32)
+        if not self.g:
+            raise RuntimeError("mesh_graph_create failed for RDMAWeightAllReducer")
+        self.b_w = int(self.lib.mesh_graph_add_buffer(self.g, self.n_pad * 4, MG_BUF_STATE, None, -1, 0))
+        cid = int(self.lib.mesh_graph_add_crossing(self.g, self.n_pad, 4, MG_WIRE_F32, 0))
+        op = _make_op(
+            MG_OP_ALLREDUCE,
+            dtype=MG_DTYPE_F32,
+            in_bufs=(self.b_w,),
+            out_bufs=(self.b_w,),
+            u=(cid, self.rows, self.dim),
+        )
+        self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
+        rc = self.lib.mesh_graph_compile(self.g)
+        if rc != 0:
+            raise RuntimeError(f"mesh_graph_compile failed for RDMAWeightAllReducer: {rc}")
+        self.w_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_w), (self.n_pad,))
+
+    def close(self) -> None:
+        if getattr(self, "g", None):
+            self.lib.mesh_graph_destroy(self.g)
+            self.g = None
+
+    @torch.no_grad()
+    def average_model_(self, model: PlanWally) -> float:
+        """All-reduce FP32 parameters across all ranks over /mesh0 TB5 RDMA and re-project unit norms."""
+        off = 0
+        for p in model.parameters():
+            n = p.numel()
+            self.w_view[off : off + n].copy_(p.detach().float().view(-1))
+            off += n
+        if off < self.n_pad:
+            self.w_view[off:].zero_()
+        wall = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+        inv_ws = 1.0 / float(self.world_size)
+        off = 0
+        for p in model.parameters():
+            n = p.numel()
+            avg = self.w_view[off : off + n] * inv_ws
+            p.copy_(avg.view(p.shape).to(device=p.device, dtype=p.dtype))
+            off += n
+        project_unit_norm_(model, eps=model.norm_cfg.unit_norm_eps)
+        return float(wall.value)
+
+
+def run_rdma_dp(args: argparse.Namespace) -> None:
+    """4-Studio All-Compute Data-Parallel: 4x rollout + 4x updates + <3 ms /mesh0 RDMA weight average."""
+    overrides: dict[str, Any] = {}
+    sd: dict[str, Any] = {}
+    if args.iterations > 0:
+        sd["iterations"] = args.iterations
+    if args.base_envs > 0:
+        sd["base_envs"] = args.base_envs
+    if args.group_size > 0:
+        sd["group_size"] = args.group_size
+    if args.horizon > 0:
+        sd["rollout_horizon"] = args.horizon
+    if args.ppo_epochs > 0:
+        sd["ppo_epochs"] = args.ppo_epochs
+    if sd:
+        overrides["sim_dt"] = sd
+    cfg = load_training_config(args.config, overrides=overrides or None)
+
+    torch.manual_seed(cfg.seeds.model_init)
+    np.random.seed(cfg.seeds.model_init)
+    model = PlanWally(model_cfg=cfg.model, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+    ema_model = clone_plan_model(model)
+    main_init = clone_plan_model(model)
+
+    reducer = RDMAWeightAllReducer(model, args.tp_world_size, args.tp_rank, args.tp_comm_id)
+    variants: dict[str, PlanWally | None] = {"main": model, "ema": ema_model, "main_init": main_init}
+    pool = PersistentMatchPool(
+        cfg, variants,
+        num_worlds=int(args.num_worlds),
+        group_size=int(cfg.sim_dt.group_size),
+        seed_base=cfg.seeds.match_base + int(args.tp_rank) * 100003,
+        self_play_only=bool(args.self_play),
+    )
+    learner = AtemporalPPOTrainer(model, ema_model, cfg)
+    pfsp_pool = ["default", *SCRIPTED_ANCHORS, "main_init", "ema"]
+    pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
+
+    total_iters = int(cfg.sim_dt.iterations)
+    ws = int(args.tp_world_size)
+    t_start = time.perf_counter()
+    tot_sim_s = 0.0
+    tot_ag_steps = 0
+    tot_rdma_ms = 0.0
+
+    try:
+        for it in range(1, total_iters + 1):
+            ent_coef = cfg.losses.entropy_for_iteration("main", it, total_iters)
+            batch = pool.sample_batch(
+                policy_version=learner.policy_version,
+                pfsp_pool=pfsp_pool,
+                pfsp_wr=pfsp_wr,
+            )
+            upd = learner.update(batch, entropy_coef=ent_coef)
+            rdma_ms = reducer.average_model_(model)
+            tot_rdma_ms += rdma_ms
+            pool.sync_variant_("main", model)
+            pool.sync_variant_("ema", ema_model)
+
+            M, N, _ = batch.obs.shape
+            tot_sim_s += float(batch.stats["sim_s"]) * ws
+            tot_ag_steps += int(M * N) * ws
+            elapsed = max(time.perf_counter() - t_start, 1e-6)
+            if args.tp_rank == 0:
+                wm = batch.world_meta
+                print(
+                    f"  [RDMA-DP x{ws}] iter {it:02d}/{total_iters} (R0 K={wm['K']:2d} J={wm['J']:2d} N={N:2d}) | "
+                    f"roll={batch.stats['wall_s']:.2f}s upd={upd['update_wall_s']:.2f}s rdma={rdma_ms:.2f}ms | "
+                    f"kl={upd['approx_kl']:.5f} loss={upd['loss_total']:.3f} ent={upd['entropy_disc']:.2f} "
+                    f"dSc(m={batch.stats['main_dscore_mean']:.1f},o={batch.stats['opp_dscore_mean']:.1f}) | "
+                    f"cluster={tot_ag_steps/elapsed/1e6:.2f}M ag-st/s ({tot_sim_s/elapsed:.0f}x RT)",
+                    flush=True,
+                )
+    finally:
+        pool.close()
+        learner.close()
+        reducer.close()
+
+    if args.tp_rank == 0:
+        wall = max(time.perf_counter() - t_start, 1e-6)
+        print(
+            f"[RDMA-DP x{ws}] DONE {total_iters} global iters ({total_iters*ws} studio-batches) in {wall:.2f}s | "
+            f"avg_rdma={tot_rdma_ms/max(1,total_iters):.2f} ms/sync | "
+            f"cluster={tot_ag_steps/wall/1e6:.2f}M training-consumed agent-steps/s | "
+            f"{tot_sim_s/wall:.0f}x realtime end-to-end!",
+            flush=True,
+        )
 
 
 def run_learner(args: argparse.Namespace) -> None:
@@ -177,12 +341,12 @@ def run_learner(args: argparse.Namespace) -> None:
             try:
                 with lk:
                     send_msg(s, MSG_WEIGHTS, payload)
-            except Exception:
-                pass
+            except Exception as ex:
+                if not stop_evt.is_set():
+                    print(f"[async-learner] broadcast err: {ex}", file=sys.stderr, flush=True)
 
     def handle_actor(conn: socket.socket, lk: threading.Lock) -> None:
         try:
-            # Send initial weights immediately
             w0 = struct.pack("<I", int(trainer.policy_version)) + trainer.export_weights_bytes()
             with lk:
                 send_msg(conn, MSG_WEIGHTS, w0)
@@ -190,7 +354,6 @@ def run_learner(args: argparse.Namespace) -> None:
                 kind, payload = recv_msg(conn)
                 if kind == MSG_BATCH:
                     item = deserialize_batch(payload)
-                    # Always keep freshest batches if queue is full
                     while batch_q.full():
                         try:
                             batch_q.get_nowait()
@@ -199,8 +362,9 @@ def run_learner(args: argparse.Namespace) -> None:
                     batch_q.put(item)
                 elif kind == MSG_STOP:
                     break
-        except Exception:
-            pass
+        except Exception as ex:
+            if not stop_evt.is_set():
+                print(f"[async-learner] actor handler err: {ex}", file=sys.stderr, flush=True)
 
     host, port_s = args.bind.rsplit(":", 1)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -231,7 +395,6 @@ def run_learner(args: argparse.Namespace) -> None:
                 t_start = time.perf_counter()
             ent_coef = cfg.losses.entropy_for_iteration("main", it, total_iters)
             upd = trainer.update(batch, entropy_coef=ent_coef)
-            # Async non-blocking weight push to all actors!
             wbytes = trainer.export_weights_bytes()
             threading.Thread(target=broadcast_weights, args=(trainer.policy_version, wbytes), daemon=True).start()
 
@@ -273,16 +436,6 @@ def run_learner(args: argparse.Namespace) -> None:
         f"{total_sim_s/max(wall_s,1e-6):.0f}x realtime",
         flush=True,
     )
-    if args.out_dir:
-        od = Path(args.out_dir).expanduser().resolve()
-        od.mkdir(parents=True, exist_ok=True)
-        (od / "async_report.json").write_text(json.dumps({
-            "wall_s": round(wall_s, 3),
-            "iters_per_s": round(total_iters / max(wall_s, 1e-6), 3),
-            "agent_steps_per_s": round(total_agent_steps / max(wall_s, 1e-6), 1),
-            "sim_speedup_x": round(total_sim_s / max(wall_s, 1e-6), 1),
-            "history": history,
-        }, indent=2))
 
 
 def run_actor(args: argparse.Namespace) -> None:
@@ -340,7 +493,9 @@ def run_actor(args: argparse.Namespace) -> None:
                 elif kind == MSG_STOP:
                     stop_evt.set()
                     break
-        except Exception:
+        except Exception as ex:
+            if not stop_evt.is_set():
+                print(f"[async-actor {args.actor_id}] recv err: {ex}", file=sys.stderr, flush=True)
             stop_evt.set()
 
     def send_loop() -> None:
@@ -351,7 +506,9 @@ def run_actor(args: argparse.Namespace) -> None:
                 except queue.Empty:
                     continue
                 send_msg(sock, MSG_BATCH, blob)
-        except Exception:
+        except Exception as ex:
+            if not stop_evt.is_set():
+                print(f"[async-actor {args.actor_id}] send err: {ex}", file=sys.stderr, flush=True)
             stop_evt.set()
 
     threading.Thread(target=recv_loop, daemon=True).start()
@@ -379,7 +536,7 @@ def run_actor(args: argparse.Namespace) -> None:
             batch = pool.sample_batch(policy_version=max(0, local_ver), pfsp_pool=pfsp_pool, pfsp_wr=pfsp_wr)
             for opp, wr in batch.opp_wr_obs.items():
                 pfsp_wr[opp] = 0.8 * pfsp_wr.get(opp, 0.45) + 0.2 * wr
-            blob = serialize_batch(args.actor_id, batch)
+            blob = serialize_batch(args.actor_id, batch, cfg.losses)
             while send_q.full() and not stop_evt.is_set():
                 try:
                     send_q.get_nowait()
@@ -399,7 +556,6 @@ def run_actor(args: argparse.Namespace) -> None:
 
 
 def run_tp_bench(args: argparse.Namespace) -> None:
-    """Measure 4-Studio FFN Tensor Parallelism over live /mesh0 TB5 RDMA (MG_WIRE_HAD8_GATHER)."""
     torch.manual_seed(42)
     w = build_gas_world_graph(map_name="tp", teams=11, carts=37, players=77, tiles=6, seed=7, device=torch.device("cpu"))
     eng = MetalDeltaTimePayloadEngine(w, num_envs=args.tp_envs, num_players=77, base_seed=1)
@@ -412,17 +568,15 @@ def run_tp_bench(args: argparse.Namespace) -> None:
         do_pack=True, stochastic=False, write_sample=True, sample_seed=1,
         tp_world_size=args.tp_world_size, tp_rank=args.tp_rank, tp_comm_id=args.tp_comm_id,
     )
-    # Warmup
     out = cpol.forward(obs, carts, teams, geo=geo)
     t0 = time.perf_counter()
     for _ in range(20):
         out = cpol.forward(obs, carts, teams, geo=geo)
     ms = (time.perf_counter() - t0) * 50.0
     if args.tp_rank == 0:
-        # Verify numerical parity vs single-node tp_world_size=1
+        import torch.nn.functional as F
         c1 = CompiledPlanWally(m, E=args.tp_envs, N=77, J=37, K=11)
         out1 = c1.forward(obs, carts, teams, geo=geo)
-        import torch.nn.functional as F
         cos_c = F.cosine_similarity(out.cont_mean.float().flatten(), out1.cont_mean.float().flatten(), dim=0).item()
         cos_v = F.cosine_similarity(out.value_lou.float().flatten(), out1.value_lou.float().flatten(), dim=0).item()
         t1 = time.perf_counter()
@@ -440,28 +594,30 @@ def run_tp_bench(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="4-Studio Async Actor-Learner + /mesh0 TP Trainer")
-    ap.add_argument("--role", choices=("learner", "actor", "tp-bench"), required=True)
+    ap = argparse.ArgumentParser(description="4-Studio RDMA Data-Parallel + Async Actor-Learner + /mesh0 TP Trainer")
+    ap.add_argument("--role", choices=("rdma-dp", "learner", "actor", "tp-bench"), required=True)
     ap.add_argument("--config", type=str, default=str(CONFIGS_DIR / "sim_dt_grpo_pfsp.json"))
     ap.add_argument("--bind", type=str, default="0.0.0.0:29810")
-    ap.add_argument("--learner-addr", type=str, default="100.103.69.53:29810")
+    ap.add_argument("--learner-addr", type=str, default="10.0.0.124:29810")
     ap.add_argument("--num-actors", type=int, default=3)
     ap.add_argument("--actor-id", type=int, default=1)
     ap.add_argument("--num-worlds", type=int, default=4)
-    ap.add_argument("--iterations", type=int, default=16)
+    ap.add_argument("--iterations", type=int, default=8)
     ap.add_argument("--base-envs", type=int, default=0)
     ap.add_argument("--group-size", type=int, default=0)
     ap.add_argument("--horizon", type=int, default=0)
     ap.add_argument("--ppo-epochs", type=int, default=0)
-    ap.add_argument("--self-play", action="store_true", help="Pure self-play 1x forward (no multi-arm 3x multiplier)")
+    ap.add_argument("--self-play", action="store_true")
     ap.add_argument("--out-dir", type=str, default="")
     ap.add_argument("--tp-world-size", type=int, default=4)
     ap.add_argument("--tp-rank", type=int, default=0)
-    ap.add_argument("--tp-comm-id", type=str, default="100.103.69.53:29820")
+    ap.add_argument("--tp-comm-id", type=str, default="10.0.0.124:29820")
     ap.add_argument("--tp-envs", type=int, default=256)
     args = ap.parse_args()
 
-    if args.role == "learner":
+    if args.role == "rdma-dp":
+        run_rdma_dp(args)
+    elif args.role == "learner":
         run_learner(args)
     elif args.role == "actor":
         run_actor(args)

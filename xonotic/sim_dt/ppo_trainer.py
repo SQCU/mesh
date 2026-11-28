@@ -122,9 +122,13 @@ class AtemporalPPOTrainer:
         entities_per_env = N + J + K
         staleness = max(0, int(self.policy_version) - int(batch.policy_version))
 
-        rho_c = _team_eff_rho_flat(batch.carts, batch.teams, batch.obs, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
-        rho_n = _team_eff_rho_flat(batch.carts_next, batch.teams_next, batch.obs_next, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
-        obs_drho_f = torch.asinh(lcfg.dyn_drho_scale * (rho_n - rho_c))
+        if batch.obs_drho is not None:
+            obs_drho_f = batch.obs_drho.to(torch.float32)
+        else:
+            assert batch.obs_next is not None and batch.carts_next is not None and batch.teams_next is not None
+            rho_c = _team_eff_rho_flat(batch.carts, batch.teams, batch.obs, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
+            rho_n = _team_eff_rho_flat(batch.carts_next, batch.teams_next, batch.obs_next, partial_cp_weight=lcfg.reward.cart_partial_cp_weight)
+            obs_drho_f = torch.asinh(lcfg.dyn_drho_scale * (rho_n - rho_c))
         am_f = batch.actor_mask.to(torch.float32)
         adv_f = batch.adv.clamp(-lcfg.adv_clip, lcfg.adv_clip)
 

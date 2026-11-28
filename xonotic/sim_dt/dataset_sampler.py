@@ -37,9 +37,9 @@ class AtemporalBatch:
     obs: torch.Tensor            # [M, N, OBS_WIDTH] bf16
     carts: torch.Tensor          # [M, J, CART_WIDTH] bf16
     teams: torch.Tensor          # [M, K, TEAM_WIDTH] bf16
-    obs_next: torch.Tensor       # [M, N, OBS_WIDTH] bf16
-    carts_next: torch.Tensor     # [M, J, CART_WIDTH] bf16
-    teams_next: torch.Tensor     # [M, K, TEAM_WIDTH] bf16
+    obs_next: torch.Tensor | None  # [M, N, OBS_WIDTH] bf16 (None if obs_drho precomputed)
+    carts_next: torch.Tensor | None
+    teams_next: torch.Tensor | None
     cont: torch.Tensor           # [M, N, 11] bf16
     cart_pick: torch.Tensor      # [M, N] int16
     rival_pick: torch.Tensor     # [M, N] int16
@@ -53,6 +53,7 @@ class AtemporalBatch:
     world_meta: dict[str, int]
     opp_wr_obs: dict[str, float]
     stats: dict[str, Any]
+    obs_drho: torch.Tensor | None = None  # optional precomputed [M, N] fp32 dynamics target
 
 
 @torch.no_grad()
