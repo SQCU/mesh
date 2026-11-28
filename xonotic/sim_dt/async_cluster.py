@@ -1701,14 +1701,16 @@ def run_rdma_dp_concurrent(args: argparse.Namespace) -> None:
     lifecycle_events: list[dict[str, Any]] = []
     t_start = time.perf_counter()
 
-    def _update_synced_emas_(src_opt: Any, d_fast: float = 0.90, d_slow: float = 0.97) -> None:
+    def _update_synced_emas_(src_opt: Any, it: int, d_fast: float = 0.80, d_slow: float = 0.92) -> None:
+        df = min(d_fast, float(max(0, it - 1)) / float(it + 1))
+        ds = min(d_slow, float(max(0, it - 1)) / float(it + 2))
         with torch.no_grad():
             for (n, _), (_, pf), (_, ps) in zip(
                 src_opt.model.named_parameters(), ema_fast.named_parameters(), ema_slow.named_parameters()
             ):
                 wm = src_opt.master[n]
-                pf.copy_((d_fast * pf.float() + (1.0 - d_fast) * wm).to(pf.dtype))
-                ps.copy_((d_slow * ps.float() + (1.0 - d_slow) * wm).to(ps.dtype))
+                pf.copy_((df * pf.float() + (1.0 - df) * wm).to(pf.dtype))
+                ps.copy_((ds * ps.float() + (1.0 - ds) * wm).to(ps.dtype))
 
     def _choose_concurrent_seats(K: int, it: int) -> list[str]:
         lg = cfg.league
@@ -1804,7 +1806,7 @@ def run_rdma_dp_concurrent(args: argparse.Namespace) -> None:
                 if is_act:
                     pool.sync_variant_(arm, models_live[arm])
             if active_flags[0]:
-                _update_synced_emas_(learners["main"].opt)
+                _update_synced_emas_(learners["main"].opt, it)
                 pool.sync_variant_("ema_fast", ema_fast)
                 pool.sync_variant_("ema_slow", ema_slow)
                 alpha_ema = float(cfg.sim_dt.pfsp_update_ema)

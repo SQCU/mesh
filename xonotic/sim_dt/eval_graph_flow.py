@@ -1088,12 +1088,20 @@ def main() -> None:
             models, cfg, E_match=int(args.league_envs), H=int(args.league_horizon),
         )
 
+    top_league: list[str] = []
+    if "league_tournament" in results:
+        lt_e = results["league_tournament"]["elo_overall"]
+        top_league = [a for a in sorted(lt_e.keys(), key=lambda x: lt_e[x], reverse=True) if a != "default"][:3]
+
     if (args.diversity_eval or args.full_eval) and len(models) >= 2:
-        div_models = {a: models[a] for a in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "exp_0_final", "main_final", "ema_slow_final", "best_online") if a in models and models[a] is not None}
+        cand_div = ["main_init", "exploiter_1", "exploiter_2", "exp_f0", "exp_1_final", "main_final", "main_snap_final", "ema_fast_final", "ema_slow_final", "best_online", *top_league]
+        div_keys = list(dict.fromkeys(a for a in cand_div if a in models and models[a] is not None))
+        div_models = {a: models[a] for a in div_keys}
         results["effector_diversity"] = evaluate_effector_diversity_suite(div_models, world, cfg)
 
     if (args.pvp_elo_eval or args.full_eval) and len(models) >= 2:
-        pvp_focal = [a for a in ("main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "ema_slow_final", "best_online") if a in models and models[a] is not None]
+        cand_pvp = ["main_init", "exploiter_1", "exploiter_2", "exp_f0", "main_final", "main_snap_final", "ema_fast_final", "ema_slow_final", "best_online", *top_league]
+        pvp_focal = list(dict.fromkeys(a for a in cand_pvp if a in models and models[a] is not None))
         results["playerwise_pvp_elo"] = evaluate_playerwise_pvp_elo(models, cfg, focal_arms=pvp_focal)
 
     out_path = ckpt_dir / "graph_flow_behavior_eval.json"
