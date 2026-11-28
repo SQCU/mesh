@@ -30,6 +30,88 @@ from .metal_runtime import (
 from .world_graph import WorldGraphIR, build_gas_world_graph
 
 
+PHYSICS_DR_PROFILES: dict[str, dict[str, float]] = {
+    "baseline": {},
+    "fast": {"cart_base_speed": 45.0, "cart_max_speed": 260.0, "push_falloff": 1.0},
+    "slow": {"cart_base_speed": 20.0, "cart_max_speed": 120.0, "push_falloff": 0.5},
+    "volatile": {"contest_speed": 36.0, "reverse_speed": 24.0, "push_falloff": 0.75},
+}
+
+
+def make_rules_for_profile(point_limit_base: float, profile: str = "baseline") -> SimRulesConfig:
+    kw: dict[str, Any] = {"point_limit_base": float(point_limit_base)}
+    kw.update(PHYSICS_DR_PROFILES.get(profile, {}))
+    return SimRulesConfig(**kw)
+
+
+def sample_roster_skills(
+    rng: np.random.Generator,
+    E: int,
+    N: int,
+    K: int,
+    mode: str = "mixed_dr",
+) -> np.ndarray:
+    """Sample per-bot deathmatch mechanics skill [E, N] float32 (sk_m = clamp(1 + 0.06*skill, 0.4, 3.0)).
+
+    Modes:
+      - uniform_balanced: homogeneous lobby skill ~ U[2, 8]
+      - gaussian_lobby: lobby mean ~ U[0, 12], per-bot N(mean, 5.0)
+      - team_stacked_weak: 1-2 teams stacked with weak-mechanics bots (N(-7.5, 2.0), ~0.40-0.65x DPS)
+                           against strong/ace teams (N(+19, 2.5), ~2.0-2.4x DPS)
+      - within_team_skewed: 25% ace carries (N(+20, 2.5)) + 75% weak-mechanics teammates (N(-7.5, 2.0))
+      - mixed_dr: per-env mixture (20% balanced, 20% gaussian, 35% team_stacked_weak, 25% within_team_skewed)
+      - stacked_main_weak: deterministic eval stress — team 1 stacked weak (-8), rivals strong (+20)
+      - stacked_main_strong: deterministic eval stress — team 1 stacked strong (+20), rivals weak (-8)
+      - within_team_carry_weak: deterministic eval stress — 25% carries (+22) + 75% weak (-8) on every team
+    """
+    out = np.empty((E, N), dtype=np.float32)
+    teams_1d = (np.arange(N, dtype=np.int32) % max(1, K))  # 0..K-1
+    slot_in_team = np.arange(N, dtype=np.int32) // max(1, K)
+
+    if mode == "stacked_main_weak":
+        out[:] = np.where(teams_1d[None, :] == 0, -8.0, 20.0).astype(np.float32)
+        return out
+    if mode == "stacked_main_strong":
+        out[:] = np.where(teams_1d[None, :] == 0, 20.0, -8.0).astype(np.float32)
+        return out
+    if mode == "within_team_carry_weak":
+        is_carry = (slot_in_team % 4) == 0
+        out[:] = np.where(is_carry[None, :], 22.0, -8.0).astype(np.float32)
+        return out
+    if mode == "balanced_fixed":
+        out.fill(4.0)
+        return out
+
+    for e in range(E):
+        if mode == "mixed_dr":
+            u = float(rng.random())
+            m = "uniform_balanced" if u < 0.20 else ("gaussian_lobby" if u < 0.40 else ("team_stacked_weak" if u < 0.75 else "within_team_skewed"))
+        else:
+            m = mode
+
+        if m == "uniform_balanced":
+            out[e] = rng.uniform(2.0, 8.0, size=N).astype(np.float32)
+        elif m == "gaussian_lobby":
+            mu = float(rng.uniform(0.0, 12.0))
+            out[e] = np.clip(rng.normal(mu, 5.0, size=N), -10.0, 28.0).astype(np.float32)
+        elif m == "team_stacked_weak":
+            # Randomly stack 1..max(1, K//3) teams weak and 1..max(1, K//3) teams ace!
+            perm = rng.permutation(K)
+            n_weak = max(1, K // 3)
+            n_ace = max(1, K // 3)
+            weak_t = set(int(x) for x in perm[:n_weak])
+            ace_t = set(int(x) for x in perm[n_weak : n_weak + n_ace])
+            t_mu = np.array([-7.5 if k in weak_t else (19.0 if k in ace_t else 4.0) for k in range(K)], dtype=np.float32)
+            t_sd = np.array([2.0 if k in weak_t else (2.5 if k in ace_t else 2.5) for k in range(K)], dtype=np.float32)
+            out[e] = np.clip(rng.normal(t_mu[teams_1d], t_sd[teams_1d]), -10.0, 28.0).astype(np.float32)
+        else:  # within_team_skewed
+            is_carry = (slot_in_team % 4) == 0
+            mu = np.where(is_carry, 20.0, -7.5).astype(np.float32)
+            sd = np.where(is_carry, 2.5, 2.0).astype(np.float32)
+            out[e] = np.clip(rng.normal(mu, sd), -10.0, 28.0).astype(np.float32)
+    return out
+
+
 @dataclass
 class AtemporalBatch:
     """Flat atemporal transition dataset emitted by DatasetSampler for any PPO/value learner."""
@@ -247,6 +329,8 @@ class _WorldSlot:
         *,
         seed_base: int,
         group_size: int,
+        physics_profile: str = "baseline",
+        roster_mode: str = "mixed_dr",
     ):
         sc = cfg.sim_dt
         self.world = world
@@ -257,14 +341,19 @@ class _WorldSlot:
         self.B = int(sc.base_envs)
         self.G = max(1, int(group_size))
         self.E = self.B * self.G
-        self.rules = SimRulesConfig(point_limit_base=float(sc.point_limit_base))
+        self.physics_profile = str(physics_profile)
+        self.roster_mode = str(roster_mode)
+        self.dr_rng = np.random.default_rng(seed_base + 4242)
+        self.rules = make_rules_for_profile(float(sc.point_limit_base), self.physics_profile)
         self.geo = {"map_center": world.map_center.clone(), "map_radius": world.map_radius.clone()}
 
         # Persistent live engine (auto-resets finished envs -> continuous coverage of all match phases!)
+        n_live = self.E if self.G == 1 else self.B
         self.live_eng = MetalDeltaTimePayloadEngine(
-            world, num_envs=self.E if self.G == 1 else self.B,
+            world, num_envs=n_live,
             num_players=self.N, rules=self.rules, base_seed=seed_base,
         )
+        self.live_eng.set_skills(sample_roster_skills(self.dr_rng, n_live, self.N, self.K, self.roster_mode))
         # Optional counterfactual fork engine (allocated once and reused via O(1) memcpy!)
         self.fork_eng: MetalDeltaTimePayloadEngine | None = (
             MetalDeltaTimePayloadEngine(
@@ -312,15 +401,19 @@ class PersistentMatchPool:
         group_size: int | None = None,
         seed_base: int = 30000,
         self_play_only: bool = False,
+        roster_mode: str = "mixed_dr",
+        randomize_physics: bool = True,
     ):
         self.cfg = cfg
         self.sc = cfg.sim_dt
         self.variants = variants
         self.G = int(self.sc.group_size if group_size is None else group_size)
         self.self_play_only = bool(self_play_only)
+        self.roster_mode = str(roster_mode)
         self.rng = np.random.default_rng(seed_base + 777)
         self.slots: list[_WorldSlot] = []
         self._cursor = 0
+        phys_cycle = ("baseline", "fast", "slow", "volatile") if randomize_physics else ("baseline",)
 
         for wi in range(max(1, int(num_worlds))):
             spec = sample_world_spec(seed_base + (wi + 1) * 101, cfg.world)
@@ -335,7 +428,13 @@ class PersistentMatchPool:
                 device=torch.device("cpu"),
             )
             self.slots.append(
-                _WorldSlot(world, spec, cfg, variants, seed_base=seed_base + wi * 10009, group_size=self.G)
+                _WorldSlot(
+                    world, spec, cfg, variants,
+                    seed_base=seed_base + wi * 10009,
+                    group_size=self.G,
+                    physics_profile=phys_cycle[wi % len(phys_cycle)],
+                    roster_mode=self.roster_mode,
+                )
             )
 
         # Initialize natural staggered match progression once at pool creation (0 per-iter warmup!)
@@ -402,10 +501,14 @@ class PersistentMatchPool:
         # Choose active rollout engine (zero warmup!):
         if G > 1:
             assert slot.fork_eng is not None
-            # Auto-reset any finished base envs before counterfactual fork
+            # Auto-reset any finished base envs + resample fresh DR roster skills before counterfactual fork
             fin0 = slot.live_eng.t_finished
             if bool(fin0.any().item()):
                 slot.live_eng.reset(fin0)
+                fids = np.nonzero(fin0.numpy())[0]
+                slot.live_eng.set_skills(
+                    sample_roster_skills(slot.dr_rng, len(fids), N, K, slot.roster_mode), env_ids=fids,
+                )
             snap = slot.live_eng.snapshot()
             src = np.frombuffer(snap.data, dtype=np.uint8).reshape(B, snap.env_stride)
             slot.fork_eng._state_u8[:] = np.repeat(src, G, axis=0)
@@ -447,6 +550,10 @@ class PersistentMatchPool:
                 fin_pre = eng.t_finished
                 if bool(fin_pre.any().item()):
                     eng.reset(fin_pre)
+                    fids = np.nonzero(fin_pre.numpy())[0]
+                    eng.set_skills(
+                        sample_roster_skills(slot.dr_rng, len(fids), N, K, slot.roster_mode), env_ids=fids,
+                    )
                 was_finished = torch.zeros((E,), dtype=torch.bool)
             else:
                 was_finished = eng.t_finished.clone()

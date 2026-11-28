@@ -1279,15 +1279,36 @@ class MetalDeltaTimePayloadEngine:
             "p_pos": torch.from_numpy(u8[:, L["soff_p_pos"] : L["soff_p_pos"] + N * 12].view(np.float32).reshape(E, N, 3)),
             "p_hp": torch.from_numpy(p_f1[:, 0, :]),
             "p_respawn_t": torch.from_numpy(p_f1[:, 2, :]),
-            "p_goal_timer": torch.from_numpy(p_f1[:, 3, :]),
+            "p_skill": torch.from_numpy(p_f1[:, 4, :]),
+            "p_goal_timer": torch.from_numpy(p_f1[:, 6, :]),
+            "p_dmg_dealt": torch.from_numpy(p_f1[:, 8, :]),
+            "p_dmg_taken": torch.from_numpy(p_f1[:, 9, :]),
+            "p_kills": torch.from_numpy(p_f1[:, 10, :]),
+            "p_deaths": torch.from_numpy(p_f1[:, 11, :]),
+            "p_cart_push": torch.from_numpy(p_f1[:, 13, :]),
+            "p_cart_contest": torch.from_numpy(p_f1[:, 14, :]),
             "p_team": torch.from_numpy(p_i1[:, 0, :]),
             "p_alive": torch.from_numpy(p_i1[:, 1, :]),
-            "p_goal_cart": torch.from_numpy(p_i1[:, 6, :]),
+            "p_goal_cart": torch.from_numpy(p_i1[:, 5, :]),
             "c_pos": torch.from_numpy(u8[:, L["soff_c_pos"] : L["soff_c_pos"] + J * 12].view(np.float32).reshape(E, J, 3)),
             "c_s": torch.from_numpy(u8[:, L["soff_c_f1"] : L["soff_c_f1"] + J * 4].view(np.float32).reshape(E, J)),
             "t_score": torch.from_numpy(u8[:, L["soff_t_score"] : L["soff_t_score"] + K * 4].view(np.float32).reshape(E, K)),
             "t_cp_held": torch.from_numpy(u8[:, L["soff_t_cp_held"] : L["soff_t_cp_held"] + K * 4].view(np.int32).reshape(E, K)),
         }
+
+    def set_skills(self, skills: np.ndarray | torch.Tensor, env_ids: np.ndarray | torch.Tensor | None = None) -> None:
+        """Write per-bot deathmatch mechanics skill [E, N] or [len(env_ids), N] directly into live GPU state."""
+        L = self.layout
+        N = self.N
+        sk = skills.detach().cpu().numpy() if isinstance(skills, torch.Tensor) else np.asarray(skills)
+        sk = np.ascontiguousarray(sk, dtype=np.float32)
+        s0 = L["soff_p_f1"] + 4 * N * 4
+        s1 = s0 + N * 4
+        if env_ids is None:
+            self._state_u8[:, s0:s1].view(np.float32)[:] = sk
+        else:
+            ids = env_ids.detach().cpu().numpy() if isinstance(env_ids, torch.Tensor) else np.asarray(env_ids, dtype=np.int64)
+            self._state_u8[ids, s0:s1].view(np.float32)[:] = sk
 
     # Zero-copy state inspection properties
     @property

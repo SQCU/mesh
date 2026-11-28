@@ -249,17 +249,26 @@ def run_rdma_dp(args: argparse.Namespace) -> None:
         group_size=int(cfg.sim_dt.group_size),
         seed_base=cfg.seeds.match_base + int(args.tp_rank) * 100003,
         self_play_only=bool(args.self_play),
+        roster_mode=str(args.roster_mode),
+        randomize_physics=not bool(args.no_physics_dr),
     )
     learner = AtemporalPPOTrainer(model, ema_model, cfg)
     pfsp_pool = ["default", *SCRIPTED_ANCHORS, "main_init", "ema"]
     pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
 
     total_iters = int(cfg.sim_dt.iterations)
+    mid_iter = max(1, total_iters // 2)
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
+    if out_dir is not None and args.tp_rank == 0:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+
     ws = int(args.tp_world_size)
     t_start = time.perf_counter()
     tot_sim_s = 0.0
     tot_ag_steps = 0
     tot_rdma_ms = 0.0
+    history: list[dict[str, Any]] = []
 
     try:
         for it in range(1, total_iters + 1):
@@ -275,20 +284,33 @@ def run_rdma_dp(args: argparse.Namespace) -> None:
             pool.sync_variant_("main", model)
             pool.sync_variant_("ema", ema_model)
 
+            alpha_ema = float(cfg.sim_dt.pfsp_update_ema)
+            for opp_arm, wr_val in batch.opp_wr_obs.items():
+                prev = pfsp_wr.get(opp_arm, float(cfg.league.pfsp_default_winrate))
+                pfsp_wr[opp_arm] = alpha_ema * prev + (1.0 - alpha_ema) * float(wr_val)
+
+            if it == mid_iter and out_dir is not None and args.tp_rank == 0:
+                torch.save(model.state_dict(), out_dir / "main_mid.pt")
+
             M, N, _ = batch.obs.shape
             tot_sim_s += float(batch.stats["sim_s"]) * ws
             tot_ag_steps += int(M * N) * ws
             elapsed = max(time.perf_counter() - t_start, 1e-6)
             if args.tp_rank == 0:
                 wm = batch.world_meta
-                print(
-                    f"  [RDMA-DP x{ws}] iter {it:02d}/{total_iters} (R0 K={wm['K']:2d} J={wm['J']:2d} N={N:2d}) | "
-                    f"roll={batch.stats['wall_s']:.2f}s upd={upd['update_wall_s']:.2f}s rdma={rdma_ms:.2f}ms | "
-                    f"kl={upd['approx_kl']:.5f} loss={upd['loss_total']:.3f} ent={upd['entropy_disc']:.2f} "
-                    f"dSc(m={batch.stats['main_dscore_mean']:.1f},o={batch.stats['opp_dscore_mean']:.1f}) | "
-                    f"cluster={tot_ag_steps/elapsed/1e6:.2f}M ag-st/s ({tot_sim_s/elapsed:.0f}x RT)",
-                    flush=True,
-                )
+                history.append({"iter": it, "world": wm, "rollout": batch.stats, "update": upd, "rdma_ms": round(rdma_ms, 2)})
+                if it == 1 or it % max(1, args.log_every) == 0 or it == total_iters:
+                    print(
+                        f"  [RDMA-DP x{ws} dr={args.roster_mode}] iter {it:02d}/{total_iters} (R0 K={wm['K']:2d} J={wm['J']:2d} N={N:2d}) | "
+                        f"roll={batch.stats['wall_s']:.2f}s upd={upd['update_wall_s']:.2f}s rdma={rdma_ms:.1f}ms | "
+                        f"kl={upd['approx_kl']:.5f} loss={upd['loss_total']:.3f} ent={upd['entropy_disc']:.2f} "
+                        f"dSc(m={batch.stats['main_dscore_mean']:.1f},o={batch.stats['opp_dscore_mean']:.1f}) | "
+                        f"cluster={tot_ag_steps/elapsed/1e6:.2f}M ag-st/s ({tot_sim_s/elapsed:.0f}x RT)",
+                        flush=True,
+                    )
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(model.state_dict(), out_dir / "main_final.pt")
+            torch.save(ema_model.state_dict(), out_dir / "ema_final.pt")
     finally:
         pool.close()
         learner.close()
@@ -296,11 +318,25 @@ def run_rdma_dp(args: argparse.Namespace) -> None:
 
     if args.tp_rank == 0:
         wall = max(time.perf_counter() - t_start, 1e-6)
+        summary = {
+            "world_size": ws,
+            "roster_mode": args.roster_mode,
+            "physics_dr": not bool(args.no_physics_dr),
+            "total_iters": total_iters,
+            "total_studio_batches": total_iters * ws,
+            "wall_s": round(wall, 2),
+            "avg_rdma_ms": round(tot_rdma_ms / max(1, total_iters), 2),
+            "agent_steps_total": int(tot_ag_steps),
+            "agent_steps_per_s": round(tot_ag_steps / wall, 1),
+            "sim_speedup_x": round(tot_sim_s / wall, 1),
+            "history": history,
+        }
+        if out_dir is not None:
+            (out_dir / "train_report.json").write_text(json.dumps(summary, indent=2))
         print(
-            f"[RDMA-DP x{ws}] DONE {total_iters} global iters ({total_iters*ws} studio-batches) in {wall:.2f}s | "
-            f"avg_rdma={tot_rdma_ms/max(1,total_iters):.2f} ms/sync | "
-            f"cluster={tot_ag_steps/wall/1e6:.2f}M training-consumed agent-steps/s | "
-            f"{tot_sim_s/wall:.0f}x realtime end-to-end!",
+            f"[RDMA-DP x{ws}] DONE {total_iters} global iters ({total_iters*ws} studio-batches, {tot_ag_steps/1e6:.1f}M ag-steps) in {wall:.2f}s | "
+            f"avg_rdma={tot_rdma_ms/max(1,total_iters):.1f}ms | "
+            f"cluster={tot_ag_steps/wall/1e6:.2f}M training-consumed ag-st/s | {tot_sim_s/wall:.0f}x RT!",
             flush=True,
         )
 
@@ -608,6 +644,9 @@ def main() -> None:
     ap.add_argument("--horizon", type=int, default=0)
     ap.add_argument("--ppo-epochs", type=int, default=0)
     ap.add_argument("--self-play", action="store_true")
+    ap.add_argument("--roster-mode", type=str, default="mixed_dr")
+    ap.add_argument("--no-physics-dr", action="store_true")
+    ap.add_argument("--log-every", type=int, default=4)
     ap.add_argument("--out-dir", type=str, default="")
     ap.add_argument("--tp-world-size", type=int, default=4)
     ap.add_argument("--tp-rank", type=int, default=0)
