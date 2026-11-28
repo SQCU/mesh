@@ -34,10 +34,31 @@ class WorldGraphIR:
     spawn_wp: torch.Tensor        # [K, S_sp] int64
     map_center: torch.Tensor      # [3] float32
     map_radius: torch.Tensor      # [] float32
+    # Directed V-cell navigation graph (afferent + efferent spatial substrate)
+    wp_to_nav: torch.Tensor       # [V] int64
+    nav_rep_wp: torch.Tensor      # [W_nav] int64
+    nav_pos: torch.Tensor         # [W_nav, 3] float32
+    nav_degree: torch.Tensor      # [W_nav] float32
+    nav_dist: torch.Tensor        # [W_nav, W_nav] float32
+    nav_kern: torch.Tensor        # [W_nav, W_nav] float32 (row-normalized directed graph kernel)
+    # Interactive pickups anchored to waypoints (0=MegaHP, 1=Armor, 2=Rocket, 3=Strength/Quad)
+    item_wp: torch.Tensor         # [I_item] int64
+    item_nav: torch.Tensor        # [I_item] int64
+    item_pos: torch.Tensor        # [I_item, 3] float32
+    item_kind: torch.Tensor       # [I_item] int64
+    item_respawn: torch.Tensor    # [I_item] float32
 
     @property
     def num_waypoints(self) -> int:
         return int(self.wp_pos.shape[0])
+
+    @property
+    def num_nav(self) -> int:
+        return int(self.nav_pos.shape[0])
+
+    @property
+    def num_items(self) -> int:
+        return int(self.item_wp.shape[0])
 
     @property
     def max_checkpoints(self) -> int:
@@ -72,6 +93,17 @@ class WorldGraphIR:
             spawn_wp=self.spawn_wp.to(dev),
             map_center=self.map_center.to(dev),
             map_radius=self.map_radius.to(dev),
+            wp_to_nav=self.wp_to_nav.to(dev),
+            nav_rep_wp=self.nav_rep_wp.to(dev),
+            nav_pos=self.nav_pos.to(dev),
+            nav_degree=self.nav_degree.to(dev),
+            nav_dist=self.nav_dist.to(dev),
+            nav_kern=self.nav_kern.to(dev),
+            item_wp=self.item_wp.to(dev),
+            item_nav=self.item_nav.to(dev),
+            item_pos=self.item_pos.to(dev),
+            item_kind=self.item_kind.to(dev),
+            item_respawn=self.item_respawn.to(dev),
         )
 
 
@@ -202,6 +234,79 @@ def _compile_world_graph(
     center = 0.5 * (mn + mx)
     radius = max(256.0, float(0.5 * np.linalg.norm(mx - mn)))
 
+    # Build coarse directed V-cell navigation graph via geodesic farthest-point seeding (W_nav <= 48)
+    w_nav = max(4, min(48, min(v, max(8, int(round(v / 5.0))))))
+    d_center = np.sum((wp_pos_np - center[None, :]) ** 2, axis=-1)
+    seeds: list[int] = [int(np.argmin(d_center))]
+    min_d = dist_np[:, seeds[0]].copy()
+    for _ in range(1, w_nav):
+        nxt_s = int(np.argmax(min_d))
+        seeds.append(nxt_s)
+        min_d = np.minimum(min_d, dist_np[:, nxt_s])
+    nav_rep_wp_np = np.asarray(seeds, dtype=np.int64)
+    wp_to_nav_np = np.argmin(dist_np[:, nav_rep_wp_np], axis=1).astype(np.int64)
+
+    nav_pos_np = np.zeros((w_nav, 3), dtype=np.float32)
+    for ni in range(w_nav):
+        members = np.nonzero(wp_to_nav_np == ni)[0]
+        nav_pos_np[ni] = wp_pos_np[members].mean(axis=0) if len(members) > 0 else wp_pos_np[nav_rep_wp_np[ni]]
+    nav_dist_np = dist_np[np.ix_(nav_rep_wp_np, nav_rep_wp_np)].astype(np.float32)
+    nav_adj = np.eye(w_nav, dtype=np.float32)
+    for a, b in edges:
+        if 0 <= a < v and 0 <= b < v:
+            na, nb = int(wp_to_nav_np[a]), int(wp_to_nav_np[b])
+            nav_adj[na, nb] = 1.0
+            nav_adj[nb, na] = 1.0
+    # Ensure every nav-node has at least 2 neighbors via geodesic fallback
+    for ni in range(w_nav):
+        if nav_adj[ni].sum() <= 1.5 and w_nav > 1:
+            order = np.argsort(nav_dist_np[ni])
+            for nb in order[1 : min(3, w_nav)]:
+                nav_adj[ni, nb] = 1.0
+                nav_adj[nb, ni] = 1.0
+    nav_deg_np = np.maximum(nav_adj.sum(axis=1) - 1.0, 1.0).astype(np.float32)
+    edge_dists = nav_dist_np[(nav_adj > 0.5) & (nav_dist_np > 1e-3)]
+    lam_g = float(max(450.0, 0.75 * np.median(edge_dists))) if edge_dists.size > 0 else 600.0
+    raw_kern = nav_adj * np.exp(-nav_dist_np / lam_g).astype(np.float32)
+    nav_kern_np = (raw_kern / np.maximum(raw_kern.sum(axis=1, keepdims=True), 1e-6)).astype(np.float32)
+
+    # Place interactive pickups (0=MegaHP, 1=LargeArmor, 2=Rocket, 3=Strength/Quad) on ~42% of nav-nodes
+    # so the remaining ~58% are pure tactical/flank/vantage waypoints on the directed nav graph.
+    n_items = max(4, min(32, int(round(w_nav * 0.42))))
+    item_wp_list: list[int] = []
+    item_nav_list: list[int] = []
+    item_pos_list: list[np.ndarray] = []
+    item_kind_list: list[int] = []
+    item_resp_list: list[float] = []
+    resp_by_kind = (20.0, 20.0, 12.0, 45.0)
+    # Order nav nodes by proximity to map center so Strength/Quad lands in central contested zones,
+    # then stride across the remaining nav nodes so pickups are spatially distributed.
+    nav_order = np.argsort(np.linalg.norm(nav_pos_np - center[None, :], axis=-1))
+    n_quad = max(1, n_items // 6)
+    chosen_navs = list(nav_order[:n_quad])
+    rem_navs = nav_order[n_quad:]
+    need = n_items - len(chosen_navs)
+    if need > 0 and len(rem_navs) > 0:
+        pick_idx = np.linspace(0, len(rem_navs) - 1, num=min(need, len(rem_navs)), dtype=np.int64)
+        chosen_navs.extend(int(rem_navs[k]) for k in pick_idx)
+    for idx_i, ni in enumerate(chosen_navs):
+        if idx_i < n_quad:
+            kind = 3
+        else:
+            kind = (idx_i - n_quad) % 3  # balanced MegaHP, LargeArmor, Rocket across the map
+        w_id = int(nav_rep_wp_np[ni])
+        item_wp_list.append(w_id)
+        item_nav_list.append(int(ni))
+        item_pos_list.append(wp_pos_np[w_id])
+        item_kind_list.append(kind)
+        item_resp_list.append(resp_by_kind[kind])
+
+    item_wp_np = np.asarray(item_wp_list, dtype=np.int64)
+    item_nav_np = np.asarray(item_nav_list, dtype=np.int64)
+    item_pos_np = np.asarray(item_pos_list, dtype=np.float32)
+    item_kind_np = np.asarray(item_kind_list, dtype=np.int64)
+    item_resp_np = np.asarray(item_resp_list, dtype=np.float32)
+
     dev = torch.device(device)
     return WorldGraphIR(
         name=name,
@@ -226,6 +331,17 @@ def _compile_world_graph(
         spawn_wp=torch.from_numpy(spawn_wp_np).to(dev),
         map_center=torch.from_numpy(center.astype(np.float32)).to(dev),
         map_radius=torch.tensor(radius, dtype=torch.float32, device=dev),
+        wp_to_nav=torch.from_numpy(wp_to_nav_np).to(dev),
+        nav_rep_wp=torch.from_numpy(nav_rep_wp_np).to(dev),
+        nav_pos=torch.from_numpy(nav_pos_np).to(dev),
+        nav_degree=torch.from_numpy(nav_deg_np).to(dev),
+        nav_dist=torch.from_numpy(nav_dist_np).to(dev),
+        nav_kern=torch.from_numpy(nav_kern_np).to(dev),
+        item_wp=torch.from_numpy(item_wp_np).to(dev),
+        item_nav=torch.from_numpy(item_nav_np).to(dev),
+        item_pos=torch.from_numpy(item_pos_np).to(dev),
+        item_kind=torch.from_numpy(item_kind_np).to(dev),
+        item_respawn=torch.from_numpy(item_resp_np).to(dev),
     )
 
 

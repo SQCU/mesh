@@ -1255,6 +1255,7 @@ inline void simdt_fwht64_pair(thread float& a, thread float& b, uint lane) {
 
 struct SimWorldHeader {
   uint E, N, J, K, CP, V, S_max, M_s, S_sp, push_cap;
+  uint W_nav, I_item, A_dim;
   // Byte offsets into world_buf for each static table:
   uint off_wp_pos;          // [V, 3] f32
   uint off_wp_dist;         // [V, V] f32
@@ -1272,21 +1273,33 @@ struct SimWorldHeader {
   uint off_spawn_pos;       // [K, S_sp, 3] f32
   uint off_spawn_wp;        // [K, S_sp] i32
   uint off_push_lut;        // [push_cap + 1] f32
+  uint off_wp_to_nav;       // [V] i32
+  uint off_nav_rep_wp;      // [W_nav] i32
+  uint off_nav_pos;         // [W_nav, 3] f32
+  uint off_nav_degree;      // [W_nav] f32
+  uint off_item_wp;         // [I_item] i32
+  uint off_item_nav;        // [I_item] i32
+  uint off_item_pos;        // [I_item, 3] f32
+  uint off_item_kind;       // [I_item] i32
+  uint off_item_respawn;    // [I_item] f32
   // Per-env state stride & byte offsets inside each env slice of state_buf:
   uint env_stride;
   uint soff_meta;           // 8*4B: sim_time(f32), step_count(u64), seed(u64), finished(u32), winner(i32), pad
   uint soff_p_pos;          // [N, 3] f32
   uint soff_p_vel;          // [N, 3] f32
-  uint soff_p_f1;           // 14 * [N] f32: hp, armor, respawn_t, spawn_t, skill, edge_rem, goal_timer, replan_timer, dmg_dealt, dmg_taken, kills, deaths, pickups, cart_push, cart_contest (15 * N f32!)
-  uint soff_p_i1;           // 7 * [N] i32: team, alive, wp_cur, wp_next, wp_goal, goal_cart, last_pick, has_plan (8 * N i32!)
-  uint soff_p_plan;         // [N, 16] f32
+  uint soff_p_f1;           // 17 * [N] f32: hp..cart_contest (0..14), rockets (15), strength_t (16)
+  uint soff_p_i1;           // 8 * [N] i32: team, alive, wp_cur, wp_next, wp_goal, goal_tgt, goal_kind, ctrl_mode
+  uint soff_p_plan;         // [N, 16] f32 (legacy compat)
   uint soff_c_f1;           // 3 * [J] f32: c_s, c_speed, c_idle
   uint soff_c_pos;          // [J, 3] f32
   uint soff_c_i1;           // 5 * [J] i32: c_ctrl, c_lead, c_second, c_home, c_cp_depth
   uint soff_c_cp_owner;     // [J, CP] i32
   uint soff_t_score;        // [K] f32
   uint soff_t_cp_held;      // [K] i32
-  // SimRulesConfig floats (22 floats):
+  uint soff_item_cd;        // [I_item] f32
+  uint soff_p_r_acc;        // [N, A_dim] f32 (exponential-relaxation steering accumulator r(t))
+  uint soff_p_u_vel;        // [N, A_dim] f32 (held steering velocity u(t))
+  // SimRulesConfig floats (18 floats):
   float point_limit;
   float checkpoint_rate;
   float cart_base_speed;
@@ -1310,12 +1323,13 @@ struct SimWorldHeader {
 struct SimStepCfg {
   float dt;
   float dt_ref;
+  float tau_rel;       // exponential relaxation time constant (s), e.g. 2.5
   uint mode;           // 0=analytic, 1=substep, 2=adaptive
   uint reset_outcomes; // 0 or 1
-  uint apply_plan;     // 0 or 1
+  uint apply_plan;     // 0 or 1 (legacy)
   uint has_active_mask;// 0 or 1
   uint record_traj;    // 0 or 1
-  uint pad;
+  uint apply_vel;      // 0 or 1 (state-space velocity steering)
 };
 
 inline float3 eval_cart_pos_dev(
@@ -1354,21 +1368,22 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
 [[kernel]] void mg_simdt_step(
     const device uchar* wb [[buffer(0)]],
     device uchar* sb [[buffer(1)]],
-    const device float* p_plan_in [[buffer(2)]],    // [E, N, 16]
+    const device float* p_plan_in [[buffer(2)]],    // [E, N, 16] legacy
     const device SimStepCfg* cfg_ptr [[buffer(3)]],
     const device uchar* active_mask [[buffer(4)]],  // [E, N] optional
     device float* traj_out [[buffer(5)]],           // [H, E, 2+K] optional
     constant uint* u [[buffer(6)]],                 // [step_idx]
+    const device float* p_vel_in [[buffer(7)]],     // [E, N, A_dim] velocity steering
     uint tid [[thread_index_in_threadgroup]],
     uint e [[threadgroup_position_in_grid]]) {
   const device SimWorldHeader& W = *(const device SimWorldHeader*)wb;
   if (e >= W.E) return;
   const SimStepCfg cfg = *cfg_ptr;
-  const uint N = W.N, J = W.J, K = W.K, CP = W.CP;
+  const uint N = W.N, J = W.J, K = W.K, CP = W.CP, W_nav = W.W_nav, I_item = W.I_item, A_dim = W.A_dim;
   device uchar* es = sb + ulong(e) * W.env_stride;
 
   // Unpack per-env pointers
-  device uint*  e_meta = (device uint*)(es + W.soff_meta); // [0]=sim_time(bits), [1..2]=step_count(u64), [3..4]=seed(u64), [5]=finished, [6]=winner
+  device uint*  e_meta = (device uint*)(es + W.soff_meta);
   device float* p_pos  = (device float*)(es + W.soff_p_pos);
   device float* p_vel  = (device float*)(es + W.soff_p_vel);
   device float* p_f1   = (device float*)(es + W.soff_p_f1);
@@ -1380,27 +1395,35 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
   device int*   c_cpo  = (device int*)(es + W.soff_c_cp_owner);
   device float* t_sc   = (device float*)(es + W.soff_t_score);
   device int*   t_cph  = (device int*)(es + W.soff_t_cp_held);
+  device float* item_cd = (device float*)(es + W.soff_item_cd);
+  device float* p_r_acc = (device float*)(es + W.soff_p_r_acc);
+  device float* p_u_vel = (device float*)(es + W.soff_p_u_vel);
 
-  // p_f1 channels: 0:hp, 1:armor, 2:respawn_t, 3:spawn_t, 4:skill, 5:edge_rem, 6:goal_timer, 7:replan_timer,
-  //                8:dmg_dealt, 9:dmg_taken, 10:kills, 11:deaths, 12:pickups, 13:cart_push, 14:cart_contest
-  // p_i1 channels: 0:team, 1:alive, 2:wp_cur, 3:wp_next, 4:wp_goal, 5:goal_cart, 6:last_pick, 7:has_plan
-  // c_f1 channels: 0:c_s, 1:c_speed, 2:c_idle
-  // c_i1 channels: 0:c_ctrl, 1:c_lead, 2:c_second, 3:c_home, 4:c_cp_depth
-
-  // Step 0a: Apply plan if requested
-  if (cfg.apply_plan && tid < N) {
+  // Step 0a: Apply velocity steering OR legacy plan if requested
+  if (cfg.apply_vel && tid < N && A_dim > 0u) {
+    const device float* vin = p_vel_in + (ulong(e) * N + tid) * ulong(A_dim);
+    device float* u_dst = p_u_vel + ulong(tid) * ulong(A_dim);
+    const bool valid = cfg.has_active_mask ? (active_mask[ulong(e) * N + tid] != 0u) : true;
+    const int my_t0 = p_i1[0u * N + tid] - 1;
+    if (valid) {
+      for (uint a = 0; a < A_dim; a++) {
+        float v = vin[a];
+        if (a >= W_nav && a < W_nav + K && int(a - W_nav) == my_t0) v = 0.0f;
+        u_dst[a] = clamp(v, -8.0f, 8.0f);
+      }
+      p_i1[7u * N + tid] = 2;
+    } else {
+      // Unsteered bot: zero velocity so any residual decays smoothly to stock HavocBot (r -> 0)
+      for (uint a = 0; a < A_dim; a++) u_dst[a] = 0.0f;
+      if (p_i1[7u * N + tid] == 1) p_i1[7u * N + tid] = 0;
+    }
+  } else if (cfg.apply_plan && tid < N) {
     const device float* pl = p_plan_in + (ulong(e) * N + tid) * 16ul;
     const bool valid = cfg.has_active_mask ? (active_mask[ulong(e) * N + tid] != 0u) : (pl[0] > 0.0f);
     if (valid) {
       for (uint q = 0; q < 16u; q++) p_plan[tid * 16u + q] = pl[q];
     }
     p_i1[7u * N + tid] = valid ? 1 : 0;
-    const int pick_tag = int(floor(pl[1])) + 1;
-    if (valid && p_i1[6u * N + tid] != pick_tag && p_f1[7u * N + tid] <= 0.0f) {
-      p_i1[6u * N + tid] = pick_tag;
-      p_f1[7u * N + tid] = W.plan_replan_hysteresis;
-      p_f1[6u * N + tid] = min(p_f1[6u * N + tid], 0.35f);
-    }
   }
 
   // Step 0b: Reset outcomes if requested
@@ -1408,10 +1431,12 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     for (uint ch = 8u; ch <= 14u; ch++) p_f1[ch * N + tid] = 0.0f;
   }
 
-  // Threadgroup SRAM mirrors (~16.1 KB total; supports N<=128, J<=64, K<=16, CP<=16)
+  // Threadgroup SRAM mirrors (~17 KB total; supports N<=128, J<=64, K<=16, CP<=16, I_item<=64)
   threadgroup float sh_p_pos[128 * 3];
   threadgroup int   sh_p_team[128];
   threadgroup uchar sh_p_alive[128];
+  threadgroup int   sh_p_wp[128];
+  threadgroup float sh_p_hp[128];
   threadgroup int   sh_p_tgt[128];
   threadgroup float sh_p_dmg[128];
   threadgroup float sh_c_pos[64 * 3];
@@ -1424,6 +1449,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
   threadgroup float sh_w_jk[64 * 16];
   threadgroup float sh_dpts[64 * 16];
   threadgroup short sh_cph[64 * 16];
+  threadgroup float sh_item_cd[64];
   threadgroup float sh_t_score[16];
   threadgroup int   sh_t_cph[16];
   threadgroup float sh_dt_eff;
@@ -1443,6 +1469,8 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     sh_p_pos[tid * 3u + 2u] = p_pos[tid * 3u + 2u];
     sh_p_team[tid] = p_i1[0u * N + tid];
     sh_p_alive[tid] = uchar(p_i1[1u * N + tid] != 0);
+    sh_p_wp[tid] = p_i1[2u * N + tid];
+    sh_p_hp[tid] = p_f1[0u * N + tid];
   }
   if (tid < J) {
     sh_c_s[tid] = c_f1[0u * J + tid];
@@ -1450,6 +1478,9 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     sh_c_pos[tid * 3u + 1u] = c_pos[tid * 3u + 1u];
     sh_c_pos[tid * 3u + 2u] = c_pos[tid * 3u + 2u];
     sh_c_ctrl[tid] = c_i1[0u * J + tid];
+  }
+  if (tid < I_item) {
+    sh_item_cd[tid] = item_cd[tid];
   }
   if (tid < K) {
     sh_t_score[tid] = t_sc[tid];
@@ -1510,6 +1541,14 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
   const device float* w_wp_pos = (const device float*)(wb + W.off_wp_pos);
   const device float* w_sp_pos = (const device float*)(wb + W.off_spawn_pos);
   const device int*   w_sp_wp  = (const device int*)(wb + W.off_spawn_wp);
+  const device int*   w_wp_nav = (const device int*)(wb + W.off_wp_to_nav);
+  const device int*   w_nav_wp = (const device int*)(wb + W.off_nav_rep_wp);
+  const device int*   w_it_wp  = (const device int*)(wb + W.off_item_wp);
+  const device int*   w_it_nav = (const device int*)(wb + W.off_item_nav);
+  const device float* w_it_pos = (const device float*)(wb + W.off_item_pos);
+  const device int*   w_it_knd = (const device int*)(wb + W.off_item_kind);
+  const device float* w_it_rsp = (const device float*)(wb + W.off_item_respawn);
+  const float tau_rel = max(cfg.tau_rel > 0.0f ? cfg.tau_rel : 2.5f, 0.1f);
 
   for (uint sub = 0; sub < sh_n_sub; sub++) {
     // 1. _integrate_score
@@ -1674,6 +1713,9 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       // if ds_pos > 0 then s_new > s_prev >= 0 so regressed is ALWAYS false! Thus final_ctrl == color whenever ds_pos > 0!
       sh_c_wp[j] = cart_nearest_wp_dev(j, s_new, wb, W);
     }
+    if (tid < I_item) {
+      sh_item_cd[tid] = max(sh_item_cd[tid] - dt_eff, 0.0f);
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Team score post-crossing update + cp_held sum
@@ -1731,67 +1773,154 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         if (cont_any) p_f1[14u * N + p] += dt_eff;
       }
 
-      // 3. _select_goals
+      // 3. Exact exponential-relaxation state-space integrator r(t+dt) = e^{-dt/tau}*r + tau*(1-e^{-dt/tau})*u
+      const int ctrl_mode = p_i1[7u * N + p];
+      device float* r_acc = p_r_acc + ulong(p) * ulong(A_dim);
+      const device float* u_vel = p_u_vel + ulong(p) * ulong(A_dim);
+      if (A_dim > 0u && dt_eff > 0.0f) {
+        const float decay = exp(-dt_eff / tau_rel);
+        const float gain = tau_rel * (1.0f - decay);
+        for (uint a = 0; a < A_dim; a++) {
+          float uv = (ctrl_mode == 2) ? u_vel[a] : 0.0f;
+          r_acc[a] = clamp(decay * r_acc[a] + gain * uv, -5.0f, 5.0f);
+        }
+      }
+      // Tick down Strength/Quad timer (item cooldowns already updated before barrier)
+      float str_t = max(p_f1[16u * N + p] - dt_eff, 0.0f);
+      p_f1[16u * N + p] = str_t;
+
+      // 3b. Full Stock HavocBot Goal Selection over Directed Waypoint Graph (+ smooth residual r(t))
       float gtimer = max(p_f1[6u * N + p] - dt_eff, 0.0f);
       float rtimer = max(p_f1[7u * N + p] - dt_eff, 0.0f);
       p_f1[7u * N + p] = rtimer;
       int wp_cur = p_i1[2u * N + p];
       int wp_next = p_i1[3u * N + p];
       int wp_goal = p_i1[4u * N + p];
-      int goal_cart = p_i1[5u * N + p];
-      const bool has_plan = (p_i1[7u * N + p] != 0);
+      int goal_tgt = p_i1[5u * N + p];
+      int goal_kind = p_i1[6u * N + p];
+      const bool has_legacy_plan = (ctrl_mode == 1);
+      const bool use_acc = (A_dim >= W_nav + K + 4u) && (ctrl_mode != 1);
       const device float* pl = p_plan + ulong(p) * 16ul;
 
+      const float r_cart_sc = use_acc ? r_acc[W_nav + K + 0u] : 0.0f;
+      const float r_item_sc = use_acc ? r_acc[W_nav + K + 1u] : 0.0f;
+      const float r_en_sc   = use_acc ? r_acc[W_nav + K + 2u] : 0.0f;
+
       if (alive && gtimer <= 0.0f) {
-        const uint etof = p + 1u;
-        const uint arch = etof % 4u;
-        const uint pref_c = etof % max(1u, J);
-        const int plan_pick = clamp(int(floor(pl[1])), -1, int(J) - 1);
         float best_r = -1e30f;
-        int best_j = 0;
+        int best_tgt = 0;
+        int best_kind = 0;
+        int best_wp = sh_c_wp[0];
+
+        // (a) All J carts (at waypoint sh_c_wp[j], nav-node w_wp_nav[sh_c_wp[j]])
+        const int plan_pick = has_legacy_plan ? clamp(int(floor(pl[1])), -1, int(J) - 1) : -1;
         for (uint j = 0; j < J; j++) {
           const int cc = sh_c_ctrl[j];
           const float cs = sh_c_s[j];
           const float cl = w_c_len[j];
-          float w = 0.0f;
-          if (cc == p_team) {
-            w = (cs < cl * 0.98f) ? ((arch == 0u) ? 2.0f : 1.3f) : 0.4f;
-          } else if (cc > 0) {
-            w = (arch == 1u) ? 2.4f : 1.7f;
-          } else {
-            w = (arch == 0u || arch == 3u) ? 1.8f : 1.4f;
-          }
-          if (has_plan) {
-            float uv = 0.0f;
-            if (J <= 3u) uv = (j == 0u) ? pl[2] : ((j == 1u) ? pl[3] : pl[4]);
-            else uv = (plan_pick >= 0 && int(j) == plan_pick) ? pl[2] : pl[3];
-            float pm = exp(clamp(uv, -2.0f, 2.0f)) * ((plan_pick >= 0 && int(j) == plan_pick) ? 2.2f : 1.0f);
-            w *= pm;
-          } else {
-            w *= (j == pref_c) ? 1.35f : 1.0f;
-          }
+          float w = (cc == p_team) ? ((cs < cl * 0.98f) ? 1.8f : 0.4f) : ((cc > 0) ? 1.8f : 1.6f);
           const int cwp = sh_c_wp[j];
+          if (has_legacy_plan) {
+            float uv = (J <= 3u) ? ((j == 0u) ? pl[2] : ((j == 1u) ? pl[3] : pl[4]))
+                                 : ((plan_pick >= 0 && int(j) == plan_pick) ? pl[2] : pl[3]);
+            w *= exp(clamp(uv, -2.0f, 2.0f)) * ((plan_pick >= 0 && int(j) == plan_pick) ? 2.2f : 1.0f);
+          } else if (use_acc) {
+            const uint v_j = uint(clamp(w_wp_nav[cwp], 0, int(W_nav) - 1));
+            w *= exp(clamp(r_cart_sc + r_acc[v_j], -4.0f, 4.0f));
+          }
           const float dg = w_wp_d[ulong(wp_cur) * W.V + uint(cwp)];
           const float rat = w / (dg + 250.0f);
-          if (rat > best_r) { best_r = rat; best_j = int(j); }
+          if (rat > best_r) { best_r = rat; best_tgt = int(j); best_kind = 0; best_wp = cwp; }
         }
-        goal_cart = best_j;
-        float plan_ds = clamp(pl[10], -600.0f, 600.0f);
-        float chosen_s = sh_c_s[goal_cart];
-        float chosen_len = w_c_len[goal_cart];
-        float target_s = (has_plan && fabs(plan_ds) > 120.0f) ? clamp(chosen_s + plan_ds, 0.0f, chosen_len) : chosen_s;
-        wp_goal = cart_nearest_wp_dev(uint(goal_cart), target_s, wb, W);
+
+        // (b) All I_item available pickups (MegaHP, Armor, Rockets, Strength/Quad)
+        const float cur_hp = p_f1[0u * N + p];
+        const float cur_arm = p_f1[1u * N + p];
+        const float cur_rck = p_f1[15u * N + p];
+        for (uint m = 0; m < I_item; m++) {
+          if (sh_item_cd[m] > 1.5f) continue; // only route to ready or imminent (<1.5s) items
+          const int knd = w_it_knd[m];
+          float w = 0.0f;
+          if (knd == 0) w = 1.9f * clamp((150.0f - cur_hp) / 100.0f, 0.10f, 1.4f);
+          else if (knd == 1) w = 1.6f * clamp((130.0f - cur_arm) / 100.0f, 0.10f, 1.4f);
+          else if (knd == 2) w = (cur_rck < 5.0f) ? 1.7f : 0.35f;
+          else w = 2.8f; // Strength/Quad powerup
+          if (sh_item_cd[m] > 0.0f) w *= exp(-0.5f * sh_item_cd[m]);
+          if (use_acc) {
+            const uint v_m = uint(clamp(w_it_nav[m], 0, int(W_nav) - 1));
+            w *= exp(clamp(r_item_sc + r_acc[v_m], -4.0f, 4.0f));
+          }
+          const int iwp = w_it_wp[m];
+          const float dg = w_wp_d[ulong(wp_cur) * W.V + uint(iwp)];
+          const float rat = w / (dg + 250.0f);
+          if (rat > best_r) { best_r = rat; best_tgt = int(m); best_kind = 1; best_wp = iwp; }
+        }
+
+        // (c) Alive nearby enemy players (stock hunt + team-focus & nav-node residual)
+        for (uint q = 0; q < N; q++) {
+          if (!sh_p_alive[q] || sh_p_team[q] == p_team) continue;
+          const int ewp = sh_p_wp[q];
+          const float dg = w_wp_d[ulong(wp_cur) * W.V + uint(ewp)];
+          if (dg > 1800.0f) continue;
+          float w = 1.75f * ((sh_p_hp[q] < 65.0f) ? 1.5f : 1.0f);
+          if (use_acc) {
+            const uint eq_t0 = uint(clamp(sh_p_team[q] - 1, 0, int(K) - 1));
+            const uint v_q = uint(clamp(w_wp_nav[ewp], 0, int(W_nav) - 1));
+            w *= exp(clamp(r_en_sc + r_acc[W_nav + eq_t0] + 0.5f * r_acc[v_q], -4.0f, 4.0f));
+          }
+          const float rat = w / (dg + 250.0f);
+          if (rat > best_r) { best_r = rat; best_tgt = int(q); best_kind = 2; best_wp = ewp; }
+        }
+
+        // (d) Direct navigation to ANY directed nav-graph node v (0 at r_nav==0 => exact stock HavocBot!)
+        if (use_acc) {
+          for (uint v = 0; v < W_nav; v++) {
+            const float rv = r_acc[v];
+            if (rv <= 0.05f) continue;
+            const float w = 2.6f * (exp(clamp(rv, 0.0f, 4.0f)) - 1.0f);
+            const int nwp = w_nav_wp[v];
+            const float dg = w_wp_d[ulong(wp_cur) * W.V + uint(nwp)];
+            const float rat = w / (dg + 250.0f);
+            if (rat > best_r) { best_r = rat; best_tgt = int(v); best_kind = 3; best_wp = nwp; }
+          }
+        }
+
+        goal_tgt = best_tgt;
+        goal_kind = best_kind;
+        wp_goal = best_wp;
+        if (has_legacy_plan && goal_kind == 0) {
+          float plan_ds = clamp(pl[10], -600.0f, 600.0f);
+          if (fabs(plan_ds) > 120.0f) {
+            float target_s = clamp(sh_c_s[goal_tgt] + plan_ds, 0.0f, w_c_len[goal_tgt]);
+            wp_goal = cart_nearest_wp_dev(uint(goal_tgt), target_s, wb, W);
+          }
+        }
         gtimer = W.replan_interval;
       }
 
-      // 4. _step_kinematics
+      // 4. _step_kinematics (free waypoint-graph navigation for all 4 goal kinds!)
       float3 vel = float3(0.0f);
       if (alive) {
         const float rem_dist = W.move_speed * dt_eff;
-        const float3 ctp = float3(sh_c_pos[goal_cart * 3u], sh_c_pos[goal_cart * 3u + 1u], sh_c_pos[goal_cart * 3u + 2u]);
-        const float3 to_c = ctp - pos;
-        const float d_cart = length(to_c);
-        const bool local_steer = (d_cart <= w_c_rad[goal_cart] * 1.6f);
+        float3 tgt_pos = float3(w_wp_pos[wp_goal * 3], w_wp_pos[wp_goal * 3 + 1], w_wp_pos[wp_goal * 3 + 2]);
+        float local_r = 140.0f;
+        float stop_r = 24.0f;
+        if (goal_kind == 0 && uint(goal_tgt) < J) {
+          tgt_pos = float3(sh_c_pos[goal_tgt * 3u], sh_c_pos[goal_tgt * 3u + 1u], sh_c_pos[goal_tgt * 3u + 2u]);
+          local_r = w_c_rad[goal_tgt] * 1.6f;
+          stop_r = w_c_rad[goal_tgt] * 0.45f;
+        } else if (goal_kind == 1 && uint(goal_tgt) < I_item) {
+          tgt_pos = float3(w_it_pos[goal_tgt * 3u], w_it_pos[goal_tgt * 3u + 1u], w_it_pos[goal_tgt * 3u + 2u]);
+          local_r = 180.0f;
+          stop_r = 12.0f;
+        } else if (goal_kind == 2 && uint(goal_tgt) < N && sh_p_alive[goal_tgt]) {
+          tgt_pos = float3(sh_p_pos[goal_tgt * 3u], sh_p_pos[goal_tgt * 3u + 1u], sh_p_pos[goal_tgt * 3u + 2u]);
+          local_r = 240.0f;
+          stop_r = 120.0f;
+        }
+        const float3 to_t = tgt_pos - pos;
+        const float d_tgt = length(to_t);
+        const bool local_steer = (d_tgt <= local_r);
 
         if (!local_steer) {
           float grem = rem_dist;
@@ -1810,14 +1939,11 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
             wp_next = nxt;
             grem = max(grem - step, 0.0f);
           }
-        } else {
-          const float stop_r = w_c_rad[goal_cart] * 0.45f;
-          if (d_cart > stop_r) {
-            const float l_step = min(rem_dist, max(d_cart - stop_r, 0.0f));
-            const float3 l_dir = to_c / max(d_cart, 1e-6f);
-            pos += l_dir * l_step;
-            vel = l_dir * W.move_speed;
-          }
+        } else if (d_tgt > stop_r) {
+          const float l_step = min(rem_dist, max(d_tgt - stop_r, 0.0f));
+          const float3 l_dir = to_t / max(d_tgt, 1e-6f);
+          pos += l_dir * l_step;
+          vel = l_dir * W.move_speed;
         }
       }
 
@@ -1839,6 +1965,8 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
           p_f1[0u * N + p] = W.max_health;
           p_f1[1u * N + p] = W.start_armor;
           p_f1[3u * N + p] = sh_sim_time;
+          p_f1[15u * N + p] = 0.0f;
+          p_f1[16u * N + p] = 0.0f;
           gtimer = 0.0f;
           now_alive = true;
         }
@@ -1848,6 +1976,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       sh_p_pos[p * 3u + 1u] = pos.y;
       sh_p_pos[p * 3u + 2u] = pos.z;
       sh_p_alive[p] = uchar(now_alive);
+      sh_p_wp[p] = wp_cur;
       p_pos[p * 3u + 0u] = pos.x;
       p_pos[p * 3u + 1u] = pos.y;
       p_pos[p * 3u + 2u] = pos.z;
@@ -1858,21 +1987,50 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       p_i1[2u * N + p] = wp_cur;
       p_i1[3u * N + p] = wp_next;
       p_i1[4u * N + p] = wp_goal;
-      p_i1[5u * N + p] = goal_cart;
+      p_i1[5u * N + p] = goal_tgt;
+      p_i1[6u * N + p] = goal_kind;
       sh_p_tgt[p] = -1;
       sh_p_dmg[p] = 0.0f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 5b. Combat targeting & damage in TG SRAM (ZERO [E,N,N] DRAM, deterministic gather-sum!)
+    // 5a2. Deterministic pickup collection (1 thread per item m < I_item: nearest alive bot within 96u wins!)
+    if (tid < I_item && sh_item_cd[tid] <= 0.0f && sh_finished == 0u) {
+      const uint m = tid;
+      const float3 ipos = float3(w_it_pos[m * 3u], w_it_pos[m * 3u + 1u], w_it_pos[m * 3u + 2u]);
+      int winner_p = -1;
+      float best_d2 = 96.0f * 96.0f;
+      for (uint p = 0; p < N; p++) {
+        if (!sh_p_alive[p]) continue;
+        float3 d = float3(sh_p_pos[p * 3u], sh_p_pos[p * 3u + 1u], sh_p_pos[p * 3u + 2u]) - ipos;
+        float d2 = dot(d, d);
+        if (d2 <= best_d2) { best_d2 = d2; winner_p = int(p); }
+      }
+      if (winner_p >= 0) {
+        const uint p = uint(winner_p);
+        const int knd = w_it_knd[m];
+        if (knd == 0) p_f1[0u * N + p] = min(p_f1[0u * N + p] + 100.0f, 200.0f);
+        else if (knd == 1) p_f1[1u * N + p] = min(p_f1[1u * N + p] + 100.0f, 200.0f);
+        else if (knd == 2) p_f1[15u * N + p] = min(p_f1[15u * N + p] + 15.0f, 30.0f);
+        else p_f1[16u * N + p] = 25.0f;
+        p_f1[12u * N + p] += 1.0f;
+        sh_item_cd[m] = w_it_rsp[m];
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // 5b. Combat targeting & damage in TG SRAM (read-only skill + smooth r_team/r_posture + weapons/quad!)
     if (tid < N && W.combat_range > 0.0f && sh_p_alive[tid]) {
       const uint p = tid;
       const float3 pi = float3(sh_p_pos[p * 3u], sh_p_pos[p * 3u + 1u], sh_p_pos[p * 3u + 2u]);
       const int ti = sh_p_team[p];
       const float r2 = W.combat_range * W.combat_range;
-      const bool has_plan = (p_i1[7u * N + p] != 0);
+      const int ctrl_mode = p_i1[7u * N + p];
+      const bool has_legacy_plan = (ctrl_mode == 1);
+      const bool use_acc = (A_dim >= W_nav + K + 4u) && (ctrl_mode != 1);
       const device float* pl = p_plan + ulong(p) * 16ul;
-      const int focus_t = int(rint(pl[7]));
+      const device float* r_acc = p_r_acc + ulong(p) * ulong(A_dim);
+      const int focus_t = has_legacy_plan ? int(rint(pl[7])) : 0;
 
       float best_d2 = 1e18f;
       int tgt = -1;
@@ -1881,7 +2039,12 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         float3 d = pi - float3(sh_p_pos[q * 3u], sh_p_pos[q * 3u + 1u], sh_p_pos[q * 3u + 2u]);
         float d2 = dot(d, d);
         if (d2 <= r2) {
-          float mult = (has_plan && focus_t > 0 && sh_p_team[q] == focus_t) ? 0.55f : 1.0f;
+          float mult = 1.0f;
+          if (has_legacy_plan && focus_t > 0 && sh_p_team[q] == focus_t) mult = 0.55f;
+          else if (use_acc) {
+            const uint qt0 = uint(clamp(sh_p_team[q] - 1, 0, int(K) - 1));
+            mult = exp(clamp(-0.5f * r_acc[W_nav + qt0], -2.0f, 2.0f));
+          }
           float ed2 = d2 * mult;
           if (ed2 < best_d2) { best_d2 = ed2; tgt = int(q); }
         }
@@ -1889,9 +2052,16 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       if (tgt >= 0 && best_d2 < 1e17f && sh_finished == 0u) {
         const float dist = sqrt(max(best_d2, 1.0f));
         const float prox = clamp(1.0f - dist / W.combat_range, 0.15f, 1.0f);
-        const float posture = has_plan ? clamp(pl[15], -1.0f, 1.0f) : 0.0f;
+        const float posture = has_legacy_plan ? clamp(pl[15], -1.0f, 1.0f)
+                                              : (use_acc ? safe_tanh(r_acc[W_nav + K + 3u]) : 0.0f);
         const float sk_m = clamp(1.0f + W.skill_dps_scale * p_f1[4u * N + p], 0.4f, 3.0f);
-        const float dps_rate = W.base_dps * prox * sk_m * (1.0f + 0.15f * posture);
+        float wep_m = 1.0f;
+        if (p_f1[15u * N + p] > 0.0f) {
+          wep_m *= 1.35f;
+          p_f1[15u * N + p] = max(p_f1[15u * N + p] - dt_eff * 1.25f, 0.0f);
+        }
+        if (p_f1[16u * N + p] > 0.0f) wep_m *= 2.0f;
+        const float dps_rate = W.base_dps * prox * sk_m * wep_m * (1.0f + 0.20f * posture);
         const float u_hit = simdt_philox_u01(sh_seed, sh_step_count, ulong(p), 509ul);
         const float noise = clamp(1.0f + W.dps_stochastic_cv * (2.0f * u_hit - 1.0f) / sqrt(max(dt_eff, 0.05f)), 0.25f, 2.2f);
         const float dmg_out = max(dps_rate * dt_eff * noise, 0.0f);
@@ -1902,12 +2072,18 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Deterministic incoming damage sum + armor/HP/death
+    // Deterministic incoming damage sum + armor/HP/death (symmetric exposure trade from posture!)
     if (tid < N) {
       const uint p = tid;
       float dmg_in = 0.0f;
       for (uint q = 0; q < N; q++) {
         if (sh_p_tgt[q] == int(p)) dmg_in += sh_p_dmg[q];
+      }
+      const int ctrl_mode = p_i1[7u * N + p];
+      const bool use_acc = (A_dim >= W_nav + K + 4u) && (ctrl_mode != 1);
+      if (use_acc) {
+        const float posture = safe_tanh(p_r_acc[ulong(p) * ulong(A_dim) + (W_nav + K + 3u)]);
+        dmg_in *= (1.0f + 0.20f * posture);
       }
       float arm = p_f1[1u * N + p];
       float hp  = p_f1[0u * N + p];
@@ -1922,13 +2098,13 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         sh_p_alive[p] = 0u;
         p_f1[2u * N + p] = W.respawn_delay;
         p_f1[11u * N + p] += 1.0f;
+        p_f1[16u * N + p] = 0.0f;
       }
       p_f1[0u * N + p] = hp;
       p_f1[1u * N + p] = arm;
       p_f1[9u * N + p] += dmg_in;
       p_i1[1u * N + p] = int(sh_p_alive[p]);
-      // Mark death flag in sh_c_ctrl? No! Store died in sh_p_dmg temporarily? Wait: sh_p_dmg[q] needed for > 0 check!
-      // Use sh_p_alive[p] == 0u (since tgt was alive before combat, !sh_p_alive[tgt] iff tgt died!).
+      sh_p_hp[p] = hp;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1946,7 +2122,10 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
-  // Write back team & env meta state
+  // Write back team, item cooldowns & env meta state
+  if (tid < I_item) {
+    item_cd[tid] = sh_item_cd[tid];
+  }
   if (tid < K) {
     t_sc[tid] = sh_t_score[tid];
     t_cph[tid] = sh_t_cph[tid];
@@ -1968,19 +2147,22 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
 }
 
 // ---- 12. MG_OP_SIMDT_OBS ----
-// Emits BF16 obs[E, N, 84], carts[E, J, 18], teams[E, K, 7] directly into zero-copy PlanWally inputs!
-// 1 TG per env e, 128 threads.
+// Emits BF16 obs[E, N, 84], carts[E, J, 18], teams[E, K, 7], plus directed nav-graph node features
+// nav_out[E, W_nav, 16] and current integrated steering accumulators acc_out[E, N, A_dim]!
 [[kernel]] void mg_simdt_obs(
     const device uchar* wb [[buffer(0)]],
     const device uchar* sb [[buffer(1)]],
     device bfloat* obs_out [[buffer(2)]],
     device bfloat* cart_out [[buffer(3)]],
     device bfloat* team_out [[buffer(4)]],
+    device bfloat* nav_out [[buffer(5)]],
+    device float* acc_out [[buffer(6)]],
+    constant uint* u [[buffer(7)]], // [E, write_nav_acc]
     uint tid [[thread_index_in_threadgroup]],
     uint e [[threadgroup_position_in_grid]]) {
   const device SimWorldHeader& W = *(const device SimWorldHeader*)wb;
   if (e >= W.E) return;
-  const uint N = W.N, J = W.J, K = W.K;
+  const uint N = W.N, J = W.J, K = W.K, W_nav = W.W_nav, I_item = W.I_item, A_dim = W.A_dim;
   const device uchar* es = sb + ulong(e) * W.env_stride;
 
   const device uint*  e_meta = (const device uint*)(es + W.soff_meta);
@@ -1993,13 +2175,22 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
   const device int*   c_i1   = (const device int*)(es + W.soff_c_i1);
   const device float* t_sc   = (const device float*)(es + W.soff_t_score);
   const device int*   t_cph  = (const device int*)(es + W.soff_t_cp_held);
+  const device float* item_cd = (const device float*)(es + W.soff_item_cd);
+  const device float* p_r_acc = (const device float*)(es + W.soff_p_r_acc);
   const device float* w_clen = (const device float*)(wb + W.off_cart_length);
   const device int*   w_ccpc = (const device int*)(wb + W.off_cart_cp_count);
+  const device int*   w_wp_nav = (const device int*)(wb + W.off_wp_to_nav);
+  const device int*   w_nav_wp = (const device int*)(wb + W.off_nav_rep_wp);
+  const device float* w_nav_pos = (const device float*)(wb + W.off_nav_pos);
+  const device float* w_nav_deg = (const device float*)(wb + W.off_nav_degree);
+  const device int*   w_it_nav = (const device int*)(wb + W.off_item_nav);
+  const device int*   w_it_knd = (const device int*)(wb + W.off_item_kind);
+  const device float* w_wp_d = (const device float*)(wb + W.off_wp_dist);
 
   const float sim_t = as_type<float>(e_meta[0]);
   const float fin_f = (e_meta[5] != 0u) ? 1.0f : 0.0f;
 
-  // Players: 84 cols each
+  // Players: 84 cols each (now with real ROCKETS, STRENGTH_FINISHED, PICKUPS, current nav-node & goal_kind!)
   for (uint n = 0; n < N; n++) {
     if (tid < 84u) {
       float v = 0.0f;
@@ -2008,18 +2199,23 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         case 1u: v = float(p_i1[0u * N + n]); break;
         case 2u: v = p_f1[0u * N + n]; break;
         case 3u: v = p_f1[1u * N + n]; break;
+        case 6u: v = p_f1[15u * N + n]; break; // AMMO_ROCKETS
         case 10u: v = p_pos[n * 3u + 0u]; break;
         case 11u: v = p_pos[n * 3u + 1u]; break;
         case 12u: v = p_pos[n * 3u + 2u]; break;
         case 13u: v = p_vel[n * 3u + 0u]; break;
         case 14u: v = p_vel[n * 3u + 1u]; break;
         case 15u: v = p_vel[n * 3u + 2u]; break;
+        case 16u: v = (p_f1[15u * N + n] > 0.0f) ? 1.0f : 0.0f; break; // has rocket launcher
+        case 19u: v = (p_f1[16u * N + n] > 0.0f) ? (sim_t + p_f1[16u * N + n]) : 0.0f; break; // STRENGTH_FINISHED
         case 20u: v = p_f1[3u * N + n]; break;
         case 21u: v = sim_t; break;
+        case 22u: v = float(w_wp_nav[clamp(p_i1[2u * N + n], 0, int(W.V) - 1)]); break; // current nav-node ID
+        case 23u: v = float(p_i1[6u * N + n]); break; // current goal_kind (0=cart,1=item,2=enemy,3=nav)
         case 24u: v = float(p_i1[1u * N + n]); break;
         case 25u: v = 1.0f; break;
         case 29u: v = 1.0f; break;
-        case 46u: v = p_f1[4u * N + n]; break;
+        case 46u: v = p_f1[4u * N + n]; break; // BOT_GLOBAL_SKILL (read-only percept)
         case 47u: v = p_f1[8u * N + n]; break;
         case 48u: v = p_f1[9u * N + n]; break;
         case 49u: v = p_f1[10u * N + n]; break;
@@ -2075,6 +2271,66 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         default: v = 0.0f; break;
       }
       team_out[(ulong(e) * K + k) * 7ul + tid] = bfloat(v);
+    }
+  }
+
+  // Directed nav-graph node features [E, W_nav, 16] & current steering accumulators [E, N, A_dim]
+  if (u[1] != 0u) {
+    if (tid < W_nav) {
+      const uint v = tid;
+      const int nwp = w_nav_wp[v];
+      float it_rdy[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      float min_item_d = 4000.0f;
+      for (uint m = 0; m < I_item; m++) {
+        const float rdy = (item_cd[m] <= 0.0f) ? 1.0f : exp(-0.1f * item_cd[m]);
+        if (uint(w_it_nav[m]) == v) {
+          const uint knd = uint(clamp(w_it_knd[m], 0, 3));
+          it_rdy[knd] = max(it_rdy[knd], rdy);
+        }
+        if (item_cd[m] <= 0.0f) {
+          const int mwp = w_nav_wp[clamp(w_it_nav[m], 0, int(W_nav) - 1)];
+          min_item_d = min(min_item_d, w_wp_d[ulong(nwp) * W.V + uint(mwp)]);
+        }
+      }
+      float n_carts = 0.0f, sum_pf = 0.0f, n_neut = 0.0f, min_cart_d = 4000.0f;
+      for (uint j = 0; j < J; j++) {
+        const int cwp = cart_nearest_wp_dev(j, c_f1[0u * J + j], wb, W);
+        const uint cj_nav = uint(clamp(w_wp_nav[cwp], 0, int(W_nav) - 1));
+        if (cj_nav == v) {
+          n_carts += 1.0f;
+          sum_pf += c_f1[0u * J + j] / max(w_clen[j], 1.0f);
+          if (c_i1[0u * J + j] == 0) n_neut += 1.0f;
+        }
+        min_cart_d = min(min_cart_d, w_wp_d[ulong(nwp) * W.V + uint(cwp)]);
+      }
+      float n_pl = 0.0f, sum_hp = 0.0f;
+      for (uint n = 0; n < N; n++) {
+        if (p_i1[1u * N + n] == 0) continue;
+        const uint pn = uint(clamp(w_wp_nav[clamp(p_i1[2u * N + n], 0, int(W.V) - 1)], 0, int(W_nav) - 1));
+        if (pn == v) { n_pl += 1.0f; sum_hp += p_f1[0u * N + n] * 0.01f; }
+      }
+      device bfloat* dst = nav_out + (ulong(e) * W_nav + v) * 16ul;
+      dst[0] = bfloat(w_nav_pos[v * 3u + 0u]);
+      dst[1] = bfloat(w_nav_pos[v * 3u + 1u]);
+      dst[2] = bfloat(w_nav_pos[v * 3u + 2u]);
+      dst[3] = bfloat(w_nav_deg[v] * 0.2f);
+      dst[4] = bfloat(it_rdy[0]);
+      dst[5] = bfloat(it_rdy[1]);
+      dst[6] = bfloat(it_rdy[2]);
+      dst[7] = bfloat(it_rdy[3]);
+      dst[8] = bfloat(n_carts);
+      dst[9] = bfloat(n_carts > 0.0f ? (sum_pf / n_carts) : 0.0f);
+      dst[10] = bfloat(n_carts > 0.0f ? (n_neut / n_carts) : 0.0f);
+      dst[11] = bfloat(n_pl * 0.25f);
+      dst[12] = bfloat(n_pl > 0.0f ? (sum_hp / n_pl) : 0.0f);
+      dst[13] = bfloat(min_cart_d * 0.001f);
+      dst[14] = bfloat(min_item_d * 0.001f);
+      dst[15] = bfloat(1.0f);
+    }
+    const uint tot_a = N * A_dim;
+    device float* adst = acc_out + ulong(e) * ulong(tot_a);
+    for (uint idx = tid; idx < tot_a; idx += 128u) {
+      adst[idx] = p_r_acc[idx];
     }
   }
 }

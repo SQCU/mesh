@@ -195,7 +195,7 @@ class RDMAWeightAllReducer:
             self.g = None
 
     @torch.no_grad()
-    def average_model_(self, model: PlanWally) -> float:
+    def average_model_(self, model: Any, *, project_fn: Any = None) -> float:
         """All-reduce FP32 parameters across all ranks over /mesh0 TB5 RDMA and re-project unit norms."""
         off = 0
         for p in model.parameters():
@@ -213,7 +213,10 @@ class RDMAWeightAllReducer:
             avg = self.w_view[off : off + n] * inv_ws
             p.copy_(avg.view(p.shape).to(device=p.device, dtype=p.dtype))
             off += n
-        project_unit_norm_(model, eps=model.norm_cfg.unit_norm_eps)
+        if project_fn is not None:
+            project_fn(model, eps=model.norm_cfg.unit_norm_eps)
+        else:
+            project_unit_norm_(model, eps=model.norm_cfg.unit_norm_eps)
         return float(wall.value)
 
 
@@ -629,9 +632,152 @@ def run_tp_bench(args: argparse.Namespace) -> None:
     eng.close()
 
 
+def run_rdma_dp_flow(args: argparse.Namespace) -> None:
+    """4-Studio All-Compute RDMA Data-Parallel for GraphFlowPolicy (Graph + DPP + 1-NFE Heun Flow + ESS Boltzmann CFM)."""
+    from sim_dt.graph_flow_policy import (
+        GraphFlowConfig,
+        GraphFlowPolicy,
+        clone_graph_flow_model,
+        project_graph_flow_unit_norm_,
+    )
+    from sim_dt.graph_flow_trainer import GraphFlowRolloutPool, GraphFlowTrainer
+
+    overrides: dict[str, Any] = {}
+    sd: dict[str, Any] = {}
+    if args.iterations > 0:
+        sd["iterations"] = args.iterations
+    if args.base_envs > 0:
+        sd["base_envs"] = args.base_envs
+    if args.group_size > 0:
+        sd["group_size"] = args.group_size
+    if args.horizon > 0:
+        sd["rollout_horizon"] = args.horizon
+    if args.ppo_epochs > 0:
+        sd["ppo_epochs"] = args.ppo_epochs
+    if sd:
+        overrides["sim_dt"] = sd
+    cfg = load_training_config(args.config, overrides=overrides or None)
+
+    torch.manual_seed(cfg.seeds.model_init)
+    np.random.seed(cfg.seeds.model_init)
+    gf_cfg = GraphFlowConfig()
+    model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
+    ema_model = clone_graph_flow_model(model)
+    main_init = clone_graph_flow_model(model)
+
+    ws = int(args.tp_world_size)
+    reducer = RDMAWeightAllReducer(model, ws, args.tp_rank, args.tp_comm_id) if ws > 1 else None
+    variants: dict[str, GraphFlowPolicy | None] = {"main": model, "ema": ema_model, "main_init": main_init}
+    G = int(cfg.sim_dt.group_size) if int(cfg.sim_dt.group_size) > 0 else 4
+    pool = GraphFlowRolloutPool(
+        cfg, variants,
+        num_worlds=int(args.num_worlds),
+        group_size=G,
+        seed_base=cfg.seeds.match_base + int(args.tp_rank) * 100003,
+        self_play_only=bool(args.self_play),
+        roster_mode=str(args.roster_mode),
+        randomize_physics=not bool(args.no_physics_dr),
+    )
+    learner = GraphFlowTrainer(model, ema_model, cfg)
+    pfsp_pool = ["default", "main_init", "ema", "main"]
+    pfsp_wr = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
+
+    total_iters = int(cfg.sim_dt.iterations)
+    mid_iter = max(1, total_iters // 2)
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
+    if out_dir is not None and args.tp_rank == 0:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(main_init.state_dict(), out_dir / "main_init.pt")
+
+    t_start = time.perf_counter()
+    tot_sim_s = 0.0
+    tot_ag_steps = 0
+    tot_rdma_ms = 0.0
+    history: list[dict[str, Any]] = []
+
+    try:
+        for it in range(1, total_iters + 1):
+            batch = pool.sample_batch(
+                policy_version=learner.policy_version,
+                pfsp_pool=pfsp_pool,
+                pfsp_wr=pfsp_wr,
+            )
+            upd = learner.update(batch, epochs=max(1, int(cfg.sim_dt.ppo_epochs)))
+            rdma_ms = 0.0
+            if reducer is not None:
+                rdma_ms = reducer.average_model_(model, project_fn=project_graph_flow_unit_norm_)
+                learner.reload_after_rdma_()
+            tot_rdma_ms += rdma_ms
+            pool.sync_variant_("main", model)
+            pool.sync_variant_("ema", ema_model)
+
+            alpha_ema = float(cfg.sim_dt.pfsp_update_ema)
+            for opp_arm, wr_val in batch.opp_wr_obs.items():
+                prev = pfsp_wr.get(opp_arm, float(cfg.league.pfsp_default_winrate))
+                pfsp_wr[opp_arm] = alpha_ema * prev + (1.0 - alpha_ema) * float(wr_val)
+
+            if it == mid_iter and out_dir is not None and args.tp_rank == 0:
+                torch.save(model.state_dict(), out_dir / "main_mid.pt")
+
+            M, N, _ = batch.obs.shape
+            tot_sim_s += float(batch.stats["sim_s"]) * ws
+            tot_ag_steps += int(M * 2 * N) * ws  # n_phys_substeps = 2
+            elapsed = max(time.perf_counter() - t_start, 1e-6)
+            if args.tp_rank == 0:
+                wm = batch.world_meta
+                history.append({"iter": it, "world": wm, "rollout": batch.stats, "update": upd, "rdma_ms": round(rdma_ms, 2)})
+                if it == 1 or it % max(1, args.log_every) == 0 or it == total_iters:
+                    gk = batch.stats["gk_pct"]
+                    print(
+                        f"  [GF-RDMA x{ws} G={G} dr={args.roster_mode}] iter {it:02d}/{total_iters} "
+                        f"(K={wm['K']:2d} J={wm['J']:2d} W={wm['W_nav']:2d} N={N:2d}) | "
+                        f"roll={batch.stats['wall_s']:.2f}s upd={upd['update_wall_s']:.2f}s rdma={rdma_ms:.1f}ms | "
+                        f"vel={upd['loss_vel']:.3f} val={upd['loss_val']:.3f} ess={upd['ess_frac']:.2f} a={upd['alpha']:.2f} | "
+                        f"uSep={batch.stats['branch_u_sep']:.2f} GK={gk[0]:.0f}/{gk[1]:.0f}/{gk[2]:.0f}/{gk[3]:.0f}% "
+                        f"dSc(m={batch.stats['main_dscore_mean']:.1f},o={batch.stats['opp_dscore_mean']:.1f}) | "
+                        f"{tot_ag_steps/elapsed/1e6:.2f}M ag-st/s",
+                        flush=True,
+                    )
+        if out_dir is not None and args.tp_rank == 0:
+            torch.save(model.state_dict(), out_dir / "main_final.pt")
+            torch.save(ema_model.state_dict(), out_dir / "ema_final.pt")
+    finally:
+        pool.close()
+        learner.close()
+        if reducer is not None:
+            reducer.close()
+
+    if args.tp_rank == 0:
+        wall = max(time.perf_counter() - t_start, 1e-6)
+        summary = {
+            "policy": "graph-flow",
+            "world_size": ws,
+            "group_size": G,
+            "iterations": total_iters,
+            "roster_mode": str(args.roster_mode),
+            "physics_dr": not bool(args.no_physics_dr),
+            "wall_s": round(wall, 2),
+            "total_sim_s": round(tot_sim_s, 1),
+            "total_agent_steps": int(tot_ag_steps),
+            "cluster_agent_steps_s": round(tot_ag_steps / wall, 0),
+            "cluster_speedup_x": round(tot_sim_s / wall, 1),
+            "mean_rdma_ms": round(tot_rdma_ms / max(1, total_iters), 2),
+            "pfsp_wr": {k: round(v, 4) for k, v in pfsp_wr.items()},
+            "history": history,
+        }
+        if out_dir is not None:
+            (out_dir / "train_history.json").write_text(json.dumps(summary, indent=2))
+        print(
+            f"[GF-RDMA x{ws} COMPLETE] {total_iters} iters in {wall:.1f}s | "
+            f"{tot_ag_steps/1e6:.1f}M ag-steps @ {tot_ag_steps/wall/1e6:.2f}M ag-st/s "
+            f"({tot_sim_s/wall:.0f}x RT) | rdma={tot_rdma_ms/max(1,total_iters):.2f}ms/iter",
+            flush=True,
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="4-Studio RDMA Data-Parallel + Async Actor-Learner + /mesh0 TP Trainer")
-    ap.add_argument("--role", choices=("rdma-dp", "learner", "actor", "tp-bench"), required=True)
+    ap.add_argument("--role", choices=("rdma-dp", "rdma-dp-flow", "learner", "actor", "tp-bench"), required=True)
     ap.add_argument("--config", type=str, default=str(CONFIGS_DIR / "sim_dt_grpo_pfsp.json"))
     ap.add_argument("--bind", type=str, default="0.0.0.0:29810")
     ap.add_argument("--learner-addr", type=str, default="10.0.0.124:29810")
@@ -656,6 +802,8 @@ def main() -> None:
 
     if args.role == "rdma-dp":
         run_rdma_dp(args)
+    elif args.role == "rdma-dp-flow":
+        run_rdma_dp_flow(args)
     elif args.role == "learner":
         run_learner(args)
     elif args.role == "actor":

@@ -856,6 +856,9 @@ def _build_world_blob(
     J = int(world.carts)
     CP = int(world.max_checkpoints)
     V = int(world.num_waypoints)
+    W_nav = int(world.num_nav)
+    I_item = int(world.num_items)
+    A_dim = W_nav + K + 4
     S_max = int(world.cart_nodes.shape[1])
     M_s = int(world.cart_sample_wp.shape[1])
     S_sp = int(world.spawn_pos.shape[1])
@@ -873,7 +876,7 @@ def _build_world_blob(
     soff_meta = s_alloc(8 * 4)
     soff_p_pos = s_alloc(N * 3 * 4)
     soff_p_vel = s_alloc(N * 3 * 4)
-    soff_p_f1 = s_alloc(15 * N * 4)
+    soff_p_f1 = s_alloc(17 * N * 4)
     soff_p_i1 = s_alloc(8 * N * 4)
     soff_p_plan = s_alloc(N * 16 * 4)
     soff_c_f1 = s_alloc(3 * J * 4)
@@ -882,6 +885,9 @@ def _build_world_blob(
     soff_c_cp_owner = s_alloc(J * CP * 4)
     soff_t_score = s_alloc(K * 4)
     soff_t_cp_held = s_alloc(K * 4)
+    soff_item_cd = s_alloc(max(1, I_item) * 4)
+    soff_p_r_acc = s_alloc(N * A_dim * 4)
+    soff_p_u_vel = s_alloc(N * A_dim * 4)
     env_stride = _align(so, 64)
 
     # Push weight LUT
@@ -909,9 +915,18 @@ def _build_world_blob(
         ("spawn_pos", np.ascontiguousarray(world.spawn_pos.detach().cpu().numpy(), dtype=np.float32).tobytes()),
         ("spawn_wp", np.ascontiguousarray(world.spawn_wp.detach().cpu().numpy(), dtype=np.int32).tobytes()),
         ("push_lut", np.ascontiguousarray(np.asarray(lut, dtype=np.float32)).tobytes()),
+        ("wp_to_nav", np.ascontiguousarray(world.wp_to_nav.detach().cpu().numpy(), dtype=np.int32).tobytes()),
+        ("nav_rep_wp", np.ascontiguousarray(world.nav_rep_wp.detach().cpu().numpy(), dtype=np.int32).tobytes()),
+        ("nav_pos", np.ascontiguousarray(world.nav_pos.detach().cpu().numpy(), dtype=np.float32).tobytes()),
+        ("nav_degree", np.ascontiguousarray(world.nav_degree.detach().cpu().numpy(), dtype=np.float32).tobytes()),
+        ("item_wp", np.ascontiguousarray(world.item_wp.detach().cpu().numpy(), dtype=np.int32).tobytes()),
+        ("item_nav", np.ascontiguousarray(world.item_nav.detach().cpu().numpy(), dtype=np.int32).tobytes()),
+        ("item_pos", np.ascontiguousarray(world.item_pos.detach().cpu().numpy(), dtype=np.float32).tobytes()),
+        ("item_kind", np.ascontiguousarray(world.item_kind.detach().cpu().numpy(), dtype=np.int32).tobytes()),
+        ("item_respawn", np.ascontiguousarray(world.item_respawn.detach().cpu().numpy(), dtype=np.float32).tobytes()),
     ]
 
-    hdr_fmt = "<39I18f"
+    hdr_fmt = "<54I18f"
     hdr_size = struct.calcsize(hdr_fmt)
     cur = _align(hdr_size, 64)
     offs: dict[str, int] = {}
@@ -924,14 +939,18 @@ def _build_world_blob(
     header = struct.pack(
         hdr_fmt,
         E, N, J, K, CP, V, S_max, M_s, S_sp, push_cap,
+        W_nav, I_item, A_dim,
         offs["wp_pos"], offs["wp_dist"], offs["wp_next_hop"],
         offs["cart_nodes"], offs["cart_node_s"], offs["cart_seg_count"], offs["cart_length"],
         offs["cart_cp_dists"], offs["cart_cp_count"], offs["cart_radius"], offs["cart_height"],
         offs["cart_speed_scale"], offs["cart_sample_wp"], offs["spawn_pos"], offs["spawn_wp"],
         offs["push_lut"],
+        offs["wp_to_nav"], offs["nav_rep_wp"], offs["nav_pos"], offs["nav_degree"],
+        offs["item_wp"], offs["item_nav"], offs["item_pos"], offs["item_kind"], offs["item_respawn"],
         env_stride,
         soff_meta, soff_p_pos, soff_p_vel, soff_p_f1, soff_p_i1, soff_p_plan,
         soff_c_f1, soff_c_pos, soff_c_i1, soff_c_cp_owner, soff_t_score, soff_t_cp_held,
+        soff_item_cd, soff_p_r_acc, soff_p_u_vel,
         point_limit,
         float(rules.checkpoint_rate),
         float(rules.cart_base_speed),
@@ -960,6 +979,9 @@ def _build_world_blob(
 
     layout = dict(
         env_stride=env_stride,
+        W_nav=W_nav,
+        I_item=I_item,
+        A_dim=A_dim,
         soff_meta=soff_meta,
         soff_p_pos=soff_p_pos,
         soff_p_vel=soff_p_vel,
@@ -972,6 +994,9 @@ def _build_world_blob(
         soff_c_cp_owner=soff_c_cp_owner,
         soff_t_score=soff_t_score,
         soff_t_cp_held=soff_t_cp_held,
+        soff_item_cd=soff_item_cd,
+        soff_p_r_acc=soff_p_r_acc,
+        soff_p_u_vel=soff_p_u_vel,
         point_limit=point_limit,
     )
     return bytes(blob), layout
@@ -1001,8 +1026,12 @@ class MetalDeltaTimePayloadEngine:
         self.J = int(self.world.carts)
         self.N = int(num_players if num_players is not None else self.world.players_default)
         self.CP = int(self.world.max_checkpoints)
-        assert self.N <= 128 and self.J <= 64 and self.K <= 16 and self.CP <= 16, (
-            f"MetalDeltaTimePayloadEngine TG SRAM bounds: N<=128, J<=64, K<=16, CP<=16 (got {self.N},{self.J},{self.K},{self.CP})"
+        self.W_nav = int(self.world.num_nav)
+        self.I_item = int(self.world.num_items)
+        self.A_dim = self.W_nav + self.K + 4
+        assert self.N <= 128 and self.J <= 64 and self.K <= 16 and self.CP <= 16 and self.W_nav <= 64 and self.I_item <= 64, (
+            f"MetalDeltaTimePayloadEngine TG SRAM bounds: N<=128, J<=64, K<=16, CP<=16, W_nav<=64, I_item<=64 "
+            f"(got {self.N},{self.J},{self.K},{self.CP},{self.W_nav},{self.I_item})"
         )
 
         world_blob, self.layout = _build_world_blob(self.world, self.E, self.N, self.rules)
@@ -1025,6 +1054,9 @@ class MetalDeltaTimePayloadEngine:
         self.buf_plan = int(self.lib.mesh_graph_add_buffer(
             self.g_step, self.E * self.N * PLAN_WIDTH * 4, MG_BUF_STATE, None, -1, 0
         ))
+        self.buf_vel = int(self.lib.mesh_graph_add_buffer(
+            self.g_step, self.E * self.N * self.A_dim * 4, MG_BUF_STATE, None, -1, 0
+        ))
         self.buf_cfg = int(self.lib.mesh_graph_add_buffer(
             self.g_step, 64, MG_BUF_STATE, None, -1, 0
         ))
@@ -1041,12 +1073,18 @@ class MetalDeltaTimePayloadEngine:
         self.buf_teams = int(self.lib.mesh_graph_add_buffer(
             self.g_step, self.E * self.K * TEAM_WIDTH * 2, MG_BUF_STATE, None, -1, 0
         ))
+        self.buf_nav = int(self.lib.mesh_graph_add_buffer(
+            self.g_step, self.E * self.W_nav * 16 * 2, MG_BUF_STATE, None, -1, 0
+        ))
+        self.buf_acc = int(self.lib.mesh_graph_add_buffer(
+            self.g_step, self.E * self.N * self.A_dim * 4, MG_BUF_STATE, None, -1, 0
+        ))
 
         op_step = _make_op(
             MG_OP_SIMDT_STEP,
-            in_bufs=(self.buf_world, self.buf_state, self.buf_plan, self.buf_cfg, self.buf_active_mask),
+            in_bufs=(self.buf_world, self.buf_state, self.buf_plan, self.buf_cfg, self.buf_active_mask, self.buf_vel),
             out_bufs=(-1,),
-            u=(self.E, max(self.N, self.J, self.K)),
+            u=(self.E, max(self.N, self.J, self.K, self.I_item)),
         )
         self.lib.mesh_graph_add_op(self.g_step, ctypes.byref(op_step))
         self.lib.mesh_graph_compile(self.g_step)
@@ -1057,7 +1095,9 @@ class MetalDeltaTimePayloadEngine:
         oo = self.lib.mesh_graph_import_buffer(self.g_obs, self.g_step, self.buf_obs)
         oc = self.lib.mesh_graph_import_buffer(self.g_obs, self.g_step, self.buf_carts)
         ot = self.lib.mesh_graph_import_buffer(self.g_obs, self.g_step, self.buf_teams)
-        op_obs = _make_op(MG_OP_SIMDT_OBS, in_bufs=(ow, os_), out_bufs=(oo, oc, ot), u=(self.E,))
+        onav = self.lib.mesh_graph_import_buffer(self.g_obs, self.g_step, self.buf_nav)
+        oacc = self.lib.mesh_graph_import_buffer(self.g_obs, self.g_step, self.buf_acc)
+        op_obs = _make_op(MG_OP_SIMDT_OBS, in_bufs=(ow, os_, onav, oacc), out_bufs=(oo, oc, ot), u=(self.E,))
         self.lib.mesh_graph_add_op(self.g_obs, ctypes.byref(op_obs))
         self.lib.mesh_graph_compile(self.g_obs)
 
@@ -1066,13 +1106,18 @@ class MetalDeltaTimePayloadEngine:
         self._state_u8 = _ptr_to_u8_array(self._state_ptr, self.E * self.env_stride).reshape(self.E, self.env_stride)
         self._cfg_ptr = int(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_cfg))
         self._plan_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_plan), (self.E, self.N, PLAN_WIDTH))
+        self._vel_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_vel), (self.E, self.N, self.A_dim))
         self._mask_u8 = _ptr_to_u8_array(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_active_mask), self.E * self.N).reshape(self.E, self.N)
         self.obs_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_obs), (self.E, self.N, OBS_WIDTH))
         self.carts_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_carts), (self.E, self.J, CART_WIDTH))
         self.teams_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_teams), (self.E, self.K, TEAM_WIDTH))
+        self.nav_view = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_nav), (self.E, self.W_nav, 16))
+        self.acc_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g_step, self.buf_acc), (self.E, self.N, self.A_dim))
 
         self._pending_apply_plan = False
+        self._pending_apply_vel = False
         self._pending_has_mask = False
+        self._tau_rel = 2.5
         self._geo = {
             "map_center": self.world.map_center.clone(),
             "map_radius": self.world.map_radius.clone(),
@@ -1098,15 +1143,16 @@ class MetalDeltaTimePayloadEngine:
     def _write_cfg(
         self, dt: float, mode: int, dt_ref: float, reset_outcomes: bool,
         apply_plan: bool, has_mask: bool, record_traj: bool = False,
+        apply_vel: bool = False, tau_rel: float = 2.5,
     ) -> None:
         raw = struct.pack(
-            "<2f6I",
-            float(dt), float(dt_ref), int(mode),
+            "<3f6I",
+            float(dt), float(dt_ref), float(tau_rel), int(mode),
             1 if reset_outcomes else 0,
             1 if apply_plan else 0,
             1 if has_mask else 0,
             1 if record_traj else 0,
-            0,
+            1 if apply_vel else 0,
         )
         ctypes.memmove(self._cfg_ptr, raw, len(raw))
 
@@ -1134,12 +1180,11 @@ class MetalDeltaTimePayloadEngine:
         t0 = teams_1d - 1
         sp_pos = self._spawn_pos_np[t0, sp_slot]  # [N, 3]
         sp_wp = self._spawn_wp_np[t0, sp_slot]    # [N]
-        pref_cart = ((np.arange(1, N + 1, dtype=np.int32)) % max(1, J))
 
         # Build template env bytes once, then broadcast to masked envs!
         tmpl = np.zeros((self.env_stride,), dtype=np.uint8)
         tmpl[L["soff_p_pos"] : L["soff_p_pos"] + N * 12].view(np.float32).reshape(N, 3)[:] = sp_pos
-        p_f1 = tmpl[L["soff_p_f1"] : L["soff_p_f1"] + 15 * N * 4].view(np.float32).reshape(15, N)
+        p_f1 = tmpl[L["soff_p_f1"] : L["soff_p_f1"] + 17 * N * 4].view(np.float32).reshape(17, N)
         p_f1[0, :] = float(self.rules.max_health)
         p_f1[1, :] = float(self.rules.start_armor)
         p_f1[4, :] = float(skill_mean)
@@ -1149,8 +1194,8 @@ class MetalDeltaTimePayloadEngine:
         p_i1[2, :] = sp_wp
         p_i1[3, :] = sp_wp
         p_i1[4, :] = sp_wp
-        p_i1[5, :] = pref_cart
-        p_i1[6, :] = -1
+        p_i1[5, :] = 0
+        p_i1[6, :] = 0
         p_i1[7, :] = 0
         tmpl[L["soff_c_pos"] : L["soff_c_pos"] + J * 12].view(np.float32).reshape(J, 3)[:] = self._init_c_pos
 
@@ -1184,11 +1229,31 @@ class MetalDeltaTimePayloadEngine:
             self._state_u8[:, L["soff_p_f1"] + 4 * N * 4 : L["soff_p_f1"] + 5 * N * 4].view(np.float32)[:] = sk
 
         self._pending_apply_plan = False
+        self._pending_apply_vel = False
         self._pending_has_mask = False
 
     def apply_plan(self, plan: torch.Tensor, active_mask: torch.Tensor | None = None) -> None:
         self._plan_view.copy_(plan.detach().to(device="cpu", dtype=torch.float32))
         self._pending_apply_plan = True
+        self._pending_apply_vel = False
+        if active_mask is not None:
+            m = active_mask.detach().to(device="cpu", dtype=torch.uint8).numpy()
+            self._mask_u8[:] = m
+            self._pending_has_mask = True
+        else:
+            self._pending_has_mask = False
+
+    def apply_vel(
+        self,
+        vel: torch.Tensor,
+        active_mask: torch.Tensor | None = None,
+        *,
+        tau_rel: float = 2.5,
+    ) -> None:
+        self._vel_view.copy_(vel.detach().to(device="cpu", dtype=torch.float32))
+        self._pending_apply_vel = True
+        self._pending_apply_plan = False
+        self._tau_rel = float(tau_rel)
         if active_mask is not None:
             m = active_mask.detach().to(device="cpu", dtype=torch.uint8).numpy()
             self._mask_u8[:] = m
@@ -1204,12 +1269,15 @@ class MetalDeltaTimePayloadEngine:
         dt_ref: float | None = None,
         reset_outcomes: bool = True,
         n_steps: int = 1,
+        tau_rel: float | None = None,
     ) -> dict[str, torch.Tensor]:
         mode_i = 0 if mode == "analytic" else (1 if mode == "substep" else 2)
         dref = float(self.rules.plc_tick_ref if dt_ref is None else dt_ref)
+        t_rel = float(self._tau_rel if tau_rel is None else tau_rel)
         self._write_cfg(
             float(dt), mode_i, dref, reset_outcomes,
             self._pending_apply_plan, self._pending_has_mask, record_traj=False,
+            apply_vel=self._pending_apply_vel, tau_rel=t_rel,
         )
         wall = ctypes.c_double(0.0)
         if n_steps == 1:
@@ -1217,6 +1285,7 @@ class MetalDeltaTimePayloadEngine:
         else:
             self.lib.mesh_graph_run_fused(self.g_step, int(n_steps), 0, ctypes.byref(wall))
         self._pending_apply_plan = False
+        self._pending_apply_vel = False
         self._pending_has_mask = False
         return {"finished": self.t_finished, "winner": self.t_winner, "wall_ms": float(wall.value)}
 
@@ -1224,6 +1293,13 @@ class MetalDeltaTimePayloadEngine:
         wall = ctypes.c_double(0.0)
         self.lib.mesh_graph_run(self.g_obs, 1, 0, None, 0, ctypes.byref(wall))
         return self.obs_view, self.carts_view, self.teams_view, self._geo
+
+    def observe_graph_tensors(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        wall = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run(self.g_obs, 1, 0, None, 0, ctypes.byref(wall))
+        return self.obs_view, self.nav_view, self.carts_view, self.teams_view, self.acc_view, self._geo
 
     def snapshot(self, env_ids: torch.Tensor | np.ndarray | None = None) -> MetalSimSnapshot:
         if env_ids is None:
@@ -1273,11 +1349,12 @@ class MetalDeltaTimePayloadEngine:
         L = self.layout
         E, N, J, K = self.E, self.N, self.J, self.K
         u8 = self._state_u8
-        p_f1 = u8[:, L["soff_p_f1"] : L["soff_p_f1"] + 15 * N * 4].view(np.float32).reshape(E, 15, N)
+        p_f1 = u8[:, L["soff_p_f1"] : L["soff_p_f1"] + 17 * N * 4].view(np.float32).reshape(E, 17, N)
         p_i1 = u8[:, L["soff_p_i1"] : L["soff_p_i1"] + 8 * N * 4].view(np.int32).reshape(E, 8, N)
         return {
             "p_pos": torch.from_numpy(u8[:, L["soff_p_pos"] : L["soff_p_pos"] + N * 12].view(np.float32).reshape(E, N, 3)),
             "p_hp": torch.from_numpy(p_f1[:, 0, :]),
+            "p_armor": torch.from_numpy(p_f1[:, 1, :]),
             "p_respawn_t": torch.from_numpy(p_f1[:, 2, :]),
             "p_skill": torch.from_numpy(p_f1[:, 4, :]),
             "p_goal_timer": torch.from_numpy(p_f1[:, 6, :]),
@@ -1285,11 +1362,21 @@ class MetalDeltaTimePayloadEngine:
             "p_dmg_taken": torch.from_numpy(p_f1[:, 9, :]),
             "p_kills": torch.from_numpy(p_f1[:, 10, :]),
             "p_deaths": torch.from_numpy(p_f1[:, 11, :]),
+            "p_pickups": torch.from_numpy(p_f1[:, 12, :]),
             "p_cart_push": torch.from_numpy(p_f1[:, 13, :]),
             "p_cart_contest": torch.from_numpy(p_f1[:, 14, :]),
+            "p_rockets": torch.from_numpy(p_f1[:, 15, :]),
+            "p_strength_t": torch.from_numpy(p_f1[:, 16, :]),
             "p_team": torch.from_numpy(p_i1[:, 0, :]),
             "p_alive": torch.from_numpy(p_i1[:, 1, :]),
+            "p_wp_cur": torch.from_numpy(p_i1[:, 2, :]),
+            "p_goal_tgt": torch.from_numpy(p_i1[:, 5, :]),
             "p_goal_cart": torch.from_numpy(p_i1[:, 5, :]),
+            "p_goal_kind": torch.from_numpy(p_i1[:, 6, :]),
+            "p_ctrl_mode": torch.from_numpy(p_i1[:, 7, :]),
+            "p_r_acc": torch.from_numpy(u8[:, L["soff_p_r_acc"] : L["soff_p_r_acc"] + N * self.A_dim * 4].view(np.float32).reshape(E, N, self.A_dim)),
+            "p_u_vel": torch.from_numpy(u8[:, L["soff_p_u_vel"] : L["soff_p_u_vel"] + N * self.A_dim * 4].view(np.float32).reshape(E, N, self.A_dim)),
+            "item_cd": torch.from_numpy(u8[:, L["soff_item_cd"] : L["soff_item_cd"] + self.I_item * 4].view(np.float32).reshape(E, self.I_item)),
             "c_pos": torch.from_numpy(u8[:, L["soff_c_pos"] : L["soff_c_pos"] + J * 12].view(np.float32).reshape(E, J, 3)),
             "c_s": torch.from_numpy(u8[:, L["soff_c_f1"] : L["soff_c_f1"] + J * 4].view(np.float32).reshape(E, J)),
             "t_score": torch.from_numpy(u8[:, L["soff_t_score"] : L["soff_t_score"] + K * 4].view(np.float32).reshape(E, K)),

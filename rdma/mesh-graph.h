@@ -87,7 +87,20 @@ enum mesh_graph_op_kind {
   MG_OP_OPT_NS_AXPBY      = 48, /* BF16 y = f0*a + f1*b for Newton-Schulz polynomial */
   MG_OP_OPT_AURORA_DREF   = 49, /* Aurora tall-matrix row-leverage D refinement + X0 repack */
   MG_OP_OPT_APPLY_2D      = 50, /* polar step + EDM2 unit-norm + EMA + live BF16 pack + zero gw */
-  MG_OP_OPT_APPLY_1D      = 51  /* Adam step for 1D UnitLinear (u[7]=0) or scalar bank (u[7]=1) */
+  MG_OP_OPT_APPLY_1D      = 51, /* Adam step for 1D UnitLinear (u[7]=0) or scalar bank (u[7]=1) */
+  MG_OP_GRAPH_PRENORM     = 52, /* graph-native prenorm (obs+acc, nav+mass, carts, teams) */
+  MG_OP_GRAPH_EMBED_CAT   = 53, /* 4-type embed + equivariant afferent (nav_ctx + r_nav/r_team) fold */
+  MG_OP_GRAPH_EMBED_BWD   = 54, /* exact backward of MG_OP_GRAPH_EMBED_CAT */
+  MG_OP_NAV_GRAPH_MIX     = 55, /* directed nav-graph geodesic diffusion + bot local readout */
+  MG_OP_NAV_GRAPH_MIX_BWD = 56, /* exact backward of MG_OP_NAV_GRAPH_MIX */
+  MG_OP_DPP_GRAM          = 57, /* exact FP32 per-team DPP diversity kernel B(I+B^T B)^{-1} B^T V */
+  MG_OP_DPP_GRAM_BWD      = 58, /* exact analytical backward of MG_OP_DPP_GRAM */
+  MG_OP_GRAPH_SLICE_NORM  = 59, /* mp_norm(x_final) -> H_bot, H_nav, H_team */
+  MG_OP_GRAPH_SLICE_BWD   = 60, /* exact backward of MG_OP_GRAPH_SLICE_NORM */
+  MG_OP_FLOW_JET_SAMPLE   = 61, /* 1-NFE Mealy-Jet SRAM integration -> u_vel, u_lat, V_W, V_L */
+  MG_OP_FLOW_JET_PREP     = 62, /* B_H unit-norm + 32x32 Cholesky ridge u_lat_targ + pack inp_fj */
+  MG_OP_FLOW_JET_LOSS_BWD = 63, /* Advantage-Weighted Boltzmann Flow + Jet + Winnie/Lou + Dyn loss & bwd */
+  MG_OP_FLOW_COND_BWD     = 64  /* reduce d_inp_fj[:,40:104] -> d_c_bot, d_c_team */
 };
 
 enum mesh_graph_ew_subop {
