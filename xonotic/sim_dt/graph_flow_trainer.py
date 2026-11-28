@@ -21,12 +21,14 @@ from .dataset_sampler import make_rules_for_profile, sample_roster_skills
 from .graph_flow_policy import (
     GraphFlowPolicy,
     clone_graph_flow_model,
+    compute_ess_boltzmann_weights,
     sample_orthogonal_team_bot_noise,
 )
 from .metal_graphflow import (
+    CompiledGraphFlowOptimizer,
     CompiledGraphFlowPolicy,
     CompiledGraphFlowTrainer,
-    GraphFlowOptimizer,
+    GraphFlowWeightBank,
 )
 from .metal_runtime import MetalCGTRewardComputer, MetalDeltaTimePayloadEngine
 from .ppo_trainer import _team_eff_rho_flat
@@ -158,6 +160,7 @@ class _GraphFlowSlot:
         self.rew_gpu = MetalCGTRewardComputer(E=self.E, N=self.N, J=self.J, K=self.K)
         self.rew_gpu.set_config(cfg.losses.reward, terminal_win_bonus=float(sc.terminal_win_bonus))
         self._variants = variants
+        self._banks: dict[str, GraphFlowWeightBank] = {}
         self._compiled: dict[str, CompiledGraphFlowPolicy] = {}
 
     def close(self) -> None:
@@ -175,8 +178,10 @@ class _GraphFlowSlot:
             return None
         c = self._compiled.get(arm)
         if c is None:
+            bank = self._banks.get(arm)
             c = CompiledGraphFlowPolicy(
-                mdl, E=self.E, N=self.N, W_nav=self.W_nav, J=self.J, K=self.K, nav_kern=self.nav_kern,
+                mdl, E=self.E, N=self.N, W_nav=self.W_nav, J=self.J, K=self.K,
+                nav_kern=self.nav_kern, weight_bank=bank,
             )
             self._compiled[arm] = c
         return c
@@ -184,7 +189,7 @@ class _GraphFlowSlot:
     def sync_variant_(self, arm: str, model: GraphFlowPolicy) -> None:
         self._variants[arm] = model
         c = self._compiled.get(arm)
-        if c is not None:
+        if c is not None and c._owns_bank:
             c.sync_weights_(model)
 
 
@@ -224,6 +229,11 @@ class GraphFlowRolloutPool:
         self.world_seed_base = int(seed_base if world_seed_base is None else world_seed_base)
         self.rng = np.random.default_rng(seed_base + 777)
         self.slots: list[_GraphFlowSlot] = []
+        self._banks: dict[str, GraphFlowWeightBank] = {}
+        self._external_banks: set[str] = set()
+        for arm, mdl in variants.items():
+            if mdl is not None:
+                self._banks[arm] = GraphFlowWeightBank(mdl, with_grads=False)
         self._cursor = 0
         self._refresh_gen = 0
         self._phys_cycle = ("baseline", "fast", "slow", "volatile") if randomize_physics else ("baseline",)
@@ -258,6 +268,7 @@ class GraphFlowRolloutPool:
             tau_rel=self.tau_rel,
             n_phys_substeps=self.n_phys_substeps,
         )
+        slot._banks = self._banks
         stagger = ((wi + self._refresh_gen) * 12) % 40
         if stagger > 0:
             slot.live_eng.step(self.sc.dt, mode=self.sc.mode, n_steps=stagger)
@@ -282,11 +293,44 @@ class GraphFlowRolloutPool:
         for s in self.slots:
             s.close()
         self.slots.clear()
+        for arm, b in list(self._banks.items()):
+            if arm not in self._external_banks:
+                b.close()
+        self._banks.clear()
+
+    def attach_weight_bank_(self, arm: str, bank: GraphFlowWeightBank, model: GraphFlowPolicy) -> None:
+        """Share a learner's live GraphFlowWeightBank zero-copy across ALL world slots!"""
+        old = self._banks.get(arm)
+        if old is not None and old is not bank and arm not in self._external_banks:
+            old.close()
+        self._banks[arm] = bank
+        self._external_banks.add(arm)
+        self.variants[arm] = model
+        for s in self.slots:
+            c = s._compiled.pop(arm, None)
+            if c is not None:
+                c.close()
+
+    def detach_weight_bank_(self, arm: str, model: GraphFlowPolicy) -> None:
+        """Replace an external learner bank with a pool-owned frozen bank before closing the learner."""
+        self._external_banks.discard(arm)
+        self._banks[arm] = GraphFlowWeightBank(model, with_grads=False)
+        self.variants[arm] = model
+        for s in self.slots:
+            c = s._compiled.pop(arm, None)
+            if c is not None:
+                c.close()
 
     def sync_variant_(self, arm: str, model: GraphFlowPolicy) -> None:
         self.variants[arm] = model
-        for s in self.slots:
-            s.sync_variant_(arm, model)
+        bank = self._banks.get(arm)
+        if bank is None:
+            bank = GraphFlowWeightBank(model, with_grads=False)
+            self._banks[arm] = bank
+        elif arm not in self._external_banks:
+            # Shared bank: repack ONCE instead of num_worlds times!
+            bank.sync_from_model_(model)
+        # If arm is an external learner bank, CompiledGraphFlowOptimizer/RDMA already updated it in-place!
 
     def _choose_seats(
         self,
@@ -484,11 +528,9 @@ class GraphFlowRolloutPool:
                 branch_u_sep_sum += float(diff_g.masked_select(tri.expand(B, G, G, N)).mean().item())
                 branch_u_sep_cnt += 1
 
-            # Step physics with velocity steering (n_phys_substeps per strategy emission)
+            # Step physics with velocity steering (n_phys_substeps fused into ONE Metal CB!)
             eng.apply_vel(u_vel, has_vel, tau_rel=slot.tau_rel)
-            eng.step(float(sc.dt), mode=str(sc.mode), reset_outcomes=True, n_steps=1, tau_rel=slot.tau_rel)
-            for _sub in range(1, slot.n_phys_substeps):
-                eng.step(float(sc.dt), mode=str(sc.mode), reset_outcomes=False, n_steps=1, tau_rel=slot.tau_rel)
+            eng.step(float(sc.dt), mode=str(sc.mode), reset_outcomes=True, n_steps=slot.n_phys_substeps, tau_rel=slot.tau_rel)
 
             # Single observe_graph_tensors() per step — reused as next step's input and final bootstrap!
             obs_out, nav_out, carts_out, teams_out, acc_out, _ = eng.observe_graph_tensors()
@@ -630,7 +672,7 @@ class GraphFlowRolloutPool:
 
 
 class GraphFlowTrainer:
-    """Metal 4 NAX Advantage-Weighted Boltzmann Flow Matching + Winnie/Lou Critic Trainer."""
+    """Metal 4 NAX INT8@INT8 Advantage-Weighted Boltzmann Flow Matching + All-GPU Aurora Optimizer."""
 
     def __init__(
         self,
@@ -643,13 +685,11 @@ class GraphFlowTrainer:
         max_cache: int = 12,
     ):
         self.model = model.to(device=torch.device("cpu"))
-        self.ema_model = ema_model.to(device=torch.device("cpu")) if ema_model is not None else clone_graph_flow_model(self.model)
+        self.ema_model = ema_model.to(device=torch.device("cpu")) if ema_model is not None else None
         self.ema_fast_model = ema_fast_model.to(device=torch.device("cpu")) if ema_fast_model is not None else None
         self.cfg = cfg
-        self.opt = GraphFlowOptimizer(
-            self.model, self.ema_model, cfg.optimizer,
-            ema_fast_model=self.ema_fast_model, lr_mult=lr_mult,
-        )
+        self.bank = GraphFlowWeightBank(self.model, with_grads=True)
+        self.opt = CompiledGraphFlowOptimizer(self.bank, self.model, cfg.optimizer, lr_mult=lr_mult)
         self.policy_version = 0
         self.max_cache = max(2, int(max_cache))
         self._cache: OrderedDict[tuple[int, int, int, int, int], CompiledGraphFlowTrainer] = OrderedDict()
@@ -658,6 +698,12 @@ class GraphFlowTrainer:
         for tr in self._cache.values():
             tr.close()
         self._cache.clear()
+        if getattr(self, "opt", None):
+            self.opt.close()
+            self.opt = None
+        if getattr(self, "bank", None):
+            self.bank.close()
+            self.bank = None
 
     def _get_trainer(self, mb_envs: int, N: int, Wn: int, J: int, K: int, nav_kern: torch.Tensor) -> CompiledGraphFlowTrainer:
         key = (mb_envs, N, Wn, J, K)
@@ -666,26 +712,18 @@ class GraphFlowTrainer:
             while len(self._cache) >= self.max_cache:
                 _, old_tr = self._cache.popitem(last=False)
                 old_tr.close()
-            tr = CompiledGraphFlowTrainer(self.model, E_mb=mb_envs, N=N, W_nav=Wn, J=J, K=K, nav_kern=nav_kern)
+            tr = CompiledGraphFlowTrainer(
+                self.model, E_mb=mb_envs, N=N, W_nav=Wn, J=J, K=K,
+                nav_kern=nav_kern, weight_bank=self.bank,
+            )
             self._cache[key] = tr
         else:
             self._cache.move_to_end(key)
             tr.set_nav_kern(nav_kern)
-            tr.sync_weights_(self.model)
         return tr
 
     def reload_after_rdma_(self) -> None:
         self.opt.reload_master_from_model_()
-
-    @staticmethod
-    def _param_group(name: str) -> str:
-        if name.startswith(("fj_", "flow_cond_")):
-            return "flow"
-        if name.startswith("basis_"):
-            return "basis"
-        if name.startswith(("value_", "dyn_")):
-            return "critic"
-        return "backbone"
 
     @torch.no_grad()
     def update(self, batch: GraphFlowBatch, *, epochs: int = 2) -> dict[str, Any]:
@@ -713,6 +751,28 @@ class GraphFlowTrainer:
                 "ess_frac": 0.0, "alpha": 0.0, "u_norm": 0.0, "v_norm": 0.0, "grad_norm": 0.0,
             }
 
+        # Solve ESS-targeted Boltzmann weights ONCE vectorized over ALL live groups (faster + lower-variance!)
+        live_env_ids = (valid_g_ids[:, None] * G + torch.arange(G)[None, :]).reshape(-1)
+        adv_c = batch.adv.clamp(-lcfg.adv_clip, lcfg.adv_clip)
+        t0_live = (torch.round(batch.obs[live_env_ids, :, 1].float()) - 1.0).clamp(0.0, float(max(1, K) - 1)).to(torch.int64)
+        own_idx = (Wn + t0_live).unsqueeze(-1)
+        u_sq_live = batch.u_vel[live_env_ids].float().scatter(-1, own_idx, 0.0).square().mean(dim=-1)
+        gf_cfg = self.model.cfg
+        w_live, batch_ess, batch_alpha = compute_ess_boltzmann_weights(
+            adv_c[live_env_ids],
+            batch.actor_mask[live_env_ids],
+            u_sq_mean=u_sq_live,
+            zero_anchor_lambda=gf_cfg.zero_anchor_lambda,
+            ess_target=gf_cfg.ess_target,
+            w_min=gf_cfg.flow_w_min,
+            w_max=gf_cfg.flow_w_max,
+            beta_min=gf_cfg.beta_bounds[0],
+            beta_max=gf_cfg.beta_bounds[1],
+            group_size=G,
+        )
+        w_boltz_all = torch.zeros((M_tot, N), dtype=torch.float32)
+        w_boltz_all[live_env_ids] = w_live
+
         target_rows = max(512, int(sc.target_microbatch_rows))
         raw_mb = max(G, min(M_tot, int(round(target_rows / max(1, entities_per_env)))))
         mb_envs = max(G, (raw_mb // G) * G)
@@ -724,15 +784,10 @@ class GraphFlowTrainer:
         tr = self._get_trainer(mb_envs, N, Wn, J, K, batch.nav_kern)
         tr.set_geo(batch.geo)
         tr.zero_grads_()
+        self.opt.reset_snr_()
 
-        adv_c = batch.adv.clamp(-lcfg.adv_clip, lcfg.adv_clip)
         diags: list[dict[str, float]] = []
         opt_steps = 0
-
-        # Exact within-iteration Step GradSNR accumulators (global + backbone/basis/flow/critic!)
-        g_sum: dict[str, torch.Tensor] = {}
-        q_sum_grp: dict[str, float] = {"all": 0.0, "backbone": 0.0, "basis": 0.0, "flow": 0.0, "critic": 0.0}
-        n_snr_steps = 0
 
         for _ in range(max(1, int(epochs))):
             g_perm = valid_g_ids[torch.randperm(n_groups_tot)]
@@ -743,7 +798,6 @@ class GraphFlowTrainer:
                     rem_micros = len(mb_starts) - mi
                     win_size = min(accum, rem_micros)
                 g_ids = g_perm[g_start : g_start + groups_per_mb]
-                # Expand live group IDs -> contiguous [B_mb * G] env indices!
                 idx = (g_ids[:, None] * G + torch.arange(G)[None, :]).reshape(-1)
                 if idx.numel() < G:
                     continue
@@ -752,6 +806,9 @@ class GraphFlowTrainer:
                     batch.u_vel[idx], adv_c[idx], batch.gae_ret[idx], batch.obs_drho[idx],
                     batch.actor_mask[idx], batch.wm_in[idx],
                     active_env=batch.active_env[idx],
+                    w_boltz=w_boltz_all[idx],
+                    ess_frac_in=batch_ess,
+                    alpha_in=batch_alpha,
                     value_coef=float(lcfg.critic_weight),
                     dyn_coef=float(lcfg.dyn_weight),
                     grad_scale=1.0 / float(max(1, win_size)),
@@ -759,60 +816,23 @@ class GraphFlowTrainer:
                 )
                 in_accum += 1
                 if in_accum >= win_size or (mi + 1) >= len(mb_starts):
-                    self.model.zero_grad(set_to_none=True)
-                    tr.export_grads_to_model_(self.model)
-                    # Record FP32 step gradient for exact GradSNR across steps!
-                    all_finite = True
-                    for nm, prm in self.model.named_parameters():
-                        if prm.grad is None:
-                            continue
-                        gf = prm.grad.detach().float()
-                        if not torch.isfinite(gf).all():
-                            all_finite = False
-                            break
-                    if all_finite:
-                        n_snr_steps += 1
-                        for nm, prm in self.model.named_parameters():
-                            if prm.grad is None:
-                                continue
-                            gf = prm.grad.detach().float()
-                            sq = float(gf.square().sum().item())
-                            grp = self._param_group(nm)
-                            q_sum_grp["all"] += sq
-                            q_sum_grp[grp] += sq
-                            if nm not in g_sum:
-                                g_sum[nm] = gf.clone()
-                            else:
-                                g_sum[nm].add_(gf)
+                    # ALL-GPU <1 ms Aurora+Adam+INT8/INT8^T repack + zero_grads + FP32 Step GradSNR!
                     gn = self.opt.step()
-                    tr.sync_weights_(self.model)
-                    tr.zero_grads_()
                     in_accum = 0
                     opt_steps += 1
                     sd["grad_norm"] = gn
                     diags.append(sd)
 
-        # Compute exact Step GradSNR = (m-1)*S / (Q_mean - S) & Coherence = S / Q_mean
-        snr_out: dict[str, float] = {}
-        coh_out: dict[str, float] = {}
-        if n_snr_steps >= 2:
-            inv_m = 1.0 / float(n_snr_steps)
-            s_grp: dict[str, float] = {"all": 0.0, "backbone": 0.0, "basis": 0.0, "flow": 0.0, "critic": 0.0}
-            for nm, gs in g_sum.items():
-                msq = float((gs * inv_m).square().sum().item())
-                s_grp["all"] += msq
-                s_grp[self._param_group(nm)] += msq
-            for grp in ("all", "backbone", "basis", "flow", "critic"):
-                q_mean = q_sum_grp[grp] * inv_m
-                sig = s_grp[grp]
-                var_mean = max(q_mean - sig, 0.0) / float(n_snr_steps - 1)
-                coh_out[grp] = round(sig / max(q_mean, 1e-12), 4)
-                snr_out[grp] = round(min(sig / max(var_mean, 1e-12), 999.0), 3)
-        else:
-            for grp in ("all", "backbone", "basis", "flow", "critic"):
-                coh_out[grp] = 0.0
-                snr_out[grp] = 0.0
+        # Export updated FP32 master -> PyTorch model ONCE at end of update()
+        self.opt.export_to_model_(self.model)
+        if self.ema_model is not None:
+            for (n, _), (_, pe) in zip(self.model.named_parameters(), self.ema_model.named_parameters()):
+                pe.copy_((0.992 * pe.float() + 0.008 * self.opt.master[n]).to(pe.dtype))
+        if self.ema_fast_model is not None:
+            for (n, _), (_, pe) in zip(self.model.named_parameters(), self.ema_fast_model.named_parameters()):
+                pe.copy_((0.96 * pe.float() + 0.04 * self.opt.master[n]).to(pe.dtype))
 
+        snr_out, coh_out = self.opt.read_snr_(opt_steps)
         self.policy_version += opt_steps
         def _mean(k: str) -> float:
             return round(float(np.mean([d[k] for d in diags])), 5) if diags else 0.0

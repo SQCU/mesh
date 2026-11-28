@@ -1877,7 +1877,225 @@ struct I8GemmParams { int M, N, K, accum; };
   Dout.store(sy);
 }
 
-// ---- Hardware NAX Batched CGT Global Gram Kernels (dynamic_extent -> exact for ANY M_ent!) ----
+[[kernel, max_total_threads_per_threadgroup(128)]] void gemm_i8_nax_64x128(
+    const device int8_t* X [[buffer(0)]],
+    const device float* SX [[buffer(1)]],
+    const device int8_t* W [[buffer(2)]],
+    const device float* SW [[buffer(3)]],
+    device bfloat* Y [[buffer(4)]],
+    const constant I8GemmParams* params [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  constexpr int RM = 64, CN = 128;
+  const int M = params->M, N = params->N, K = params->K, accum = params->accum;
+  const int row = int(group.x) * RM, col = int(group.y) * CN;
+  if (row >= M || col >= N) return;
+
+  threadgroup float sx_sh[64], sw_sh[128];
+  if (tid < 64u) sx_sh[tid] = (row + int(tid) < M) ? SX[row + int(tid)] : 0.0f;
+  sw_sh[tid] = (col + int(tid) < N) ? SW[col + int(tid)] : 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using i8_tensor_t = metal::tensor<device int8_t, extents_t, metal::tensor_inline>;
+  using bf_tensor_t = metal::tensor<device bfloat, extents_t, metal::tensor_inline>;
+  i8_tensor_t tA((device int8_t*)X, extents_t(K, M), strides_t{1, K});
+  i8_tensor_t tB((device int8_t*)W, extents_t(K, N), strides_t{1, K});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      RM, CN, static_cast<int>(metal::dynamic_extent), false, true, false,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroups<4>> op;
+  auto acc = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, int32_t>();
+  UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) acc[i] = 0;
+
+  auto sa = tA.slice(0, row);
+  auto sb = tB.slice(0, col);
+  op.run(sa, sb, acc);
+
+  bf_tensor_t tY(Y, extents_t(N, M), strides_t{1, N});
+  auto sy = tY.slice(col, row);
+  auto Dout = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, bfloat>();
+  if (accum) {
+    Dout.load(sy);
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = bfloat(float(Dout[i]) + float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]));
+    }
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = bfloat(float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]));
+    }
+  }
+  Dout.store(sy);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]] void gemm_i8_nax_64x64_f32(
+    const device int8_t* X [[buffer(0)]],
+    const device float* SX [[buffer(1)]],
+    const device int8_t* W [[buffer(2)]],
+    const device float* SW [[buffer(3)]],
+    device float* Y [[buffer(4)]],
+    const constant I8GemmParams* params [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  constexpr int RM = 64, CN = 64;
+  const int M = params->M, N = params->N, K = params->K, accum = params->accum;
+  const int row = int(group.x) * RM, col = int(group.y) * CN;
+  if (row >= M || col >= N) return;
+
+  threadgroup float sx_sh[64], sw_sh[64];
+  if (tid < 64u) {
+    sx_sh[tid] = (row + int(tid) < M) ? SX[row + int(tid)] : 0.0f;
+  } else {
+    const uint c = tid - 64u;
+    sw_sh[c] = (col + int(c) < N) ? SW[col + int(c)] : 0.0f;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using i8_tensor_t = metal::tensor<device int8_t, extents_t, metal::tensor_inline>;
+  using f32_tensor_t = metal::tensor<device float, extents_t, metal::tensor_inline>;
+  i8_tensor_t tA((device int8_t*)X, extents_t(K, M), strides_t{1, K});
+  i8_tensor_t tB((device int8_t*)W, extents_t(K, N), strides_t{1, K});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      RM, CN, static_cast<int>(metal::dynamic_extent), false, true, false,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroups<4>> op;
+  auto acc = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, int32_t>();
+  UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) acc[i] = 0;
+
+  auto sa = tA.slice(0, row);
+  auto sb = tB.slice(0, col);
+  op.run(sa, sb, acc);
+
+  f32_tensor_t tY(Y, extents_t(N, M), strides_t{1, N});
+  auto sy = tY.slice(col, row);
+  auto Dout = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, float>();
+  if (accum) {
+    Dout.load(sy);
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] += float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]);
+    }
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]);
+    }
+  }
+  Dout.store(sy);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]] void gemm_i8_nax_64x128_f32(
+    const device int8_t* X [[buffer(0)]],
+    const device float* SX [[buffer(1)]],
+    const device int8_t* W [[buffer(2)]],
+    const device float* SW [[buffer(3)]],
+    device float* Y [[buffer(4)]],
+    const constant I8GemmParams* params [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  constexpr int RM = 64, CN = 128;
+  const int M = params->M, N = params->N, K = params->K, accum = params->accum;
+  const int row = int(group.x) * RM, col = int(group.y) * CN;
+  if (row >= M || col >= N) return;
+
+  threadgroup float sx_sh[64], sw_sh[128];
+  if (tid < 64u) sx_sh[tid] = (row + int(tid) < M) ? SX[row + int(tid)] : 0.0f;
+  sw_sh[tid] = (col + int(tid) < N) ? SW[col + int(tid)] : 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using i8_tensor_t = metal::tensor<device int8_t, extents_t, metal::tensor_inline>;
+  using f32_tensor_t = metal::tensor<device float, extents_t, metal::tensor_inline>;
+  i8_tensor_t tA((device int8_t*)X, extents_t(K, M), strides_t{1, K});
+  i8_tensor_t tB((device int8_t*)W, extents_t(K, N), strides_t{1, K});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      RM, CN, static_cast<int>(metal::dynamic_extent), false, true, false,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroups<4>> op;
+  auto acc = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, int32_t>();
+  UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) acc[i] = 0;
+
+  auto sa = tA.slice(0, row);
+  auto sb = tB.slice(0, col);
+  op.run(sa, sb, acc);
+
+  f32_tensor_t tY(Y, extents_t(N, M), strides_t{1, N});
+  auto sy = tY.slice(col, row);
+  auto Dout = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, float>();
+  if (accum) {
+    Dout.load(sy);
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] += float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]);
+    }
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]);
+    }
+  }
+  Dout.store(sy);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void gemm_i8_nax_32x32_f32(
+    const device int8_t* X [[buffer(0)]],
+    const device float* SX [[buffer(1)]],
+    const device int8_t* W [[buffer(2)]],
+    const device float* SW [[buffer(3)]],
+    device float* Y [[buffer(4)]],
+    const constant I8GemmParams* params [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  constexpr int RM = 32, CN = 32;
+  const int M = params->M, N = params->N, K = params->K, accum = params->accum;
+  const int row = int(group.x) * RM, col = int(group.y) * CN;
+  if (row >= M || col >= N) return;
+
+  threadgroup float sx_sh[32], sw_sh[32];
+  sx_sh[tid] = (row + int(tid) < M) ? SX[row + int(tid)] : 0.0f;
+  sw_sh[tid] = (col + int(tid) < N) ? SW[col + int(tid)] : 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  using extents_t = metal::dextents<int32_t, 2>;
+  using strides_t = metal::array<int32_t, 2>;
+  using i8_tensor_t = metal::tensor<device int8_t, extents_t, metal::tensor_inline>;
+  using f32_tensor_t = metal::tensor<device float, extents_t, metal::tensor_inline>;
+  i8_tensor_t tA((device int8_t*)X, extents_t(K, M), strides_t{1, K});
+  i8_tensor_t tB((device int8_t*)W, extents_t(K, N), strides_t{1, K});
+  constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+      RM, CN, static_cast<int>(metal::dynamic_extent), false, true, false,
+      mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+  auto acc = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, int32_t>();
+  UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) acc[i] = 0;
+
+  auto sa = tA.slice(0, row);
+  auto sb = tB.slice(0, col);
+  op.run(sa, sb, acc);
+
+  f32_tensor_t tY(Y, extents_t(N, M), strides_t{1, N});
+  auto sy = tY.slice(col, row);
+  auto Dout = op.template get_destination_cooperative_tensor<i8_tensor_t, i8_tensor_t, float>();
+  if (accum) {
+    Dout.load(sy);
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] += float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]);
+    }
+  } else {
+    UNROLL_ALL for (uint16_t i = 0; i < acc.get_capacity(); i++) {
+      auto idx = acc.get_multidimensional_index(i);
+      Dout[i] = float(acc[i]) * (sx_sh[idx[1]] * sw_sh[idx[0]]);
+    }
+  }
+  Dout.store(sy);
+}
 struct GramNaxParams { int E, M_ent, D, R, accum; float inv_m; };
 
 // 1. Batched KV[e, R, D] = (R_norm[e]^T @ V_norm[e]) * inv_m  (grid = (R/32, D/32, E), 32 th)
@@ -2052,6 +2270,8 @@ struct mesh_graph {
   size_t sdpa_scratch_bytes = 0;
   id<MTLBuffer> gram_kv_buf = nil;
   size_t gram_kv_bytes = 0;
+  id<MTLBuffer> fj_ginv_buf = nil;
+  size_t fj_ginv_bytes = 0;
   uint64_t step_gen = 0;
   int out_tok_buf_id = -1;
 };
@@ -3610,17 +3830,25 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         const BufSlot &bw = g->bufs[op.in[2]], &bsw = g->bufs[op.in[3]];
         const BufSlot &by = g->bufs[op.out[0]];
         const int M = static_cast<int>(op.u[0]), N = static_cast<int>(op.u[1]), K = static_cast<int>(op.u[2]);
-        const int accum = static_cast<int>(op.u[3]);
+        const int mode = static_cast<int>(op.u[3]); // 0=bf16, 1=bf16_accum, 2=f32, 3=f32_accum
+        const bool is_f32 = (mode >= 2);
+        const int accum = (mode & 1);
         const int params[4] = {M, N, K, accum};
-        const bool use_64 = (M >= 64 && N >= 64);
-        [enc setComputePipelineState:get_pso(g, g->lib_gemm, use_64 ? "gemm_i8_nax_64x64" : "gemm_i8_nax_32x32")];
+        const bool use_64x128 = (M >= 64 && N >= 128 && (N % 128 == 0));
+        const bool use_64 = (!use_64x128 && M >= 64 && N >= 64);
+        const char *kname = is_f32
+            ? (use_64x128 ? "gemm_i8_nax_64x128_f32" : (use_64 ? "gemm_i8_nax_64x64_f32" : "gemm_i8_nax_32x32_f32"))
+            : (use_64x128 ? "gemm_i8_nax_64x128" : (use_64 ? "gemm_i8_nax_64x64" : "gemm_i8_nax_32x32"));
+        [enc setComputePipelineState:get_pso(g, g->lib_gemm, kname)];
         [enc setBuffer:bx.mtl offset:bx.off atIndex:0];
         [enc setBuffer:bsx.mtl offset:bsx.off atIndex:1];
         [enc setBuffer:bw.mtl offset:bw.off atIndex:2];
         [enc setBuffer:bsw.mtl offset:bsw.off atIndex:3];
         [enc setBuffer:by.mtl offset:by.off atIndex:4];
         [enc setBytes:params length:sizeof(params) atIndex:5];
-        if (use_64) {
+        if (use_64x128) {
+          [enc dispatchThreadgroups:MTLSizeMake((M + 63) / 64, (N + 127) / 128, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else if (use_64) {
           [enc dispatchThreadgroups:MTLSizeMake((M + 63) / 64, (N + 63) / 64, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         } else {
           [enc dispatchThreadgroups:MTLSizeMake((M + 31) / 32, (N + 31) / 32, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -3738,7 +3966,7 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
           [enc setBuffer:bgw.mtl offset:bgw.off atIndex:9];
           [enc setBytes:op.u length:sizeof(op.u) atIndex:10];
           [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        } else {
+        } else if (op.u[7] == 1u) {
           const BufSlot &bscg = g->bufs[op.in[0]], &bnrm = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
           const BufSlot &bst = g->bufs[op.in[3]], &bmom = g->bufs[op.in[4]], &bv = g->bufs[op.in[5]];
           const BufSlot &bscm = g->bufs[op.out[0]], &bsce = g->bufs[op.out[1]], &bscl = g->bufs[op.out[2]];
@@ -3758,6 +3986,59 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
           [enc setBuffer:bdiag.mtl offset:bdiag.off atIndex:11];
           [enc setBytes:op.u length:sizeof(op.u) atIndex:12];
           [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else if (op.u[7] == 2u) {
+          // mg_opt_apply_adam_2d: in[0..5]={gp, norm_sq, cfg, step, mom, v}, out[0..2]={wm, w_live, fj_params}
+          // u = {M, K, k_pad, row_off|(col_off<<16), flags, fj_off, gw_buf_id, 2}
+          const BufSlot &bgp = g->bufs[op.in[0]], &bnrm = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
+          const BufSlot &bst = g->bufs[op.in[3]], &bmom = g->bufs[op.in[4]], &bv = g->bufs[op.in[5]];
+          const BufSlot &bwm = g->bufs[op.out[0]], &bwl = g->bufs[op.out[1]];
+          const BufSlot &bfj = (op.out[2] >= 0 ? g->bufs[op.out[2]] : bwm);
+          const BufSlot &bgw = g->bufs[op.u[6]];
+          [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_apply_adam_2d")];
+          [enc setBuffer:bgp.mtl offset:bgp.off atIndex:0];
+          [enc setBuffer:bnrm.mtl offset:bnrm.off atIndex:1];
+          [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:2];
+          [enc setBuffer:bst.mtl offset:bst.off atIndex:3];
+          [enc setBuffer:bmom.mtl offset:bmom.off atIndex:4];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:5];
+          [enc setBuffer:bwm.mtl offset:bwm.off atIndex:6];
+          [enc setBuffer:bwl.mtl offset:bwl.off atIndex:7];
+          [enc setBuffer:bfj.mtl offset:bfj.off atIndex:8];
+          [enc setBuffer:bgw.mtl offset:bgw.off atIndex:9];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:10];
+          [enc dispatchThreadgroups:MTLSizeMake((op.u[0] + 3u) / 4u, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else if (op.u[7] == 3u) {
+          // mg_opt_apply_gf_scalars: in[0..5]={sc_grads, norm_sq, cfg, step, mom, v}, out[0..2]={sc_m, scalars_live, hp_live}
+          // u = {S_tot, n_uniq_blk, depth, recurrent, lcfg_gains_buf, bounds_buf, diag_buf, 3}
+          const BufSlot &bscg = g->bufs[op.in[0]], &bnrm = g->bufs[op.in[1]], &bcfg = g->bufs[op.in[2]];
+          const BufSlot &bst = g->bufs[op.in[3]], &bmom = g->bufs[op.in[4]], &bv = g->bufs[op.in[5]];
+          const BufSlot &bscm = g->bufs[op.out[0]], &bscl = g->bufs[op.out[1]], &bhpl = g->bufs[op.out[2]];
+          const BufSlot &blg = g->bufs[op.u[4]], &bbnd = g->bufs[op.u[5]], &bdiag = g->bufs[op.u[6]];
+          [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_apply_gf_scalars")];
+          [enc setBuffer:bscg.mtl offset:bscg.off atIndex:0];
+          [enc setBuffer:bnrm.mtl offset:bnrm.off atIndex:1];
+          [enc setBuffer:bcfg.mtl offset:bcfg.off atIndex:2];
+          [enc setBuffer:bst.mtl offset:bst.off atIndex:3];
+          [enc setBuffer:bmom.mtl offset:bmom.off atIndex:4];
+          [enc setBuffer:bv.mtl offset:bv.off atIndex:5];
+          [enc setBuffer:bscm.mtl offset:bscm.off atIndex:6];
+          [enc setBuffer:bscl.mtl offset:bscl.off atIndex:7];
+          [enc setBuffer:bhpl.mtl offset:bhpl.off atIndex:8];
+          [enc setBuffer:blg.mtl offset:blg.off atIndex:9];
+          [enc setBuffer:bbnd.mtl offset:bbnd.off atIndex:10];
+          [enc setBuffer:bdiag.mtl offset:bdiag.off atIndex:11];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:12];
+          [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        } else if (op.u[7] == 4u) {
+          // mg_opt_snr_accum: in[0]=g_proj, out[0]=g_sum, out[1]=q_sum, u={n_elems, grp_idx, ..., 4}
+          const BufSlot &bgp = g->bufs[op.in[0]], &bgs = g->bufs[op.out[0]], &bqs = g->bufs[op.out[1]];
+          const uint32_t n = op.u[0];
+          [enc setComputePipelineState:get_pso(g, g->lib_opt, "mg_opt_snr_accum")];
+          [enc setBuffer:bgp.mtl offset:bgp.off atIndex:0];
+          [enc setBuffer:bgs.mtl offset:bgs.off atIndex:1];
+          [enc setBuffer:bqs.mtl offset:bqs.off atIndex:2];
+          [enc setBytes:op.u length:sizeof(op.u) atIndex:3];
+          [enc dispatchThreadgroups:MTLSizeMake((n + 255u) / 256u, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
         break;
       }
@@ -4001,7 +4282,7 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         [enc setBuffer:bul.mtl offset:bul.off atIndex:11];
         [enc setBuffer:bvo.mtl offset:bvo.off atIndex:12];
         [enc setBytes:up length:sizeof(up) atIndex:13];
-        [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake(E, (N + 3u) / 4u, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         break;
       }
       case MG_OP_FLOW_JET_PREP: {
@@ -4014,23 +4295,32 @@ static void encode_ops_into(mesh_graph *g, id<MTLComputeCommandEncoder> enc, uin
         const BufSlot &beps = g->bufs[op.u[3] & 0xFFFFu], &bmeta = g->bufs[op.u[3] >> 16];
         const BufSlot &btaus = g->bufs[op.u[4] & 0xFFFFu], &bzt = g->bufs[op.u[4] >> 16];
         const uint32_t up[6] = {E, N, W_nav, J, K, M_fj_pad};
-        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_flow_jet_prep")];
+        // Stage 1: Basis normalization + 32x32 Cholesky + parallel G_inv [E, 32, 32]
+        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_flow_jet_prep_basis")];
+        [enc setBuffer:bbn.mtl offset:bbn.off atIndex:0];
+        [enc setBuffer:bbt.mtl offset:bbt.off atIndex:1];
+        [enc setBuffer:bbs.mtl offset:bbs.off atIndex:2];
+        [enc setBuffer:bbh.mtl offset:bbh.off atIndex:3];
+        [enc setBuffer:g->fj_ginv_buf offset:0 atIndex:4];
+        [enc setBytes:up length:sizeof(up) atIndex:5];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        // Stage 2: Parallel 4-bots/TG register Sherman-Morrison + inp_fj pack!
+        [enc setComputePipelineState:get_pso(g, g->lib_graphflow, "mg_flow_jet_prep_bots")];
         [enc setBuffer:bcb.mtl offset:bcb.off atIndex:0];
         [enc setBuffer:bct.mtl offset:bct.off atIndex:1];
-        [enc setBuffer:bbn.mtl offset:bbn.off atIndex:2];
-        [enc setBuffer:bbt.mtl offset:bbt.off atIndex:3];
-        [enc setBuffer:bbs.mtl offset:bbs.off atIndex:4];
-        [enc setBuffer:but.mtl offset:but.off atIndex:5];
-        [enc setBuffer:beps.mtl offset:beps.off atIndex:6];
-        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:7];
-        [enc setBuffer:btaus.mtl offset:btaus.off atIndex:8];
-        [enc setBuffer:bbh.mtl offset:bbh.off atIndex:9];
-        [enc setBuffer:bul.mtl offset:bul.off atIndex:10];
-        [enc setBuffer:binp.mtl offset:binp.off atIndex:11];
-        [enc setBuffer:bzt.mtl offset:bzt.off atIndex:12];
-        [enc setBytes:up length:sizeof(up) atIndex:13];
-        [enc setBytes:op.f length:sizeof(op.f) atIndex:14];
-        [enc dispatchThreadgroups:MTLSizeMake(E, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [enc setBuffer:bbh.mtl offset:bbh.off atIndex:2];
+        [enc setBuffer:g->fj_ginv_buf offset:0 atIndex:3];
+        [enc setBuffer:but.mtl offset:but.off atIndex:4];
+        [enc setBuffer:beps.mtl offset:beps.off atIndex:5];
+        [enc setBuffer:bmeta.mtl offset:bmeta.off atIndex:6];
+        [enc setBuffer:btaus.mtl offset:btaus.off atIndex:7];
+        [enc setBuffer:bul.mtl offset:bul.off atIndex:8];
+        [enc setBuffer:binp.mtl offset:binp.off atIndex:9];
+        [enc setBuffer:bzt.mtl offset:bzt.off atIndex:10];
+        [enc setBytes:up length:sizeof(up) atIndex:11];
+        [enc setBytes:op.f length:sizeof(op.f) atIndex:12];
+        [enc dispatchThreadgroups:MTLSizeMake(E, (N + 3u) / 4u, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         break;
       }
       case MG_OP_FLOW_JET_LOSS_BWD: {
@@ -4324,9 +4614,10 @@ int mesh_graph_compile(mesh_graph_t *g) {
       l_off += cnt;
     }
   }
-  // Pre-allocate gram_kv_buf once at compile time (never reallocate inside unretained CB!)
+  // Pre-allocate gram_kv_buf & fj_ginv_buf once at compile time (never reallocate inside unretained CB!)
   {
     size_t max_gram_bytes = 0;
+    size_t max_ginv_bytes = 0;
     for (const auto &op : g->ops) {
       if (op.kind == MG_OP_CGT_GRAM_STAGE1) {
         const size_t need = static_cast<size_t>(op.u[0]) * op.u[5] * op.u[4] * 2u;
@@ -4337,11 +4628,19 @@ int mesh_graph_compile(mesh_graph_t *g) {
         const size_t R_b = op.u[2] >> 16;
         const size_t need = 2u * E_b * R_b * D_b * 2u;
         if (need > max_gram_bytes) max_gram_bytes = need;
+      } else if (op.kind == MG_OP_FLOW_JET_PREP) {
+        const size_t E_f = op.u[0] & 0xFFFFu;
+        const size_t need = E_f * 1024u * 4u;
+        if (need > max_ginv_bytes) max_ginv_bytes = need;
       }
     }
     if (max_gram_bytes > g->gram_kv_bytes) {
       g->gram_kv_buf = [g->dev newBufferWithLength:max_gram_bytes options:MTLResourceStorageModePrivate];
       g->gram_kv_bytes = max_gram_bytes;
+    }
+    if (max_ginv_bytes > g->fj_ginv_bytes) {
+      g->fj_ginv_buf = [g->dev newBufferWithLength:max_ginv_bytes options:MTLResourceStorageModePrivate];
+      g->fj_ginv_bytes = max_ginv_bytes;
     }
   }
   mesh_graph_barrier(g);

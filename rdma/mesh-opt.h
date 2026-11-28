@@ -51,7 +51,7 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint tgp [[threadgroup_position_in_grid]]) {
-  const uint M = u[0], K = u[1], K_stride = u[2], mode = u[3], row_off = u[4];
+  const uint M = u[0], K = u[1], K_stride = u[2], mode = u[3], row_off = u[4], aux = u[5];
   const float eps_w = max(f[0], 1e-4f);
   const float eps_n = max(f[1], 1e-4f);
 
@@ -71,8 +71,23 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
   const uint r = tgp * 4u + sg;
   if (r >= M) return;
 
+  if (mode == 3u) {
+    // Raw 2D copy (optional col_off = aux) + norm^2 without tangent projection (for fj_w1, fj_w2, basis_self, etc.)
+    const device float* gr = gw + ulong(row_off + r) * K_stride + aux;
+    float ssg = 0.0f;
+    for (uint c = lane; c < K; c += 32u) {
+      float gp = gr[c];
+      g_proj[ulong(r) * K + c] = gp;
+      ssg += gp * gp;
+    }
+    const float g2 = simd_sum(ssg);
+    if (lane == 0u) opt_atomic_add_f32(norm_sq, g2);
+    return;
+  }
+
   if (mode == 1u) {
-    if (r >= 3u) {
+    const uint act_rows = (aux > 0u) ? aux : 3u;
+    if (r >= act_rows) {
       for (uint c = lane; c < K; c += 32u) g_proj[ulong(r) * K + c] = 0.0f;
       return;
     }
@@ -296,6 +311,7 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     uint sg [[simdgroup_index_in_threadgroup]],
     uint tgp [[threadgroup_position_in_grid]]) {
   const uint M = u[0], K = u[1], c_pad = u[3], k_pad = u[4], row_off = u[5], flags = u[6];
+  const uint act_rows = (u[7] > 0u) ? u[7] : 3u;
   const uint i = tgp * 4u + sg;
   if (i >= M) return;
 
@@ -329,13 +345,13 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     we[j] = ema_decay * we[j] + (1.0f - ema_decay) * wn;
     if (!is_te) {
       wl[j] = bfloat(wn);
-    } else if (i < 3u) {
+    } else if (i < act_rows) {
       wl[j] = bfloat(wn * inv_te);
     }
-    if (!is_te || i < 3u) gwr[j] = 0.0f;
+    if (!is_te || i < act_rows) gwr[j] = 0.0f;
   }
   for (uint j = K + lane; j < k_pad; j += 32u) {
-    if (!is_te || i < 3u) {
+    if (!is_te || i < act_rows) {
       wl[j] = bfloat(0.0f);
       gwr[j] = 0.0f;
     }
@@ -481,6 +497,188 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     diag_opt[1] = std_sum / 11.0f;
     norm_sq[0] = 0.0f;
     step_buf[0] = step_next;
+  }
+}
+
+// 7. MG_OP_OPT_APPLY_1D (u[7]==2): General 2D/1D Adam for GraphFlow unnormalized/unit-norm heads & Mealy-Jet MLP!
+// 1 simdgroup = 32 lanes per row, 4 rows/TG.
+// flags: bit0=do_unit_norm, bit1=live_is_f32 (else bf16), bit2=write_fj_params, bit3=lr_half
+[[kernel]] void mg_opt_apply_adam_2d(
+    const device float* g_proj [[buffer(0)]],
+    const device float* norm_sq [[buffer(1)]],
+    const device float* opt_cfg [[buffer(2)]],
+    const device uint* step_buf [[buffer(3)]],
+    device float* mom [[buffer(4)]],
+    device float* v_buf [[buffer(5)]],
+    device float* w_master [[buffer(6)]],
+    device float* w_live_raw [[buffer(7)]],   // cast to bfloat* if !(flags&2) else float*
+    device float* fj_params [[buffer(8)]],    // optional f32 inference fj_params + fj_off
+    device float* gw [[buffer(9)]],           // [M_live, k_pad] zeroed for [row_off..row_off+M-1, col_off..col_off+K-1]
+    constant uint* u [[buffer(10)]],          // [M, K, k_pad, row_off|(col_off<<16), flags, fj_off]
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint M = u[0], K = u[1], k_pad = u[2];
+  const uint row_off = u[3] & 0xFFFFu, col_off = u[3] >> 16;
+  const uint flags = u[4], fj_off = u[5];
+  const uint i = tgp * 4u + sg;
+  if (i >= M) return;
+
+  const bool do_unit = (flags & 1u) != 0u;
+  const bool live_f32 = (flags & 2u) != 0u;
+  const bool write_fj = (flags & 4u) != 0u;
+  const bool lr_half = (flags & 8u) != 0u;
+  const float slr = opt_cfg[1] * (lr_half ? 0.5f : 1.0f);
+  const float b1 = 0.9f;
+  const float grad_clip = opt_cfg[4];
+  const float eps_w = max(opt_cfg[12], 1e-4f);
+  const float b2 = opt_cfg[14];
+  const float seps = opt_cfg[15];
+  const float step = float(step_buf[0] + 1u);
+  const float bc1 = 1.0f / max(1.0f - pow(b1, step), 1e-7f);
+  const float bc2 = 1.0f / max(1.0f - pow(b2, step), 1e-7f);
+
+  const float g_norm = sqrt(max(norm_sq[0], 0.0f));
+  const float clip_sc = (grad_clip > 0.0f && g_norm > grad_clip) ? (grad_clip / max(g_norm, 1e-6f)) : 1.0f;
+
+  device float* wm = w_master + ulong(i) * K;
+  device float* mr = mom + ulong(i) * K;
+  device float* vr = v_buf + ulong(i) * K;
+  const device float* gr = g_proj + ulong(i) * K;
+  float ss = 0.0f;
+  for (uint j = lane; j < K; j += 32u) {
+    float g = gr[j] * clip_sc;
+    float m = b1 * mr[j] + (1.0f - b1) * g;
+    float v = b2 * vr[j] + (1.0f - b2) * g * g;
+    mr[j] = m;
+    vr[j] = v;
+    float wn = wm[j] - slr * (m * bc1) / (sqrt(v * bc2) + seps);
+    wm[j] = wn;
+    ss += wn * wn;
+  }
+  const float inv_u = do_unit ? (1.0f / max(sqrt(simd_sum(ss)), eps_w)) : 1.0f;
+
+  device float* gwr = gw + ulong(row_off + i) * k_pad + col_off;
+  if (live_f32) {
+    device float* wlf = w_live_raw + ulong(row_off + i) * k_pad + col_off;
+    for (uint j = lane; j < K; j += 32u) {
+      float wn = wm[j] * inv_u;
+      if (do_unit) wm[j] = wn;
+      wlf[j] = wn;
+      if (write_fj) fj_params[fj_off + ulong(i) * K + j] = wn;
+      gwr[j] = 0.0f;
+    }
+  } else {
+    device bfloat* wlb = reinterpret_cast<device bfloat*>(w_live_raw) + ulong(row_off + i) * k_pad + col_off;
+    for (uint j = lane; j < K; j += 32u) {
+      float wn = wm[j] * inv_u;
+      if (do_unit) wm[j] = wn;
+      wlb[j] = bfloat(wn);
+      if (write_fj) fj_params[fj_off + ulong(i) * K + j] = wn;
+      gwr[j] = 0.0f;
+    }
+  }
+}
+
+// 8. MG_OP_OPT_APPLY_1D (u[7]==3): GraphFlow scalar bank Adam + live scalars/hp/lcfg pack + step++ + zero sc_grads/norm_sq!
+// Layout of sc_master / sc_grads:
+//   [0]=val_gain, [1..2]=val_bias[0..1], [3]=dyn_drift_gain, [4]=dyn_action_gain,
+//   [5]=type_blend, [6]=aff_blend, [7..7+6*n_uniq_blk-1]=blk blends, [7+6*n_uniq_blk..]=step_blends
+[[kernel]] void mg_opt_apply_gf_scalars(
+    device float* sc_grads [[buffer(0)]],
+    device float* norm_sq [[buffer(1)]],
+    const device float* opt_cfg [[buffer(2)]],
+    device uint* step_buf [[buffer(3)]],
+    device float* mom [[buffer(4)]],
+    device float* v_buf [[buffer(5)]],
+    device float* sc_master [[buffer(6)]],
+    device float* scalars_live [[buffer(7)]],
+    device float* hp_live [[buffer(8)]],       // [8] inference hp: [vg, vb0, vb1, ...]
+    device float* lcfg_gains [[buffer(9)]],    // [5] trainer gains: [vg, vb0, vb1, ddg, dag]
+    const device float* bounds [[buffer(10)]], // [vg_lo, vg_hi, dg_lo, dg_hi]
+    device float* diag_opt [[buffer(11)]],     // [2]: grad_norm
+    constant uint* u [[buffer(12)]],           // [S_tot, n_uniq_blk, depth, recurrent]
+    uint tid [[thread_index_in_threadgroup]]) {
+  const uint S_tot = u[0], n_uniq_blk = u[1], depth = u[2], recurrent = u[3];
+  const float slr = opt_cfg[1];
+  const float b1 = 0.9f;
+  const float grad_clip = opt_cfg[4];
+  const float b2 = opt_cfg[14];
+  const float seps = opt_cfg[15];
+  const uint step_next = step_buf[0] + 1u;
+  const float step_f = float(step_next);
+  const float bc1 = 1.0f / max(1.0f - pow(b1, step_f), 1e-7f);
+  const float bc2 = 1.0f / max(1.0f - pow(b2, step_f), 1e-7f);
+
+  const float g_norm = sqrt(max(norm_sq[0], 0.0f));
+  const float clip_sc = (grad_clip > 0.0f && g_norm > grad_clip) ? (grad_clip / max(g_norm, 1e-6f)) : 1.0f;
+
+  const float vg_lo = bounds[0], vg_hi = bounds[1];
+  const float dg_lo = bounds[2], dg_hi = bounds[3];
+
+  if (tid < S_tot) {
+    float cur = sc_master[tid];
+    float g_raw = sc_grads[tid];
+    // Respect exact clamped gain boundary gradient zeroing
+    if (tid == 0u && !(cur > vg_lo && cur < vg_hi)) g_raw = 0.0f;
+    if ((tid == 3u || tid == 4u) && !(cur > dg_lo && cur < dg_hi)) g_raw = 0.0f;
+    float g = g_raw * clip_sc;
+    float m = b1 * mom[tid] + (1.0f - b1) * g;
+    float v = b2 * v_buf[tid] + (1.0f - b2) * g * g;
+    mom[tid] = m;
+    v_buf[tid] = v;
+    float wn = cur - slr * (m * bc1) / (sqrt(v * bc2) + seps);
+    if (tid == 0u) wn = clamp(wn, vg_lo, vg_hi);
+    if (tid == 3u || tid == 4u) wn = clamp(wn, dg_lo, dg_hi);
+    sc_master[tid] = wn;
+    sc_grads[tid] = 0.0f;
+  }
+  threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+
+  if (tid == 0u) {
+    const float vg = clamp(sc_master[0], vg_lo, vg_hi);
+    const float vb0 = sc_master[1], vb1 = sc_master[2];
+    const float ddg = clamp(sc_master[3], dg_lo, dg_hi);
+    const float dag = clamp(sc_master[4], dg_lo, dg_hi);
+    hp_live[0] = vg; hp_live[1] = vb0; hp_live[2] = vb1;
+    lcfg_gains[0] = vg; lcfg_gains[1] = vb0; lcfg_gains[2] = vb1;
+    lcfg_gains[3] = ddg; lcfg_gains[4] = dag;
+
+    const uint n_sig = 2u + 6u * n_uniq_blk + (recurrent ? depth : 0u);
+    for (uint i = 0u; i < n_sig; i++) {
+      scalars_live[i] = 1.0f / (1.0f + exp(-clamp(sc_master[5u + i], -40.0f, 40.0f)));
+    }
+    diag_opt[0] = g_norm;
+    norm_sq[0] = 0.0f;
+    step_buf[0] = step_next;
+  }
+}
+
+// 9. MG_OP_OPT_APPLY_1D (u[7]==4): In-GPU FP32 Step GradSNR accumulator (g_sum += g_proj, q_sum[grp] += ||g_proj||^2)!
+[[kernel]] void mg_opt_snr_accum(
+    const device float* g_proj [[buffer(0)]],
+    device float* g_sum [[buffer(1)]],
+    device atomic_uint* q_sum [[buffer(2)]],  // [5]: all, backbone, basis, flow, critic
+    constant uint* u [[buffer(3)]],           // [n_elems, grp_idx]
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tgp [[threadgroup_position_in_grid]]) {
+  const uint n = u[0], grp = u[1];
+  const uint idx = tgp * 256u + tid;
+  float sq = 0.0f;
+  if (idx < n) {
+    float g = g_proj[idx];
+    if (isfinite(g)) {
+      g_sum[idx] += g;
+      sq = g * g;
+    }
+  }
+  threadgroup float sh[9];
+  const float tot = opt_tg_sum_f32(sq, lane, sg, 8u, sh);
+  if (tid == 0u && tot > 0.0f) {
+    opt_atomic_add_f32(&q_sum[0], tot);
+    if (grp >= 1u && grp <= 4u) opt_atomic_add_f32(&q_sum[grp], tot);
   }
 }
 )MSL");

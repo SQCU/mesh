@@ -32,12 +32,15 @@ if str(REPO_ROOT / "xonotic") not in sys.path:
 from sim_dt.dataset_sampler import AtemporalBatch, PersistentMatchPool
 from sim_dt.metal_runtime import (
     MG_BUF_STATE,
+    MG_DTYPE_BF16,
     MG_DTYPE_F32,
     MG_OP_ALLREDUCE,
+    MG_WIRE_HAD8_GATHER,
     CompiledPlanWally,
     MetalDeltaTimePayloadEngine,
     _load_mesh_graph_lib,
     _make_op,
+    _ptr_to_torch_bf16,
     _ptr_to_torch_f32,
 )
 from sim_dt.ppo_trainer import AtemporalPPOTrainer, _team_eff_rho_flat
@@ -46,7 +49,10 @@ from solver.strat.league_curriculum import SCRIPTED_ANCHORS
 from solver.strat.plan_policy import PlanWally, clone_plan_model, project_unit_norm_
 from solver.strat.train_config import CONFIGS_DIR, load_training_config
 
-MG_WIRE_F32 = 2
+MG_WIRE_BF16 = 0
+MG_WIRE_F32 = 1
+MG_WIRE_GATHER = 2
+MG_WIRE_HAD8 = 3
 MSG_WEIGHTS = 1
 MSG_BATCH = 2
 MSG_STOP = 3
@@ -161,34 +167,90 @@ def deserialize_batch(raw: bytes) -> tuple[int, AtemporalBatch]:
 
 
 class RDMAWeightAllReducer:
-    """Lossless FP32 parameter all-reduce over live /mesh0 TB5 flat-DMA (libmesh-graph.dylib)."""
+    """/mesh0 TB5 flat-DMA parameter / delta all-reducer supporting:
+      - `had8_gather` (default): 3.76x compressed HAD8_GATHER on BF16 step deltas ΔW = bf16(W - W_prev),
+        accumulated into FP32 W_master with zero drift + exact FP32 scalar crossing for 4-Rank GradSNR!
+      - `gather`: exact FP32 Steiner-multicast gather (`MG_WIRE_GATHER = 2`).
+      - `f32`: exact FP32 in-switch NEON reduction (`MG_WIRE_F32 = 1`).
+    """
 
-    def __init__(self, model: PlanWally, world_size: int, rank: int, comm_id: str):
+    def __init__(
+        self,
+        model: Any,
+        world_size: int,
+        rank: int,
+        comm_id: str,
+        *,
+        wire_mode: str = "had8_gather",
+        n_params_override: int | None = None,
+    ):
         self.lib = _load_mesh_graph_lib()
         self.world_size = int(world_size)
         self.rank = int(rank)
-        self.n_params = sum(p.numel() for p in model.parameters())
+        self.wire_mode_name = str(wire_mode)
+        self.n_params = int(sum(p.numel() for p in model.parameters()) if n_params_override is None else n_params_override)
         self.dim = 256
-        # Reserve 1 extra FP32 slot at index self.n_params to piggyback ||delta_r||_2^2 for exact 4-Studio GradSNR!
-        self.rows = (self.n_params + 1 + self.dim - 1) // self.dim
-        self.n_pad = self.rows * self.dim
-        self.g = self.lib.mesh_graph_create(self.world_size, self.rank, comm_id.encode("utf-8"), MG_WIRE_F32)
-        if not self.g:
-            raise RuntimeError("mesh_graph_create failed for RDMAWeightAllReducer")
-        self.b_w = int(self.lib.mesh_graph_add_buffer(self.g, self.n_pad * 4, MG_BUF_STATE, None, -1, 0))
-        cid = int(self.lib.mesh_graph_add_crossing(self.g, self.n_pad, 4, MG_WIRE_F32, 0))
-        op = _make_op(
-            MG_OP_ALLREDUCE,
-            dtype=MG_DTYPE_F32,
-            in_bufs=(self.b_w,),
-            out_bufs=(self.b_w,),
-            u=(cid, self.rows, self.dim),
-        )
-        self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
-        rc = self.lib.mesh_graph_compile(self.g)
-        if rc != 0:
-            raise RuntimeError(f"mesh_graph_compile failed for RDMAWeightAllReducer: {rc}")
-        self.w_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_w), (self.n_pad,))
+        self.use_had8 = (self.wire_mode_name == "had8_gather")
+
+        if self.use_had8:
+            self.rows = (self.n_params + self.dim - 1) // self.dim
+            self.n_pad = self.rows * self.dim
+            self.g = self.lib.mesh_graph_create(self.world_size, self.rank, comm_id.encode("utf-8"), MG_WIRE_HAD8_GATHER)
+            if not self.g:
+                raise RuntimeError("mesh_graph_create failed for RDMAWeightAllReducer(had8_gather)")
+            self.b_w = int(self.lib.mesh_graph_add_buffer(self.g, self.n_pad * 2, MG_BUF_STATE, None, -1, 0))
+            cid_w = int(self.lib.mesh_graph_add_crossing(self.g, self.n_pad, 2, MG_WIRE_HAD8_GATHER, 0))
+            op_w = _make_op(
+                MG_OP_ALLREDUCE,
+                dtype=MG_DTYPE_BF16,
+                in_bufs=(self.b_w,),
+                out_bufs=(self.b_w,),
+                u=(cid_w, self.rows, self.dim),
+            )
+            self.lib.mesh_graph_add_op(self.g, ctypes.byref(op_w))
+            # Tiny 1-page FP32 scalar crossing in the SAME CB for exact 4-Rank GradSNR (||ΔW_r||^2)!
+            self.b_sq = int(self.lib.mesh_graph_add_buffer(self.g, 16 * 4, MG_BUF_STATE, None, -1, 0))
+            cid_sq = int(self.lib.mesh_graph_add_crossing(self.g, 16, 4, MG_WIRE_GATHER, 0))
+            op_sq = _make_op(
+                MG_OP_ALLREDUCE,
+                dtype=MG_DTYPE_F32,
+                in_bufs=(self.b_sq,),
+                out_bufs=(self.b_sq,),
+                u=(cid_sq, 1, 16),
+            )
+            self.lib.mesh_graph_add_op(self.g, ctypes.byref(op_sq))
+            rc = self.lib.mesh_graph_compile(self.g)
+            if rc != 0:
+                raise RuntimeError(f"mesh_graph_compile failed for RDMAWeightAllReducer(had8_gather): {rc}")
+            self.w_view_bf16 = _ptr_to_torch_bf16(self.lib.mesh_graph_buffer_ptr(self.g, self.b_w), (self.n_pad,))
+            self.sq_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_sq), (16,))
+            self._tmp_f32 = torch.empty((self.n_params,), dtype=torch.float32)
+            self.w_view = None
+        else:
+            wm_int = MG_WIRE_F32 if self.wire_mode_name == "f32" else MG_WIRE_GATHER
+            # Reserve 1 extra FP32 slot at index self.n_params to piggyback ||delta_r||_2^2 for exact 4-Studio GradSNR!
+            self.rows = (self.n_params + 1 + self.dim - 1) // self.dim
+            self.n_pad = self.rows * self.dim
+            self.g = self.lib.mesh_graph_create(self.world_size, self.rank, comm_id.encode("utf-8"), wm_int)
+            if not self.g:
+                raise RuntimeError("mesh_graph_create failed for RDMAWeightAllReducer")
+            self.b_w = int(self.lib.mesh_graph_add_buffer(self.g, self.n_pad * 4, MG_BUF_STATE, None, -1, 0))
+            cid = int(self.lib.mesh_graph_add_crossing(self.g, self.n_pad, 4, wm_int, 0))
+            op = _make_op(
+                MG_OP_ALLREDUCE,
+                dtype=MG_DTYPE_F32,
+                in_bufs=(self.b_w,),
+                out_bufs=(self.b_w,),
+                u=(cid, self.rows, self.dim),
+            )
+            self.lib.mesh_graph_add_op(self.g, ctypes.byref(op))
+            rc = self.lib.mesh_graph_compile(self.g)
+            if rc != 0:
+                raise RuntimeError(f"mesh_graph_compile failed for RDMAWeightAllReducer: {rc}")
+            self.w_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.b_w), (self.n_pad,))
+            self.w_view_bf16 = None
+            self.sq_view = None
+            self._tmp_f32 = None
 
     def close(self) -> None:
         if getattr(self, "g", None):
@@ -197,23 +259,42 @@ class RDMAWeightAllReducer:
 
     @torch.no_grad()
     def average_model_(self, model: Any, *, project_fn: Any = None) -> float:
-        """All-reduce FP32 parameters across all ranks over /mesh0 TB5 RDMA and re-project unit norms."""
-        off = 0
-        for p in model.parameters():
-            n = p.numel()
-            self.w_view[off : off + n].copy_(p.detach().float().view(-1))
-            off += n
-        if off < self.n_pad:
-            self.w_view[off:].zero_()
-        wall = ctypes.c_double(0.0)
-        self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+        """All-reduce parameters across all ranks over /mesh0 TB5 RDMA and re-project unit norms."""
         inv_ws = 1.0 / float(self.world_size)
-        off = 0
-        for p in model.parameters():
-            n = p.numel()
-            avg = self.w_view[off : off + n] * inv_ws
-            p.copy_(avg.view(p.shape).to(device=p.device, dtype=p.dtype))
-            off += n
+        if self.use_had8:
+            assert self.w_view_bf16 is not None
+            off = 0
+            for p in model.parameters():
+                n = p.numel()
+                self.w_view_bf16[off : off + n].copy_(p.detach().to(torch.bfloat16).view(-1))
+                off += n
+            if off < self.n_pad:
+                self.w_view_bf16[off:].zero_()
+            wall = ctypes.c_double(0.0)
+            self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+            off = 0
+            for p in model.parameters():
+                n = p.numel()
+                avg = self.w_view_bf16[off : off + n].float() * inv_ws
+                p.copy_(avg.view(p.shape).to(device=p.device, dtype=p.dtype))
+                off += n
+        else:
+            assert self.w_view is not None
+            off = 0
+            for p in model.parameters():
+                n = p.numel()
+                self.w_view[off : off + n].copy_(p.detach().float().view(-1))
+                off += n
+            if off < self.n_pad:
+                self.w_view[off:].zero_()
+            wall = ctypes.c_double(0.0)
+            self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+            off = 0
+            for p in model.parameters():
+                n = p.numel()
+                avg = self.w_view[off : off + n] * inv_ws
+                p.copy_(avg.view(p.shape).to(device=p.device, dtype=p.dtype))
+                off += n
         if project_fn is not None:
             project_fn(model, eps=model.norm_cfg.unit_norm_eps)
         else:
@@ -222,13 +303,39 @@ class RDMAWeightAllReducer:
 
     @torch.no_grad()
     def average_master_(self, opt: Any, *, prev_flat: torch.Tensor | None = None) -> tuple[float, float, float]:
-        """All-reduce FP32 optimizer master weights directly over /mesh0 RDMA (zero BF16 round-trip!).
+        """All-reduce FP32 optimizer master weights (or HAD8_GATHER compressed BF16 step deltas!).
 
-        If `prev_flat` (FP32 master snapshot before local update) is provided, piggybacks ||delta_r||^2
-        into slot `w_view[n_params]` to compute exact cross-Studio 4-rank GradSNR and delta coherence
-        with ZERO extra RDMA calls!
         Returns (rdma_wall_ms, cluster_grad_snr, cluster_delta_coh).
         """
+        inv_ws = 1.0 / float(self.world_size)
+        if self.use_had8 and prev_flat is not None:
+            assert self.w_view_bf16 is not None and self.sq_view is not None and self._tmp_f32 is not None
+            off = opt.export_master_flat_(self._tmp_f32)
+            delta = self._tmp_f32[:off] - prev_flat[:off]
+            local_sq = float(delta.square().sum().item())
+            self.w_view_bf16[:off].copy_(delta.to(torch.bfloat16))
+            if off < self.n_pad:
+                self.w_view_bf16[off:].zero_()
+            self.sq_view.zero_()
+            self.sq_view[0] = local_sq
+
+            wall = ctypes.c_double(0.0)
+            self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+
+            cluster_snr = 0.0
+            cluster_coh = 0.0
+            if self.world_size > 1:
+                mean_sq = float(self.sq_view[0].item()) * inv_ws
+                avg_delta = self.w_view_bf16[:off].float() * inv_ws
+                sig_sq = float(avg_delta.square().sum().item())
+                var_mean = max(mean_sq - sig_sq, 0.0) / float(self.world_size - 1)
+                cluster_coh = sig_sq / max(mean_sq, 1e-12)
+                cluster_snr = min(sig_sq / max(var_mean, 1e-12), 999.0)
+
+            opt.apply_delta_flat_(prev_flat, self.w_view_bf16, scale=inv_ws)
+            return float(wall.value), round(cluster_snr, 3), round(cluster_coh, 4)
+
+        assert self.w_view is not None
         off = opt.export_master_flat_(self.w_view)
         if prev_flat is not None:
             local_sq = float((self.w_view[:off] - prev_flat).square().sum().item())
@@ -240,7 +347,6 @@ class RDMAWeightAllReducer:
 
         wall = ctypes.c_double(0.0)
         self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
-        inv_ws = 1.0 / float(self.world_size)
 
         cluster_snr = 0.0
         cluster_coh = 0.0
@@ -851,7 +957,11 @@ def run_rdma_dp_league(args: argparse.Namespace) -> None:
     main_init = clone_graph_flow_model(main_model)
 
     ws = int(args.tp_world_size)
-    reducer = RDMAWeightAllReducer(main_model, ws, args.tp_rank, args.tp_comm_id) if ws > 1 else None
+    reducer = (
+        RDMAWeightAllReducer(main_model, ws, args.tp_rank, args.tp_comm_id, wire_mode=str(args.wire_mode))
+        if ws > 1
+        else None
+    )
     variants: dict[str, GraphFlowPolicy | None] = {
         "main": main_model,
         "ema_fast": ema_fast,
@@ -872,6 +982,7 @@ def run_rdma_dp_league(args: argparse.Namespace) -> None:
         randomize_physics=not bool(args.no_physics_dr),
     )
     main_learner = GraphFlowTrainer(main_model, None, cfg)
+    pool.attach_weight_bank_("main", main_learner.bank, main_model)
 
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
     if out_dir is not None and args.tp_rank == 0:
@@ -1033,12 +1144,13 @@ def run_rdma_dp_league(args: argparse.Namespace) -> None:
         # Phase 2: Fresh-init Adversarial Exploiter 1 targeting frozen main_p1!
         torch.manual_seed(cfg.seeds.model_init + 101)
         exp1_model = GraphFlowPolicy(gf_cfg, norm_cfg=cfg.norm).to(device=torch.device("cpu"), dtype=torch.bfloat16)
-        pool.sync_variant_("exploiter_1", exp1_model)
         exp1_learner = GraphFlowTrainer(exp1_model, None, cfg, lr_mult=float(cfg.optimizer.exploiter_lr_mult))
+        pool.attach_weight_bank_("exploiter_1", exp1_learner.bank, exp1_model)
         phase_summaries["p2_exp1"] = _run_phase(
             "p2_exp1", int(args.exp_iters), exp1_learner, "exploiter_1",
             exploiter_target="main_p1", update_emas=False,
         )
+        pool.detach_weight_bank_("exploiter_1", exp1_model)
         exp1_learner.close(); exp1_learner = None
         if out_dir is not None and args.tp_rank == 0:
             torch.save(exp1_model.state_dict(), out_dir / "exploiter_1.pt")
@@ -1059,12 +1171,13 @@ def run_rdma_dp_league(args: argparse.Namespace) -> None:
         with torch.no_grad():
             exp2_model.fj_w2.weight.add_(0.02 * torch.randn_like(exp2_model.fj_w2.weight))
             exp2_model.fj_w2.bias.add_(0.02 * torch.randn_like(exp2_model.fj_w2.bias))
-        pool.sync_variant_("exploiter_2", exp2_model)
         exp2_learner = GraphFlowTrainer(exp2_model, None, cfg, lr_mult=float(cfg.optimizer.exploiter_lr_mult))
+        pool.attach_weight_bank_("exploiter_2", exp2_learner.bank, exp2_model)
         phase_summaries["p4_exp2"] = _run_phase(
             "p4_exp2", int(args.exp_iters), exp2_learner, "exploiter_2",
             exploiter_target="main_p2", update_emas=False,
         )
+        pool.detach_weight_bank_("exploiter_2", exp2_model)
         exp2_learner.close(); exp2_learner = None
         if out_dir is not None and args.tp_rank == 0:
             torch.save(exp2_model.state_dict(), out_dir / "exploiter_2.pt")
@@ -1155,6 +1268,7 @@ def main() -> None:
     ap.add_argument("--tp-rank", type=int, default=0)
     ap.add_argument("--tp-comm-id", type=str, default="10.0.0.124:29820")
     ap.add_argument("--tp-envs", type=int, default=256)
+    ap.add_argument("--wire-mode", choices=("had8_gather", "gather", "f32"), default="had8_gather")
     args = ap.parse_args()
 
     if args.role == "rdma-dp":

@@ -1141,14 +1141,15 @@ class MetalDeltaTimePayloadEngine:
         self.close()
 
     def _write_cfg(
-        self, dt: float, mode: int, dt_ref: float, reset_outcomes: bool,
+        self, dt: float, mode: int, dt_ref: float, reset_outcomes: bool | int,
         apply_plan: bool, has_mask: bool, record_traj: bool = False,
         apply_vel: bool = False, tau_rel: float = 2.5,
     ) -> None:
+        ro_i = int(reset_outcomes) if isinstance(reset_outcomes, int) and not isinstance(reset_outcomes, bool) else (1 if reset_outcomes else 0)
         raw = struct.pack(
             "<3f6I",
             float(dt), float(dt_ref), float(tau_rel), int(mode),
-            1 if reset_outcomes else 0,
+            ro_i,
             1 if apply_plan else 0,
             1 if has_mask else 0,
             1 if record_traj else 0,
@@ -1274,8 +1275,9 @@ class MetalDeltaTimePayloadEngine:
         mode_i = 0 if mode == "analytic" else (1 if mode == "substep" else 2)
         dref = float(self.rules.plc_tick_ref if dt_ref is None else dt_ref)
         t_rel = float(self._tau_rel if tau_rel is None else tau_rel)
+        ro_cfg: bool | int = 2 if (n_steps > 1 and reset_outcomes) else bool(reset_outcomes)
         self._write_cfg(
-            float(dt), mode_i, dref, reset_outcomes,
+            float(dt), mode_i, dref, ro_cfg,
             self._pending_apply_plan, self._pending_has_mask, record_traj=False,
             apply_vel=self._pending_apply_vel, tau_rel=t_rel,
         )

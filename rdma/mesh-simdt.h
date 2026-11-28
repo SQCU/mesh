@@ -1399,8 +1399,9 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
   device float* p_r_acc = (device float*)(es + W.soff_p_r_acc);
   device float* p_u_vel = (device float*)(es + W.soff_p_u_vel);
 
-  // Step 0a: Apply velocity steering OR legacy plan if requested
-  if (cfg.apply_vel && tid < N && A_dim > 0u) {
+  // Step 0a: Apply velocity steering OR legacy plan if requested (when reset_outcomes==2, only on u[0]==0!)
+  const bool first_or_all = (cfg.reset_outcomes != 2u) || (u[0] == 0u);
+  if (cfg.apply_vel && first_or_all && tid < N && A_dim > 0u) {
     const device float* vin = p_vel_in + (ulong(e) * N + tid) * ulong(A_dim);
     device float* u_dst = p_u_vel + ulong(tid) * ulong(A_dim);
     const bool valid = cfg.has_active_mask ? (active_mask[ulong(e) * N + tid] != 0u) : true;
@@ -1417,7 +1418,7 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       for (uint a = 0; a < A_dim; a++) u_dst[a] = 0.0f;
       if (p_i1[7u * N + tid] == 1) p_i1[7u * N + tid] = 0;
     }
-  } else if (cfg.apply_plan && tid < N) {
+  } else if (cfg.apply_plan && first_or_all && tid < N) {
     const device float* pl = p_plan_in + (ulong(e) * N + tid) * 16ul;
     const bool valid = cfg.has_active_mask ? (active_mask[ulong(e) * N + tid] != 0u) : (pl[0] > 0.0f);
     if (valid) {
@@ -1426,8 +1427,8 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
     p_i1[7u * N + tid] = valid ? 1 : 0;
   }
 
-  // Step 0b: Reset outcomes if requested
-  if (cfg.reset_outcomes && tid < N) {
+  // Step 0b: Reset outcomes if requested (reset_outcomes==2 resets ONLY on u[0]==0 for fused multi-substep!)
+  if (((cfg.reset_outcomes == 1u) || (cfg.reset_outcomes == 2u && u[0] == 0u)) && tid < N) {
     for (uint ch = 8u; ch <= 14u; ch++) p_f1[ch * N + tid] = 0.0f;
   }
 
