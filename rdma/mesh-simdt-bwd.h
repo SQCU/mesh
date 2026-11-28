@@ -179,6 +179,7 @@ inline float huber_grad(float diff, float beta) {
 
   const float act_loss_r = actor_w * (-(surr * am) * inv_am - ent_coef * h_disc * am * inv_am);
   const float clip_r = ((fabs(lr) > clip_hi) ? 1.0f : 0.0f) * am * inv_am;
+  const float kl_r = ((exp(lr) - 1.0f) - lr) * am * inv_am;
 
   const bool in_lr = (lr_raw > -lr_bound) && (lr_raw < lr_bound);
   const bool not_clipped = (adv >= 0.0f) ? (lr < clip_hi) : (lr > clip_lo);
@@ -255,7 +256,7 @@ inline float huber_grad(float diff, float beta) {
   const float s_vg  = simd_sum(d_vg),  s_vb0 = simd_sum(dvw), s_vb1 = simd_sum(dvl);
   const float s_ddg = simd_sum(d_ddg), s_dag = simd_sum(d_dag);
   const float s_la  = simd_sum(act_loss_r), s_lw = simd_sum(w_loss_r), s_ll = simd_sum(l_loss_r), s_ld = simd_sum(dyn_loss_r);
-  const float s_ed  = simd_sum(h_disc * am * inv_am), s_ea = simd_sum((h_cont + h_disc) * am * inv_am), s_cf = simd_sum(clip_r);
+  const float s_ed  = simd_sum(h_disc * am * inv_am), s_ea = simd_sum((h_cont + h_disc) * am * inv_am), s_cf = simd_sum(clip_r), s_kl = simd_sum(kl_r);
   if (lane == 0u) {
     atomic_add_f32(&sc_grads[33], s_vg);
     atomic_add_f32(&sc_grads[34], s_vb0);
@@ -269,6 +270,7 @@ inline float huber_grad(float diff, float beta) {
     atomic_add_f32(&diag_out[4], s_ed);
     atomic_add_f32(&diag_out[5], s_ea);
     atomic_add_f32(&diag_out[6], s_cf);
+    atomic_add_f32(&diag_out[7], s_kl);
   }
 }
 

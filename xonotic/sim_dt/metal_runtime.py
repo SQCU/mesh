@@ -33,9 +33,13 @@ MG_DTYPE_F32 = 2
 MG_DTYPE_I32 = 3
 MG_DTYPE_U32 = 4
 
+MG_WIRE_HAD8_GATHER = 4
 MG_WIRE_AUTO = 5
 
 MG_OP_LINEAR = 2
+MG_OP_EW = 4
+MG_OP_ALLREDUCE = 12
+MG_EW_ADD = 0
 MG_OP_PLAN_PRENORM = 16
 MG_OP_PLAN_EMBED_CAT = 17
 MG_OP_MP_NORM = 18
@@ -115,6 +119,10 @@ def _load_mesh_graph_lib() -> ctypes.CDLL:
     lib.mesh_graph_import_buffer.restype = ctypes.c_int
     lib.mesh_graph_buffer_ptr.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.mesh_graph_buffer_ptr.restype = ctypes.c_void_p
+    lib.mesh_graph_add_crossing.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int, ctypes.c_int,
+    ]
+    lib.mesh_graph_add_crossing.restype = ctypes.c_int
     lib.mesh_graph_add_op.argtypes = [ctypes.c_void_p, ctypes.POINTER(MeshGraphOp)]
     lib.mesh_graph_add_op.restype = ctypes.c_int
     lib.mesh_graph_compile.argtypes = [ctypes.c_void_p]
@@ -247,6 +255,9 @@ class CompiledPlanWally:
         ext_geo_buf: int | None = None,
         ext_plan_buf: int | None = None,
         ext_active_mask_buf: int | None = None,
+        tp_world_size: int = 1,
+        tp_rank: int = 0,
+        tp_comm_id: str = "",
     ):
         assert not model.use_fsq and not model.use_mealy and not model.use_manifold_encoders, (
             "CompiledPlanWally targets stripped PlanWally (use_fsq=use_mealy=use_manifold_encoders=False)"
@@ -262,6 +273,12 @@ class CompiledPlanWally:
         self.M_ent = self.N + self.J + self.K
         self.d = int(model.d)
         self.h = int(model.h)
+        self.tp_world_size = max(1, int(tp_world_size))
+        self.tp_rank = int(tp_rank)
+        assert self.h % self.tp_world_size == 0 and (self.h // self.tp_world_size) % 64 == 0, (
+            f"FFN hidden h={self.h} must divide evenly by tp_world_size={self.tp_world_size} into multiples of 64"
+        )
+        self.h_local = self.h // self.tp_world_size
         self.r_gram = int(model.r_gram)
         self.r_team = int(model.r_dpp)
         self.depth = int(model.depth)
@@ -276,7 +293,9 @@ class CompiledPlanWally:
 
         self._owns_graph = graph is None
         if graph is None:
-            self.g = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+            self.g = self.lib.mesh_graph_create(
+                self.tp_world_size, self.tp_rank, tp_comm_id.encode("utf-8"), MG_WIRE_HAD8_GATHER if self.tp_world_size > 1 else MG_WIRE_AUTO,
+            )
             if not self.g:
                 raise RuntimeError("mesh_graph_create failed")
         else:
@@ -332,7 +351,7 @@ class CompiledPlanWally:
         ext_active_mask_buf: int | None,
     ) -> None:
         E, N, J, K, M_ent = self.E, self.N, self.J, self.K, self.M_ent
-        D, H, Rg, Rt = self.d, self.h, self.r_gram, self.r_team
+        D, H, Rg, Rt = self.d, self.h_local, self.r_gram, self.r_team
         EN_pad = _nax_m_pad(E * N)
         EJ_pad = _nax_m_pad(E * J)
         EK_pad = _nax_m_pad(E * K)
@@ -557,6 +576,9 @@ class CompiledPlanWally:
                 f=(1.0 / float(self.nc.mp_silu_scale),),
             ))
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_down"]), out_bufs=(b_c,), u=(EM_pad, D, H, 0)))
+            if self.tp_world_size > 1:
+                cid = int(self.lib.mesh_graph_add_crossing(self.g, EM_pad * D, 2, MG_WIRE_HAD8_GATHER, 0))
+                self._add_op(_make_op(MG_OP_ALLREDUCE, in_bufs=(b_c,), out_bufs=(b_c,), u=(cid, EM_pad, D)))
 
             # x_new = mp_lerp(x_mid=b_d, norm(b_c), blend_ffn)
             if self.recurrent:
@@ -682,8 +704,15 @@ class CompiledPlanWally:
             put(p + "gram_out", _unit_weight_bf16(blk.gram_out.weight, eps))
             wg = _unit_weight_bf16(blk.ffn_gate.weight, eps)
             wu = _unit_weight_bf16(blk.ffn_up.weight, eps)
+            wd = _unit_weight_bf16(blk.ffn_down.weight, eps)
+            if self.tp_world_size > 1:
+                lo = self.tp_rank * self.h_local
+                hi = lo + self.h_local
+                wg = wg[lo:hi].contiguous()
+                wu = wu[lo:hi].contiguous()
+                wd = wd[:, lo:hi].contiguous()
             put(p + "ffn_gate_up", torch.cat((wg, wu), dim=0))
-            put(p + "ffn_down", _unit_weight_bf16(blk.ffn_down.weight, eps))
+            put(p + "ffn_down", wd)
             scalars.extend([
                 float(torch.sigmoid(blk.blend_pool.detach().float()).item()),
                 float(torch.sigmoid(blk.blend_team_mut.detach().float()).item()),
@@ -1457,6 +1486,10 @@ class CompiledPlanTrainer:
         N: int,
         J: int,
         K: int,
+        *,
+        tp_world_size: int = 1,
+        tp_rank: int = 0,
+        tp_comm_id: str = "",
     ):
         assert not model.use_fsq and not model.use_mealy and not model.use_manifold_encoders
         assert not model.use_cart_dist_bias and not model.use_cell_head and not model.use_aux_skill_head
@@ -1468,6 +1501,12 @@ class CompiledPlanTrainer:
         self.M_ent = self.N + self.J + self.K
         self.d = int(model.d)
         self.h = int(model.h)
+        self.tp_world_size = max(1, int(tp_world_size))
+        self.tp_rank = int(tp_rank)
+        assert self.h % self.tp_world_size == 0 and (self.h // self.tp_world_size) % 64 == 0, (
+            f"FFN hidden h={self.h} must divide evenly by tp_world_size={self.tp_world_size} into multiples of 64"
+        )
+        self.h_local = self.h // self.tp_world_size
         self.r_gram = int(model.r_gram)
         self.r_team = int(model.r_dpp)
         self.depth = int(model.depth)
@@ -1475,7 +1514,10 @@ class CompiledPlanTrainer:
         self.mc = model.model_cfg
         self.nc = model.norm_cfg
 
-        self.g = self.lib.mesh_graph_create(1, 0, b"", MG_WIRE_AUTO)
+        self.g = self.lib.mesh_graph_create(
+            self.tp_world_size, self.tp_rank, tp_comm_id.encode("utf-8"),
+            MG_WIRE_HAD8_GATHER if self.tp_world_size > 1 else MG_WIRE_AUTO,
+        )
         if not self.g:
             raise RuntimeError("mesh_graph_create failed for CompiledPlanTrainer")
 
@@ -1515,7 +1557,7 @@ class CompiledPlanTrainer:
 
     def _build_graph(self, model: PlanWally) -> None:
         E, N, J, K, M_ent = self.E, self.N, self.J, self.K, self.M_ent
-        D, H, Rg, Rt = self.d, self.h, self.r_gram, self.r_team
+        D, H, Rg, Rt = self.d, self.h_local, self.r_gram, self.r_team
         # Pad ALL row counts to multiples of 64 for Metal 4 NAX forward, dX, and dW!
         EN_pad = _align(E * N, 64)
         EJ_pad = _align(E * J, 64)
@@ -1732,6 +1774,9 @@ class CompiledPlanTrainer:
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_gate_up"]), out_bufs=(a["gate_up"],), u=(EM_pad, 2 * H, D, 0)))
             self._add_op(_make_op(MG_OP_MP_SWIGLU, in_bufs=(a["gate_up"],), out_bufs=(a["hid"], b_q, b_s), u=(M_tot, H, EM_pad, 1), f=(inv_silu,)))
             self._add_op(_make_op(MG_OP_LINEAR_I8, in_bufs=(b_q, b_s, *wq[p + "ffn_down"]), out_bufs=(a["ffn_raw"],), u=(EM_pad, D, H, 0)))
+            if self.tp_world_size > 1:
+                cid = int(self.lib.mesh_graph_add_crossing(self.g, EM_pad * D, 2, MG_WIRE_HAD8_GATHER, 0))
+                self._add_op(_make_op(MG_OP_ALLREDUCE, in_bufs=(a["ffn_raw"],), out_bufs=(a["ffn_raw"],), u=(cid, EM_pad, D)))
             if self.recurrent:
                 self._add_op(_make_op(
                     MG_OP_MP_LERP,
@@ -1895,7 +1940,13 @@ class CompiledPlanTrainer:
             self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_ffn_raw, w[p + "ffn_down"]), out_bufs=(bd_hid,), u=(EM_pad, H, D, 0)))
             self._add_op(_make_op(MG_OP_MP_SWIGLU_BWD, in_bufs=(a["gate_up"], bd_hid), out_bufs=(bd_gu,), u=(M_tot, H, EM_pad), f=(inv_silu,)))
             self._add_op(_make_op(MG_OP_LINEAR_DW, in_bufs=(bd_gu, a["x_mid"]), out_bufs=(gw[p + "ffn_gate_up"],), u=(2 * H, D, EM_pad, 1)))
-            self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_gu, w[p + "ffn_gate_up"]), out_bufs=(bd_x_mid,), u=(EM_pad, D, 2 * H, 1)))
+            if self.tp_world_size > 1:
+                self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_gu, w[p + "ffn_gate_up"]), out_bufs=(bd_ffn_raw,), u=(EM_pad, D, 2 * H, 0)))
+                cid_b = int(self.lib.mesh_graph_add_crossing(self.g, EM_pad * D, 2, MG_WIRE_HAD8_GATHER, 0))
+                self._add_op(_make_op(MG_OP_ALLREDUCE, in_bufs=(bd_ffn_raw,), out_bufs=(bd_ffn_raw,), u=(cid_b, EM_pad, D)))
+                self._add_op(_make_op(MG_OP_EW, in_bufs=(bd_x_mid, bd_ffn_raw), out_bufs=(bd_x_mid,), u=(EM_pad * D, MG_EW_ADD)))
+            else:
+                self._add_op(_make_op(MG_OP_LINEAR_DX, in_bufs=(bd_gu, w[p + "ffn_gate_up"]), out_bufs=(bd_x_mid,), u=(EM_pad, D, 2 * H, 1)))
 
             # Gram residual lerp bwd -> bd_xn, bd_gram_out
             self._add_op(_make_op(
@@ -2046,8 +2097,15 @@ class CompiledPlanTrainer:
             put(p + "gram_out", _unit_weight_bf16(blk.gram_out.weight, eps))
             wg = _unit_weight_bf16(blk.ffn_gate.weight, eps)
             wu = _unit_weight_bf16(blk.ffn_up.weight, eps)
+            wd = _unit_weight_bf16(blk.ffn_down.weight, eps)
+            if self.tp_world_size > 1:
+                lo = self.tp_rank * self.h_local
+                hi = lo + self.h_local
+                wg = wg[lo:hi].contiguous()
+                wu = wu[lo:hi].contiguous()
+                wd = wd[:, lo:hi].contiguous()
             put(p + "ffn_gate_up", torch.cat((wg, wu), dim=0))
-            put(p + "ffn_down", _unit_weight_bf16(blk.ffn_down.weight, eps))
+            put(p + "ffn_down", wd)
             scalars.extend([
                 float(torch.sigmoid(blk.blend_pool.detach().float()).item()),
                 float(torch.sigmoid(blk.blend_team_mut.detach().float()).item()),
@@ -2187,6 +2245,7 @@ class CompiledPlanTrainer:
             "entropy_disc": d[4],
             "entropy": d[5],
             "clip_frac": d[6],
+            "approx_kl": d[7],
         }
 
     @torch.no_grad()

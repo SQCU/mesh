@@ -44,6 +44,7 @@ if str(REPO_ROOT / "xonotic") not in sys.path:
 from mapgen.bsp_stream import sample_world_spec, synthesize_world_bundle
 from payload.tools.strategy_io_schema import CS, OBS, TS
 from sim_dt.engine import SimRulesConfig
+from sim_dt.dataset_sampler import AtemporalBatch, PersistentMatchPool
 from sim_dt.metal_runtime import (
     CompiledAuroraOptimizer,
     CompiledAuroraState,
@@ -52,6 +53,7 @@ from sim_dt.metal_runtime import (
     MetalCGTRewardComputer,
     MetalDeltaTimePayloadEngine,
 )
+from sim_dt.ppo_trainer import AtemporalPPOTrainer
 from sim_dt.world_graph import WorldGraphIR, build_gas_world_graph
 from solver.strat.aurora import Aurora
 from solver.strat.league_curriculum import (
@@ -1233,7 +1235,6 @@ def main() -> None:
     ema_model = clone_plan_model(model).to(device=torch.device("cpu"), dtype=model_dtype)
     main_init = clone_plan_model(model).to(device=torch.device("cpu"), dtype=model_dtype)
     main_mid: PlanWally | None = None
-    optimizer = CompiledAuroraState.empty()
 
     torch.save(main_init.state_dict(), out_dir / "main_init.pt")
 
@@ -1246,12 +1247,19 @@ def main() -> None:
     pfsp_wr: dict[str, float] = {a: float(cfg.league.pfsp_default_winrate) for a in pfsp_pool}
 
     n_params = sum(p.numel() for p in model.parameters())
+    n_pool_worlds = min(max(2, sc.iterations), 4)
     print(
-        f"[sim_dt-grpo] runtime=metal4-compiled (libmesh-graph.dylib) opt_device={device} dtype={model_dtype} params={n_params:,} ({n_params * 2 / 1e6:.2f} MB) "
+        f"[sim_dt-grpo] runtime=metal4-compiled (libmesh-graph.dylib) persistent_pool={n_pool_worlds} "
+        f"dtype={model_dtype} params={n_params:,} ({n_params * 2 / 1e6:.2f} MB) "
         f"iters={sc.iterations} B={sc.base_envs} G={sc.group_size} (E={sc.base_envs * sc.group_size}) "
         f"H={sc.rollout_horizon} dt={sc.dt}s target_mb_rows={sc.target_microbatch_rows} crn={sc.common_random_numbers}",
         flush=True,
     )
+
+    sampler = PersistentMatchPool(
+        cfg, arm_models, num_worlds=n_pool_worlds, group_size=int(sc.group_size), seed_base=cfg.seeds.match_base,
+    )
+    learner = AtemporalPPOTrainer(model, ema_model, cfg)
 
     history: list[dict[str, Any]] = []
     t_train_start = time.perf_counter()
@@ -1259,70 +1267,59 @@ def main() -> None:
     total_rollout_s = 0.0
     total_update_s = 0.0
 
-    for it in range(1, sc.iterations + 1):
-        spec = sample_world_spec(cfg.seeds.match_base + it * 101, cfg.world)
-        map_name = f"simdt_gas_it{it}_k{spec['teams']}_j{spec['carts']}_n{spec['players']}"
-        world = build_gas_world_graph(
-            map_name=map_name,
-            teams=int(spec["teams"]),
-            carts=int(spec["carts"]),
-            players=int(spec["players"]),
-            tiles=int(spec["tiles"]),
-            seed=int(spec["seed"]),
-            device=torch.device("cpu"),
-        )
-        seats = _sample_pfsp_seats(
-            rng, int(spec["teams"]), pfsp_pool, pfsp_wr,
-            train_arm="main",
-            pfsp_power=cfg.league.pfsp_power,
-            pfsp_min_weight=cfg.league.pfsp_min_weight,
-            pfsp_default_wr=cfg.league.pfsp_default_winrate,
-        )
-        ent_coef = cfg.losses.entropy_for_iteration("main", it, sc.iterations)
-
-        rollout = collect_grpo_rollout_group(
-            world, cfg, arm_models, seats, rng=rng, seed_base=cfg.seeds.match_base + it * 1009,
-        )
-        upd = update_batched_grpo_ppo(
-            model, ema_model, optimizer, rollout, cfg=cfg, entropy_coef=ent_coef, device=device,
-        )
-
-        # Update PFSP win-rate estimates (EMA)
-        alpha_ema = float(sc.pfsp_update_ema)
-        for opp_arm, wr_val in rollout["opp_wr_obs"].items():
-            prev = pfsp_wr.get(opp_arm, float(cfg.league.pfsp_default_winrate))
-            pfsp_wr[opp_arm] = alpha_ema * prev + (1.0 - alpha_ema) * float(wr_val)
-
-        if it == sc.mid_snapshot_iter:
-            main_mid = clone_plan_model(model)
-            arm_models["main_mid"] = main_mid
-            pfsp_pool.append("main_mid")
-            pfsp_wr["main_mid"] = 0.5
-            torch.save(main_mid.state_dict(), out_dir / "main_mid.pt")
-
-        total_sim_s += float(rollout["stats"]["sim_s"])
-        total_rollout_s += float(rollout["stats"]["wall_s"])
-        total_update_s += float(upd["update_wall_s"])
-
-        rec = {
-            "iter": it,
-            "world": {"K": int(spec["teams"]), "J": int(spec["carts"]), "N": int(spec["players"]), "M": int(spec["tiles"])},
-            "seats": seats,
-            "rollout": rollout["stats"],
-            "update": upd,
-            "pfsp_wr": {k: round(v, 3) for k, v in sorted(pfsp_wr.items())},
-        }
-        history.append(rec)
-
-        if it == 1 or it % max(1, sc.eval_interval) == 0 or it == sc.iterations:
-            print(
-                f"  iter {it:02d}/{sc.iterations} K={spec['teams']:2d} J={spec['carts']:2d} N={spec['players']:2d} | "
-                f"roll={rollout['stats']['wall_s']:.2f}s ({rollout['stats']['speedup_x']:.0f}x) "
-                f"upd={upd['update_wall_s']:.2f}s | loss={upd['loss_total']:.3f} ent={upd['entropy_disc']:.2f} "
-                f"dScore(main={rollout['stats']['main_dscore_mean']:.1f}, opp={rollout['stats']['opp_dscore_mean']:.1f}) "
-                f"wr(def={pfsp_wr.get('default', 0.5):.2f}, rush={pfsp_wr.get('script_cart_rush', 0.5):.2f})",
-                flush=True,
+    try:
+        for it in range(1, sc.iterations + 1):
+            ent_coef = cfg.losses.entropy_for_iteration("main", it, sc.iterations)
+            batch = sampler.sample_batch(
+                policy_version=learner.policy_version,
+                pfsp_pool=pfsp_pool,
+                pfsp_wr=pfsp_wr,
             )
+            upd = learner.update(batch, entropy_coef=ent_coef)
+            sampler.sync_variant_("main", model)
+            sampler.sync_variant_("ema", ema_model)
+
+            # Update PFSP win-rate estimates (EMA)
+            alpha_ema = float(sc.pfsp_update_ema)
+            for opp_arm, wr_val in batch.opp_wr_obs.items():
+                prev = pfsp_wr.get(opp_arm, float(cfg.league.pfsp_default_winrate))
+                pfsp_wr[opp_arm] = alpha_ema * prev + (1.0 - alpha_ema) * float(wr_val)
+
+            if it == sc.mid_snapshot_iter:
+                main_mid = clone_plan_model(model)
+                arm_models["main_mid"] = main_mid
+                sampler.sync_variant_("main_mid", main_mid)
+                pfsp_pool.append("main_mid")
+                pfsp_wr["main_mid"] = 0.5
+                torch.save(main_mid.state_dict(), out_dir / "main_mid.pt")
+
+            total_sim_s += float(batch.stats["sim_s"])
+            total_rollout_s += float(batch.stats["wall_s"])
+            total_update_s += float(upd["update_wall_s"])
+            wm = batch.world_meta
+
+            rec = {
+                "iter": it,
+                "world": wm,
+                "seats": batch.stats.get("seats", []),
+                "rollout": batch.stats,
+                "update": upd,
+                "pfsp_wr": {k: round(v, 3) for k, v in sorted(pfsp_wr.items())},
+            }
+            history.append(rec)
+
+            if it == 1 or it % max(1, sc.eval_interval) == 0 or it == sc.iterations:
+                print(
+                    f"  iter {it:02d}/{sc.iterations} K={wm['K']:2d} J={wm['J']:2d} N={wm['N']:2d} | "
+                    f"roll={batch.stats['wall_s']:.2f}s ({batch.stats['speedup_x']:.0f}x) "
+                    f"upd={upd['update_wall_s']:.2f}s kl={upd['approx_kl']:.5f} | loss={upd['loss_total']:.3f} ent={upd['entropy_disc']:.2f} "
+                    f"dScore(main={batch.stats['main_dscore_mean']:.1f}, opp={batch.stats['opp_dscore_mean']:.1f}) "
+                    f"wr(def={pfsp_wr.get('default', 0.5):.2f}, rush={pfsp_wr.get('script_cart_rush', 0.5):.2f})",
+                    flush=True,
+                )
+    finally:
+        sampler.close()
+        learner.close()
 
     train_wall_s = time.perf_counter() - t_train_start
     if main_mid is None:
