@@ -148,6 +148,7 @@ class GraphFlowRolloutPool:
         num_worlds: int = 4,
         group_size: int = 4,
         seed_base: int = 30000,
+        world_seed_base: int | None = None,
         self_play_only: bool = False,
         roster_mode: str = "mixed_dr",
         randomize_physics: bool = True,
@@ -166,9 +167,10 @@ class GraphFlowRolloutPool:
         self.slots: list[_GraphFlowSlot] = []
         self._cursor = 0
         phys_cycle = ("baseline", "fast", "slow", "volatile") if randomize_physics else ("baseline",)
+        w_seed = int(seed_base if world_seed_base is None else world_seed_base)
 
         for wi in range(max(1, int(num_worlds))):
-            spec = sample_world_spec(seed_base + (wi + 1) * 101, cfg.world)
+            spec = sample_world_spec(w_seed + (wi + 1) * 101, cfg.world)
             map_name = f"gf_w{wi}_k{spec['teams']}_j{spec['carts']}_n{spec['players']}"
             world = build_gas_world_graph(
                 map_name=map_name,
@@ -300,7 +302,12 @@ class GraphFlowRolloutPool:
         branch_u_sep_sum = 0.0
         branch_u_sep_cnt = 0
         pickups_tot = 0.0
+        sat_cnt = 0
+        sat_tot = 0
+        u_sq_sum = 0.0
+        u_sq_cnt = 0
 
+        obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
         for t in range(H):
             if G == 1:
                 fin_pre = eng.t_finished
@@ -308,11 +315,11 @@ class GraphFlowRolloutPool:
                     eng.reset(fin_pre)
                     fids = np.nonzero(fin_pre.numpy())[0]
                     eng.set_skills(sample_roster_skills(slot.dr_rng, len(fids), N, K, slot.roster_mode), env_ids=fids)
+                    obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
                 was_finished = torch.zeros((E,), dtype=torch.bool)
             else:
                 was_finished = eng.t_finished.clone()
 
-            obs_in, nav_in, carts_in, teams_in, acc_in, _ = eng.observe_graph_tensors()
             obs_c = obs_in.clone()
             nav_c = nav_in.clone()
             carts_c = carts_in.clone()
@@ -358,10 +365,15 @@ class GraphFlowRolloutPool:
                         val_w = res["value_winnie"]
                         val_l = res["value_lou"]
 
-            # Measure inter-branch velocity separation across G counterfactual branches
+            # Measure inter-branch velocity separation & box-wall saturation on main actors
+            if bool(main_mask.any().item()):
+                um = u_vel[main_mask]
+                sat_cnt += int((um.abs() >= (float(c_main.cfg.u_clip) - 0.1)).sum().item())
+                sat_tot += int(um.numel())
+                u_sq_sum += float(um.square().mean(dim=-1).sqrt().sum().item())
+                u_sq_cnt += int(um.shape[0])
             if G > 1 and (t % 4 == 0):
                 ug = u_vel.view(B, G, N, A_dim)
-                # Mean pairwise L2 distance across G branches normalized by sqrt(A_dim)
                 diff_g = (ug[:, :, None, :, :] - ug[:, None, :, :, :]).square().mean(dim=-1).sqrt()
                 tri = ~torch.eye(G, dtype=torch.bool).view(1, G, G, 1)
                 branch_u_sep_sum += float(diff_g.masked_select(tri.expand(B, G, G, N)).mean().item())
@@ -373,7 +385,8 @@ class GraphFlowRolloutPool:
             for _sub in range(1, slot.n_phys_substeps):
                 eng.step(float(sc.dt), mode=str(sc.mode), reset_outcomes=False, n_steps=1, tau_rel=slot.tau_rel)
 
-            obs_out, _, carts_out, teams_out, _, _ = eng.observe_graph_tensors()
+            # Single observe_graph_tensors() per step — reused as next step's input and final bootstrap!
+            obs_out, nav_out, carts_out, teams_out, acc_out, _ = eng.observe_graph_tensors()
             now_finished = eng.t_finished
             score_outs += int(((~was_finished) & now_finished).sum().item())
 
@@ -407,10 +420,10 @@ class GraphFlowRolloutPool:
             buf_val_l[t] = val_l
             buf_not_done[t] = ~now_finished
             buf_actor_mask[t] = main_mask & active_env[:, None]
+            obs_in, nav_in, carts_in, teams_in, acc_in = obs_out, nav_out, carts_out, teams_out, acc_out
 
-        # Bootstrap value at t = H
-        obs_f, nav_f, carts_f, teams_f, acc_f, _ = eng.observe_graph_tensors()
-        out_f = c_main.sample_velocity(obs_f, nav_f, carts_f, teams_f, acc_f, geo=slot.geo, output_scale=0.0)
+        # Bootstrap value at t = H (reusing last obs_in/nav_in/carts_in/teams_in/acc_in!)
+        out_f = c_main.sample_velocity(obs_in, nav_in, carts_in, teams_in, acc_in, geo=slot.geo, output_scale=0.0)
         end_finished = eng.t_finished.clone()
         end_scores = eng.t_score.clone()
 
@@ -498,6 +511,8 @@ class GraphFlowRolloutPool:
                 "score_outs": score_outs,
                 "grpo_within_std": round(grpo_within_std, 4),
                 "branch_u_sep": round(branch_u_sep_sum / max(1, branch_u_sep_cnt), 4),
+                "sat_frac": round(float(sat_cnt) / max(1, sat_tot), 4),
+                "u_rms": round(float(u_sq_sum) / max(1, u_sq_cnt), 4),
                 "main_dscore_mean": round(float(d_scores[:, 0].mean().item()), 2),
                 "opp_dscore_mean": round(float(d_scores[:, 1:].mean().item()), 2) if K > 1 else 0.0,
                 "gk_pct": [round(100.0 * c / gk_tot, 1) for c in gk_hist.tolist()],
@@ -530,6 +545,7 @@ class GraphFlowTrainer:
             tr = CompiledGraphFlowTrainer(self.model, E_mb=mb_envs, N=N, W_nav=Wn, J=J, K=K, nav_kern=nav_kern)
             self._cache[key] = tr
         else:
+            tr.set_nav_kern(nav_kern)
             tr.sync_weights_(self.model)
         return tr
 
@@ -568,8 +584,12 @@ class GraphFlowTrainer:
 
         for _ in range(max(1, int(epochs))):
             g_perm = torch.randperm(n_groups_tot)
+            mb_starts = list(range(0, n_groups_tot, groups_per_mb))
             in_accum = 0
-            for g_start in range(0, n_groups_tot, groups_per_mb):
+            for mi, g_start in enumerate(mb_starts):
+                if in_accum == 0:
+                    rem_micros = len(mb_starts) - mi
+                    win_size = min(accum, rem_micros)
                 g_ids = g_perm[g_start : g_start + groups_per_mb]
                 # Expand group IDs -> contiguous [B_mb * G] env indices!
                 idx = (g_ids[:, None] * G + torch.arange(G)[None, :]).reshape(-1)
@@ -581,11 +601,11 @@ class GraphFlowTrainer:
                     batch.actor_mask[idx], batch.wm_in[idx],
                     value_coef=float(lcfg.critic_weight),
                     dyn_coef=float(lcfg.dyn_weight),
-                    grad_scale=1.0 / float(accum),
+                    grad_scale=1.0 / float(max(1, win_size)),
                     group_size=G,
                 )
                 in_accum += 1
-                if in_accum >= accum or (g_start + groups_per_mb) >= n_groups_tot:
+                if in_accum >= win_size or (mi + 1) >= len(mb_starts):
                     self.model.zero_grad(set_to_none=True)
                     tr.export_grads_to_model_(self.model)
                     gn = self.opt.step()

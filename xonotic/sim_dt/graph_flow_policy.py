@@ -65,7 +65,11 @@ class GraphFlowConfig:
     ess_target: float = 0.55
     flow_w_min: float = 0.05
     flow_w_max: float = 8.0
-    zero_anchor_lambda: float = 0.04
+    beta_bounds: tuple[float, float] = (0.25, 3.5)
+    zero_anchor_lambda: float = 0.25
+    v_max: float = 3.0
+    ridge_lambda: float = 0.02
+    basis_rec_weight: float = 0.20
     u_clip: float = 6.0
 
 
@@ -73,16 +77,23 @@ def compute_ess_boltzmann_weights(
     adv: torch.Tensor,
     actor_mask: torch.Tensor,
     *,
+    u_sq_mean: torch.Tensor | None = None,
+    zero_anchor_lambda: float = 0.0,
     ess_target: float = 0.55,
     w_min: float = 0.05,
     w_max: float = 8.0,
+    beta_min: float = 0.25,
+    beta_max: float = 3.5,
     group_size: int = 1,
     n_bisect: int = 16,
 ) -> tuple[torch.Tensor, float, float]:
     """Solve for Boltzmann inverse-temperature beta = 1/alpha via exact bisection to hold target ESS.
 
-    Prevents small-G Dirac-delta weight collapse while preserving all plural high-EV strategies.
-    Returns (w_norm [E, N] mean=1 on active actors, achieved ess_frac, mean alpha).
+    Standardizes `adv` FIRST on active actors, THEN folds `-zero_anchor_lambda * u_sq_mean` so the
+    confining stock-HavocBot quadratic energy is never cancelled out by batch re-centering/scaling.
+    Excludes empty groups from bisection and alpha reporting; uses max-shifted unclipped logits so
+    ESS is strictly monotonic in beta.
+    Returns (w_norm [E, N] mean=1 on active actors, achieved ess_frac after bounds, mean alpha).
     """
     am = actor_mask.float()
     am_sum = am.sum().clamp_min(1.0)
@@ -90,47 +101,69 @@ def compute_ess_boltzmann_weights(
     adv_mean = (adv_f * am).sum() / am_sum
     adv_var = ((adv_f - adv_mean).square() * am).sum() / am_sum
     a_norm = ((adv_f - adv_mean) / adv_var.clamp_min(1e-6).sqrt()).clamp(-6.0, 6.0)
+    if u_sq_mean is not None and float(zero_anchor_lambda) > 0.0:
+        score = a_norm - float(zero_anchor_lambda) * u_sq_mean.float()
+    else:
+        score = a_norm
 
-    # Solve per-group when group_size > 1 and E % group_size == 0, else globally across active actors
-    E, N = a_norm.shape
+    E, N = score.shape
     target = max(0.15, min(0.95, float(ess_target)))
+    b_lo = max(1e-3, float(beta_min))
+    b_hi = max(b_lo, float(beta_max))
+
     if group_size > 1 and E % group_size == 0:
         B = E // group_size
-        ag = a_norm.view(B, group_size * N)
+        sg = score.view(B, group_size * N)
         mg = am.view(B, group_size * N)
-        cnt = mg.sum(dim=-1, keepdim=True).clamp_min(1.0)
-        lo = torch.zeros((B, 1), device=adv.device, dtype=torch.float32)
-        hi = torch.full((B, 1), 8.0, device=adv.device, dtype=torch.float32)
+        cnt_raw = mg.sum(dim=-1, keepdim=True)
+        has_act = cnt_raw > 0.5
+        cnt = cnt_raw.clamp_min(1.0)
+        lo = torch.full((B, 1), b_lo, device=adv.device, dtype=torch.float32)
+        hi = torch.full((B, 1), b_hi, device=adv.device, dtype=torch.float32)
         for _ in range(n_bisect):
             mid = 0.5 * (lo + hi)
-            logw = (mid * ag).clamp(-10.0, 10.0)
-            # Shift by max per group for numerical stability
-            lmax = logw.masked_fill(mg < 0.5, -1e9).max(dim=-1, keepdim=True).values
-            w = torch.exp((logw - lmax).clamp(-20.0, 0.0)) * mg
+            logits = mid * sg
+            lmax = logits.masked_fill(mg < 0.5, -1e9).max(dim=-1, keepdim=True).values
+            w_u = torch.exp((logits - lmax).clamp_min(-40.0)) * mg
+            w = (w_u / w_u.sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt).clamp(w_min, w_max) * mg
             ess = w.sum(dim=-1, keepdim=True).square() / (w.square().sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt)
             too_flat = ess > target
             lo = torch.where(too_flat, mid, lo)
             hi = torch.where(too_flat, hi, mid)
         beta = 0.5 * (lo + hi)
-        logw = (beta * ag).clamp(-10.0, 10.0)
-        lmax = logw.masked_fill(mg < 0.5, -1e9).max(dim=-1, keepdim=True).values
-        w = torch.exp((logw - lmax).clamp(-20.0, 0.0))
-        w = (w / (w * mg).sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt).clamp(w_min, w_max) * mg
+        logits = beta * sg
+        lmax = logits.masked_fill(mg < 0.5, -1e9).max(dim=-1, keepdim=True).values
+        w_u = torch.exp((logits - lmax).clamp_min(-40.0)) * mg
+        w = (w_u / w_u.sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt).clamp(w_min, w_max) * mg
         w_flat = w.view(E, N)
-        mean_alpha = float((1.0 / beta.clamp_min(1e-3)).mean().item())
+        if bool(has_act.any().item()):
+            mean_alpha = float((1.0 / beta[has_act]).mean().item())
+        else:
+            mean_alpha = 1.0 / b_lo
     else:
-        lo_s, hi_s = 0.0, 8.0
-        for _ in range(n_bisect):
-            mid_s = 0.5 * (lo_s + hi_s)
-            w = torch.exp((mid_s * a_norm).clamp(-10.0, 10.0)).clamp(w_min, w_max) * am
-            ess_s = float((w.sum().square() / (w.square().sum().clamp_min(1e-8) * am_sum)).item())
-            if ess_s > target:
-                lo_s = mid_s
-            else:
-                hi_s = mid_s
-        beta_s = 0.5 * (lo_s + hi_s)
-        w_flat = torch.exp((beta_s * a_norm).clamp(-10.0, 10.0)).clamp(w_min, w_max) * am
-        mean_alpha = 1.0 / max(beta_s, 1e-3)
+        lo_s, hi_s = b_lo, b_hi
+        has_any = bool((am > 0.5).any().item())
+        if has_any:
+            for _ in range(n_bisect):
+                mid_s = 0.5 * (lo_s + hi_s)
+                logits = mid_s * score
+                lmax_s = logits.masked_fill(am < 0.5, -1e9).max()
+                w_u = torch.exp((logits - lmax_s).clamp_min(-40.0)) * am
+                w = (w_u / w_u.sum().clamp_min(1e-8) * am_sum).clamp(w_min, w_max) * am
+                ess_s = float((w.sum().square() / (w.square().sum().clamp_min(1e-8) * am_sum)).item())
+                if ess_s > target:
+                    lo_s = mid_s
+                else:
+                    hi_s = mid_s
+            beta_s = 0.5 * (lo_s + hi_s)
+            logits = beta_s * score
+            lmax_s = logits.masked_fill(am < 0.5, -1e9).max()
+            w_u = torch.exp((logits - lmax_s).clamp_min(-40.0)) * am
+            w_flat = (w_u / w_u.sum().clamp_min(1e-8) * am_sum).clamp(w_min, w_max) * am
+            mean_alpha = 1.0 / beta_s
+        else:
+            w_flat = torch.zeros_like(am)
+            mean_alpha = 1.0 / b_lo
 
     w_norm = w_flat / (w_flat.sum() / am_sum).clamp_min(1e-6)
     ess_frac = float((w_norm.sum().square() / (w_norm.square().sum().clamp_min(1e-8) * am_sum)).item())
@@ -746,13 +779,21 @@ class GraphFlowPolicy(nn.Module):
         tau: torch.Tensor,
         c_flow: torch.Tensor,
     ) -> torch.Tensor:
-        """Evaluate closed-loop SRAM velocity field v_psi(z, tau; c_flow) = -dz/dtau (pointing tau: 1 -> 0)."""
+        """Evaluate closed-loop SRAM velocity field v_psi(z, tau; c_flow) = -dz/dtau (pointing tau: 1 -> 0).
+
+        Feeds radially bounded z_fed = z * rsqrt(1 + mean(z^2)/4.0) into the SwiGLU MLP and bounds
+        output velocity v = v_max * tanh(v_raw / v_max) so Heun ODE integration is globally Lipschitz.
+        """
+        zf = z.float()
+        z_fed = zf * torch.rsqrt(1.0 + zf.square().mean(dim=-1, keepdim=True) * 0.25)
         te = _tau_embed(tau)
-        inp = torch.cat((z.float(), te, c_flow.float()), dim=-1)
+        inp = torch.cat((z_fed, te, c_flow.float()), dim=-1)
         gu = F.linear(inp, self.fj_w1.weight.float(), self.fj_w1.bias.float())
         g, u = gu.chunk(2, dim=-1)
         hid = (F.silu(g) / float(self.norm_cfg.mp_silu_scale)) * u
-        return F.linear(hid, self.fj_w2.weight.float(), self.fj_w2.bias.float())
+        v_raw = F.linear(hid, self.fj_w2.weight.float(), self.fj_w2.bias.float())
+        v_max = float(self.cfg.v_max)
+        return v_max * torch.tanh(v_raw / v_max)
 
     def lift_to_action(
         self,
@@ -853,6 +894,7 @@ class GraphFlowPolicy(nn.Module):
         dyn_coef: float = 0.10,
         group_size: int = 1,
         noise: torch.Tensor | None = None,
+        taus: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """1-NFE Pure Unbiased Advantage-Weighted Boltzmann Flow Matching (ESS-targeted alpha) + Winnie/Lou Critic."""
         E, N, _ = obs.shape
@@ -878,47 +920,58 @@ class GraphFlowPolicy(nn.Module):
         own_idx = (W_nav + bot_t0).unsqueeze(-1)
         u_t = u_t.scatter(-1, own_idx, 0.0)
 
-        # Exact stock-HavocBot trust-region anchor folded into advantage BEFORE Boltzmann weighting!
-        # pi*(u|s) proportional to pi_old(u|s) * exp((A(s, u) - lambda_0 * ||u||^2/A_dim) / alpha)
+        # Standardize advantage FIRST, THEN fold confining stock-HavocBot energy -lambda_0 * ||u||^2/A_dim!
         u_sq_mean = u_t.square().mean(dim=-1)  # [E, N]
-        adv_reg = adv.to(device=dev, dtype=torch.float32) - float(cfg.zero_anchor_lambda) * u_sq_mean
         w_norm, ess_frac, mean_alpha = compute_ess_boltzmann_weights(
-            adv_reg, am,
+            adv.to(device=dev, dtype=torch.float32),
+            am,
+            u_sq_mean=u_sq_mean,
+            zero_anchor_lambda=cfg.zero_anchor_lambda,
             ess_target=cfg.ess_target,
             w_min=cfg.flow_w_min,
             w_max=cfg.flow_w_max,
+            beta_min=cfg.beta_bounds[0],
+            beta_max=cfg.beta_bounds[1],
             group_size=group_size,
         )
 
-        # Ridge projection of u_target into current equivariant basis B_H (stopgrad on projection only!)
+        # Exact own-team-masked ridge projection (B^T M B + ridge_lambda I)^{-1} B^T M u_t via Sherman-Morrison!
         with torch.no_grad():
             B_det = B_H.detach()
-            G_B = torch.einsum("ead,eaf->edf", B_det, B_det) + 0.15 * torch.eye(self.d_e, device=dev).unsqueeze(0)
+            G_B = torch.einsum("ead,eaf->edf", B_det, B_det) + float(cfg.ridge_lambda) * torch.eye(self.d_e, device=dev).unsqueeze(0)
             rhs_B = torch.einsum("ead,ena->edn", B_det, u_t)
             L_B = torch.linalg.cholesky(G_B)
-            u_lat_targ = torch.cholesky_solve(rhs_B, L_B).transpose(1, 2)  # [E, N, d_e]
+            x0 = torch.cholesky_solve(rhs_B, L_B).transpose(1, 2)  # [E, N, d_e]
+            b_own = torch.gather(B_det, 1, own_idx.expand(E, N, self.d_e))  # [E, N, d_e]
+            y_sm = torch.cholesky_solve(b_own.transpose(1, 2), L_B).transpose(1, 2)  # [E, N, d_e]
+            bx = (b_own * x0).sum(dim=-1, keepdim=True)
+            by = (b_own * y_sm).sum(dim=-1, keepdim=True)
+            u_lat_targ = x0 + y_sm * (bx / (1.0 - by).clamp_min(1e-4))
 
-        # Pure unbiased CFM across T=4 stratified decreasing flow times in 1 backbone NFE (ZERO biased jet penalty!)
-        taus = torch.tensor(cfg.train_taus, device=dev, dtype=torch.float32)
-        T = taus.shape[0]
+        # Pure unbiased CFM across T=4 stratified jittered decreasing flow times in 1 backbone NFE!
+        if taus is None:
+            taus_t = ((torch.arange(4, device=dev, dtype=torch.float32) + torch.rand(4, device=dev, dtype=torch.float32)) * 0.25).clamp(0.02, 0.98)
+        else:
+            taus_t = taus.to(device=dev, dtype=torch.float32)
+        T = taus_t.shape[0]
         if noise is None:
             eps = torch.randn((T, E, N, self.d_e), device=dev, dtype=torch.float32) * float(cfg.sigma_base)
         else:
             eps = noise.to(device=dev, dtype=torch.float32)
 
-        t_b = taus.view(T, 1, 1, 1)
+        t_b = taus_t.view(T, 1, 1, 1)
         z_t = (1.0 - t_b) * u_lat_targ.unsqueeze(0) + t_b * eps  # [T, E, N, d_e]
-        tau_grid = taus.view(T, 1, 1).expand(T, E, N)
+        tau_grid = taus_t.view(T, 1, 1).expand(T, E, N)
         c_exp = c_flow.unsqueeze(0).expand(T, E, N, self.c_dim)
 
         v_pred = self.flow_vel_eval(z_t, tau_grid, c_exp)  # [T, E, N, d_e]
 
-        # Exact action-space CFM loss (zero nullspace leak, full gradient into both v_psi and B_H!)
-        v_act_pred = self.lift_to_action(v_pred, B_H, bot_t0, W_nav, K)
-        eps_act = self.lift_to_action(eps, B_H, bot_t0, W_nav, K)
-        v_act_targ = u_t.unsqueeze(0) - eps_act
-        vel_err = (v_act_pred - v_act_targ).square().mean(dim=-1)  # [T, E, N]
-        loss_vel = (vel_err.mean(dim=0) * w_norm).sum() / am_sum
+        # Consistent action-metric CFM loss on v* = u_lat_targ - eps + separate basis reconstruction loss!
+        v_diff_act = self.lift_to_action(v_pred - (u_lat_targ.unsqueeze(0) - eps), B_H, bot_t0, W_nav, K)
+        vel_err = v_diff_act.square().mean(dim=-1)  # [T, E, N]
+        u_rec_act = self.lift_to_action(u_lat_targ, B_H, bot_t0, W_nav, K)
+        rec_err = (u_rec_act - u_t).square().mean(dim=-1)  # [E, N]
+        loss_vel = ((vel_err.mean(dim=0) + float(cfg.basis_rec_weight) * rec_err) * w_norm).sum() / am_sum
 
         # Winnie / Lou Huber critic loss
         ret_f = gae_ret.to(device=dev, dtype=torch.float32)

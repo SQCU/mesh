@@ -994,7 +994,7 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     return;
   }
 
-  // mode == 1: 1 TG per (e, k), 128 threads, exact FP32 Cholesky for I + Bs^T Bs (R <= 32)
+  // mode == 1: 1 TG per (e, k), 128 threads, exact FP32 Cholesky for I + Bs^T Bs (R <= 16)
   const uint ek = tgp;
   if (ek >= E * K) return;
   const uint e = ek / K, k = ek % K;
@@ -1436,12 +1436,13 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   const device float* b2 = W2 + 32u * 64u;                  // [32]
 
   threadgroup float sh_B[72 * 32];
-  threadgroup float sh_inp[104];
+  threadgroup float sh_inp[40];       // [z_fed(32), tau_emb(8)] only!
+  threadgroup float sh_cf[64];
+  threadgroup float sh_base_gu[128];  // Precomputed b1 + W1[:, 40:104] @ c_flow ONCE per bot (2.6x faster Heun!)
   threadgroup float sh_gu[128];
   threadgroup float sh_hid[64];
   threadgroup float sh_z[32];
   threadgroup float sh_v1[32];
-  threadgroup float sh_v2[32];
   threadgroup float tg_red[9];
 
   // Each simdgroup normalizes rows of B_H (1 simdgroup = 32 lanes = exact d_e=32; stride 64 on B_nav/B_tm!)
@@ -1456,6 +1457,8 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   const float h = 1.0f / float(S_heun);
+  const float v_max = 3.0f;
+  const float inv_vmax = 1.0f / v_max;
   for (uint n = 0; n < N; n++) {
     const uint t0 = uint(clamp(ent_meta[ulong(e) * M_ent + n] - 1, 0, int(max(1u, K)) - 1));
     if (tid == 0u) {
@@ -1473,18 +1476,31 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       cv = float(c_bot[(ulong(e) * N + n) * 64ul + tid]) + float(c_team[(ulong(e) * K + t0) * 64ul + tid]);
     }
     const float c_inv = rsqrt(gf_tg_sum((tid < 64u) ? (cv * cv) : 0.0f, lane, sg, 4u, tg_red) / 64.0f + eps_n);
-    if (tid < 64u) sh_inp[40u + tid] = cv * c_inv;
+    if (tid < 64u) sh_cf[tid] = cv * c_inv;
     if (tid < 32u) sh_z[tid] = eps_in[(ulong(e) * N + n) * 32ul + tid];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // S_heun exact 2nd-order Heun (RK2) steps purely in TG SRAM:
-    //   v1 = v(z, tau); z_pred = z + h * v1; v2 = v(z_pred, tau - h); z += 0.5 * h * (v1 + v2)
+    // Precompute b1 + W1[:, 40:104] @ c_flow ONCE per bot outside the Heun loop!
+    {
+      const device float* w1r = W1 + ulong(tid) * 104ul;
+      float acc_c = b1[tid];
+      for (uint c = 0; c < 64u; c++) acc_c += w1r[40u + c] * sh_cf[c];
+      sh_base_gu[tid] = acc_c;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // S_heun exact 2nd-order Heun (RK2) steps with radially bounded input z_fed & bounded velocity v = v_max*tanh(v_raw/v_max)!
     for (uint s = 0; s < S_heun; s++) {
       const float tau1 = 1.0f - float(s) * h;
       const float tau2 = max(0.0f, tau1 - h);
 
-      // Stage 1: v1 = v_psi(z, tau1)
-      if (tid < 32u) sh_inp[tid] = sh_z[tid];
+      // Stage 1: z_fed = z * rsqrt(1 + mean(z^2)/4.0) (prevents SwiGLU quadratic blowup!)
+      {
+        const float zv = (tid < 32u) ? sh_z[tid] : 0.0f;
+        const float z_ss = gf_tg_sum((tid < 32u) ? (zv * zv) : 0.0f, lane, sg, 4u, tg_red);
+        const float z_sc = rsqrt(1.0f + (z_ss / 32.0f) * 0.25f);
+        if (tid < 32u) sh_inp[tid] = zv * z_sc;
+      }
       if (tid == 0u) {
         float te[8]; gf_tau_embed(tau1, te);
         for (uint q = 0; q < 8u; q++) sh_inp[32u + q] = te[q];
@@ -1492,8 +1508,8 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       threadgroup_barrier(mem_flags::mem_threadgroup);
       {
         const device float* w1r = W1 + ulong(tid) * 104ul;
-        float acc1 = b1[tid];
-        for (uint c = 0; c < 104u; c++) acc1 += w1r[c] * sh_inp[c];
+        float acc1 = sh_base_gu[tid];
+        for (uint c = 0; c < 40u; c++) acc1 += w1r[c] * sh_inp[c];
         sh_gu[tid] = acc1;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1507,10 +1523,18 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
         const device float* w2r = W2 + ulong(tid) * 64ul;
         float acc2 = b2[tid];
         for (uint c = 0; c < 64u; c++) acc2 += w2r[c] * sh_hid[c];
-        sh_v1[tid] = acc2;
-        sh_inp[tid] = sh_z[tid] + h * acc2; // z_pred directly into sh_inp!
+        const float v1 = v_max * gf_safe_tanh(acc2 * inv_vmax);
+        sh_v1[tid] = v1;
       }
-      // Stage 2: v2 = v_psi(z_pred, tau2)
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+
+      // Stage 2: z_pred = z + h * v1 -> z_fed2
+      {
+        const float zp = (tid < 32u) ? (sh_z[tid] + h * sh_v1[tid]) : 0.0f;
+        const float z_ss = gf_tg_sum((tid < 32u) ? (zp * zp) : 0.0f, lane, sg, 4u, tg_red);
+        const float z_sc = rsqrt(1.0f + (z_ss / 32.0f) * 0.25f);
+        if (tid < 32u) sh_inp[tid] = zp * z_sc;
+      }
       if (tid == 0u) {
         float te[8]; gf_tau_embed(tau2, te);
         for (uint q = 0; q < 8u; q++) sh_inp[32u + q] = te[q];
@@ -1518,8 +1542,8 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       threadgroup_barrier(mem_flags::mem_threadgroup);
       {
         const device float* w1r = W1 + ulong(tid) * 104ul;
-        float acc1 = b1[tid];
-        for (uint c = 0; c < 104u; c++) acc1 += w1r[c] * sh_inp[c];
+        float acc1 = sh_base_gu[tid];
+        for (uint c = 0; c < 40u; c++) acc1 += w1r[c] * sh_inp[c];
         sh_gu[tid] = acc1;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1533,8 +1557,8 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
         const device float* w2r = W2 + ulong(tid) * 64ul;
         float acc2 = b2[tid];
         for (uint c = 0; c < 64u; c++) acc2 += w2r[c] * sh_hid[c];
-        sh_v2[tid] = acc2;
-        sh_z[tid] += (0.5f * h) * (sh_v1[tid] + acc2);
+        const float v2 = v_max * gf_safe_tanh(acc2 * inv_vmax);
+        sh_z[tid] += (0.5f * h) * (sh_v1[tid] + v2);
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -1601,10 +1625,10 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // 2. Build G_B = B_H^T B_H + 0.15 I_32 [32, 32] in parallel
+  // 2. Build G_B = B_H^T B_H + 0.02 I_32 [32, 32] in parallel (tight ridge + exact Sherman-Morrison own-team mask!)
   for (uint pq = tid; pq < 1024u; pq += 128u) {
     const uint p = pq / 32u, q = pq % 32u;
-    float s = (p == q) ? 0.15f : 0.0f;
+    float s = (p == q) ? 0.02f : 0.0f;
     for (uint a = 0; a < A_dim; a++) s += sh_B[a * 32u + p] * sh_B[a * 32u + q];
     sh_L[pq] = s;
   }
@@ -1623,22 +1647,24 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // 3. For each bot n < N: solve u_lat_targ, compute c_flow, pack 5 rows into inp_fj_out!
+  // 3. For each bot n < N: solve exact own-team-masked (B^T M B + 0.02 I)^{-1} B^T M u_t via Sherman-Morrison!
+  //    Let b = B[W_nav + t0], G_m = G_B - b b^T. Given x0 = G_B^{-1} rhs and y = G_B^{-1} b:
+  //    G_m^{-1} rhs = x0 + y * (b^T x0) / max(1 - b^T y, 1e-4)  (EXACT!)
+  threadgroup float sh_sm_y[32];
   const ulong EN = ulong(E) * ulong(N);
   for (uint n = 0; n < N; n++) {
     const ulong en_idx = ulong(e) * N + n;
     const uint t0 = uint(clamp(ent_meta[ulong(e) * M_ent + n] - 1, 0, int(max(1u, K)) - 1));
     const device float* ut = u_targ + en_idx * A_dim;
 
-    // rhs = B_H^T u_t (with own-team slot masked to 0!)
     if (tid < 32u) {
       float s = 0.0f;
       for (uint a = 0; a < A_dim; a++) {
         if (a != W_nav + t0) s += sh_B[a * 32u + tid] * ut[a];
       }
       sh_ul[tid] = s;
+      sh_sm_y[tid] = sh_B[(W_nav + t0) * 32u + tid];
     }
-    // c_flow[64] = mp_norm(c_bot[n] + c_team[t0])
     float cv = 0.0f;
     if (tid < 64u) {
       cv = float(c_bot[en_idx * 64ul + tid]) + float(c_team[(ulong(e) * K + t0) * 64ul + tid]);
@@ -1647,40 +1673,58 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     if (tid < 64u) sh_cf[tid] = cv * c_inv;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Solve L L^T u_lat = rhs (tid == 0)
     if (tid == 0u) {
+      // Solve L L^T x0 = rhs and L L^T y = b_own simultaneously
       for (uint i = 0; i < 32u; i++) {
-        float s = sh_ul[i];
-        for (uint p = 0; p < i; p++) s -= sh_L[i * 32u + p] * sh_ul[p];
-        sh_ul[i] = s / sh_L[i * 32u + i];
+        float sx = sh_ul[i], sy = sh_sm_y[i];
+        for (uint p = 0; p < i; p++) {
+          const float lip = sh_L[i * 32u + p];
+          sx -= lip * sh_ul[p]; sy -= lip * sh_sm_y[p];
+        }
+        const float lii = sh_L[i * 32u + i];
+        sh_ul[i] = sx / lii; sh_sm_y[i] = sy / lii;
       }
       for (int i = 31; i >= 0; i--) {
-        float s = sh_ul[i];
-        for (uint p = uint(i + 1); p < 32u; p++) s -= sh_L[p * 32u + uint(i)] * sh_ul[p];
-        sh_ul[i] = s / sh_L[uint(i) * 32u + uint(i)];
+        float sx = sh_ul[i], sy = sh_sm_y[i];
+        for (uint p = uint(i + 1); p < 32u; p++) {
+          const float lpi = sh_L[p * 32u + uint(i)];
+          sx -= lpi * sh_ul[p]; sy -= lpi * sh_sm_y[p];
+        }
+        const float lii = sh_L[uint(i) * 32u + uint(i)];
+        sh_ul[i] = sx / lii; sh_sm_y[i] = sy / lii;
       }
+      float bx = 0.0f, by = 0.0f;
+      for (uint i = 0; i < 32u; i++) {
+        const float bi = sh_B[(W_nav + t0) * 32u + i];
+        bx += bi * sh_ul[i];
+        by += bi * sh_sm_y[i];
+      }
+      const float coef = bx / max(1.0f - by, 1e-4f);
+      for (uint i = 0; i < 32u; i++) sh_ul[i] += coef * sh_sm_y[i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (tid < 32u) u_lat_out[en_idx * 32ul + tid] = sh_ul[tid];
 
-    // Pack 4 unbiased CFM rows (t = 0..3) into inp_fj_out [M_fj_pad, 128] (ZERO dangling separatrix row!)
+    // Pack 4 unbiased CFM rows (t = 0..3) with radially bounded z_fed = z_t * rsqrt(1 + mean(z_t^2)/4.0)!
     for (uint t = 0; t < 4u; t++) {
       const ulong row = ulong(t) * EN + en_idx;
       const float tau_v = taus[t];
       float te[8];
       gf_tau_embed(tau_v, te);
+      const float zt_v = (tid < 32u) ? ((1.0f - tau_v) * sh_ul[tid] + tau_v * eps_train[row * 32ul + tid]) : 0.0f;
+      const float z_ss = gf_tg_sum((tid < 32u) ? (zt_v * zt_v) : 0.0f, lane, sg, 4u, tg_red);
+      const float z_sc = rsqrt(1.0f + (z_ss / 32.0f) * 0.25f);
       float val = 0.0f;
       if (tid < 32u) {
-        const float ep = eps_train[row * 32ul + tid];
-        val = (1.0f - tau_v) * sh_ul[tid] + tau_v * ep;
-        z_t_out[row * 32ul + tid] = val;
+        z_t_out[row * 32ul + tid] = zt_v;
+        val = zt_v * z_sc;
       } else if (tid < 40u) {
         val = te[tid - 32u];
       } else if (tid < 104u) {
         val = sh_cf[tid - 40u];
       } else if (tid == 104u) {
-        val = 1.0f; // bias trick for NAX fj_w1!
+        val = 1.0f;
       }
       inp_fj_out[row * 128ul + tid] = bfloat(val);
     }
@@ -1731,13 +1775,16 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   const float inv_am = lcfg[8], inv_wm = lcfg[9], inv_lm = lcfg[10], inv_en = lcfg[11];
   const float val_g = lcfg[12], val_b0 = lcfg[13], val_b1 = lcfg[14];
   const float dyn_dg = lcfg[15], dyn_ag = lcfg[16], gsc = lcfg[17], eps_u = max(lcfg[18], 1e-6f);
+  const uint B_cur = uint(max(1.0f, rint(lcfg[19])));
+  const float valid_env = (e < B_cur) ? 1.0f : 0.0f;
+  const float v_max = 3.0f, inv_vmax = 1.0f / v_max;
   const float inv_A = 1.0f / float(A_dim);
 
   threadgroup float sh_B[72 * 32];
   threadgroup float sh_dB[72 * 32];
   threadgroup float sh_db2[32];
   threadgroup float sh_ddaw[32];
-  threadgroup float sh_v[32], sh_ep[32];
+  threadgroup float sh_v[32], sh_vt[32], sh_ul[32], sh_ep[32];
   threadgroup float sh_dva[72];
   threadgroup float tg_red[9];
 
@@ -1755,20 +1802,21 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
   for (uint n = 0; n < N; n++) {
     const ulong en_idx = ulong(e) * N + n;
     const device float* tf = targ_f + en_idx * 6ul;
-    const float w_norm = tf[0];
+    const float w_norm = tf[0] * valid_env;
     const float gae_ret = tf[1];
     const float obs_drho = tf[2];
-    const float wm = tf[4];
+    const float wm = tf[4] * valid_env;
+    const float lm = (1.0f - tf[4]) * valid_env;
     const uint t0 = uint(clamp(int(rint(tf[5])), 0, int(max(1u, K)) - 1));
     const device float* ut = u_targ + en_idx * A_dim;
 
-    // Critic & dynamics backward
+    // Critic & dynamics backward (strictly masked by valid_env so padded tail rows contribute EXACT 0!)
     float da_dot = (tid < 32u) ? (dyn_act_w[tid] * u_lat_targ[en_idx * 32ul + tid]) : 0.0f;
     const float da_raw = gf_tg_sum((tid < 32u) ? da_dot : 0.0f, lane, sg, 4u, tg_red);
 
     if (tid < 64u) {
       float dv_out = 0.0f;
-      if (tid < 3u) {
+      if (tid < 3u && valid_env > 0.5f) {
         const ulong vb = en_idx * 64ul;
         const float raw0 = float(val_drift[vb + 0u]);
         const float raw1 = float(val_drift[vb + 1u]);
@@ -1786,8 +1834,8 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
           const float ad = fabs(diff);
           const float h_loss = (ad <= 1.0f) ? (0.5f * diff * diff) : (ad - 0.5f);
           const float dh = (ad <= 1.0f) ? diff : ((diff > 0.0f) ? 1.0f : -1.0f);
-          loc_l_val += h_loss * (1.0f - wm) * inv_lm;
-          const float d_vl = dh * (val_coef * (1.0f - wm) * inv_lm) * gsc;
+          loc_l_val += h_loss * lm * inv_lm;
+          const float d_vl = dh * (val_coef * lm * inv_lm) * gsc;
           dv_out = d_vl * val_g; g_vg += d_vl * raw1; g_vb1 += d_vl;
         } else {
           const float diff = (dyn_dg * raw2 + dyn_ag * da_raw) - obs_drho;
@@ -1799,35 +1847,53 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
           dv_out = d_dp * dyn_dg; g_ddg += d_dp * raw2; g_dag += d_dp * da_raw;
           tg_red[0] = d_dp * dyn_ag;
         }
+      } else if (tid == 2u) {
+        tg_red[0] = 0.0f;
       }
       d_val_drift[en_idx * 64ul + tid] = bfloat(dv_out);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid < 32u) sh_ddaw[tid] += tg_red[0] * u_lat_targ[en_idx * 32ul + tid];
+    if (tid < 32u) {
+      sh_ddaw[tid] += tg_red[0] * u_lat_targ[en_idx * 32ul + tid];
+      sh_ul[tid] = u_lat_targ[en_idx * 32ul + tid];
+    }
 
-    // 4 stratified decreasing flow times (t = 0..3): pure unbiased CFM!
+    // Separate lightweight basis reconstruction term 0.20 * ||M(B_H u_lat - u_t)||^2 (trains B_H cleanly!)
+    float er_sq = 0.0f;
+    if (w_norm > 0.0f && tid < A_dim && tid != W_nav + t0) {
+      float u_rec = 0.0f;
+      for (uint d = 0; d < 32u; d++) u_rec += sh_B[tid * 32u + d] * sh_ul[d];
+      const float err_r = u_rec - ut[tid];
+      er_sq = err_r * err_r;
+      const float dr_a = (2.0f * 0.20f * inv_A * w_norm * inv_am * gsc) * err_r;
+      for (uint d = 0; d < 32u; d++) sh_dB[tid * 32u + d] += dr_a * sh_ul[d];
+    }
+    const float lr_n = gf_tg_sum(er_sq, lane, sg, 4u, tg_red) * inv_A;
+    if (tid == 0u) loc_l_vel += 0.20f * lr_n * w_norm * inv_am;
+
+    // 4 stratified jittered flow times (t = 0..3): consistent target v* = u_lat_targ - eps in masked action metric!
     const float w_flow = 0.25f * w_norm * inv_am;
     for (uint t = 0; t < 4u; t++) {
       const ulong row = ulong(t) * EN + en_idx;
       if (tid < 32u) {
-        sh_v[tid]  = float(vj_raw[row * 64ul + tid]) + fj_b2[tid];
+        const float v_raw = float(vj_raw[row * 64ul + tid]) + fj_b2[tid];
+        const float th = gf_safe_tanh(v_raw * inv_vmax);
+        sh_v[tid]  = v_max * th;
+        sh_vt[tid] = 1.0f - th * th; // exact d(v_max*tanh(x/v_max))/dx!
         sh_ep[tid] = eps_train[row * 32ul + tid];
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
 
       float ev_sq = 0.0f, dv_a = 0.0f;
-      if (tid < A_dim && tid != W_nav + t0) {
-        float vp = 0.0f, ep_a = 0.0f;
+      if (w_flow > 0.0f && tid < A_dim && tid != W_nav + t0) {
+        float err_v = 0.0f;
         for (uint d = 0; d < 32u; d++) {
-          const float b = sh_B[tid * 32u + d];
-          vp += b * sh_v[d];
-          ep_a += b * sh_ep[d];
+          err_v += sh_B[tid * 32u + d] * (sh_v[d] - (sh_ul[d] - sh_ep[d]));
         }
-        const float err_v = vp - (ut[tid] - ep_a);
         ev_sq = err_v * err_v;
         dv_a = (2.0f * inv_A * w_flow * gsc) * err_v;
         for (uint d = 0; d < 32u; d++) {
-          sh_dB[tid * 32u + d] += dv_a * (sh_v[d] + sh_ep[d]);
+          sh_dB[tid * 32u + d] += dv_a * (sh_v[d] - (sh_ul[d] - sh_ep[d]));
         }
       }
       const float lv_t = gf_tg_sum(ev_sq, lane, sg, 4u, tg_red) * inv_A;
@@ -1838,17 +1904,18 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
       if (tid < 32u) {
         float gv = 0.0f;
         for (uint a = 0; a < A_dim; a++) gv += sh_B[a * 32u + tid] * sh_dva[a];
-        d_vj_raw[row * 64ul + tid] = bfloat(gv);
+        const float gv_raw = gv * sh_vt[tid];
+        d_vj_raw[row * 64ul + tid] = bfloat(gv_raw);
         d_vj_raw[row * 64ul + 32u + tid] = bfloat(0.0f);
-        sh_db2[tid] += gv;
-        if (t == 0u) loc_vnorm += sh_v[tid] * sh_v[tid];
+        sh_db2[tid] += gv_raw;
+        if (t == 0u && valid_env > 0.5f) loc_vnorm += sh_v[tid] * sh_v[tid];
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    const float un_a = (tid < A_dim && tid != W_nav + t0) ? (ut[tid] * ut[tid]) : 0.0f;
+    const float un_a = (valid_env > 0.5f && tid < A_dim && tid != W_nav + t0) ? (ut[tid] * ut[tid]) : 0.0f;
     const float un_s = gf_tg_sum(un_a, lane, sg, 4u, tg_red) * inv_A;
-    if (tid == 0u) loc_unorm += sqrt(un_s) * inv_en;
+    if (tid == 0u && valid_env > 0.5f) loc_unorm += sqrt(un_s) * inv_en;
   }
 
   // Backprop sh_dB [A_dim, 32] through unit_vec(B_raw) -> d_B_nav [EW_pad, 64], d_B_tm [EK_pad, 64], atomic d_W_b_self!
@@ -1886,7 +1953,7 @@ inline void gf_tau_embed(float tau, thread float out[8]) {
     gf_atomic_add_f32(&d_sc_grads[1], g_vb0);
     gf_atomic_add_f32(&diag_out[0], loc_l_vel);
     gf_atomic_add_f32(&diag_out[3], loc_unorm);
-    gf_atomic_add_f32(&diag_out[4], sqrt(vn_tot / max(1.0f, float(N) * 32.0f)) / float(E));
+    gf_atomic_add_f32(&diag_out[4], sqrt(vn_tot / max(1.0f, float(N) * 32.0f)) / float(B_cur));
   } else if (tid == 1u) {
     gf_atomic_add_f32(&d_sc_grads[2], g_vb1);
   } else if (tid == 2u) {

@@ -1972,49 +1972,64 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
         }
       }
 
-      sh_p_pos[p * 3u + 0u] = pos.x;
-      sh_p_pos[p * 3u + 1u] = pos.y;
-      sh_p_pos[p * 3u + 2u] = pos.z;
-      sh_p_alive[p] = uchar(now_alive);
-      sh_p_wp[p] = wp_cur;
-      p_pos[p * 3u + 0u] = pos.x;
-      p_pos[p * 3u + 1u] = pos.y;
-      p_pos[p * 3u + 2u] = pos.z;
-      p_vel[p * 3u + 0u] = vel.x;
-      p_vel[p * 3u + 1u] = vel.y;
-      p_vel[p * 3u + 2u] = vel.z;
+      // Stage updated player kinematics/respawn registers BEFORE barrier so enemy goal/pursuit reads above are 100% race-free!
       p_f1[6u * N + p] = gtimer;
       p_i1[2u * N + p] = wp_cur;
       p_i1[3u * N + p] = wp_next;
       p_i1[4u * N + p] = wp_goal;
       p_i1[5u * N + p] = goal_tgt;
       p_i1[6u * N + p] = goal_kind;
+      p_pos[p * 3u + 0u] = pos.x;
+      p_pos[p * 3u + 1u] = pos.y;
+      p_pos[p * 3u + 2u] = pos.z;
+      p_vel[p * 3u + 0u] = vel.x;
+      p_vel[p * 3u + 1u] = vel.y;
+      p_vel[p * 3u + 2u] = vel.z;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < N) {
+      const uint p = tid;
+      sh_p_pos[p * 3u + 0u] = p_pos[p * 3u + 0u];
+      sh_p_pos[p * 3u + 1u] = p_pos[p * 3u + 1u];
+      sh_p_pos[p * 3u + 2u] = p_pos[p * 3u + 2u];
+      sh_p_alive[p] = uchar(p_f1[0u * N + p] > 0.0f);
+      sh_p_wp[p] = p_i1[2u * N + p];
       sh_p_tgt[p] = -1;
       sh_p_dmg[p] = 0.0f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 5a2. Deterministic pickup collection (1 thread per item m < I_item: nearest alive bot within 96u wins!)
-    if (tid < I_item && sh_item_cd[tid] <= 0.0f && sh_finished == 0u) {
-      const uint m = tid;
-      const float3 ipos = float3(w_it_pos[m * 3u], w_it_pos[m * 3u + 1u], w_it_pos[m * 3u + 2u]);
+    // 5a2. Race-free deterministic pickup collection:
+    // Stage 1 (per-item): find nearest alive bot within 96u -> sh_it_win[m]
+    // Stage 2 (per-player): each bot applies all awards it won sequentially (zero write races!)
+    threadgroup int sh_it_win[64];
+    if (tid < I_item) {
       int winner_p = -1;
-      float best_d2 = 96.0f * 96.0f;
-      for (uint p = 0; p < N; p++) {
-        if (!sh_p_alive[p]) continue;
-        float3 d = float3(sh_p_pos[p * 3u], sh_p_pos[p * 3u + 1u], sh_p_pos[p * 3u + 2u]) - ipos;
-        float d2 = dot(d, d);
-        if (d2 <= best_d2) { best_d2 = d2; winner_p = int(p); }
+      if (sh_item_cd[tid] <= 0.0f && sh_finished == 0u) {
+        const uint m = tid;
+        const float3 ipos = float3(w_it_pos[m * 3u], w_it_pos[m * 3u + 1u], w_it_pos[m * 3u + 2u]);
+        float best_d2 = 96.0f * 96.0f;
+        for (uint p = 0; p < N; p++) {
+          if (!sh_p_alive[p]) continue;
+          float3 d = float3(sh_p_pos[p * 3u], sh_p_pos[p * 3u + 1u], sh_p_pos[p * 3u + 2u]) - ipos;
+          float d2 = dot(d, d);
+          if (d2 <= best_d2) { best_d2 = d2; winner_p = int(p); }
+        }
+        if (winner_p >= 0) sh_item_cd[m] = w_it_rsp[m];
       }
-      if (winner_p >= 0) {
-        const uint p = uint(winner_p);
+      sh_it_win[tid] = winner_p;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < N && sh_finished == 0u) {
+      const uint p = tid;
+      for (uint m = 0; m < I_item; m++) {
+        if (sh_it_win[m] != int(p)) continue;
         const int knd = w_it_knd[m];
         if (knd == 0) p_f1[0u * N + p] = min(p_f1[0u * N + p] + 100.0f, 200.0f);
         else if (knd == 1) p_f1[1u * N + p] = min(p_f1[1u * N + p] + 100.0f, 200.0f);
         else if (knd == 2) p_f1[15u * N + p] = min(p_f1[15u * N + p] + 15.0f, 30.0f);
         else p_f1[16u * N + p] = 25.0f;
         p_f1[12u * N + p] += 1.0f;
-        sh_item_cd[m] = w_it_rsp[m];
       }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

@@ -507,6 +507,12 @@ class CompiledGraphFlowPolicy:
         else:
             self.geo_ncfg_view[0:4].zero_()
 
+    def set_nav_kern(self, nav_kern: torch.Tensor) -> None:
+        _copy_f32_to_ptr(
+            nav_kern.detach().to(device="cpu", dtype=torch.float32).numpy(),
+            self.lib.mesh_graph_buffer_ptr(self.g, self.buf_nav_kern),
+        )
+
     @torch.no_grad()
     def sample_velocity(
         self,
@@ -1105,6 +1111,7 @@ class CompiledGraphFlowTrainer:
         self.targ_f_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_targ_f), (E, N, 6))
         self.geo_ncfg_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_geo_ncfg), (16,))
         self.lcfg_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_lcfg), (24,))
+        self.taus_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_taus), (4,))
         self.sc_grads_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_sc_grads), (self._n_sc_grads,))
         self.diag_view = _ptr_to_torch_f32(self.lib.mesh_graph_buffer_ptr(self.g, self.buf_diag), (16,))
         self._gw_views = {
@@ -1133,6 +1140,12 @@ class CompiledGraphFlowTrainer:
             self.geo_ncfg_view[3] = float(geo["map_radius"].detach().to(device="cpu", dtype=torch.float32).item())
         else:
             self.geo_ncfg_view[0:4].zero_()
+
+    def set_nav_kern(self, nav_kern: torch.Tensor) -> None:
+        _copy_f32_to_ptr(
+            nav_kern.detach().to(device="cpu", dtype=torch.float32).numpy(),
+            self.lib.mesh_graph_buffer_ptr(self.g, self.buf_nav_kern),
+        )
 
     @torch.no_grad()
     def sync_weights_(self, model: GraphFlowPolicy) -> None:
@@ -1238,6 +1251,7 @@ class CompiledGraphFlowTrainer:
         grad_scale: float = 1.0,
         group_size: int = 1,
         noise: torch.Tensor | None = None,
+        taus: torch.Tensor | None = None,
     ) -> dict[str, float]:
         B_cur = int(obs.shape[0])
         assert B_cur <= self.E
@@ -1277,18 +1291,30 @@ class CompiledGraphFlowTrainer:
             t0_cpu = torch.zeros((self.E, self.N), dtype=torch.float32)
             t0_cpu[:B_cur].copy_((torch.round(obs[:, :, 1].detach().to(device="cpu", dtype=torch.float32)) - 1.0).clamp(0.0, float(max(1, self.K) - 1)))
 
-        # Fold stock-HavocBot anchor -lambda_0 * ||u||^2/A_dim into advantage & solve ESS-targeted Boltzmann alpha!
-        own_idx = (self.W_nav + t0_cpu.to(torch.int64)).unsqueeze(-1)
-        u_masked = u_t_cpu.scatter(-1, own_idx, 0.0)
-        adv_reg = adv_cpu - float(cfg.zero_anchor_lambda) * u_masked.square().mean(dim=-1)
-        w_norm, ess_frac, mean_alpha = compute_ess_boltzmann_weights(
-            adv_reg, am_cpu,
+        # Solve ESS-targeted Boltzmann weights strictly on valid [:B_cur] rows (preserving grouped solve when B_cur % G == 0!)
+        own_idx = (self.W_nav + t0_cpu[:B_cur].to(torch.int64)).unsqueeze(-1)
+        u_masked_valid = u_t_cpu[:B_cur].scatter(-1, own_idx, 0.0)
+        u_sq_valid = u_masked_valid.square().mean(dim=-1)
+        g_eff = group_size if (group_size > 1 and B_cur % group_size == 0) else 1
+        w_valid, ess_frac, mean_alpha = compute_ess_boltzmann_weights(
+            adv_cpu[:B_cur],
+            am_cpu[:B_cur],
+            u_sq_mean=u_sq_valid,
+            zero_anchor_lambda=cfg.zero_anchor_lambda,
             ess_target=cfg.ess_target,
             w_min=cfg.flow_w_min,
             w_max=cfg.flow_w_max,
-            group_size=group_size if B_cur == self.E else 1,
+            beta_min=cfg.beta_bounds[0],
+            beta_max=cfg.beta_bounds[1],
+            group_size=g_eff,
         )
-        am_sum = max(float(am_cpu.sum().item()), 1.0)
+        if B_cur == self.E:
+            w_norm = w_valid
+        else:
+            w_norm = torch.zeros((self.E, self.N), dtype=torch.float32)
+            w_norm[:B_cur].copy_(w_valid)
+
+        am_sum = max(float(am_cpu[:B_cur].sum().item()), 1.0)
         wm_sum = max(float(wm_cpu[:B_cur].sum().item()), 1.0)
         lm_sum = max(float((1.0 - wm_cpu[:B_cur]).sum().item()), 1.0)
 
@@ -1304,12 +1330,19 @@ class CompiledGraphFlowTrainer:
         else:
             self.eps_tr_view.normal_(0.0, float(cfg.sigma_base))
 
-        self.lcfg_view[:19].copy_(torch.tensor([
-            float(cfg.train_taus[0]), float(cfg.train_taus[1]), float(cfg.train_taus[2]), float(cfg.train_taus[3]),
+        if taus is None:
+            taus_cpu = ((torch.arange(4, dtype=torch.float32) + torch.rand(4, dtype=torch.float32)) * 0.25).clamp(0.02, 0.98)
+        else:
+            taus_cpu = taus.detach().to(device="cpu", dtype=torch.float32).view(4)
+        self.taus_view.copy_(taus_cpu)
+
+        self.lcfg_view[:20].copy_(torch.tensor([
+            float(taus_cpu[0]), float(taus_cpu[1]), float(taus_cpu[2]), float(taus_cpu[3]),
             0.0, 0.0, float(value_coef), float(dyn_coef),
             1.0 / am_sum, 1.0 / wm_sum, 1.0 / lm_sum, 1.0 / float(B_cur * self.N),
             self._val_g_cur, self._val_b_cur[0], self._val_b_cur[1],
             self._dd_g_cur, self._da_g_cur, float(grad_scale), float(self.nc.mp_unit_vec_eps),
+            float(B_cur),
         ], dtype=torch.float32))
 
         wall = ctypes.c_double(0.0)
@@ -1511,3 +1544,33 @@ class GraphFlowOptimizer:
         """Sync FP32 master weights after RDMA all-reduce across Studios."""
         for n, p in self.model.named_parameters():
             self.master[n].copy_(p.detach().float())
+
+    @torch.no_grad()
+    def export_master_flat_(self, dst: torch.Tensor) -> int:
+        """Pack FP32 master parameters into a contiguous 1D buffer for lossless FP32 RDMA all-reduce."""
+        off = 0
+        for n, p in self.model.named_parameters():
+            cnt = p.numel()
+            dst[off : off + cnt].copy_(self.master[n].view(-1))
+            off += cnt
+        return off
+
+    @torch.no_grad()
+    def load_master_flat_(self, src: torch.Tensor, *, scale: float = 1.0) -> None:
+        """Unpack averaged FP32 master parameters, re-project unit norms in FP32, and sync model."""
+        eps = max(float(self.model.norm_cfg.unit_norm_eps), 1e-4)
+        off = 0
+        for n, p in self.model.named_parameters():
+            cnt = p.numel()
+            wm = self.master[n]
+            wm.copy_(src[off : off + cnt].view(p.shape) * float(scale))
+            if n == "type_embed":
+                wm.copy_(F.rms_norm(wm, (wm.shape[-1],), eps=1e-4))
+            elif n == "value_gain":
+                wm.clamp_(*self.model.cfg.value_gain_bounds)
+            elif n in ("dyn_drift_gain", "dyn_action_gain"):
+                wm.clamp_(*self.model.cfg.dyn_gain_bounds)
+            elif p.ndim == 2 and not n.startswith(("fj_w1", "fj_w2")):
+                wm.copy_(F.normalize(wm, p=2, dim=-1, eps=eps))
+            p.copy_(wm.to(p.dtype))
+            off += cnt

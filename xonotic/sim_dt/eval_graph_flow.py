@@ -124,7 +124,7 @@ def evaluate_arm_on_regime(
 
     u_samples: list[np.ndarray] = []
     r_cart_l, r_item_l, r_en_l, r_post_l = [], [], [], []
-    r_foc_lead, r_foc_str, r_foc_wk, u_norm_l = [], [], [], []
+    r_foc_lead, r_foc_str, r_foc_wk, u_norm_l, u_sat_l = [], [], [], [], []
     role_pw_l, bot_wk_l, bot_ace_l = [], [], []
     gk_step_l = []
 
@@ -160,6 +160,7 @@ def evaluate_arm_on_regime(
                 if step % 3 == 0:
                     u_samples.append(u_m.reshape(-1, A_dim))
                 u_norm_l.append(np.sqrt(np.mean(u_m ** 2, axis=-1)))
+                u_sat_l.append((np.abs(u_m) >= (float(model.cfg.u_clip) - 0.1)).mean(axis=-1))
                 r_cart_l.append(r_m[:, :, Wn + K + 0])
                 r_item_l.append(r_m[:, :, Wn + K + 1])
                 r_en_l.append(r_m[:, :, Wn + K + 2])
@@ -216,7 +217,7 @@ def evaluate_arm_on_regime(
         return out
 
     def cat(lst): return np.concatenate([a.reshape(-1) for a in lst], axis=0)
-    un_a = cat(u_norm_l); rc_a = cat(r_cart_l); ri_a = cat(r_item_l); re_a = cat(r_en_l); rp_a = cat(r_post_l)
+    un_a = cat(u_norm_l); us_a = cat(u_sat_l); rc_a = cat(r_cart_l); ri_a = cat(r_item_l); re_a = cat(r_en_l); rp_a = cat(r_post_l)
     fl_a = cat(r_foc_lead); fs_a = cat(r_foc_str); fw_a = cat(r_foc_wk)
     pw_a = cat(role_pw_l); wk_a = cat(bot_wk_l); ace_a = cat(bot_ace_l); gk_a = cat(gk_step_l)
 
@@ -226,6 +227,7 @@ def evaluate_arm_on_regime(
         return {
             "n": int(m.sum()),
             "u_norm": round(float(un_a[m].mean()), 3),
+            "sat_frac": round(float(us_a[m].mean()), 4),
             "r_cart": round(float(rc_a[m].mean()), 3),
             "r_item": round(float(ri_a[m].mean()), 3),
             "r_enemy": round(float(re_a[m].mean()), 3),
@@ -321,6 +323,38 @@ def evaluate_multimodal_branch_diversity(
     off = ~torch.eye(G, dtype=torch.bool).unsqueeze(0).expand(B, G, G)
     sc_end = fork.t_score[:, 0].view(B, G)
 
+    # Conditional endpoint distribution probe: 128 i.i.d. draws at ONE fixed mid-match state s_0!
+    c_128 = CompiledGraphFlowPolicy(model, E=128, N=N, W_nav=Wn, J=J, K=K, nav_kern=world.nav_kern)
+    res_128 = c_128.sample_velocity(
+        obs0[:1].expand(128, -1, -1).contiguous(),
+        nav0[:1].expand(128, -1, -1).contiguous(),
+        carts0[:1].expand(128, -1, -1).contiguous(),
+        teams0[:1].expand(128, -1, -1).contiguous(),
+        acc0[:1].expand(128, -1, -1).contiguous(),
+        geo=geo,
+    )
+    U128 = res_128["u_vel"][:, main_idx, :].reshape(128, -1).numpy()  # [128, n_main * A_dim]
+    u128_mu = U128.mean(axis=0)
+    u128_c = U128 - u128_mu
+    u128_spread = float(np.sqrt(np.mean(np.sum(u128_c ** 2, axis=1))))
+    u128_mu_norm = float(np.linalg.norm(u128_mu))
+    u128_sat = float((np.abs(U128) >= (float(model.cfg.u_clip) - 0.1)).mean())
+    u128_rms = float(np.sqrt(np.mean(U128 ** 2)))
+    u128_n = U128 / np.maximum(np.linalg.norm(U128, axis=1, keepdims=True), 1e-6)
+    cos128 = u128_n @ u128_n.T
+    u128_pair_cos = float(cos128[~np.eye(128, dtype=bool)].mean())
+    cov128 = (u128_c.T @ u128_c) / 127.0
+    ev128, evec128 = np.linalg.eigh(cov128)
+    ev128 = np.maximum(ev128[::-1], 0.0)
+    p128 = ev128 / max(float(ev128.sum()), 1e-12)
+    eff_r128 = float(np.exp(-np.sum(np.where(p128 > 1e-12, p128 * np.log(np.maximum(p128, 1e-12)), 0.0))))
+    pc1 = u128_c @ evec128[:, -1]
+    pc1_z = (pc1 - pc1.mean()) / max(float(pc1.std()), 1e-6)
+    skew1 = float(np.mean(pc1_z ** 3))
+    kurt1 = float(np.mean(pc1_z ** 4))
+    bimod1 = (skew1 ** 2 + 1.0) / max(kurt1, 1e-6)
+    c_128.close()
+
     c_pol.close()
     fork.close()
     return {
@@ -330,6 +364,13 @@ def evaluate_multimodal_branch_diversity(
         "end_pos_divergence_u": round(float(p_dist[off].mean().item()), 1),
         "end_goal_kind_disagree": round(float(gk_dis[off].mean().item()), 4),
         "end_score_std_across_G": round(float(sc_end.std(dim=1).mean().item()), 2),
+        "s0_128_u_rms": round(u128_rms, 4),
+        "s0_128_sat_frac": round(u128_sat, 4),
+        "s0_128_spread_over_mean": round(u128_spread / max(u128_mu_norm, 1e-6), 4),
+        "s0_128_pair_cos": round(u128_pair_cos, 4),
+        "s0_128_eff_rank": round(eff_r128, 2),
+        "s0_128_pc1_var": round(float(p128[0]), 4),
+        "s0_128_pc1_bimod": round(bimod1, 4),
     }
 
 
@@ -397,8 +438,8 @@ def main() -> None:
 
     if "main_final" in models:
         print("\n=== 2. CONTINUOUS STEERING FIELD & PCA SPECTRUM (main_init vs main_final) ===")
-        print(f"{'Regime':24s} | {'Arm':10s} | {'||u||':5s} {'rCart':6s} {'rItem':6s} {'rEnem':6s} {'Post':6s} | {'FocLd':6s} {'FocSt':6s} {'FocWk':6s} | {'PCA(1/3/8) EffR':18s}")
-        print("-" * 116)
+        print(f"{'Regime':24s} | {'Arm':10s} | {'||u||':5s} {'Sat%':5s} {'rCart':6s} {'rItem':6s} {'rEnem':6s} {'Post':6s} | {'FocLd':6s} {'FocSt':6s} {'FocWk':6s} | {'PCA(1/3/8) EffR':18s}")
+        print("-" * 122)
         for reg in EVAL_REGIMES:
             rn = reg["name"]
             for an in ("main_init", "main_final"):
@@ -408,7 +449,7 @@ def main() -> None:
                 s = r["steering_all"]
                 p = r["pca"]
                 print(
-                    f"{rn:24s} | {an:10s} | {s['u_norm']:5.2f} {s['r_cart']:+6.2f} {s['r_item']:+6.2f} {s['r_enemy']:+6.2f} {s['posture']:+6.2f} | "
+                    f"{rn:24s} | {an:10s} | {s['u_norm']:5.2f} {s['sat_frac']*100:5.1f} {s['r_cart']:+6.2f} {s['r_item']:+6.2f} {s['r_enemy']:+6.2f} {s['posture']:+6.2f} | "
                     f"{s['foc_lead']:+6.2f} {s['foc_strong']:+6.2f} {s['foc_weak']:+6.2f} | "
                     f"{p['top1_var']:.2f}/{p['top3_var']:.2f}/{p['top8_var']:.2f} ({p['eff_rank']:4.1f})"
                 )
@@ -423,9 +464,13 @@ def main() -> None:
                 for label, sl in [("Weak(sk<0)", r["within_team"]["weak"]), ("Ace(sk>10)", r["within_team"]["ace"])]:
                     print(f"  [{rn:23s}] {label:10s}: rCart={sl['r_cart']:+.2f} rItem={sl['r_item']:+.2f} rEn={sl['r_enemy']:+.2f} Post={sl['posture']:+.2f} Foc(Ld={sl['foc_lead']:+.2f},Wk={sl['foc_weak']:+.2f}) GK={sl['gk_pct']}")
 
-        print("\n=== 4. MULTIMODAL ROLLOUT-GROUP DIVERSITY (G=8 BRANCHES FROM IDENTICAL SAVESTATES, CRN) ===")
+        print("\n=== 4. MULTIMODAL ROLLOUT-GROUP DIVERSITY & CONDITIONAL p(u|s0) ENDPOINTS ===")
         for an, dv in results["branch_diversity"].items():
-            print(f"  {an:10s}: zero_collapse_err={dv['zero_collapse_max_u']:.1e} | s0_u_L2={dv['s0_branch_u_l2']:.3f} s0_u_cos={dv['s0_branch_u_cos']:+.3f} | end_pos_div={dv['end_pos_divergence_u']:.1f}u end_gk_disagree={dv['end_goal_kind_disagree']:.3f} score_std={dv['end_score_std_across_G']:.2f}")
+            print(
+                f"  {an:10s}: zero_err={dv['zero_collapse_max_u']:.1e} | "
+                f"G8(u_L2={dv['s0_branch_u_l2']:.3f} u_cos={dv['s0_branch_u_cos']:+.3f} pos_div={dv['end_pos_divergence_u']:.1f}u gk_dis={dv['end_goal_kind_disagree']:.3f} sc_std={dv['end_score_std_across_G']:.2f}) | "
+                f"p(u|s0,128)(uRms={dv['s0_128_u_rms']:.2f} sat={dv['s0_128_sat_frac']*100:.2f}% spr/mu={dv['s0_128_spread_over_mean']:.2f} cos={dv['s0_128_pair_cos']:+.3f} effR={dv['s0_128_eff_rank']:.1f} bimod={dv['s0_128_pc1_bimod']:.3f})"
+            )
 
 
 if __name__ == "__main__":

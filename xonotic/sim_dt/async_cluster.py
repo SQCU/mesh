@@ -219,6 +219,17 @@ class RDMAWeightAllReducer:
             project_unit_norm_(model, eps=model.norm_cfg.unit_norm_eps)
         return float(wall.value)
 
+    @torch.no_grad()
+    def average_master_(self, opt: Any) -> float:
+        """All-reduce FP32 optimizer master weights directly over /mesh0 RDMA (zero BF16 round-trip!)."""
+        off = opt.export_master_flat_(self.w_view)
+        if off < self.n_pad:
+            self.w_view[off:].zero_()
+        wall = ctypes.c_double(0.0)
+        self.lib.mesh_graph_run(self.g, 1, 0, None, 0, ctypes.byref(wall))
+        opt.load_master_flat_(self.w_view, scale=1.0 / float(self.world_size))
+        return float(wall.value)
+
 
 def run_rdma_dp(args: argparse.Namespace) -> None:
     """4-Studio All-Compute Data-Parallel: 4x rollout + 4x updates + <3 ms /mesh0 RDMA weight average."""
@@ -674,6 +685,7 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
         num_worlds=int(args.num_worlds),
         group_size=G,
         seed_base=cfg.seeds.match_base + int(args.tp_rank) * 100003,
+        world_seed_base=cfg.seeds.match_base,
         self_play_only=bool(args.self_play),
         roster_mode=str(args.roster_mode),
         randomize_physics=not bool(args.no_physics_dr),
@@ -705,8 +717,7 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
             upd = learner.update(batch, epochs=max(1, int(cfg.sim_dt.ppo_epochs)))
             rdma_ms = 0.0
             if reducer is not None:
-                rdma_ms = reducer.average_model_(model, project_fn=project_graph_flow_unit_norm_)
-                learner.reload_after_rdma_()
+                rdma_ms = reducer.average_master_(learner.opt)
             tot_rdma_ms += rdma_ms
             pool.sync_variant_("main", model)
             pool.sync_variant_("ema", ema_model)
@@ -733,7 +744,8 @@ def run_rdma_dp_flow(args: argparse.Namespace) -> None:
                         f"(K={wm['K']:2d} J={wm['J']:2d} W={wm['W_nav']:2d} N={N:2d}) | "
                         f"roll={batch.stats['wall_s']:.2f}s upd={upd['update_wall_s']:.2f}s rdma={rdma_ms:.1f}ms | "
                         f"vel={upd['loss_vel']:.3f} val={upd['loss_val']:.3f} ess={upd['ess_frac']:.2f} a={upd['alpha']:.2f} | "
-                        f"uSep={batch.stats['branch_u_sep']:.2f} GK={gk[0]:.0f}/{gk[1]:.0f}/{gk[2]:.0f}/{gk[3]:.0f}% "
+                        f"uRms={batch.stats['u_rms']:.2f} sat={batch.stats['sat_frac']:.3f} uSep={batch.stats['branch_u_sep']:.2f} "
+                        f"GK={gk[0]:.0f}/{gk[1]:.0f}/{gk[2]:.0f}/{gk[3]:.0f}% "
                         f"dSc(m={batch.stats['main_dscore_mean']:.1f},o={batch.stats['opp_dscore_mean']:.1f}) | "
                         f"{tot_ag_steps/elapsed/1e6:.2f}M ag-st/s",
                         flush=True,
