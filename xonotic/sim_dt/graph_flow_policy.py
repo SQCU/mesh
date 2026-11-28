@@ -124,7 +124,7 @@ def compute_ess_boltzmann_weights(
             mid = 0.5 * (lo + hi)
             logits = mid * sg
             lmax = logits.masked_fill(mg < 0.5, -1e9).max(dim=-1, keepdim=True).values
-            w_u = torch.exp((logits - lmax).clamp_min(-40.0)) * mg
+            w_u = torch.where(mg > 0.5, torch.exp((logits - lmax).clamp(-40.0, 0.0)), torch.zeros_like(logits))
             w = (w_u / w_u.sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt).clamp(w_min, w_max) * mg
             ess = w.sum(dim=-1, keepdim=True).square() / (w.square().sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt)
             too_flat = ess > target
@@ -133,7 +133,7 @@ def compute_ess_boltzmann_weights(
         beta = 0.5 * (lo + hi)
         logits = beta * sg
         lmax = logits.masked_fill(mg < 0.5, -1e9).max(dim=-1, keepdim=True).values
-        w_u = torch.exp((logits - lmax).clamp_min(-40.0)) * mg
+        w_u = torch.where(mg > 0.5, torch.exp((logits - lmax).clamp(-40.0, 0.0)), torch.zeros_like(logits))
         w = (w_u / w_u.sum(dim=-1, keepdim=True).clamp_min(1e-8) * cnt).clamp(w_min, w_max) * mg
         w_flat = w.view(E, N)
         if bool(has_act.any().item()):
@@ -148,7 +148,7 @@ def compute_ess_boltzmann_weights(
                 mid_s = 0.5 * (lo_s + hi_s)
                 logits = mid_s * score
                 lmax_s = logits.masked_fill(am < 0.5, -1e9).max()
-                w_u = torch.exp((logits - lmax_s).clamp_min(-40.0)) * am
+                w_u = torch.where(am > 0.5, torch.exp((logits - lmax_s).clamp(-40.0, 0.0)), torch.zeros_like(logits))
                 w = (w_u / w_u.sum().clamp_min(1e-8) * am_sum).clamp(w_min, w_max) * am
                 ess_s = float((w.sum().square() / (w.square().sum().clamp_min(1e-8) * am_sum)).item())
                 if ess_s > target:
@@ -158,7 +158,7 @@ def compute_ess_boltzmann_weights(
             beta_s = 0.5 * (lo_s + hi_s)
             logits = beta_s * score
             lmax_s = logits.masked_fill(am < 0.5, -1e9).max()
-            w_u = torch.exp((logits - lmax_s).clamp_min(-40.0)) * am
+            w_u = torch.where(am > 0.5, torch.exp((logits - lmax_s).clamp(-40.0, 0.0)), torch.zeros_like(logits))
             w_flat = (w_u / w_u.sum().clamp_min(1e-8) * am_sum).clamp(w_min, w_max) * am
             mean_alpha = 1.0 / beta_s
         else:
