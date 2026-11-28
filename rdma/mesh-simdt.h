@@ -15,6 +15,10 @@ using namespace metal;
 
 #define UNROLL_ALL _Pragma("clang loop unroll(full)")
 
+inline float safe_tanh(float x) {
+  return tanh(clamp(x, -20.0f, 20.0f));
+}
+
 inline float tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup float* scratch) {
   v = simd_sum(v);
   if (lane == 0u) scratch[sg] = v;
@@ -120,7 +124,7 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
     }
     t_best_other[tid] = bo;
     const float r = t_rho[tid];
-    t_extra[tid * 2u + 0u] = float(bfloat(tanh(r)));
+    t_extra[tid * 2u + 0u] = float(bfloat(safe_tanh(r)));
     t_extra[tid * 2u + 1u] = float(bfloat((r - bo) / (r + bo + 1e-6f)));
   }
   if (tid == 0u) {
@@ -209,11 +213,11 @@ inline float simdt_philox_u01(ulong seed, ulong counter, ulong idx, ulong salt) 
             denom = orho + t_best_other[oidx] + 1e-6f;
             if (cp_dep > 0.0f && oh > 0.0f) drd = orho / max(oh, 1.0f);
           }
-          v = float(bfloat(tanh(drd / denom / dist_deny)));
+          v = float(bfloat(safe_tanh(drd / denom / dist_deny)));
         } else if (tid == 19u) {
           const float dist_push = max(ceil(seg + 1e-6f) - seg, 0.05f);
           const float drp = (cp_dep < cp_cnt) ? (max_rate_sh / min_rem_sh) : 0.0f;
-          v = float(bfloat(tanh((drp / (max_rho_sh + drp + 1e-6f)) / dist_push)));
+          v = float(bfloat(safe_tanh((drp / (max_rho_sh + drp + 1e-6f)) / dist_push)));
         } else if (tid == 20u) {
           const int nb = c_nim[j];
           const int nt = nim_tot_sh;
@@ -1122,7 +1126,7 @@ inline void simdt_fwht64_pair(thread float& a, thread float& b, uint lane) {
 
   float cont_mu[11];
   for (uint i = 0; i < 11u; i++) {
-    float v = cm_sc * tanh(hp[i] * float(hr[i]) + hp[11u + i]);
+    float v = cm_sc * safe_tanh(hp[i] * float(hr[i]) + hp[11u + i]);
     cont_mu[i] = float(bfloat(v));
     ho[i] = bfloat(v);
   }
@@ -1240,7 +1244,7 @@ inline void simdt_fwht64_pair(thread float& a, thread float& b, uint lane) {
       pl[10] = cart_ds;
       pl[11] = 0.0f; pl[12] = 0.0f; pl[13] = 0.0f;
       pl[14] = cont[9];
-      pl[15] = tanh(cont[10]);
+      pl[15] = safe_tanh(cont[10]);
     }
   }
 }
@@ -2270,9 +2274,9 @@ inline int cart_nearest_wp_dev(uint j, float s_val, const device uchar* wb, cons
       }
       r += lane_w * lp;
     }
-    if (push_w != 0.0f) r += push_w * tanh(max(float(obs_out[ob + 52u]), 0.0f) / push_sc);
-    if (cont_w != 0.0f) r += cont_w * tanh(max(float(obs_out[ob + 53u]), 0.0f) / cont_sc);
-    if (pick_w != 0.0f) r += pick_w * tanh(max(float(obs_out[ob + 51u]), 0.0f) / pick_sc);
+    if (push_w != 0.0f) r += push_w * safe_tanh(max(float(obs_out[ob + 52u]), 0.0f) / push_sc);
+    if (cont_w != 0.0f) r += cont_w * safe_tanh(max(float(obs_out[ob + 53u]), 0.0f) / cont_sc);
+    if (pick_w != 0.0f) r += pick_w * safe_tanh(max(float(obs_out[ob + 51u]), 0.0f) / pick_sc);
     if (term_bonus > 0.0f && just_fin && winner1 > 0) {
       r += (p_t1 == winner1) ? term_bonus : (-term_bonus / max(1.0f, float(K - 1u)));
     }

@@ -41,12 +41,13 @@ from solver.strat.train_config import CONFIGS_DIR, load_training_config
 
 
 EVAL_REGIMES: list[dict[str, Any]] = [
-    {"name": "balanced_baseline",      "roster": "balanced_fixed",         "physics": "baseline"},
-    {"name": "stacked_main_weak",      "roster": "stacked_main_weak",      "physics": "baseline"},
-    {"name": "stacked_main_strong",    "roster": "stacked_main_strong",    "physics": "baseline"},
-    {"name": "within_team_carry_weak", "roster": "within_team_carry_weak", "physics": "baseline"},
-    {"name": "fast_carts_high_tempo",  "roster": "balanced_fixed",         "physics": "fast"},
-    {"name": "volatile_contest_slow",  "roster": "balanced_fixed",         "physics": "volatile"},
+    {"name": "balanced_baseline",      "roster": "balanced_fixed",          "physics": "baseline"},
+    {"name": "stacked_main_weak",      "roster": "stacked_main_weak",       "physics": "baseline"},
+    {"name": "mixed_enemies_main_weak","roster": "mixed_enemies_main_weak", "physics": "baseline"},
+    {"name": "stacked_main_strong",    "roster": "stacked_main_strong",     "physics": "baseline"},
+    {"name": "within_team_carry_weak", "roster": "within_team_carry_weak",  "physics": "baseline"},
+    {"name": "fast_carts_high_tempo",  "roster": "balanced_fixed",          "physics": "fast"},
+    {"name": "volatile_contest_slow",  "roster": "balanced_fixed",          "physics": "volatile"},
 ]
 
 
@@ -387,26 +388,28 @@ def main() -> None:
             )
 
     if "main_final" in models:
-        print("\n=== 2. MAIN_FINAL POLICY BEHAVIOR DISTRIBUTIONS ACROSS DR REGIMES ===")
-        print(f"{'Regime':24s} | {'OwnC':5s} {'NeuC':5s} {'LeadC':5s} {'FocLd':5s} {'FocSt':5s} {'SqMax':5s} {'SqEnt':5s} | {'Commit(p50)':11s} {'CartDS(p10/50/90)':18s} {'Post(p50)':9s}")
-        print("-" * 124)
+        print("\n=== 2. POLICY BEHAVIOR DISTRIBUTIONS (main_init vs main_final) ACROSS DR REGIMES ===")
+        print(f"{'Regime':24s} | {'Arm':10s} | {'OwnC':5s} {'NeuC':5s} {'LeadC':5s} {'FocLd':5s} {'FocSt':5s} {'FocWk':5s} {'SqMax':5s} {'SqEnt':5s} | {'Commit(p50±sd)':14s} {'CartDS(p10/50/90)':18s} {'Post(p50±sd)':12s}")
+        print("-" * 146)
+        arms_show = [a for a in ("main_init", "main_final") if a in models]
         for reg in EVAL_REGIMES:
             rn = reg["name"]
-            r = results[rn]["main_final"]
-            b = r["behavior_all"]
-            co = r["coordination"]
-            ds = b["cart_ds"]
-            print(
-                f"{rn:24s} | {b['p_cart_own']:5.3f} {b['p_cart_neutral']:5.3f} {b['p_cart_leader']:5.3f} "
-                f"{b['p_focus_leader']:5.3f} {b['p_focus_strongest_mech']:5.3f} "
-                f"{co['squad_max_cart_frac']['mean']:5.3f} {co['squad_cart_norm_entropy']['mean']:5.3f} | "
-                f"{b['cart_commit']['p50']:+6.2f}±{b['cart_commit']['std']:4.2f} "
-                f"{ds['p10']:+5.0f}/{ds['p50']:+5.0f}/{ds['p90']:+5.0f} "
-                f"{b['posture']['p50']:+5.2f}±{b['posture']['std']:4.2f}"
-            )
+            for an in arms_show:
+                r = results[rn][an]
+                b = r["behavior_all"]
+                co = r["coordination"]
+                ds = b["cart_ds"]
+                print(
+                    f"{rn:24s} | {an:10s} | {b['p_cart_own']:5.3f} {b['p_cart_neutral']:5.3f} {b['p_cart_leader']:5.3f} "
+                    f"{b['p_focus_leader']:5.3f} {b['p_focus_strongest_mech']:5.3f} {b['p_focus_weakest_mech']:5.3f} "
+                    f"{co['squad_max_cart_frac']['mean']:5.3f} {co['squad_cart_norm_entropy']['mean']:5.3f} | "
+                    f"{b['cart_commit']['p50']:+6.2f}±{b['cart_commit']['std']:4.2f}   "
+                    f"{ds['p10']:+5.0f}/{ds['p50']:+5.0f}/{ds['p90']:+5.0f} "
+                    f"{b['posture']['p50']:+5.2f}±{b['posture']['std']:4.2f}"
+                )
 
         print("\n=== 3. ROLE SHIFT (PROJECTED WINNER vs LOSER) & WITHIN-TEAM MECHANICS SHIFT (WEAK vs ACE) ===")
-        for rn in ("balanced_baseline", "stacked_main_weak", "within_team_carry_weak"):
+        for rn in ("balanced_baseline", "stacked_main_weak", "mixed_enemies_main_weak", "within_team_carry_weak"):
             r = results[rn]["main_final"]
             for label, sl in [("PW(Winnie)", r["by_role"]["projected_winner"]), ("Loser(Lou)", r["by_role"]["loser"])]:
                 if sl.get("n", 0) == 0:

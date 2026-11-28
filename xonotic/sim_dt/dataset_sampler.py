@@ -74,6 +74,18 @@ def sample_roster_skills(
     if mode == "stacked_main_strong":
         out[:] = np.where(teams_1d[None, :] == 0, 20.0, -8.0).astype(np.float32)
         return out
+    if mode == "mixed_enemies_main_weak":
+        # Team 1 weak (-8), Team 2 ace (+20), Team 3 strong (+14), middle teams (+4), last team weak (-8)
+        t_sk = np.full((max(1, K),), 4.0, dtype=np.float32)
+        t_sk[0] = -8.0
+        if K >= 2:
+            t_sk[1] = 20.0
+        if K >= 3:
+            t_sk[2] = 14.0
+        if K >= 4:
+            t_sk[K - 1] = -8.0
+        out[:] = t_sk[teams_1d][None, :]
+        return out
     if mode == "within_team_carry_weak":
         is_carry = (slot_in_team % 4) == 0
         out[:] = np.where(is_carry[None, :], 22.0, -8.0).astype(np.float32)

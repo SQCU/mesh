@@ -124,7 +124,7 @@ inline float huber_grad(float diff, float beta) {
   for (uint i = 0; i < 11u; i++) {
     raw_c[i] = float(hr[i]);
     const float u_v = hp[i] * raw_c[i] + hp[11u + i];
-    const float th = tanh(u_v);
+    const float th = tanh(clamp(u_v, -20.0f, 20.0f));
     th_c[i] = th;
     const float mu = float(bfloat(cm_sc * th));
     const float ls = hp[22u + i];

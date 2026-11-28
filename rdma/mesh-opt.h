@@ -466,15 +466,15 @@ inline float opt_tg_sum_f32(float v, uint lane, uint sg, uint n_sg, threadgroup 
     hp_live[37] = clamp(sc_master[37], dg_lo, dg_hi);
 
     // Pack scalars_live: [0]=sigmoid(type_blend), [1]=clamp(exp(log_temp_cart)), [2]=clamp(exp(log_temp_rival)), ...
-    scalars_live[0] = 1.0f / (1.0f + exp(-sc_master[40]));
-    scalars_live[1] = clamp(exp(sc_master[38]), t_lo, t_hi);
-    scalars_live[2] = clamp(exp(sc_master[39]), t_lo, t_hi);
+    scalars_live[0] = 1.0f / (1.0f + exp(-clamp(sc_master[40], -40.0f, 40.0f)));
+    scalars_live[1] = clamp(exp(clamp(sc_master[38], -20.0f, 20.0f)), t_lo, t_hi);
+    scalars_live[2] = clamp(exp(clamp(sc_master[39], -20.0f, 20.0f)), t_lo, t_hi);
     for (uint i = 0; i < 4u * n_uniq_blk; i++) {
-      scalars_live[3u + i] = 1.0f / (1.0f + exp(-sc_master[41u + i]));
+      scalars_live[3u + i] = 1.0f / (1.0f + exp(-clamp(sc_master[41u + i], -40.0f, 40.0f)));
     }
     if (recurrent != 0u) {
       for (uint s = 0; s < depth; s++) {
-        scalars_live[3u + 4u * n_uniq_blk + s] = 1.0f / (1.0f + exp(-sc_master[41u + 4u * n_uniq_blk + s]));
+        scalars_live[3u + 4u * n_uniq_blk + s] = 1.0f / (1.0f + exp(-clamp(sc_master[41u + 4u * n_uniq_blk + s], -40.0f, 40.0f)));
       }
     }
     diag_opt[0] = g_norm;
